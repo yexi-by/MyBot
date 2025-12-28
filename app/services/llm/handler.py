@@ -1,0 +1,60 @@
+from google import genai
+from google.genai import types
+from openai import AsyncOpenAI
+from typing import Self
+from .schemas import LLMConfig, ChatMessage, LLMProviderWrapper
+from .providers.openai import OpenAIService
+from .providers.gemini import GeminiService
+from .wrapper import ResilientLLMProvider
+
+
+class LLMHandler:
+    def __init__(self, services: list[LLMProviderWrapper]) -> None:
+        self.services = services
+
+    @classmethod
+    def register_instance(cls, settings: list[LLMConfig]) -> Self:
+        """注册实例"""
+        services = []
+        model_map = {
+            "openai": lambda api_key, base_url: OpenAIService(
+                client=AsyncOpenAI(api_key=api_key, base_url=base_url)
+            ),
+            "gemini": lambda api_key, base_url: GeminiService(
+                client=genai.Client(
+                    api_key=api_key,
+                    http_options=types.HttpOptions(base_url=base_url)
+                    if base_url
+                    else None,
+                )
+            ),
+        }
+        for model_config in settings:
+            factory = model_map.get(model_config.provider_type)
+            if factory is None:
+                raise ValueError(f"未知的模型服务类型: {model_config.provider_type}")
+            raw_service = factory(model_config.api_key, model_config.base_url)
+            safe_service = ResilientLLMProvider(
+                inner_provider=raw_service, llm_config=model_config
+            )
+            wrapper = LLMProviderWrapper(
+                model_vendors=model_config.model_vendors,
+                provider=safe_service,
+            )
+            services.append(wrapper)
+        return cls(services=services)
+
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        **kwargs,
+    ) -> str:
+        for llm in self.services:
+            if llm.model_vendors != model_vendors:
+                continue
+            return await llm.provider.get_ai_response(
+                messages=messages, model=model_name
+            )
+        raise ValueError(f"未定义的服务商名:{model_vendors}")
