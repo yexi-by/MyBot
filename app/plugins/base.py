@@ -3,9 +3,8 @@ from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, fields
 from typing import ClassVar, cast
 
-from models import AllEvent
-
 from app.api import BOTClient
+from app.models import AllEvent
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
 
 PLUGINS: list[type["BasePlugin"]] = []
@@ -22,20 +21,22 @@ class PluginContext:
 class PluginMeta(ABCMeta):
     def __new__(mcs, name, bases, attrs):
         cls = super().__new__(mcs, name, bases, attrs)
-        if bases:
+        if bases and name != "BasePlugin":
             plugin_name = getattr(cls, "name", None)
             consumers_count = getattr(cls, "consumers_count", None)
             priority = getattr(cls, "priority", None)
             if "__init__" in attrs:
-                raise ValueError("插件不允许重写 __init__ 方法,请使用 setup 方法")
+                raise ValueError(
+                    f"{name}插件不允许重写 __init__ 方法,请使用 setup 方法"
+                )
             if not plugin_name:
-                raise ValueError("插件缺少 name 属性,请重新定义")
+                raise ValueError(f"{name}插件缺少 name 属性,请重新定义")
             if consumers_count is None:
                 raise ValueError(
-                    "插件缺少 consumers_count(最大并发数量) 属性,请重新定义"
+                    f"{name}插件缺少 consumers_count(最大并发数量) 属性,请重新定义"
                 )
             if priority is None:
-                raise ValueError("插件缺少 priority(优先级) 属性,请重新定义")
+                raise ValueError(f"{name}插件缺少 priority(优先级) 属性,请重新定义")
             for plugin in PLUGINS:
                 if plugin.name == plugin_name:
                     raise ValueError(
@@ -45,7 +46,7 @@ class PluginMeta(ABCMeta):
         return cls
 
 
-class BasePlugin(metaclass=PluginMeta):
+class BasePlugin[T: AllEvent](metaclass=PluginMeta):
     llm: LLMHandler
     siliconflow: SiliconFlowEmbedding
     search_vectors: SearchVectors
@@ -56,9 +57,7 @@ class BasePlugin(metaclass=PluginMeta):
 
     def __init__(self, context: PluginContext) -> None:
         self.context = context
-        self.task_queue: asyncio.Queue[tuple[AllEvent, asyncio.Future[bool]]] = (
-            asyncio.Queue()
-        )
+        self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
         self.consumers: list[asyncio.Task] = []
         self.register_consumers()
         for field in fields(context):
@@ -67,7 +66,7 @@ class BasePlugin(metaclass=PluginMeta):
             setattr(self, name, instance)
         self.setup()
 
-    async def add_to_queue(self, data: AllEvent) -> bool:
+    async def add_to_queue(self, data: T) -> bool:
         """对外接口"""
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
@@ -91,7 +90,7 @@ class BasePlugin(metaclass=PluginMeta):
         pass
 
     @abstractmethod
-    async def run(self, data: AllEvent) -> bool:
+    async def run(self, data: T) -> bool:
         pass
 
 

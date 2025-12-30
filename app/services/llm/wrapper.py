@@ -1,7 +1,10 @@
-from .base import LLMProvider
-from .schemas import LLMConfig, ChatMessage
 from openai import APIConnectionError, APITimeoutError, RateLimitError
-from utils import create_retry_manager
+
+from app.utils import create_retry_manager
+
+from .base import LLMProvider
+from .schemas import ChatMessage, LLMConfig
+
 
 class ResilientLLMProvider(LLMProvider):
     def __init__(self, inner_provider: LLMProvider, llm_config: LLMConfig):
@@ -25,4 +28,4 @@ class ResilientLLMProvider(LLMProvider):
                     messages=messages, model=model, **kwargs
                 )
                 return response
-        raise RuntimeError("Retries exhausted") # 规避下类型检查,这行是死代码
+        raise RuntimeError("Retries exhausted")  # 规避下类型检查,这行是死代码

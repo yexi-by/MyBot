@@ -1,7 +1,7 @@
 import inspect
 from typing import Any, Callable, Coroutine
 
-from models import AllEvent
+from app.models import AllEvent
 
 from app.api import BOTClient
 from app.plugins import PLUGINS, BasePlugin, PluginContext

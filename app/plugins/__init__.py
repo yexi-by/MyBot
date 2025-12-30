@@ -1,17 +1,20 @@
-import user_plugins
-import pkgutil
 import importlib
+import pkgutil
 from operator import attrgetter
-from .base import PLUGINS,PluginContext,BasePlugin
+from . import user_plugins
+from .base import PLUGINS, BasePlugin, PluginContext
 
 
 def load_all_plugins():
-    for finder, name, ispkg in pkgutil.iter_modules(user_plugins.__path__):
-        importlib.import_module(f"{user_plugins.__name__}.{name}")
+    prefix = user_plugins.__name__ + "."
+    for finder, name, ispkg in pkgutil.walk_packages(user_plugins.__path__, prefix):
+        importlib.import_module(name)
 
 
 load_all_plugins()
 
 PLUGINS.sort(key=attrgetter("priority"), reverse=True)
 
-__all__ = ["PLUGINS","PluginContext","BasePlugin"]
+__all__ = ["PLUGINS", "PluginContext", "BasePlugin"]
+__all__ = ["PLUGINS", "PluginContext", "BasePlugin"]
+__all__ = ["PLUGINS", "PluginContext", "BasePlugin"]

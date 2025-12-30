@@ -1,13 +1,16 @@
-from dishka import Provider, Scope, provide, from_context
-from config import RAW_CONFIG_DICT, Settings
-from app.services import LLMHandler, SiliconFlowEmbedding, SearchVectors
 from typing import NewType
+
 import httpx
-from app.api import BOTClient
+from dishka import Provider, Scope, from_context, provide
 from fastapi import WebSocket
+
+from app.api import BOTClient
+from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
+from config import RAW_CONFIG_DICT, Settings
+
+from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
 from .plugin_manager import PluginController
-from .dispatcher import EventDispatcher
 
 DirectHttpx = NewType("DirectHttpx", httpx.AsyncClient)
 ProxyHttpx = NewType("ProxyHttpx", httpx.AsyncClient)
