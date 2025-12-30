@@ -9,3 +9,6 @@ wheels/
 # Virtual environments
 .venv
 setting.toml
+vector
+logs
+debug.jsonl

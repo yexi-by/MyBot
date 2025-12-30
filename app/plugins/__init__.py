@@ -16,5 +16,3 @@ load_all_plugins()
 PLUGINS.sort(key=attrgetter("priority"), reverse=True)
 
 __all__ = ["PLUGINS", "PluginContext", "BasePlugin"]
-__all__ = ["PLUGINS", "PluginContext", "BasePlugin"]
-__all__ = ["PLUGINS", "PluginContext", "BasePlugin"]

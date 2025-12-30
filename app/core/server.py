@@ -55,8 +55,3 @@ class NapCatServer:
             except Exception:
                 await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
                 pass
-            except Exception:
-                await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-                pass
-            except Exception:
-                await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
