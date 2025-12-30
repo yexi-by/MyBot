@@ -1,6 +1,6 @@
 import json
 import secrets
-
+import asyncio
 from dishka import AsyncContainer
 from dishka.integrations.fastapi import inject, setup_dishka
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
@@ -43,15 +43,15 @@ class NapCatServer:
                 context={WebSocket: websocket}
             ) as request_container:
                 dispatcher = await request_container.get(EventDispatcher)
-            try:
-                while True:
-                    data_str = await websocket.receive_text()
-                    data = json.loads(data_str)
-                    await write_to_file(data=data)
-                    await dispatcher.dispatch_event(data=data)
+                try:
+                    while True:
+                        data_str = await websocket.receive_text()
+                        data = json.loads(data_str)
+                        await write_to_file(data=data)
+                        asyncio.create_task(dispatcher.dispatch_event(data=data))
 
-            except WebSocketDisconnect:
-                pass
-            except Exception:
-                await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-                pass
+                except WebSocketDisconnect:
+                    pass
+                except Exception:
+                    await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                    pass

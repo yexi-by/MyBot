@@ -2,7 +2,7 @@ import asyncio
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, fields
 from typing import ClassVar, cast
-
+from utils import logger
 from app.api import BOTClient
 from app.models import AllEvent
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
@@ -76,8 +76,12 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
     async def consumer(self) -> None:
         while True:
             data, future = await self.task_queue.get()
-            result = await self.run(data=data)
-            future.set_result(result)
+            try:
+                result = await self.run(data=data)
+                future.set_result(result)
+            except Exception as e:
+                logger.error(e)
+                future.set_result(True)
             self.task_queue.task_done()
 
     def register_consumers(self) -> None:

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 # 示例
 # Text.new("你好世界")
 # Text.new(text="你好世界")
-# Rps.new()
+# Rps.new() 骰子和猜拳等不需要参数
 
 
 class BaseSegment[T](BaseModel):
@@ -33,36 +33,48 @@ type MessageSegment = (
 
 
 class TextData(BaseModel):
-    text: str
+    text: str  # 文本内容 -发送|接收
 
 
 class AtData(BaseModel):
-    qq: Literal["all"] | int
+    qq: Literal["all"] | int  # 要@的QQ号，使用"all"表示@全体成员 -发送|接收
 
 
 class ImageData(BaseModel):
     file: str  # "base64://"+base64编码
     url: str | None = None
+    local_path: str | None = None  # 本地私有路径 用于数据库私有传输
 
 
 class ReplyData(BaseModel):
-    id: int
+    id: int  # 被回复消息的唯一 ID -发送|接收
 
 
 class FaceData(BaseModel):
-    id: int
+    id: int  # 表情 ID -发送|接收
+    raw: Any = None  # 表情原始数据 -接收
+    resultId: str | None = None  # 骰子或石头剪刀布结果 ID -接收
+    chainCount: int | None = None  # 连续发送次数 -接收
 
 
 class FileData(BaseModel):
-    file: str
+    file: str  # "base64://"+base64编码 -发送
+    name: str | None = None  # 文件名(可选) -发送
+    file_id: str | None = None  # 文件 ID -接收
+    file_size: int | None = None  # 文件大小(字节) -接收
 
 
 class VideoData(BaseModel):
-    file: str
+    file: str  # "base64://"+base64编码 -发送
+    url: str | None = None  # 视频在线 URL -接收
+    file_size: int | None = None  # 文件大小(字节) -接收
+    local_path: str | None = None  # 本地私有路径 用于数据库私有传输
 
 
 class RecordData(BaseModel):
-    file: str
+    file: str  # "base64://"+base64编码 -发送
+    file_size: int | None = None  # 文件大小(字节) -接收
+    path: str | None = None  # 文件路径 -接收
 
 
 class Text(BaseSegment[TextData]):

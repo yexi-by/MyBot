@@ -1,6 +1,6 @@
 import inspect
-from typing import Any, Callable, Coroutine
-
+from typing import Any, Callable
+from collections import defaultdict
 from app.models import AllEvent
 
 from app.api import BOTClient
@@ -21,26 +21,31 @@ class PluginController:
         self.search_vectors = search_vectors
         self.bot = bot
         self.plugin_objects: list[BasePlugin] = []
-        self.dependencies_list: list[
-            tuple[Callable[..., Coroutine[Any, Any, bool]], dict[str, type[AllEvent]]]
-        ] = []
+        self.handlers_map: dict[type[AllEvent], list[tuple[Callable, str]]] = (
+            defaultdict(list)
+        )
         self._load_plugins()
 
     @staticmethod
     def get_dependency(func: Callable[..., Any]) -> dict[str, type[AllEvent]]:
         sig = inspect.signature(func)
+        valid_params = [p for p in sig.parameters.values()]
+        if len(valid_params) != 1:
+            raise ValueError(
+                f"插件定义错误: 方法 '{func.__name__}' 必须且只能接受 1 个事件参数。"
+            )
         dependencies = {}
-        for param in sig.parameters.values():
-            if param.name in ("self", "cls"):
-                continue
-            if param.annotation is inspect.Parameter.empty:
-                raise ValueError(f"错误: 参数 '{param.name}' 缺少类型注解")
-            dependencies[param.name] = param.annotation
+        param = valid_params[0]
+        if param.annotation is inspect.Parameter.empty:
+            raise ValueError(f"错误: 参数 '{param.name}' 缺少类型注解")
+        dependencies[param.name] = param.annotation
         return dependencies
 
     def _load_plugins(self) -> None:
         for cls in PLUGINS:
             dependencies = self.get_dependency(cls.run)
+            param_name, event_type = next(iter(dependencies.items()))
+
             plugin_object = cls(
                 context=PluginContext(
                     llm=self.llm,
@@ -50,4 +55,6 @@ class PluginController:
                 )
             )
             self.plugin_objects.append(plugin_object)
-            self.dependencies_list.append((plugin_object.add_to_queue, dependencies))
+            self.handlers_map[event_type].append(
+                (plugin_object.add_to_queue, param_name)
+            )
