@@ -7,6 +7,7 @@ from fastapi import WebSocket
 from app.api import BOTClient
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
 from config import RAW_CONFIG_DICT, Settings
+from app.database import DatabaseManager
 
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
@@ -49,7 +50,9 @@ class MyProvider(Provider):
     @provide(scope=Scope.APP)
     def get_event_type_checker(self) -> EventTypeChecker:
         return EventTypeChecker()
-
+    @provide(scope=Scope.APP)
+    
+    
     @provide(scope=Scope.SESSION)
     def get_bot_client(self, websocket: WebSocket) -> BOTClient:
         return BOTClient(websocket=websocket)

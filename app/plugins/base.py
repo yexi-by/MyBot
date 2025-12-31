@@ -8,6 +8,7 @@ from app.models import AllEvent
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
 
 PLUGINS: list[type["BasePlugin"]] = []
+ACTIVE_INSTANCES: list["BasePlugin"] = []
 
 
 @dataclass
@@ -59,6 +60,7 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
         self.context = context
         self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
         self.consumers: list[asyncio.Task] = []
+        ACTIVE_INSTANCES.append(self)
         self.register_consumers()
         for field in fields(context):
             name = field.name
@@ -82,7 +84,8 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
             except Exception as e:
                 logger.error(e)
                 future.set_result(True)
-            self.task_queue.task_done()
+            finally:
+                self.task_queue.task_done()
 
     def register_consumers(self) -> None:
         for _ in range(self.consumers_count):
