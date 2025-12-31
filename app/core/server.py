@@ -4,14 +4,15 @@ import secrets
 from contextlib import asynccontextmanager
 
 from dishka import AsyncContainer
-from dishka.integrations.fastapi import inject, setup_dishka
+from dishka.integrations.fastapi import inject, setup_dishka, FromDishka
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from utils import logger
 
-from app.plugins import ACTIVE_INSTANCES
 from app.utils import write_to_file
 
 from .dispatcher import EventDispatcher
+from app.database import RedisDatabaseManager
+from .event_parser import EventTypeChecker
 
 
 class NapCatServer:
@@ -25,17 +26,9 @@ class NapCatServer:
     async def lifespan(self, app: FastAPI):
         logger.info("服务已启动")
         yield
+        redis_database_manager = await self.container.get(RedisDatabaseManager)
+        await redis_database_manager.stop_consumers()
         await self.container.close()
-        shutdown_tasks = []
-        for plugin in ACTIVE_INSTANCES:
-            logger.info(f"等待插件 {plugin.name} 队列完成...")
-            shutdown_tasks.append(plugin.task_queue.join())
-        if shutdown_tasks:
-            try:
-                await asyncio.wait_for(asyncio.gather(*shutdown_tasks), timeout=10.0)
-                logger.info("所有插件队列均为空")
-            except asyncio.TimeoutError:
-                logger.error("插件队列超时")
         logger.info("服务器关闭完成")
 
     async def _check_auth_token(
@@ -55,6 +48,8 @@ class NapCatServer:
         async def websocket_endpoint(
             websocket: WebSocket,
             client_id: str,
+            checker: FromDishka[EventTypeChecker],
+            redis_database_manager: FromDishka[RedisDatabaseManager],
         ) -> None:
             try:
                 await self._check_auth_token(websocket=websocket)
@@ -69,9 +64,22 @@ class NapCatServer:
                         data_str = await websocket.receive_text()
                         data = json.loads(data_str)
                         await write_to_file(data=data)
-                        asyncio.create_task(dispatcher.dispatch_event(data=data))
+                        event = checker.get_event(data)
+                        if event is None:
+                            continue
+                        asyncio.create_task(dispatcher.dispatch_event(event=event))
+                        await redis_database_manager.add_to_queue(event)
                 except WebSocketDisconnect as e:
                     logger.error(e)
                 except Exception as e:
                     await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
                     logger.error(e)
+                finally:
+                    logger.info(f"正在清理会话 {client_id} 的插件资源...")
+                    shutdown_tasks = []
+                    for plugin in dispatcher.plugincontroller.plugin_objects:
+                        logger.info(f"等待插件 {plugin.name} 队列完成...")
+                        shutdown_tasks.append(plugin.stop_consumers())
+                    if shutdown_tasks:
+                        await asyncio.gather(*shutdown_tasks)
+                    logger.info(f"会话 {client_id} 清理完成")

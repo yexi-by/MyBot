@@ -1,8 +1,8 @@
 import inspect
-from typing import Any, Callable
+from typing import Any, Callable, get_origin, Union, get_args
+from types import UnionType
 from collections import defaultdict
 from app.models import AllEvent
-
 from app.api import BOTClient
 from app.plugins import PLUGINS, BasePlugin, PluginContext
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
@@ -55,6 +55,14 @@ class PluginController:
                 )
             )
             self.plugin_objects.append(plugin_object)
-            self.handlers_map[event_type].append(
-                (plugin_object.add_to_queue, param_name)
-            )
+            origin = get_origin(event_type)
+            if origin is Union or origin is UnionType:
+                args = get_args(event_type)
+                for arg in args:
+                    self.handlers_map[arg].append(
+                        (plugin_object.add_to_queue, param_name)
+                    )
+            else:
+                self.handlers_map[event_type].append(
+                    (plugin_object.add_to_queue, param_name)
+                )

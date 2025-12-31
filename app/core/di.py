@@ -3,11 +3,11 @@ from typing import NewType
 import httpx
 from dishka import Provider, Scope, from_context, provide
 from fastapi import WebSocket
-
+from redis.asyncio import Redis
 from app.api import BOTClient
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
 from config import RAW_CONFIG_DICT, Settings
-from app.database import DatabaseManager
+from app.database import RedisDatabaseManager
 
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
@@ -48,11 +48,27 @@ class MyProvider(Provider):
         )
 
     @provide(scope=Scope.APP)
-    def get_event_type_checker(self) -> EventTypeChecker:
+    def get_event_type_checker(
+        self,
+    ) -> EventTypeChecker:
         return EventTypeChecker()
+
     @provide(scope=Scope.APP)
-    
-    
+    def get_redis_client(self, settings: Settings) -> Redis:
+        return Redis(
+            host=settings.redis_config.host,
+            port=settings.redis_config.port,
+            db=settings.redis_config.db,
+            password=settings.redis_config.password,
+        )
+
+    @provide(scope=Scope.APP)
+    def get_redis_database_manager(
+        self, redis_client: Redis, settings: Settings, client: DirectHttpx
+    ) -> RedisDatabaseManager:
+        path = settings.video_and_image_path
+        return RedisDatabaseManager(redis_client=redis_client, path=path, client=client)
+
     @provide(scope=Scope.SESSION)
     def get_bot_client(self, websocket: WebSocket) -> BOTClient:
         return BOTClient(websocket=websocket)
@@ -75,10 +91,8 @@ class MyProvider(Provider):
     @provide(scope=Scope.SESSION)
     def get_event_dispatcher(
         self,
-        checker: EventTypeChecker,
         plugincontroller: PluginController,
     ) -> EventDispatcher:
         return EventDispatcher(
-            checker=checker,
             plugincontroller=plugincontroller,
         )

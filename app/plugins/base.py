@@ -8,7 +8,6 @@ from app.models import AllEvent
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
 
 PLUGINS: list[type["BasePlugin"]] = []
-ACTIVE_INSTANCES: list["BasePlugin"] = []
 
 
 @dataclass
@@ -60,7 +59,6 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
         self.context = context
         self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
         self.consumers: list[asyncio.Task] = []
-        ACTIVE_INSTANCES.append(self)
         self.register_consumers()
         for field in fields(context):
             name = field.name
@@ -92,6 +90,19 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
             consumer = asyncio.create_task(self.consumer())
             self.consumers.append(consumer)
 
+    async def stop_consumers(self) -> None:
+        for consumer in self.consumers:
+            consumer.cancel()
+        if self.consumers:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self.consumers, return_exceptions=True), timeout=3
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"{self.name}插件消费者关闭超时")
+            finally:
+                self.consumers.clear()
+
     @abstractmethod
     def setup(self) -> None:
         pass
@@ -99,6 +110,3 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
     @abstractmethod
     async def run(self, data: T) -> bool:
         pass
-
-
-# 待实现 死锁,异常捕捉

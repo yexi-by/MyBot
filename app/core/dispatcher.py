@@ -1,6 +1,5 @@
-from typing import Any
-from .event_parser import EventTypeChecker
 from .plugin_manager import PluginController
+from app.models import AllEvent
 
 
 class EventDispatcher:
@@ -8,16 +7,11 @@ class EventDispatcher:
 
     def __init__(
         self,
-        checker: EventTypeChecker,
         plugincontroller: PluginController,
     ) -> None:
-        self.checker = checker
         self.plugincontroller = plugincontroller
 
-    async def dispatch_event(self, data: dict[str, Any]) -> None:
-        event = self.checker.get_event(data)
-        if event is None:
-            return
+    async def dispatch_event(self, event: AllEvent) -> None:
         event_type = type(event)
         handlers = self.plugincontroller.handlers_map.get(event_type, [])
         for handler, param_name in handlers:
