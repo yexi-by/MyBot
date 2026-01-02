@@ -1,7 +1,9 @@
+import asyncio
+import uuid
 from typing import Any, Literal, overload
 
 from fastapi import WebSocket
-
+import time
 from app.models import (
     At,
     Dice,
@@ -11,6 +13,7 @@ from app.models import (
     MessageSegment,
     Record,
     Reply,
+    Response,
     Rps,
     Text,
     Video,
@@ -18,14 +21,23 @@ from app.models import (
 from app.models.api import (
     GroupMessageParams,
     GroupMessagePayload,
+    LoginInfo,
     PrivateMessageParams,
     PrivateMessagePayload,
 )
-
+from app.models.events.response import SelfData, IDData
+from app.models import SelfMessage
+from app.database import RedisDatabaseManager
+from app.utils import logger
 
 class BOTClient:
-    def __init__(self, websocket: WebSocket) -> None:
+    def __init__(self, websocket: WebSocket, database: RedisDatabaseManager) -> None:
         self.websocket = websocket
+        self.database = database
+        self.echo_dict: dict[int, asyncio.Future[Response]] = {}
+        self.boot_id:int = 1
+        self.timeout:int=10
+        asyncio.create_task(self.get_login_info())
 
     @overload
     async def send_msg(
@@ -84,7 +96,8 @@ class BOTClient:
         file: str | None = None,
         video: str | None = None,
         record: str | None = None,
-    ) -> None:
+    ) -> None|SelfMessage:
+        """发送消息 群聊|私人"""
         mapping: list[tuple[Any, type[MessageSegment]]] = [
             (text, Text),
             (at, At),
@@ -101,17 +114,69 @@ class BOTClient:
             message_segment = [
                 cls.new(value) for value, cls in mapping if value is not None
             ]
+        echo = int(uuid.uuid4())
+        time_id = int(time.time())
         if user_id is not None:
             for Segment in message_segment:
                 if isinstance(Segment, At):
                     raise ValueError("私聊消息不能包含 At 段")
             payload = PrivateMessagePayload(
-                params=PrivateMessageParams(user_id=user_id, message=message_segment)
+                params=PrivateMessageParams(user_id=user_id, message=message_segment),
+                echo=echo,
             )
+
         elif group_id is not None:
             payload = GroupMessagePayload(
-                params=GroupMessageParams(group_id=group_id, message=message_segment)
+                params=GroupMessageParams(group_id=group_id, message=message_segment),
+                echo=echo,
             )
         else:
             raise ValueError("必须指定 user_id 或 group_id 其一")
         await self.websocket.send_text(payload.model_dump_json())
+        result = await self.create_future(echo=echo)
+        data = result.data
+        if not isinstance(data, IDData):
+            raise ValueError("严重错误")
+        self_message = SelfMessage(
+            message_id=data.message_id,
+            self_id=self.boot_id,
+            group_id=group_id,
+            user_id=user_id,
+            time=time_id,
+            message=message_segment,
+        )
+        await self.database.add_to_queue(msg=self_message)
+        return self_message
+
+    async def get_login_info(self)->None:
+        """获取自身qq号"""
+        echo = int(uuid.uuid4())
+        payload = LoginInfo(echo=echo)
+        await self.websocket.send_text(payload.model_dump_json())
+        result = await self.create_future(echo=echo)
+        data = result.data
+        if not isinstance(data, SelfData):
+            raise ValueError("严重错误")
+        self.boot_id = data.user_id
+
+    def receive_data(self, response: Response)->None:
+        """对外接口,找到对应future并填充"""
+        future = self.echo_dict[response.echo]
+        future.set_result(response)
+
+    async def create_future(self, echo: int)->Response:
+        """监听future完成"""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Response] = loop.create_future()
+        self.echo_dict[echo] = future
+        try:
+            await asyncio.wait_for(future, timeout=self.timeout)
+        except asyncio.TimeoutError as e:
+           logger.error(e) 
+           raise ValueError("严重错误,future超时!")
+        result = future.result()
+        del self.echo_dict[echo]
+        return result
+    
+    
+    

@@ -1,5 +1,6 @@
 from .plugin_manager import PluginController
 from app.models import AllEvent
+from app.api import BOTClient
 
 
 class EventDispatcher:
@@ -8,8 +9,10 @@ class EventDispatcher:
     def __init__(
         self,
         plugincontroller: PluginController,
+        bot:BOTClient
     ) -> None:
         self.plugincontroller = plugincontroller
+        self.bot=bot
 
     async def dispatch_event(self, event: AllEvent) -> None:
         event_type = type(event)

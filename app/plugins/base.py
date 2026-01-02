@@ -2,10 +2,11 @@ import asyncio
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, fields
 from typing import ClassVar, cast
-from utils import logger
+
 from app.api import BOTClient
 from app.models import AllEvent
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
+from app.utils import logger
 
 PLUGINS: list[type["BasePlugin"]] = []
 
@@ -81,7 +82,7 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
                 future.set_result(result)
             except Exception as e:
                 logger.error(e)
-                future.set_result(True)
+                future.set_result(True)  # 强制消费链结束
             finally:
                 self.task_queue.task_done()
 

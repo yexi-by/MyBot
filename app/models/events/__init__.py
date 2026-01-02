@@ -8,6 +8,7 @@ from .message_event import (
     MessageEvent,
     PrivateMessage,
     Sender,
+    SelfMessage,
 )
 from .meta_event import HeartBeat, LifeCycle, Meta, MetaEvent
 from .notice_event import (
@@ -38,11 +39,14 @@ from .notice_event import (
     ProfileLikeEvent,
 )
 from .request_event import FriendRequestEvent, GroupRequestEvent, Request, RequestEvent
+from .response import Response
 
-type AllEvent = Annotated[
+type BotEvent = Annotated[
     MessageEvent | MetaEvent | NoticeEvent | RequestEvent,
     Field(discriminator="post_type"),
 ]
+
+type AllEvent = BotEvent | Response
 __all__ = [
     # AllEvent
     "AllEvent",
@@ -88,4 +92,6 @@ __all__ = [
     "Request",
     "FriendRequestEvent",
     "GroupRequestEvent",
+    "SelfMessage",
+    "Response"
 ]

@@ -70,8 +70,8 @@ class MyProvider(Provider):
         return RedisDatabaseManager(redis_client=redis_client, path=path, client=client)
 
     @provide(scope=Scope.SESSION)
-    def get_bot_client(self, websocket: WebSocket) -> BOTClient:
-        return BOTClient(websocket=websocket)
+    def get_bot_client(self, websocket: WebSocket,database:RedisDatabaseManager) -> BOTClient:
+        return BOTClient(websocket=websocket,database=database)
 
     @provide(scope=Scope.SESSION)
     def get_plugin_controller(
@@ -92,7 +92,9 @@ class MyProvider(Provider):
     def get_event_dispatcher(
         self,
         plugincontroller: PluginController,
+        bot:BOTClient
     ) -> EventDispatcher:
         return EventDispatcher(
             plugincontroller=plugincontroller,
+            bot=bot
         )

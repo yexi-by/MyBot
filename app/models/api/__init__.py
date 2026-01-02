@@ -4,10 +4,12 @@ from .message import (
     PrivateMessagePayload,
     PrivateMessageParams,
 )
+from .other_payload import LoginInfo
 
 __all__ = [
     "GroupMessagePayload",
     "GroupMessageParams",
     "PrivateMessageParams",
     "PrivateMessagePayload",
+    "LoginInfo"
 ]

@@ -1,9 +1,10 @@
 import inspect
-from typing import Any, Callable, get_origin, Union, get_args
-from types import UnionType
 from collections import defaultdict
-from app.models import AllEvent
+from types import UnionType
+from typing import Any, Callable, Union, get_args, get_origin
+
 from app.api import BOTClient
+from app.models import AllEvent
 from app.plugins import PLUGINS, BasePlugin, PluginContext
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
 
@@ -29,7 +30,7 @@ class PluginController:
     @staticmethod
     def get_dependency(func: Callable[..., Any]) -> dict[str, type[AllEvent]]:
         sig = inspect.signature(func)
-        valid_params = [p for p in sig.parameters.values()]
+        valid_params = [p for p in sig.parameters.values() if p.name != "self"]
         if len(valid_params) != 1:
             raise ValueError(
                 f"插件定义错误: 方法 '{func.__name__}' 必须且只能接受 1 个事件参数。"

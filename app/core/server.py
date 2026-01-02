@@ -6,13 +6,13 @@ from contextlib import asynccontextmanager
 from dishka import AsyncContainer
 from dishka.integrations.fastapi import inject, setup_dishka, FromDishka
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
-from utils import logger
-
-from app.utils import write_to_file
+from app.utils import write_to_file, logger
 
 from .dispatcher import EventDispatcher
 from app.database import RedisDatabaseManager
 from .event_parser import EventTypeChecker
+from app.models import Response
+from app.api import BOTClient
 
 
 class NapCatServer:
@@ -21,6 +21,7 @@ class NapCatServer:
         self.container = container
         setup_dishka(self.container, self.app)
         self._register_routes()
+        self._background_tasks: set[asyncio.Task] = set()
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
@@ -59,15 +60,28 @@ class NapCatServer:
                 context={WebSocket: websocket}
             ) as request_container:
                 dispatcher = await request_container.get(EventDispatcher)
+                bot = await request_container.get(BOTClient)
                 try:
                     while True:
                         data_str = await websocket.receive_text()
                         data = json.loads(data_str)
+                        logger.debug(f"收到数据包: {data}")
                         await write_to_file(data=data)
                         event = checker.get_event(data)
                         if event is None:
                             continue
-                        asyncio.create_task(dispatcher.dispatch_event(event=event))
+                        task = asyncio.create_task(
+                            dispatcher.dispatch_event(event=event)
+                        )
+                        self._background_tasks.add(
+                            task
+                        )  # 持有asyncio.Task强引用，防止在某些情况被gc回收
+                        task.add_done_callback(
+                            self._background_tasks.discard
+                        )  # 做完自动删除 防内存泄漏
+                        if isinstance(event, Response):
+                            bot.receive_data(response=event)
+                            continue
                         await redis_database_manager.add_to_queue(event)
                 except WebSocketDisconnect as e:
                     logger.error(e)

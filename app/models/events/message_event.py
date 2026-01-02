@@ -46,6 +46,15 @@ class PrivateMessage(BaseMessage):
     # friend: 好友私聊, group: 群临时会话, other: 其他
 
 
+class SelfMessage(BaseModel):
+    message_id:int
+    self_id: int
+    group_id: int|None
+    user_id: int|None
+    time:int
+    message: list[MessageSegment]
+
+
 type MessageEvent = Annotated[
     GroupMessage | PrivateMessage, Field(discriminator="message_type")
 ]

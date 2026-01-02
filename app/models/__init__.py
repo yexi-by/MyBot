@@ -38,6 +38,8 @@ from .events import (  # AllEvent; message_event; meta_event; notice_event; requ
     Request,
     RequestEvent,
     Sender,
+    SelfMessage,
+    Response
 )
 from .segments import (
     At,
@@ -110,4 +112,6 @@ __all__ = [
     "Request",
     "FriendRequestEvent",
     "GroupRequestEvent",
+    "SelfMessage",
+    "Response"
 ]
