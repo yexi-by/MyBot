@@ -6,6 +6,7 @@ from app.api import BOTClient
 from app.database import RedisDatabaseManager
 from app.models import AllEvent
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
+from config import Settings
 from app.utils import logger
 
 PLUGINS: list[type["BasePlugin"]] = []
@@ -51,12 +52,14 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
         search_vectors: SearchVectors,
         bot: BOTClient,
         database: RedisDatabaseManager,
+        settings:Settings
     ) -> None:
         self.llm = llm
         self.siliconflow = siliconflow
         self.search_vectors = search_vectors
         self.bot = bot
         self.database = database
+        self.settings=settings
         self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
         self.consumers: list[asyncio.Task] = []
         self.register_consumers()

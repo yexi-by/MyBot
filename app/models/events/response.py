@@ -1,19 +1,15 @@
 from pydantic import BaseModel
+from typing import Any
 
 
-class IDData(BaseModel):
+class MessageData(BaseModel):
     message_id: int
-
-
-class SelfData(BaseModel):
-    user_id: int
-    nickname: str
 
 
 class Response(BaseModel):
     status: str
     retcode: int
-    data: IDData | SelfData
+    data: MessageData | Any
     message: str
-    echo: str
+    echo: str | None = None
     wording: str

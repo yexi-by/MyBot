@@ -83,6 +83,7 @@ class MyProvider(Provider):
         search_vectors: SearchVectors,
         bot: BOTClient,
         database: RedisDatabaseManager,
+        settings:Settings
     ) -> PluginController:
         plugin_objects: list[BasePlugin] = []
         for cls in PLUGINS:
@@ -92,6 +93,7 @@ class MyProvider(Provider):
                 search_vectors=search_vectors,
                 bot=bot,
                 database=database,
+                settings=settings
             )
             plugin_objects.append(plugin_object)
         return PluginController(plugin_objects=plugin_objects)

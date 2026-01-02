@@ -71,6 +71,7 @@ class NapCatServer:
                         event = checker.get_event(data)
                         if event is None:
                             continue
+                        bot.get_self_qq_id(msg=event)
                         task = asyncio.create_task(
                             dispatcher.dispatch_event(event=event)
                         )
