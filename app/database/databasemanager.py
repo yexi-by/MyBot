@@ -481,3 +481,9 @@ class RedisDatabaseManager:
         task.add_done_callback(
             self._background_tasks.discard
         )  # 做完自动删除 防内存泄漏
+
+    async def del_data(self, hash_key: str, zset_key: str, msg_id: str) -> None:
+        async with self.redis_client.pipeline(transaction=True) as pipe:
+            pipe.hdel(hash_key, msg_id)
+            pipe.zrem(zset_key, msg_id)
+            await pipe.execute()

@@ -8,7 +8,7 @@ from app.api import BOTClient
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
 from config import RAW_CONFIG_DICT, Settings
 from app.database import RedisDatabaseManager
-
+from app.plugins import PLUGINS, BasePlugin
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
 from .plugin_manager import PluginController
@@ -70,8 +70,10 @@ class MyProvider(Provider):
         return RedisDatabaseManager(redis_client=redis_client, path=path, client=client)
 
     @provide(scope=Scope.SESSION)
-    def get_bot_client(self, websocket: WebSocket,database:RedisDatabaseManager) -> BOTClient:
-        return BOTClient(websocket=websocket,database=database)
+    def get_bot_client(
+        self, websocket: WebSocket, database: RedisDatabaseManager
+    ) -> BOTClient:
+        return BOTClient(websocket=websocket, database=database)
 
     @provide(scope=Scope.SESSION)
     def get_plugin_controller(
@@ -80,21 +82,22 @@ class MyProvider(Provider):
         siliconflow: SiliconFlowEmbedding,
         search_vectors: SearchVectors,
         bot: BOTClient,
+        database: RedisDatabaseManager,
     ) -> PluginController:
-        return PluginController(
-            llm=llm,
-            siliconflow=siliconflow,
-            search_vectors=search_vectors,
-            bot=bot,
-        )
+        plugin_objects: list[BasePlugin] = []
+        for cls in PLUGINS:
+            plugin_object = cls(
+                llm=llm,
+                siliconflow=siliconflow,
+                search_vectors=search_vectors,
+                bot=bot,
+                database=database,
+            )
+            plugin_objects.append(plugin_object)
+        return PluginController(plugin_objects=plugin_objects)
 
     @provide(scope=Scope.SESSION)
     def get_event_dispatcher(
-        self,
-        plugincontroller: PluginController,
-        bot:BOTClient
+        self, plugincontroller: PluginController, bot: BOTClient
     ) -> EventDispatcher:
-        return EventDispatcher(
-            plugincontroller=plugincontroller,
-            bot=bot
-        )
+        return EventDispatcher(plugincontroller=plugincontroller, bot=bot)

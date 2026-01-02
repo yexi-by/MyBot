@@ -1,22 +1,16 @@
 import asyncio
 from abc import ABCMeta, abstractmethod
-from dataclasses import dataclass, fields
 from typing import ClassVar, cast
 
 from app.api import BOTClient
 from app.models import AllEvent
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
 from app.utils import logger
+from app.database import RedisDatabaseManager
 
 PLUGINS: list[type["BasePlugin"]] = []
 
 
-@dataclass
-class PluginContext:
-    llm: LLMHandler
-    siliconflow: SiliconFlowEmbedding
-    search_vectors: SearchVectors
-    bot: BOTClient
 
 
 class PluginMeta(ABCMeta):
@@ -48,23 +42,26 @@ class PluginMeta(ABCMeta):
 
 
 class BasePlugin[T: AllEvent](metaclass=PluginMeta):
-    llm: LLMHandler
-    siliconflow: SiliconFlowEmbedding
-    search_vectors: SearchVectors
-    bot: BOTClient
     name: ClassVar[str]
     consumers_count: ClassVar[int]
     priority: ClassVar[int]
 
-    def __init__(self, context: PluginContext) -> None:
-        self.context = context
+    def __init__(
+        self,
+        llm: LLMHandler,
+        siliconflow: SiliconFlowEmbedding,
+        search_vectors: SearchVectors,
+        bot: BOTClient,
+        database:RedisDatabaseManager,
+        ) -> None:
+        self.llm=llm
+        self.siliconflow=siliconflow
+        self.search_vectors=search_vectors
+        self.bot=bot
+        self.database=database
         self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
         self.consumers: list[asyncio.Task] = []
         self.register_consumers()
-        for field in fields(context):
-            name = field.name
-            instance = getattr(context, name)
-            setattr(self, name, instance)
         self.setup()
 
     async def add_to_queue(self, data: T) -> bool:
@@ -78,7 +75,7 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
         while True:
             data, future = await self.task_queue.get()
             try:
-                result = await self.run(data=data)
+                result = await self.run(msg=data)
                 future.set_result(result)
             except Exception as e:
                 logger.error(e)
@@ -109,5 +106,5 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
         pass
 
     @abstractmethod
-    async def run(self, data: T) -> bool:
+    async def run(self, msg: T) -> bool:
         pass

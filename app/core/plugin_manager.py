@@ -3,25 +3,16 @@ from collections import defaultdict
 from types import UnionType
 from typing import Any, Callable, Union, get_args, get_origin
 
-from app.api import BOTClient
 from app.models import AllEvent
-from app.plugins import PLUGINS, BasePlugin, PluginContext
-from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
+from app.plugins import BasePlugin
 
 
 class PluginController:
     def __init__(
         self,
-        llm: LLMHandler,
-        siliconflow: SiliconFlowEmbedding,
-        search_vectors: SearchVectors,
-        bot: BOTClient,
+        plugin_objects: list[BasePlugin],
     ) -> None:
-        self.llm = llm
-        self.siliconflow = siliconflow
-        self.search_vectors = search_vectors
-        self.bot = bot
-        self.plugin_objects: list[BasePlugin] = []
+        self.plugin_objects = plugin_objects
         self.handlers_map: dict[type[AllEvent], list[tuple[Callable, str]]] = (
             defaultdict(list)
         )
@@ -43,27 +34,13 @@ class PluginController:
         return dependencies
 
     def _load_plugins(self) -> None:
-        for cls in PLUGINS:
-            dependencies = self.get_dependency(cls.run)
+        for plugin in self.plugin_objects:
+            dependencies = self.get_dependency(plugin.run)
             param_name, event_type = next(iter(dependencies.items()))
-
-            plugin_object = cls(
-                context=PluginContext(
-                    llm=self.llm,
-                    siliconflow=self.siliconflow,
-                    search_vectors=self.search_vectors,
-                    bot=self.bot,
-                )
-            )
-            self.plugin_objects.append(plugin_object)
             origin = get_origin(event_type)
             if origin is Union or origin is UnionType:
                 args = get_args(event_type)
                 for arg in args:
-                    self.handlers_map[arg].append(
-                        (plugin_object.add_to_queue, param_name)
-                    )
+                    self.handlers_map[arg].append((plugin.add_to_queue, param_name))
             else:
-                self.handlers_map[event_type].append(
-                    (plugin_object.add_to_queue, param_name)
-                )
+                self.handlers_map[event_type].append((plugin.add_to_queue, param_name))
