@@ -1,9 +1,11 @@
 import asyncio
+import time
 import uuid
 from typing import Any, Literal, overload
 
 from fastapi import WebSocket
-import time
+
+from app.database import RedisDatabaseManager
 from app.models import (
     At,
     Dice,
@@ -15,6 +17,7 @@ from app.models import (
     Reply,
     Response,
     Rps,
+    SelfMessage,
     Text,
     Video,
 )
@@ -25,18 +28,17 @@ from app.models.api import (
     PrivateMessageParams,
     PrivateMessagePayload,
 )
-from app.models.events.response import SelfData, IDData
-from app.models import SelfMessage
-from app.database import RedisDatabaseManager
+from app.models.events.response import IDData, SelfData
 from app.utils import logger
+
 
 class BOTClient:
     def __init__(self, websocket: WebSocket, database: RedisDatabaseManager) -> None:
         self.websocket = websocket
         self.database = database
-        self.echo_dict: dict[int, asyncio.Future[Response]] = {}
-        self.boot_id:int = 1
-        self.timeout:int=10
+        self.echo_dict: dict[str, asyncio.Future[Response]] = {}
+        self.boot_id: int = 1
+        self.timeout: int = 20
         asyncio.create_task(self.get_login_info())
 
     @overload
@@ -96,7 +98,7 @@ class BOTClient:
         file: str | None = None,
         video: str | None = None,
         record: str | None = None,
-    ) -> None|SelfMessage:
+    ) -> None | SelfMessage:
         """发送消息 群聊|私人"""
         mapping: list[tuple[Any, type[MessageSegment]]] = [
             (text, Text),
@@ -114,7 +116,7 @@ class BOTClient:
             message_segment = [
                 cls.new(value) for value, cls in mapping if value is not None
             ]
-        echo = int(uuid.uuid4())
+        echo = str(uuid.uuid4())
         time_id = int(time.time())
         if user_id is not None:
             for Segment in message_segment:
@@ -148,35 +150,38 @@ class BOTClient:
         await self.database.add_to_queue(msg=self_message)
         return self_message
 
-    async def get_login_info(self)->None:
+    async def get_login_info(self) -> None:
         """获取自身qq号"""
-        echo = int(uuid.uuid4())
-        payload = LoginInfo(echo=echo)
-        await self.websocket.send_text(payload.model_dump_json())
-        result = await self.create_future(echo=echo)
-        data = result.data
-        if not isinstance(data, SelfData):
-            raise ValueError("严重错误")
-        self.boot_id = data.user_id
+        try:
+            echo = str(uuid.uuid4())
+            payload = LoginInfo(echo=echo)
+            await self.websocket.send_text(payload.model_dump_json())
+            result = await self.create_future(echo=echo)
+            data = result.data
+            if not isinstance(data, SelfData):
+                raise ValueError("严重错误")
+            self.boot_id = data.user_id
+        except asyncio.CancelledError:
+            logger.debug("获取登录信息任务被取消")
+        except Exception as e:
+            logger.warning(f"获取登录信息失败（WebSocket可能已断开）: {e}")
 
-    def receive_data(self, response: Response)->None:
+    def receive_data(self, response: Response) -> None:
         """对外接口,找到对应future并填充"""
         future = self.echo_dict[response.echo]
         future.set_result(response)
 
-    async def create_future(self, echo: int)->Response:
+    async def create_future(self, echo: str) -> Response:
         """监听future完成"""
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Response] = loop.create_future()
         self.echo_dict[echo] = future
         try:
             await asyncio.wait_for(future, timeout=self.timeout)
-        except asyncio.TimeoutError as e:
-           logger.error(e) 
-           raise ValueError("严重错误,future超时!")
+        except asyncio.TimeoutError:
+            del self.echo_dict[echo]
+            logger.error(f"等待响应超时 (echo={echo}, timeout={self.timeout}s)")
+            raise ValueError(f"严重错误: 等待响应超时 (echo={echo})")
         result = future.result()
         del self.echo_dict[echo]
         return result
-    
-    
-    

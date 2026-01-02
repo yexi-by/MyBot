@@ -1,5 +1,7 @@
 from typing import Literal
+
 from pydantic import BaseModel
+
 from ..segments import MessageSegment
 
 
@@ -11,7 +13,7 @@ class PrivateMessageParams(BaseModel):
 class PrivateMessagePayload(BaseModel):
     action: Literal["send_private_msg"] = "send_private_msg"
     params: PrivateMessageParams
-    echo: int
+    echo: str
 
 
 class GroupMessageParams(BaseModel):
@@ -22,7 +24,7 @@ class GroupMessageParams(BaseModel):
 class GroupMessagePayload(BaseModel):
     action: Literal["send_group_msg"] = "send_group_msg"
     params: GroupMessageParams
-    echo: int
+    echo: str
 
 
 class PokeParams(BaseModel):
@@ -45,4 +47,4 @@ class DeleteMsgParams(BaseModel):
 class DeleteMsgPayload(BaseModel):
     action: Literal["delete_msg"] = "delete_msg"
     params: DeleteMsgParams
-    
+

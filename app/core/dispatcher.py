@@ -1,18 +1,15 @@
-from .plugin_manager import PluginController
-from app.models import AllEvent
 from app.api import BOTClient
+from app.models import AllEvent
+
+from .plugin_manager import PluginController
 
 
 class EventDispatcher:
     """中央逻辑处理器"""
 
-    def __init__(
-        self,
-        plugincontroller: PluginController,
-        bot:BOTClient
-    ) -> None:
+    def __init__(self, plugincontroller: PluginController, bot: BOTClient) -> None:
         self.plugincontroller = plugincontroller
-        self.bot=bot
+        self.bot = bot
 
     async def dispatch_event(self, event: AllEvent) -> None:
         event_type = type(event)

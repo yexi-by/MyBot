@@ -1,6 +1,8 @@
-from pydantic import BaseModel
 from typing import Literal
 
+from pydantic import BaseModel
+
+
 class LoginInfo(BaseModel):
-    action:Literal["get_login_info"]="get_login_info"
-    echo:int
+    action: Literal["get_login_info"] = "get_login_info"
+    echo: str

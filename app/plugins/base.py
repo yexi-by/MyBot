@@ -3,14 +3,12 @@ from abc import ABCMeta, abstractmethod
 from typing import ClassVar, cast
 
 from app.api import BOTClient
+from app.database import RedisDatabaseManager
 from app.models import AllEvent
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
 from app.utils import logger
-from app.database import RedisDatabaseManager
 
 PLUGINS: list[type["BasePlugin"]] = []
-
-
 
 
 class PluginMeta(ABCMeta):
@@ -52,23 +50,23 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
         siliconflow: SiliconFlowEmbedding,
         search_vectors: SearchVectors,
         bot: BOTClient,
-        database:RedisDatabaseManager,
-        ) -> None:
-        self.llm=llm
-        self.siliconflow=siliconflow
-        self.search_vectors=search_vectors
-        self.bot=bot
-        self.database=database
+        database: RedisDatabaseManager,
+    ) -> None:
+        self.llm = llm
+        self.siliconflow = siliconflow
+        self.search_vectors = search_vectors
+        self.bot = bot
+        self.database = database
         self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
         self.consumers: list[asyncio.Task] = []
         self.register_consumers()
         self.setup()
 
-    async def add_to_queue(self, data: T) -> bool:
+    async def add_to_queue(self, msg: T) -> bool:
         """对外接口"""
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
-        await self.task_queue.put((data, future))
+        await self.task_queue.put((msg, future))
         return await future
 
     async def consumer(self) -> None:

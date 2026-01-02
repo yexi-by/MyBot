@@ -4,15 +4,16 @@ import secrets
 from contextlib import asynccontextmanager
 
 from dishka import AsyncContainer
-from dishka.integrations.fastapi import inject, setup_dishka, FromDishka
+from dishka.integrations.fastapi import FromDishka, inject, setup_dishka
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
-from app.utils import write_to_file, logger
+
+from app.api import BOTClient
+from app.database import RedisDatabaseManager
+from app.models import Response
+from app.utils import logger, write_to_file
 
 from .dispatcher import EventDispatcher
-from app.database import RedisDatabaseManager
 from .event_parser import EventTypeChecker
-from app.models import Response
-from app.api import BOTClient
 
 
 class NapCatServer:
@@ -84,10 +85,18 @@ class NapCatServer:
                             continue
                         await redis_database_manager.add_to_queue(event)
                 except WebSocketDisconnect as e:
-                    logger.error(e)
+                    logger.info(f"WebSocket 连接断开: {e}")
+                except RuntimeError as e:
+                    # 处理 WebSocket 未连接或已关闭的情况
+                    logger.warning(f"WebSocket 运行时错误（连接可能已断开）: {e}")
                 except Exception as e:
-                    await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-                    logger.error(e)
+                    logger.error(f"WebSocket 处理异常: {e}")
+                    # 只有在连接仍然打开时才尝试关闭
+                    if websocket.client_state.name == "CONNECTED":
+                        try:
+                            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                        except RuntimeError:
+                            pass  # 连接已关闭，忽略
                 finally:
                     logger.info(f"正在清理会话 {client_id} 的插件资源...")
                     shutdown_tasks = []
