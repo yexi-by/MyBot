@@ -1,6 +1,7 @@
 """系统相关 Mixin 类"""
 
 from app.models.api.payloads import system as system_payload
+from app.models.events.response import Response
 
 from .base import BaseMixin
 
@@ -8,19 +9,19 @@ from .base import BaseMixin
 class SystemMixin(BaseMixin):
     """系统相关的 API 接口"""
 
-    async def get_version_info(self):
+    async def get_version_info(self) -> Response:
         """获取版本信息"""
         echo = self._generate_echo()
         payload = system_payload.GetVersionInfoPayload(echo=echo)
         return await self._send_and_wait(payload)
 
-    async def nc_get_packet_status(self):
+    async def nc_get_packet_status(self) -> Response:
         """获取packet状态"""
         echo = self._generate_echo()
         payload = system_payload.NcGetPacketStatusPayload(echo=echo)
         return await self._send_and_wait(payload)
 
-    async def get_robot_uin_range(self):
+    async def get_robot_uin_range(self) -> Response:
         """获取机器人账号范围"""
         echo = self._generate_echo()
         payload = system_payload.GetRobotUinRangePayload(echo=echo)
@@ -31,19 +32,19 @@ class SystemMixin(BaseMixin):
         payload = system_payload.BotExitPayload()
         await self._send_payload(payload)
 
-    async def can_send_image(self):
+    async def can_send_image(self) -> Response:
         """检查是否可以发送图片"""
         echo = self._generate_echo()
         payload = system_payload.CanSendImagePayload(echo=echo)
         return await self._send_and_wait(payload)
 
-    async def can_send_record(self):
+    async def can_send_record(self) -> Response:
         """检查是否可以发送语音"""
         echo = self._generate_echo()
         payload = system_payload.CanSendRecordPayload(echo=echo)
         return await self._send_and_wait(payload)
 
-    async def ocr_image(self, image: str):
+    async def ocr_image(self, image: str) -> Response:
         """OCR 图片识别"""
         echo = self._generate_echo()
         payload = system_payload.OcrImagePayload(
@@ -52,7 +53,7 @@ class SystemMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def translate_en2zh(self, words: list[str]):
+    async def translate_en2zh(self, words: list[str]) -> Response:
         """英译中"""
         echo = self._generate_echo()
         payload = system_payload.TranslateEn2ZhPayload(
@@ -75,7 +76,7 @@ class SystemMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_cookies(self, domain: str):
+    async def get_cookies(self, domain: str) -> Response:
         """获取cookies"""
         echo = self._generate_echo()
         payload = system_payload.GetCookiesPayload(
@@ -84,13 +85,13 @@ class SystemMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_csrf_token(self):
+    async def get_csrf_token(self) -> Response:
         """获取 CSRF Token"""
         echo = self._generate_echo()
         payload = system_payload.GetCsrfTokenPayload(echo=echo)
         return await self._send_and_wait(payload)
 
-    async def get_credentials(self, domain: str):
+    async def get_credentials(self, domain: str) -> Response:
         """获取 QQ 相关接口凭证"""
         echo = self._generate_echo()
         payload = system_payload.GetCredentialsPayload(
@@ -99,19 +100,19 @@ class SystemMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def nc_get_rkey(self):
+    async def nc_get_rkey(self) -> Response:
         """nc获取rkey"""
         echo = self._generate_echo()
         payload = system_payload.NcGetRkeyPayload(echo=echo)
         return await self._send_and_wait(payload)
 
-    async def get_rkey(self):
+    async def get_rkey(self) -> Response:
         """获取rkey"""
         echo = self._generate_echo()
         payload = system_payload.GetRkeyPayload(echo=echo)
         return await self._send_and_wait(payload)
 
-    async def get_clientkey(self):
+    async def get_clientkey(self) -> Response:
         """获取clientkey"""
         echo = self._generate_echo()
         payload = system_payload.GetClientkeyPayload(echo=echo)
@@ -119,7 +120,7 @@ class SystemMixin(BaseMixin):
 
     async def get_ai_record(
         self, character: str, text: str, group_id: int | None = None
-    ):
+    ) -> Response:
         """获取AI语音"""
         echo = self._generate_echo()
         payload = system_payload.GetAiRecordPayload(
@@ -130,7 +131,7 @@ class SystemMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def check_url_safely(self, url: str):
+    async def check_url_safely(self, url: str) -> Response:
         """检查链接安全性"""
         echo = self._generate_echo()
         payload = system_payload.CheckUrlSafelyPayload(
@@ -141,7 +142,7 @@ class SystemMixin(BaseMixin):
 
     async def get_mini_app_ark(
         self, type: str, title: str, desc: str, pic_url: str, jump_url: str
-    ):
+    ) -> Response:
         """获取小程序卡片"""
         echo = self._generate_echo()
         payload = system_payload.GetMiniAppArkPayload(
@@ -152,7 +153,7 @@ class SystemMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_collection_list(self, category: int, count: int = 10):
+    async def get_collection_list(self, category: int, count: int = 10) -> Response:
         """获取收藏列表"""
         echo = self._generate_echo()
         payload = system_payload.GetCollectionListPayload(

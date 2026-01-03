@@ -3,6 +3,7 @@
 from typing import Literal
 
 from app.models.api.payloads import group as group_payload
+from app.models.events.response import Response
 
 from .base import BaseMixin
 
@@ -24,7 +25,7 @@ class GroupMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_group_detail_info(self, group_id: int):
+    async def get_group_detail_info(self, group_id: int) -> Response:
         """获取群详细信息"""
         echo = self._generate_echo()
         payload = group_payload.GroupDetailInfoPayload(
@@ -65,7 +66,7 @@ class GroupMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_essence_msg_list(self, group_id: int):
+    async def get_essence_msg_list(self, group_id: int) -> Response:
         """获取群精华消息"""
         echo = self._generate_echo()
         payload = group_payload.GetEssenceMsgListPayload(
@@ -195,7 +196,7 @@ class GroupMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_group_notice(self, group_id: int):
+    async def get_group_notice(self, group_id: int) -> Response:
         """获取群公告"""
         echo = self._generate_echo()
         payload = group_payload.GetGroupNoticePayload(
@@ -215,7 +216,7 @@ class GroupMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_group_info(self, group_id: int):
+    async def get_group_info(self, group_id: int) -> Response:
         """获取群信息"""
         echo = self._generate_echo()
         payload = group_payload.GetGroupInfoPayload(
@@ -224,7 +225,7 @@ class GroupMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_group_list(self, no_cache: bool = False):
+    async def get_group_list(self, no_cache: bool = False) -> Response:
         """获取群列表"""
         echo = self._generate_echo()
         payload = group_payload.GetGroupListPayload(
@@ -235,7 +236,7 @@ class GroupMixin(BaseMixin):
 
     async def get_group_member_info(
         self, group_id: int, user_id: int, no_cache: bool = False
-    ):
+    ) -> Response:
         """获取群成员信息"""
         echo = self._generate_echo()
         payload = group_payload.GetGroupMemberInfoPayload(
@@ -246,7 +247,9 @@ class GroupMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_group_member_list(self, group_id: int, no_cache: bool = False):
+    async def get_group_member_list(
+        self, group_id: int, no_cache: bool = False
+    ) -> Response:
         """获取群成员列表"""
         echo = self._generate_echo()
         payload = group_payload.GetGroupMemberListPayload(
@@ -257,7 +260,13 @@ class GroupMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_group_honor_info(self, group_id: int, type: str = "all"):
+    async def get_group_honor_info(
+        self,
+        group_id: int,
+        type: Literal[
+            "all", "talkative", "performer", "legend", "strong_newbie", "emotion"
+        ] = "all",
+    ) -> Response:
         """获取群荣誉"""
         echo = self._generate_echo()
         payload = group_payload.GetGroupHonorInfoPayload(
@@ -266,7 +275,7 @@ class GroupMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_group_at_all_remain(self, group_id: int):
+    async def get_group_at_all_remain(self, group_id: int) -> Response:
         """获取群@全体成员剩余次数"""
         echo = self._generate_echo()
         payload = group_payload.GetGroupAtAllRemainPayload(
@@ -275,7 +284,7 @@ class GroupMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_group_shut_list(self, group_id: int):
+    async def get_group_shut_list(self, group_id: int) -> Response:
         """获取群禁言列表"""
         echo = self._generate_echo()
         payload = group_payload.GetGroupShutListPayload(
@@ -287,7 +296,7 @@ class GroupMixin(BaseMixin):
     async def set_group_sign(self, group_id: int) -> None:
         """群打卡"""
         payload = group_payload.SetGroupSignPayload(
-            params=group_payload.SetGroupSignParams(group_id=str(group_id))
+            params=group_payload.SetGroupSignParams(group_id=group_id)
         )
         await self._send_payload(payload)
 
@@ -297,14 +306,16 @@ class GroupMixin(BaseMixin):
         """设置群代办"""
         payload = group_payload.SetGroupTodoPayload(
             params=group_payload.SetGroupTodoParams(
-                group_id=str(group_id),
-                message_id=str(message_id),
+                group_id=group_id,
+                message_id=message_id,
                 message_seq=message_seq,
             )
         )
         await self._send_payload(payload)
 
-    async def get_ai_characters(self, group_id: int, chat_type: Literal[1, 2] = 1):
+    async def get_ai_characters(
+        self, group_id: int, chat_type: Literal[1, 2] = 1
+    ) -> Response:
         """获取群AI角色列表"""
         echo = self._generate_echo()
         payload = group_payload.AiCharactersPayload(
@@ -333,7 +344,7 @@ class GroupMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_group_system_msg(self):
+    async def get_group_system_msg(self) -> Response:
         """获取群系统消息"""
         echo = self._generate_echo()
         payload = group_payload.GetGroupSystemMsgPayload(echo=echo)
@@ -346,7 +357,7 @@ class GroupMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_group_info_ex(self, group_id: int):
+    async def get_group_info_ex(self, group_id: int) -> Response:
         """获取群信息ex"""
         echo = self._generate_echo()
         payload = group_payload.GetGroupInfoExPayload(
@@ -355,7 +366,7 @@ class GroupMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_group_ignored_notifies(self, group_id: int):
+    async def get_group_ignored_notifies(self, group_id: int) -> Response:
         """获取群过滤系统消息"""
         echo = self._generate_echo()
         payload = group_payload.GetGroupIgnoredNotifiesPayload(

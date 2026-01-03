@@ -308,7 +308,9 @@ class GetGroupMemberListPayload(BaseModel):
 # ==================== 获取群荣誉 ====================
 class GetGroupHonorInfoParams(BaseModel):
     group_id: int
-    type: str = "all"
+    type: Literal[
+        "all", "talkative", "performer", "legend", "strong_newbie", "emotion"
+    ] = "all"
 
 
 class GetGroupHonorInfoPayload(BaseModel):
@@ -347,7 +349,7 @@ class GetGroupShutListPayload(BaseModel):
 
 # ==================== 群打卡 ====================
 class SetGroupSignParams(BaseModel):
-    group_id: str
+    group_id: int
 
 
 class SetGroupSignPayload(BaseModel):
@@ -359,8 +361,8 @@ class SetGroupSignPayload(BaseModel):
 
 # ==================== 设置群代办 ====================
 class SetGroupTodoParams(BaseModel):
-    group_id: str
-    message_id: str
+    group_id: int
+    message_id: int
     message_seq: str | None = None
 
 

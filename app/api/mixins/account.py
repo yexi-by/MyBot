@@ -1,6 +1,9 @@
 """账号相关 Mixin 类"""
 
+from typing import Literal
+
 from app.models.api.payloads import account as account_payload
+from app.models.events.response import Response
 
 from .base import BaseMixin
 
@@ -33,7 +36,7 @@ class AccountMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_recent_contact(self, count: int = 10):
+    async def get_recent_contact(self, count: int = 10) -> Response:
         """获取最近消息列表"""
         echo = self._generate_echo()
         payload = account_payload.GetRecentContactPayload(
@@ -65,7 +68,7 @@ class AccountMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_stranger_info(self, user_id: int):
+    async def get_stranger_info(self, user_id: int) -> Response:
         """获取账号信息"""
         echo = self._generate_echo()
         payload = account_payload.GetStrangerInfoPayload(
@@ -74,7 +77,7 @@ class AccountMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_friend_list(self, no_cache: bool = False):
+    async def get_friend_list(self, no_cache: bool = False) -> Response:
         """获取好友列表"""
         echo = self._generate_echo()
         payload = account_payload.GetFriendListPayload(
@@ -83,14 +86,17 @@ class AccountMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_friends_with_category(self):
+    async def get_friends_with_category(self) -> Response:
         """获取好友分组列表"""
         echo = self._generate_echo()
         payload = account_payload.GetFriendsWithCategoryPayload(echo=echo)
         return await self._send_and_wait(payload)
 
     async def set_qq_profile(
-        self, nickname: str, personal_note: str | None = None, sex: str | None = None
+        self,
+        nickname: str,
+        personal_note: str | None = None,
+        sex: Literal["male", "female", "unknown"] | None = None,
     ) -> None:
         """设置账号信息"""
         payload = account_payload.SetQqProfilePayload(
@@ -123,7 +129,7 @@ class AccountMixin(BaseMixin):
         group_id: int | None = None,
         user_id: int | None = None,
         phone_number: str | None = None,
-    ):
+    ) -> Response:
         """获取推荐好友/群聊卡片"""
         echo = self._generate_echo()
         payload = account_payload.ArkSharePeerPayload(
@@ -134,7 +140,7 @@ class AccountMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def ark_share_group(self, group_id: str):
+    async def ark_share_group(self, group_id: int) -> Response:
         """获取推荐群聊卡片"""
         echo = self._generate_echo()
         payload = account_payload.ArkShareGroupPayload(
@@ -186,7 +192,7 @@ class AccountMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def fetch_custom_face(self, count: int = 40):
+    async def fetch_custom_face(self, count: int = 40) -> Response:
         """获取收藏表情"""
         echo = self._generate_echo()
         payload = account_payload.FetchCustomFacePayload(
@@ -197,7 +203,7 @@ class AccountMixin(BaseMixin):
 
     async def get_profile_like(
         self, user_id: int | None = None, start: int = 0, count: int = 10
-    ):
+    ) -> Response:
         """获取点赞列表"""
         echo = self._generate_echo()
         payload = account_payload.GetProfileLikePayload(
@@ -208,7 +214,7 @@ class AccountMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def nc_get_user_status(self, user_id: int):
+    async def nc_get_user_status(self, user_id: int) -> Response:
         """获取用户状态"""
         echo = self._generate_echo()
         payload = account_payload.NcGetUserStatusPayload(
@@ -217,31 +223,31 @@ class AccountMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_unidirectional_friend_list(self):
+    async def get_unidirectional_friend_list(self) -> Response:
         """获取单向好友列表"""
         echo = self._generate_echo()
         payload = account_payload.GetUnidirectionalFriendListPayload(echo=echo)
         return await self._send_and_wait(payload)
 
-    async def get_login_info(self):
+    async def get_login_info(self) -> Response:
         """获取登录号信息"""
         echo = self._generate_echo()
         payload = account_payload.GetLoginInfoPayload(echo=echo)
         return await self._send_and_wait(payload)
 
-    async def get_status(self):
+    async def get_status(self) -> Response:
         """获取状态"""
         echo = self._generate_echo()
         payload = account_payload.GetStatusPayload(echo=echo)
         return await self._send_and_wait(payload)
 
-    async def get_online_clients(self):
+    async def get_online_clients(self) -> Response:
         """获取在线客户端列表"""
         echo = self._generate_echo()
         payload = account_payload.GetOnlineClientsPayload(echo=echo)
         return await self._send_and_wait(payload)
 
-    async def get_model_show(self, model: str):
+    async def get_model_show(self, model: str) -> Response:
         """获取在线机型"""
         echo = self._generate_echo()
         payload = account_payload.GetModelShowPayload(
@@ -259,7 +265,7 @@ class AccountMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_doubt_friends_add_request(self, count: int = 50):
+    async def get_doubt_friends_add_request(self, count: int = 50) -> Response:
         """获取被过滤好友请求"""
         echo = self._generate_echo()
         payload = account_payload.GetDoubtFriendsAddRequestPayload(

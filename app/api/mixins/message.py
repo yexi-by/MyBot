@@ -18,7 +18,7 @@ from app.models import (
     Video,
 )
 from app.models.api.payloads import base as base_payload
-from app.models.events.response import MessageData
+from app.models.events.response import MessageData, Response
 
 from .base import BaseMixin
 
@@ -195,7 +195,7 @@ class MessageMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_forward_msg(self, message_id: int):
+    async def get_forward_msg(self, message_id: int) -> Response:
         """获取合并转发消息"""
         echo = self._generate_echo()
         payload = base_payload.ForwardMsgPayload(
@@ -215,7 +215,7 @@ class MessageMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_msg(self, message_id: int):
+    async def get_msg(self, message_id: int) -> Response:
         """获取消息详情"""
         echo = self._generate_echo()
         payload = base_payload.GetMsgPayload(
@@ -230,7 +230,7 @@ class MessageMixin(BaseMixin):
         message_seq: int | None = None,
         count: int = 20,
         reverse_order: bool = False,
-    ):
+    ) -> Response:
         """获取群历史消息"""
         echo = self._generate_echo()
         payload = base_payload.GetGroupMsgHistoryPayload(
@@ -250,7 +250,7 @@ class MessageMixin(BaseMixin):
         message_seq: int | None = None,
         count: int = 20,
         reverse_order: bool = False,
-    ):
+    ) -> Response:
         """获取好友历史消息"""
         echo = self._generate_echo()
         payload = base_payload.GetFriendMsgHistoryPayload(
@@ -270,7 +270,7 @@ class MessageMixin(BaseMixin):
         emoji_id: str,
         emoji_type: str,
         count: int | None = None,
-    ):
+    ) -> Response:
         """获取贴表情详情"""
         echo = self._generate_echo()
         payload = base_payload.FetchEmojiLikePayload(
@@ -289,7 +289,7 @@ class MessageMixin(BaseMixin):
         file: str | None = None,
         file_id: str | None = None,
         out_format: str = "mp3",
-    ):
+    ) -> Response:
         """获取语音消息详情"""
         echo = self._generate_echo()
         payload = base_payload.GetRecordPayload(
@@ -300,7 +300,9 @@ class MessageMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_image(self, file_id: str | None = None, file: str | None = None):
+    async def get_image(
+        self, file_id: str | None = None, file: str | None = None
+    ) -> Response:
         """获取图片消息详情"""
         echo = self._generate_echo()
         payload = base_payload.GetImagePayload(

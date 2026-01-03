@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 # ==================== 上传群文件 ====================
 class UploadGroupFileParams(BaseModel):
-    group_id: int | str
+    group_id: int
     file: str
     name: str
     folder: str | None = None
@@ -23,7 +23,7 @@ class UploadGroupFilePayload(BaseModel):
 
 # ==================== 上传私聊文件 ====================
 class UploadPrivateFileParams(BaseModel):
-    user_id: int | str
+    user_id: int
     file: str
     name: str
 
@@ -37,7 +37,7 @@ class UploadPrivateFilePayload(BaseModel):
 
 # ==================== 获取群根目录文件列表 ====================
 class GetGroupRootFilesParams(BaseModel):
-    group_id: int | str
+    group_id: int
     file_count: int = 50
 
 
@@ -51,7 +51,7 @@ class GetGroupRootFilesPayload(BaseModel):
 
 # ==================== 获取群子目录文件列表 ====================
 class GetGroupFilesByFolderParams(BaseModel):
-    group_id: int | str
+    group_id: int
     folder_id: str | None = None
     folder: str | None = None
     file_count: int = 50
@@ -67,7 +67,7 @@ class GetGroupFilesByFolderPayload(BaseModel):
 
 # ==================== 获取群文件系统信息 ====================
 class GetGroupFileSystemInfoParams(BaseModel):
-    group_id: int | str
+    group_id: int
 
 
 class GetGroupFileSystemInfoPayload(BaseModel):
@@ -94,7 +94,7 @@ class GetFilePayload(BaseModel):
 
 # ==================== 获取群文件链接 ====================
 class GetGroupFileUrlParams(BaseModel):
-    group_id: int | str
+    group_id: int
     file_id: str
 
 
@@ -121,7 +121,7 @@ class GetPrivateFileUrlPayload(BaseModel):
 
 # ==================== 创建群文件文件夹 ====================
 class CreateGroupFileFolderParams(BaseModel):
-    group_id: int | str
+    group_id: int
     folder_name: str
 
 
@@ -135,7 +135,7 @@ class CreateGroupFileFolderPayload(BaseModel):
 
 # ==================== 删除群文件 ====================
 class DeleteGroupFileParams(BaseModel):
-    group_id: int | str
+    group_id: int
     file_id: str
 
 
@@ -149,7 +149,7 @@ class DeleteGroupFilePayload(BaseModel):
 
 # ==================== 删除群文件夹 ====================
 class DeleteGroupFolderParams(BaseModel):
-    group_id: int | str
+    group_id: int
     folder_id: str
 
 
@@ -163,7 +163,7 @@ class DeleteGroupFolderPayload(BaseModel):
 
 # ==================== 移动群文件 ====================
 class MoveGroupFileParams(BaseModel):
-    group_id: int | str
+    group_id: int
     file_id: str
     current_parent_directory: str
     target_parent_directory: str
@@ -179,7 +179,7 @@ class MoveGroupFilePayload(BaseModel):
 
 # ==================== 重命名群文件 ====================
 class RenameGroupFileParams(BaseModel):
-    group_id: int | str
+    group_id: int
     file_id: str
     current_parent_directory: str
     new_name: str

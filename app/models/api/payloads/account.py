@@ -127,7 +127,7 @@ class GetFriendsWithCategoryPayload(BaseModel):
 class SetQqProfileParams(BaseModel):
     nickname: str
     personal_note: str | None = None
-    sex: str | None = None
+    sex: Literal["male", "female", "unknown"] | None = None
 
 
 class SetQqProfilePayload(BaseModel):
@@ -169,7 +169,7 @@ class ArkSharePeerPayload(BaseModel):
 
 # ==================== 获取推荐群聊卡片 ====================
 class ArkShareGroupParams(BaseModel):
-    group_id: str
+    group_id: int
 
 
 class ArkShareGroupPayload(BaseModel):

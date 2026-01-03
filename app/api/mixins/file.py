@@ -1,6 +1,7 @@
 """文件相关 Mixin 类"""
 
 from app.models.api.payloads import file as file_payload
+from app.models.events.response import Response
 
 from .base import BaseMixin
 
@@ -44,7 +45,9 @@ class FileMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_group_root_files(self, group_id: int, file_count: int = 50):
+    async def get_group_root_files(
+        self, group_id: int, file_count: int = 50
+    ) -> Response:
         """获取群根目录文件列表"""
         echo = self._generate_echo()
         payload = file_payload.GetGroupRootFilesPayload(
@@ -61,7 +64,7 @@ class FileMixin(BaseMixin):
         folder_id: str | None = None,
         folder: str | None = None,
         file_count: int = 50,
-    ):
+    ) -> Response:
         """获取群子目录文件列表"""
         echo = self._generate_echo()
         payload = file_payload.GetGroupFilesByFolderPayload(
@@ -75,7 +78,7 @@ class FileMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_group_file_system_info(self, group_id: int):
+    async def get_group_file_system_info(self, group_id: int) -> Response:
         """获取群文件系统信息"""
         echo = self._generate_echo()
         payload = file_payload.GetGroupFileSystemInfoPayload(
@@ -84,7 +87,9 @@ class FileMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_file(self, file_id: str | None = None, file: str | None = None):
+    async def get_file(
+        self, file_id: str | None = None, file: str | None = None
+    ) -> Response:
         """获取文件信息"""
         echo = self._generate_echo()
         payload = file_payload.GetFilePayload(
@@ -93,7 +98,7 @@ class FileMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_group_file_url(self, group_id: int, file_id: str):
+    async def get_group_file_url(self, group_id: int, file_id: str) -> Response:
         """获取群文件链接"""
         echo = self._generate_echo()
         payload = file_payload.GetGroupFileUrlPayload(
@@ -104,7 +109,7 @@ class FileMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def get_private_file_url(self, file_id: str):
+    async def get_private_file_url(self, file_id: str) -> Response:
         """获取私聊文件链接"""
         echo = self._generate_echo()
         payload = file_payload.GetPrivateFileUrlPayload(
@@ -113,7 +118,9 @@ class FileMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def create_group_file_folder(self, group_id: int, folder_name: str):
+    async def create_group_file_folder(
+        self, group_id: int, folder_name: str
+    ) -> Response:
         """创建群文件文件夹"""
         echo = self._generate_echo()
         payload = file_payload.CreateGroupFileFolderPayload(
@@ -124,7 +131,7 @@ class FileMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def delete_group_file(self, group_id: int, file_id: str):
+    async def delete_group_file(self, group_id: int, file_id: str) -> Response:
         """删除群文件"""
         echo = self._generate_echo()
         payload = file_payload.DeleteGroupFilePayload(
@@ -135,7 +142,7 @@ class FileMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def delete_group_folder(self, group_id: int, folder_id: str):
+    async def delete_group_folder(self, group_id: int, folder_id: str) -> Response:
         """删除群文件夹"""
         echo = self._generate_echo()
         payload = file_payload.DeleteGroupFolderPayload(
@@ -152,7 +159,7 @@ class FileMixin(BaseMixin):
         file_id: str,
         current_parent_directory: str,
         target_parent_directory: str,
-    ):
+    ) -> Response:
         """移动群文件"""
         echo = self._generate_echo()
         payload = file_payload.MoveGroupFilePayload(
@@ -172,7 +179,7 @@ class FileMixin(BaseMixin):
         file_id: str,
         current_parent_directory: str,
         new_name: str,
-    ):
+    ) -> Response:
         """重命名群文件"""
         echo = self._generate_echo()
         payload = file_payload.RenameGroupFilePayload(
@@ -193,7 +200,7 @@ class FileMixin(BaseMixin):
         name: str | None = None,
         headers: str | list[str] | None = None,
         thread_cnt: int | None = None,
-    ):
+    ) -> Response:
         """下载文件到缓存目录"""
         echo = self._generate_echo()
         payload = file_payload.DownloadFilePayload(
@@ -208,7 +215,7 @@ class FileMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def trans_group_file(self, group_id: int, file_id: str):
+    async def trans_group_file(self, group_id: int, file_id: str) -> Response:
         """转存为永久文件"""
         echo = self._generate_echo()
         payload = file_payload.TransGroupFilePayload(
@@ -219,7 +226,7 @@ class FileMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def clean_cache(self):
+    async def clean_cache(self) -> Response:
         """清空缓存"""
         echo = self._generate_echo()
         payload = file_payload.CleanCachePayload(echo=echo)

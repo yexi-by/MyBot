@@ -1,6 +1,7 @@
 """群相册相关 Mixin 类"""
 
 from app.models.api.payloads import album as album_payload
+from app.models.events.response import Response
 
 from .base import BaseMixin
 
@@ -52,7 +53,7 @@ class AlbumMixin(BaseMixin):
 
     async def get_group_album_media_list(
         self, group_id: str, album_id: str, attach_info: str
-    ):
+    ) -> Response:
         """获取群相册列表"""
         echo = self._generate_echo()
         payload = album_payload.GetGroupAlbumMediaListPayload(
@@ -77,7 +78,7 @@ class AlbumMixin(BaseMixin):
         )
         await self._send_payload(payload)
 
-    async def get_qun_album_list(self, group_id: str):
+    async def get_qun_album_list(self, group_id: str) -> Response:
         """获取群相册总列表"""
         echo = self._generate_echo()
         payload = album_payload.GetQunAlbumListPayload(
