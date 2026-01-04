@@ -2,6 +2,7 @@ import importlib
 import pkgutil
 from operator import attrgetter
 from . import user_plugins
+from .base import Context
 from .base import PLUGINS, BasePlugin
 
 
@@ -15,4 +16,4 @@ load_all_plugins()
 
 PLUGINS.sort(key=attrgetter("priority"), reverse=True)
 
-__all__ = ["PLUGINS",  "BasePlugin",]
+__all__ = ["PLUGINS",  "BasePlugin", "Context"]

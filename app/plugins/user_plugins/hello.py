@@ -24,7 +24,7 @@ class HelloPlugin(BasePlugin[GroupMessage]):
     async def run(self, msg: GroupMessage) -> bool:
         for m in msg.message:
             if m.type == "text" and m.data.text == "你好":
-                await self.bot.send_group_ai_record(
+                await self.context.bot.send_group_ai_record(
                     group_id=msg.group_id, character="lucy-voice-houge", text=text
                 )
                 return True

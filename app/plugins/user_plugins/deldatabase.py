@@ -23,7 +23,7 @@ class DeleteDatabaseMessage(
                 id_val = msg.user_id
         hash_key = f"bot:{msg.self_id}:{root}:{id_val}:msg_data"
         zset_key = f"bot:{msg.self_id}:{root}:{id_val}:time_map"
-        await self.database.del_data(
+        await self.context.database.del_data(
             hash_key=hash_key, zset_key=zset_key, msg_id=str(message_id)
         )
         return True

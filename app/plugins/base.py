@@ -1,13 +1,15 @@
 import asyncio
 from abc import ABCMeta, abstractmethod
-from typing import ClassVar, cast
+from typing import ClassVar, cast, Callable, Any
 
 from app.api import BOTClient
 from app.database import RedisDatabaseManager
 from app.models import AllEvent
-from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
+from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding, ContextHandler
 from config import Settings
 from app.utils import logger
+from app.core.plugin_manager import PluginController
+from dataclasses import dataclass
 
 PLUGINS: list[type["BasePlugin"]] = []
 
@@ -39,6 +41,15 @@ class PluginMeta(ABCMeta):
             PLUGINS.append(cast(type["BasePlugin"], cls))
         return cls
 
+@dataclass
+class Context:
+    llm: LLMHandler
+    siliconflow: SiliconFlowEmbedding
+    search_vectors: SearchVectors
+    bot: BOTClient
+    database: RedisDatabaseManager
+    settings: Settings
+    llm_context_handler:ContextHandler
 
 class BasePlugin[T: AllEvent](metaclass=PluginMeta):
     name: ClassVar[str]
@@ -47,23 +58,28 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
 
     def __init__(
         self,
-        llm: LLMHandler,
-        siliconflow: SiliconFlowEmbedding,
-        search_vectors: SearchVectors,
-        bot: BOTClient,
-        database: RedisDatabaseManager,
-        settings:Settings
+        context: Context,
     ) -> None:
-        self.llm = llm
-        self.siliconflow = siliconflow
-        self.search_vectors = search_vectors
-        self.bot = bot
-        self.database = database
-        self.settings=settings
+        self.context = context
         self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
         self.consumers: list[asyncio.Task] = []
+        self.controller: PluginController | None = None
+        self._pending_listeners: list[tuple[str, Callable]] = []
         self.register_consumers()
         self.setup()
+
+    def set_controller(self, controller: PluginController) -> None:
+        self.controller = controller
+        for event, func in self._pending_listeners:
+            self.controller.register_listener(event_name=event, callback=func)
+
+    async def emit(self, event_name: str, **kwargs) -> Any:
+        if self.controller:
+            results = await self.controller.broadcast(
+                event_name=event_name, kwargs=kwargs
+            )
+            if results:
+                return results
 
     async def add_to_queue(self, msg: T) -> bool:
         """对外接口"""

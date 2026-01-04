@@ -1,12 +1,14 @@
 from pydantic import BaseModel, model_validator, ConfigDict
 from typing import Literal
 from .base import LLMProvider
+from dataclasses import dataclass
+
 
 class LLMConfig(BaseModel):
     api_key: str
     base_url: str
     model_vendors: str  # 模型厂商
-    provider_type: str
+    provider_type: str  # 接口类型
     retry_count: int
     retry_delay: int
 
@@ -23,9 +25,7 @@ class ChatMessage(BaseModel):
         return self
 
 
-class LLMProviderWrapper(BaseModel):
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True
-    )  # 允许在 Pydantic使用自定义类类型
+@dataclass
+class LLMProviderWrapper:
     model_vendors: str
     provider: LLMProvider

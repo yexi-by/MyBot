@@ -16,24 +16,28 @@ class LLMHandler:
     def register_instance(cls, settings: list[LLMConfig]) -> Self:
         """注册实例"""
         services = []
-        model_map = {
-            "openai": lambda api_key, base_url: OpenAIService(
-                client=AsyncOpenAI(api_key=api_key, base_url=base_url)
-            ),
-            "gemini": lambda api_key, base_url: GeminiService(
-                client=genai.Client(
-                    api_key=api_key,
-                    http_options=types.HttpOptions(base_url=base_url)
-                    if base_url
-                    else None,
-                )
-            ),
-        }
         for model_config in settings:
-            factory = model_map.get(model_config.provider_type)
-            if factory is None:
-                raise ValueError(f"未知的模型服务类型: {model_config.provider_type}")
-            raw_service = factory(model_config.api_key, model_config.base_url)
+            provider_type = model_config.provider_type
+            api_key = model_config.api_key
+            base_url = model_config.base_url
+            match provider_type:
+                case "openai":
+                    raw_service = OpenAIService(
+                        client=AsyncOpenAI(api_key=api_key, base_url=base_url)
+                    )
+                case "gemini":
+                    raw_service = GeminiService(
+                        client=genai.Client(
+                            api_key=api_key,
+                            http_options=types.HttpOptions(base_url=base_url)
+                            if base_url
+                            else None,
+                        )
+                    )
+                case _:
+                    raise ValueError(
+                        f"未知的模型服务类型: {model_config.provider_type}"
+                    )
             safe_service = ResilientLLMProvider(
                 inner_provider=raw_service, llm_config=model_config
             )

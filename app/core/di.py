@@ -5,10 +5,10 @@ from dishka import Provider, Scope, from_context, provide
 from fastapi import WebSocket
 from redis.asyncio import Redis
 from app.api import BOTClient
-from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
+from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding, ContextHandler
 from config import RAW_CONFIG_DICT, Settings
 from app.database import RedisDatabaseManager
-from app.plugins import PLUGINS, BasePlugin
+from app.plugins import PLUGINS, BasePlugin, Context
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
 from .plugin_manager import PluginController
@@ -27,6 +27,12 @@ class MyProvider(Provider):
     @provide(scope=Scope.APP)
     def get_direct_httpx(self) -> DirectHttpx:
         return DirectHttpx(httpx.AsyncClient())
+
+    @provide(scope=Scope.APP)
+    async def get_llm_context_handler(self, settings: Settings) -> ContextHandler:
+        path = settings.llm_context_config.system_prompt_path
+        max_length = settings.llm_context_config.max_context_length
+        return await ContextHandler.new(path=path, max_context_length=max_length)
 
     @provide(scope=Scope.APP)
     def get_llm_handler(self, settings: Settings) -> LLMHandler:
@@ -83,18 +89,21 @@ class MyProvider(Provider):
         search_vectors: SearchVectors,
         bot: BOTClient,
         database: RedisDatabaseManager,
-        settings:Settings
+        settings: Settings,
+        llm_context_handler: ContextHandler,
     ) -> PluginController:
         plugin_objects: list[BasePlugin] = []
         for cls in PLUGINS:
-            plugin_object = cls(
+            context = Context(
                 llm=llm,
                 siliconflow=siliconflow,
                 search_vectors=search_vectors,
                 bot=bot,
                 database=database,
-                settings=settings
+                settings=settings,
+                llm_context_handler=llm_context_handler,
             )
+            plugin_object = cls(context=context)
             plugin_objects.append(plugin_object)
         return PluginController(plugin_objects=plugin_objects)
 

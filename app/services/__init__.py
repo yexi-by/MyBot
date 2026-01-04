@@ -1,5 +1,6 @@
 from .llm import LLMConfig, LLMHandler
 from .rag import EmbeddingConfig, SiliconFlowEmbedding, SearchVectors, start
+from .llmcontextmanager import ContextHandler,LLMContextConfig, ChatMessage
 
 __all__ = [
     "LLMConfig",
@@ -8,4 +9,7 @@ __all__ = [
     "SearchVectors",
     "start",
     "LLMHandler",
+    "ContextHandler",
+    "LLMContextConfig",
+    "ChatMessage",
 ]
