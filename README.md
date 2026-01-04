@@ -495,22 +495,50 @@ pip install -r requirements.txt
 ```
 
 ### 配置
-创建 `setting.toml` 文件（参考 `setting.toml.example`）：
+创建 `setting.toml` 文件：
 ```toml
+# 向量存储位置
+faiss_file_location = "vector"
+
+# 视频和图片保存路径
+video_and_image_path = "C:/path/to/images"
+
+# LLM 配置（支持多个提供商）
+[[llm_settings]]
+api_key = "your-api-key"
+base_url = "https://api.deepseek.com"
+model_vendors = "deepseek"
+provider_type = "openai"
+retry_count = 3
+retry_delay = 1
+
+[[llm_settings]]
+api_key = "your-api-key"
+base_url = "http://localhost:7861"
+model_vendors = "google"
+provider_type = "gemini"
+retry_count = 3
+retry_delay = 1
+
+# Embedding 配置
+[embedding_settings]
+api_key = "your-embedding-api-key"
+base_url = "https://api.siliconflow.cn/v1/embeddings"
+model_name = "Qwen/Qwen3-Embedding-8B"
+provider_type = "siliconflow"
+retry_count = 3
+retry_delay = 1
+
+# Redis 配置
 [redis_config]
 host = "localhost"
 port = 6379
-db = 0
 password = ""
 
-[llm_settings.openai]
-api_key = "your-api-key"
-base_url = "https://api.openai.com/v1"
-model = "gpt-4"
-
-[embedding_settings]
-api_key = "your-embedding-api-key"
-base_url = "https://api.siliconflow.cn/v1"
+# LLM 上下文配置
+[llm_context_config]
+system_prompt_path = ""
+max_context_length = 50
 ```
 
 ### 运行
@@ -526,44 +554,66 @@ python main.py
 
 配置文件使用 TOML 格式，主要配置项：
 
-### Redis 配置
+### 基础配置
 ```toml
-[redis_config]
-host = "localhost"          # Redis 地址
-port = 6379                 # Redis 端口
-db = 0                      # 数据库编号
-password = ""               # 密码（可选）
+# 向量数据库存储位置
+faiss_file_location = "vector"
+
+# 图片和视频文件保存路径
+video_and_image_path = "C:/path/to/images"
 ```
 
 ### LLM 配置
-```toml
-[llm_settings.openai]
-api_key = "sk-xxx"
-base_url = "https://api.openai.com/v1"
-model = "gpt-4"
-temperature = 0.7
-max_tokens = 2000
+支持配置多个 LLM 提供商，使用数组格式 `[[llm_settings]]`：
 
-[llm_settings.gemini]
-api_key = "xxx"
-model = "gemini-pro"
+```toml
+# OpenAI 兼容接口（如 DeepSeek）
+[[llm_settings]]
+api_key = "your-api-key"
+base_url = "https://api.deepseek.com"
+model_vendors = "deepseek"       # 模型供应商标识
+provider_type = "openai"         # 提供商类型
+retry_count = 3                  # 重试次数
+retry_delay = 1                  # 重试延迟（秒）
+
+# Google Gemini
+[[llm_settings]]
+api_key = "your-api-key"
+base_url = "http://localhost:7861"
+model_vendors = "google"
+provider_type = "gemini"
+retry_count = 3
+retry_delay = 1
 ```
 
-### RAG 配置
+支持的 `provider_type`：
+- `openai`: OpenAI 及兼容接口（DeepSeek、通义千问等）
+- `gemini`: Google Gemini
+
+### Embedding 配置
 ```toml
 [embedding_settings]
-api_key = "xxx"
-base_url = "https://api.siliconflow.cn/v1"
-model = "BAAI/bge-large-zh-v1.5"
-
-faiss_file_location = "./vector_store"
+api_key = "your-embedding-api-key"
+base_url = "https://api.siliconflow.cn/v1/embeddings"
+model_name = "Qwen/Qwen3-Embedding-8B"
+provider_type = "siliconflow"
+retry_count = 3
+retry_delay = 1
 ```
 
-### 上下文管理
+### Redis 配置
+```toml
+[redis_config]
+host = "localhost"               # Redis 地址
+port = 6379                      # Redis 端口
+password = ""                    # 密码（可选）
+```
+
+### LLM 上下文配置
 ```toml
 [llm_context_config]
-system_prompt_path = "./prompts/system.txt"
-max_context_length = 10
+system_prompt_path = ""          # 系统提示词文件路径（可选）
+max_context_length = 50          # 最大上下文长度
 ```
 
 ## 🔌 插件开发
