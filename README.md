@@ -486,12 +486,21 @@ graph LR
 - NapCat (QQ 机器人协议端)
 
 ### 安装依赖
-```bash
-# 使用 uv（推荐）
-uv sync
 
-# 或使用 pip
-pip install -r requirements.txt
+本项目使用 [uv](https://github.com/astral-sh/uv) 作为包管理器，请先安装 uv：
+
+```bash
+# Windows (PowerShell)
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# macOS/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+安装项目依赖：
+
+```bash
+uv sync
 ```
 
 ### 配置
@@ -547,7 +556,7 @@ max_context_length = 50
 run.bat
 
 # Linux/Mac
-python main.py
+uv run main.py
 ```
 
 ## 📝 配置说明
