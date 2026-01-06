@@ -29,3 +29,27 @@ class ResilientLLMProvider(LLMProvider):
                 )
                 return response
         raise RuntimeError("Retries exhausted")  # 规避下类型检查,这行是死代码
+
+    async def get_image(
+        self,
+        prompt: str,
+        model: str,
+        image_base64_list: list[str] | None = None,
+    ) -> str:
+        retry_count = self.llm_config.retry_count
+        retry_delay = self.llm_config.retry_delay
+        retrier = create_retry_manager(
+            retry_count=retry_count,
+            retry_delay=retry_delay,
+            error_types=(RateLimitError, APIConnectionError, APITimeoutError),
+            custom_checker=lambda x: not x,
+        )
+        async for attempt in retrier:
+            with attempt:
+                response = await self.inner_provider.get_image(
+                    prompt=prompt,
+                    model=model,
+                    image_base64_list=image_base64_list
+                )
+                return response
+        raise RuntimeError("Retries exhausted")  # 规避下类型检查,这行是死代码

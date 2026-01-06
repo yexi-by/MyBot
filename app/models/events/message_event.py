@@ -49,8 +49,8 @@ class PrivateMessage(BaseMessage):
 class SelfMessage(BaseModel):
     message_id:int
     self_id: int
-    group_id: int|None
-    user_id: int|None
+    group_id: int|None=None
+    user_id: int|None=None
     time:int
     message: list[MessageSegment]
 

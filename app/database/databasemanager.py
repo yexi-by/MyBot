@@ -239,10 +239,10 @@ class RedisDatabaseManager:
             msg_id = str(uuid.uuid4())
         if not time_id:
             time_id = int(time.time())
-        async with self.redis_client.pipeline() as pipe:
-            pipe.hset(hash_key, msg_id, value)
-            pipe.zadd(zset_key, {msg_id: time_id})
-            await pipe.execute()
+        pipe = self.redis_client.pipeline()
+        pipe.hset(hash_key, msg_id, value)
+        pipe.zadd(zset_key, {msg_id: time_id})
+        await pipe.execute()
 
     async def search_data(
         self,
@@ -332,8 +332,10 @@ class RedisDatabaseManager:
                         msg=msg, segment=segment, index=index
                     )
                 case SelfMessage():
+                    image_base64=segment.data.file
+                    segment.data.file= "local" # 不应该存这base64字符串,这傻逼onebot11协议,先做个拷贝
                     await self._save_self_media(
-                        segment=segment, index=index, message_id=msg.message_id, msg=msg
+                        segment=segment, index=index, message_id=msg.message_id, msg=msg,image_base64=image_base64
                     )
 
     async def _dispatch_media_download(
@@ -390,10 +392,10 @@ class RedisDatabaseManager:
             logger.error(f"下载资源失败: {url}，错误信息: {error}")
 
     async def _save_self_media(
-        self, segment: Image | Video, message_id: int, index: int, msg: SelfMessage
+        self, segment: Image | Video, message_id: int, index: int, msg: SelfMessage,image_base64:str,
     ):
         """保存自发消息中的 Base64 媒体资源到本地文件。"""
-        file_base64 = segment.data.file
+        file_base64 = image_base64 
         data_start_index = 0
         comma_index = file_base64.find(",", 0, 200)
         if comma_index != -1:

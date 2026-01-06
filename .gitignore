@@ -12,3 +12,7 @@ setting.toml
 vector
 logs
 debug.jsonl
+other
+prompt
+run.bat
+app\plugins\user_plugins/*

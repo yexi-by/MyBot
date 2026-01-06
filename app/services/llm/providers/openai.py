@@ -1,6 +1,10 @@
 import base64
+
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
+
+from app.utils.utils import detect_image_mime_type
+
 from ..base import LLMProvider
 from ..schemas import ChatMessage
 
@@ -20,13 +24,15 @@ class OpenAIService(LLMProvider):
             if msg.text:
                 content_lst.append({"type": "text", "text": msg.text})
             if msg.image:
-                base64_image = f"data:image/jpeg;base64,{base64.b64encode(msg.image).decode('utf-8')}"
-                content_lst.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": base64_image, "detail": "auto"},
-                    }
-                )
+                for image_bytes in msg.image:
+                    mime_type = detect_image_mime_type(image_bytes)
+                    base64_image = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('utf-8')}"
+                    content_lst.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": base64_image, "detail": "auto"},
+                        }
+                    )
             msg_dict["content"] = content_lst
             chat_messages.append(msg_dict)
         return chat_messages

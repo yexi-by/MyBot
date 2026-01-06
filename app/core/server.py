@@ -53,13 +53,13 @@ class NapCatServer:
             checker: FromDishka[EventTypeChecker],
             redis_database_manager: FromDishka[RedisDatabaseManager],
         ) -> None:
-            try:
-                await self._check_auth_token(websocket=websocket)
-            except ValueError:
-                return
             async with self.container(
                 context={WebSocket: websocket}
             ) as request_container:
+                try:
+                    await self._check_auth_token(websocket=websocket)
+                except ValueError:
+                    return
                 dispatcher = await request_container.get(EventDispatcher)
                 bot = await request_container.get(BOTClient)
                 try:

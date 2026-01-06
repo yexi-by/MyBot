@@ -1,15 +1,16 @@
 import asyncio
 from abc import ABCMeta, abstractmethod
 from typing import ClassVar, cast, Callable, Any
-
+from functools import wraps
 from app.api import BOTClient
 from app.database import RedisDatabaseManager
 from app.models import AllEvent
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding, ContextHandler
+from app.services.ai_image import NaiClient
 from config import Settings
 from app.utils import logger
 from app.core.plugin_manager import PluginController
-from dataclasses import dataclass
+import httpx
 
 PLUGINS: list[type["BasePlugin"]] = []
 
@@ -41,15 +42,85 @@ class PluginMeta(ABCMeta):
             PLUGINS.append(cast(type["BasePlugin"], cls))
         return cls
 
-@dataclass
+
+def require_initialized(func):
+    """
+    属性装饰器：
+    1. 自动检查返回值是否为 None。
+    2. 如果是 None，自动通过反射读取函数定义的返回类型，抛出详细错误。
+    """
+    prop_name = func.__name__
+    hints = func.__annotations__
+    return_type = hints.get("return")
+    if return_type is None:
+        raise ValueError(f"无法获取属性 {prop_name} 的返回类型注解")
+    type_name = getattr(return_type, "__name__", str(return_type))
+
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        instance = func(self, *args, **kwargs)
+        if instance is None:
+            raise RuntimeError(
+                f"上下文中的 {type_name} 未正确初始化, 请检查配置文件中是否填写了相关字段。"
+            )
+        return instance
+
+    return wrapper
+
+
 class Context:
-    llm: LLMHandler
-    siliconflow: SiliconFlowEmbedding
-    search_vectors: SearchVectors
-    bot: BOTClient
-    database: RedisDatabaseManager
-    settings: Settings
-    llm_context_handler:ContextHandler
+    def __init__(
+        self,
+        settings: Settings,
+        bot: BOTClient,
+        database: RedisDatabaseManager,
+        direct_httpx: httpx.AsyncClient,
+        proxy_httpx: httpx.AsyncClient | None = None,
+        llm: LLMHandler | None = None,
+        siliconflow: SiliconFlowEmbedding | None = None,
+        search_vectors: SearchVectors | None = None,
+        nai_client: NaiClient | None = None,
+    ):
+        self.settings = settings
+        self.bot = bot
+        self.database = database
+        self.direct_httpx = direct_httpx
+        self._llm = llm
+        self._siliconflow = siliconflow
+        self._search_vectors = search_vectors
+        self._nai_client = nai_client
+        self._proxy_httpx = proxy_httpx
+
+    @property
+    @require_initialized
+    def llm(self) -> LLMHandler:
+        return self._llm  # type: ignore
+
+    @property
+    @require_initialized
+    def siliconflow(self) -> SiliconFlowEmbedding:
+        return self._siliconflow  # type: ignore
+
+    @property
+    @require_initialized
+    def search_vectors(self) -> SearchVectors:
+        return self._search_vectors  # type: ignore
+
+    @property
+    @require_initialized
+    def llm_context_handler(self) -> ContextHandler:
+        return self._llm_context_handler  # type: ignore
+
+    @property
+    @require_initialized
+    def nai_client(self) -> NaiClient:
+        return self._nai_client  # type: ignore
+
+    @property
+    @require_initialized
+    def proxy_httpx(self) -> httpx.AsyncClient:
+        return self._proxy_httpx  # type: ignore
+
 
 class BasePlugin[T: AllEvent](metaclass=PluginMeta):
     name: ClassVar[str]

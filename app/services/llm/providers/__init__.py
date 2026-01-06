@@ -1,3 +1,4 @@
 from .gemini import GeminiService
 from .openai import OpenAIService
-__all__ = ["GeminiService", "OpenAIService"]
+from .volcengine import VolcengineService
+__all__ = ["GeminiService", "OpenAIService", "VolcengineService"]

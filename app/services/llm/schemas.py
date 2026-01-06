@@ -1,4 +1,4 @@
-from pydantic import BaseModel, model_validator, ConfigDict
+from pydantic import BaseModel, model_validator
 from typing import Literal
 from .base import LLMProvider
 from dataclasses import dataclass
@@ -16,7 +16,7 @@ class LLMConfig(BaseModel):
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
     text: str | None = None
-    image: bytes | None = None
+    image: list[bytes] | None = None
 
     @model_validator(mode="after")
     def check_at_least_one(self):

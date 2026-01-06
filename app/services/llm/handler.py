@@ -2,9 +2,11 @@ from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
 from typing import Self
+from volcenginesdkarkruntime import AsyncArk
 from .schemas import LLMConfig, ChatMessage, LLMProviderWrapper
 from .providers.openai import OpenAIService
 from .providers.gemini import GeminiService
+from .providers.volcengine import VolcengineService
 from .wrapper import ResilientLLMProvider
 
 
@@ -34,6 +36,10 @@ class LLMHandler:
                             else None,
                         )
                     )
+                case "volcengine":
+                    raw_service = VolcengineService(
+                        client=AsyncArk(api_key=api_key, base_url=base_url)
+                    )
                 case _:
                     raise ValueError(
                         f"未知的模型服务类型: {model_config.provider_type}"
@@ -60,5 +66,34 @@ class LLMHandler:
                 continue
             return await llm.provider.get_ai_response(
                 messages=messages, model=model_name
+            )
+        raise ValueError(f"未定义的服务商名:{model_vendors}")
+
+    async def get_image(
+        self,
+        prompt: str,
+        model: str,
+        model_vendors: str,
+        image_base64_list: list[str] | None = None,
+    ) -> str:
+        """
+        生成图片
+        
+        Args:
+            prompt: 文本提示词
+            model: 模型名称
+            model_vendors: 服务商名称
+            image_base64_list: 可选的图片列表(base64编码的字符串)，用于图文生图
+            
+        Returns:
+            生成的图片base64编码字符串
+        """
+        for llm in self.services:
+            if llm.model_vendors != model_vendors:
+                continue
+            return await llm.provider.get_image(
+                prompt=prompt,
+                model=model,
+                image_base64_list=image_base64_list,
             )
         raise ValueError(f"未定义的服务商名:{model_vendors}")
