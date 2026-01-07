@@ -19,7 +19,7 @@ from .utils import (
 )
 
 # 配置文件路径
-GROUP_CONFIG_PATH = "other/group_config.toml"
+GROUP_CONFIG_PATH = "plugins_config/group_config.toml"
 
 # 最大重试次数常量
 MAX_RETRY_ATTEMPTS = 10
