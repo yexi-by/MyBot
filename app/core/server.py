@@ -18,14 +18,16 @@ from .event_parser import EventTypeChecker
 
 class NapCatServer:
     def __init__(self, container: AsyncContainer) -> None:
-        self.app = FastAPI()
         self.container = container
+        self.app = FastAPI(lifespan=self.lifespan)
         setup_dishka(self.container, self.app)
         self._register_routes()
         self._background_tasks: set[asyncio.Task] = set()
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
+        # 预热核心依赖项，避免首次连接时客户端超时
+        await self.container.get(RedisDatabaseManager)
         logger.info("服务已启动")
         yield
         redis_database_manager = await self.container.get(RedisDatabaseManager)

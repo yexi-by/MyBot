@@ -36,8 +36,16 @@ if TYPE_CHECKING:
 # 日志配置常量
 # ================================
 
+# 日志目录名称
+LOG_DIR_NAME = "logs"
+
+# 日志文件名模式
+APP_LOG_PATTERN = "{time:YYYY-MM-DD}_app.log"
+ERROR_LOG_PATTERN = "{time:YYYY-MM-DD}_error.log"
+STRUCTURED_LOG_PATTERN = "{time:YYYY-MM-DD}_structured.json"
+
 # 日志目录
-LOG_DIR = Path("logs")
+LOG_DIR = Path(LOG_DIR_NAME)
 LOG_DIR.mkdir(exist_ok=True)
 
 # 日志级别 (可通过环境变量覆盖)
@@ -151,7 +159,7 @@ def _configure_logger() -> Logger:
 
     # ---- 常规日志文件 ----
     _logger.add(
-        LOG_DIR / "{time:YYYY-MM-DD}_app.log",
+        LOG_DIR / APP_LOG_PATTERN,
         format=FILE_FORMAT if not LOG_JSON_FORMAT else JSON_FORMAT,
         level=LOG_LEVEL,
         rotation=LOG_ROTATION,
@@ -165,7 +173,7 @@ def _configure_logger() -> Logger:
 
     # ---- 错误日志文件 (单独记录 ERROR 及以上级别) ----
     _logger.add(
-        LOG_DIR / "{time:YYYY-MM-DD}_error.log",
+        LOG_DIR / ERROR_LOG_PATTERN,
         format=FILE_FORMAT,
         level="ERROR",
         rotation=LOG_ROTATION,
@@ -180,7 +188,7 @@ def _configure_logger() -> Logger:
     # ---- JSON 格式日志 (用于日志聚合系统) ----
     if LOG_JSON_FORMAT:
         _logger.add(
-            LOG_DIR / "{time:YYYY-MM-DD}_structured.json",
+            LOG_DIR / STRUCTURED_LOG_PATTERN,
             format=JSON_FORMAT,
             level=LOG_LEVEL,
             rotation=LOG_ROTATION,

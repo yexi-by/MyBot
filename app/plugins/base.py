@@ -1,16 +1,22 @@
+from __future__ import annotations
+
 import asyncio
 from abc import ABCMeta, abstractmethod
-from typing import ClassVar, cast, Callable, Any
+from typing import ClassVar, cast, Callable, Any, TYPE_CHECKING
 from functools import wraps
+
+import httpx
+
 from app.api import BOTClient
 from app.database import RedisDatabaseManager
 from app.models import AllEvent
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding, ContextHandler
 from app.services.ai_image import NaiClient
-from config import Settings
 from app.utils import logger
-from app.core.plugin_manager import PluginController
-import httpx
+from app.config import Settings
+
+if TYPE_CHECKING:
+    from app.core.plugin_manager import PluginController
 
 PLUGINS: list[type["BasePlugin"]] = []
 

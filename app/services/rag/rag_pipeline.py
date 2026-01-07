@@ -13,10 +13,18 @@ from .schemas import EmbeddingConfig, VectorizeConfig, VectorStorage
 
 logger = get_logger(__name__)
 
+# 文件名常量
+DEBUG_FILENAME = "debug.txt"
+VECTOR_JSON_FILENAME = "vector.json"
+FAISS_INDEX_FILENAME = "index.faiss"
+ID_MAPPING_FILENAME = "id_mapping.json"
+VECTOR_DIR_NAME = "vector"
+TXT_FILE_PATTERN = "*.txt"
+
 
 async def write_to_file(folder_path: str, chunks: list[str]) -> None:
     """将文本块写入debug.txt文件用于调试。"""
-    file_path = Path(folder_path) / "debug.txt"
+    file_path = Path(folder_path) / DEBUG_FILENAME
     async with aiofiles.open(file_path, mode="w", encoding="utf-8") as f:
         text = await asyncio.to_thread(lambda: "\n\n".join(chunks))
         await f.write(text)
@@ -25,7 +33,7 @@ async def write_to_file(folder_path: str, chunks: list[str]) -> None:
 async def read_txt_file(folder_path: str | Path) -> list[str]:
     """递归读取目录下所有txt文件，返回去除空白后的文本列表。"""
     file_path = Path(folder_path)
-    results = file_path.rglob("*.txt")
+    results = file_path.rglob(TXT_FILE_PATTERN)
     text_lst: list[str] = []
     for file in results:
         async with aiofiles.open(file, mode="r", encoding="utf-8") as f:
@@ -116,7 +124,7 @@ async def write_data(
 ) -> dict[str, list[float]]:
     """从队列消费向量数据并流式写入vector.json文件。"""
     folder_path = Path(folder_str)
-    file_path = folder_path / "vector.json"
+    file_path = folder_path / VECTOR_JSON_FILENAME
     first_item = True
     data: dict[str, list[float]] = {}
     async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
@@ -166,8 +174,8 @@ async def store_vectors(data: dict[str, list[float]], directory: str | Path) -> 
     if not index.is_trained:
         await asyncio.to_thread(index.train, vectors_np)  # type: ignore
     await asyncio.to_thread(index.add, vectors_np)  # type: ignore
-    index_path = Path(directory) / "index.faiss"
-    map_path = Path(directory) / "id_mapping.json"
+    index_path = Path(directory) / FAISS_INDEX_FILENAME
+    map_path = Path(directory) / ID_MAPPING_FILENAME
     # await asyncio.to_thread(faiss.write_index, index, str(index_path))
     # 由于faiss直接去访问硬盘写文件时,可能会没有办法处理中文路径
     # 这里把整个index对象压缩并转换成一个numpy(uint8)数组,再转换为二进制数据块,通过python写入
@@ -301,8 +309,8 @@ async def search_vectors(
     top_k: int = 5,
 ) -> list[str]:
     """从FAISS索引中检索最相似的top_k个文本。"""
-    index_path = Path(directory) / "index.faiss"
-    map_path = Path(directory) / "id_mapping.json"
+    index_path = Path(directory) / FAISS_INDEX_FILENAME
+    map_path = Path(directory) / ID_MAPPING_FILENAME
     async with aiofiles.open(map_path, "r", encoding="utf-8") as f:
         content = await f.read()
         id_mapping: list[str] = json.loads(content)
@@ -337,7 +345,7 @@ async def vectorize_text(
         model: embedding模型名称。
     """
     folder_path = Path(folder_str)
-    vector_dir = folder_path.parent / "vector"
+    vector_dir = folder_path.parent / VECTOR_DIR_NAME
     vector_dir.mkdir(parents=True, exist_ok=True)
     text_lst = await read_txt_file(folder_path=folder_path)
     chunks = await asyncio.to_thread(

@@ -1,1 +1,1 @@
-uv run main.py
+uv run python -m app.main

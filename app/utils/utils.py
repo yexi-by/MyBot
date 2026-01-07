@@ -1,10 +1,15 @@
-import aiofiles
-from typing import Any
-from pathlib import Path
-import json
 import base64
+import json
+import tomllib
+from pathlib import Path
+from typing import Any
+
+import aiofiles
 import filetype
 import httpx
+
+# 调试文件名
+DEBUG_FILENAME = "debug/debug.jsonl"
 
 
 async def write_to_file(
@@ -12,9 +17,16 @@ async def write_to_file(
 ) -> None:
     if not directory_path:
         directory_path = Path.cwd()
-    path = Path(directory_path) / "debug.jsonl"
+    path = Path(directory_path) / DEBUG_FILENAME
     async with aiofiles.open(path, mode="a", encoding="utf-8") as f:
         await f.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+
+def load_toml_file(file_path: str | Path) -> dict:
+    path = Path(file_path)
+    with open(path, "rb") as f:
+        toml_data = tomllib.load(f)
+        return toml_data
 
 
 def base64_to_bytes(data: str) -> bytes:
@@ -84,4 +96,5 @@ async def download_image(url: str, client: httpx.AsyncClient) -> bytes:
     """
     response = await client.get(url)
     response.raise_for_status()
+    return response.content
     return response.content

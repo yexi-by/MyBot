@@ -1,20 +1,23 @@
-from typing import NewType, get_type_hints
-from functools import wraps
-import httpx
 import inspect
+from functools import wraps
+from typing import NewType, get_type_hints
+
+import httpx
 from dishka import Provider, Scope, from_context, provide
 from fastapi import WebSocket
 from redis.asyncio import Redis
+
 from app.api import BOTClient
-from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding, ContextHandler
-from config import RAW_CONFIG_DICT, Settings
 from app.database import RedisDatabaseManager
 from app.plugins import PLUGINS, BasePlugin, Context
+from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
+from app.services.ai_image import NaiClient
+from app.utils import logger
+from app.config import RAW_CONFIG_DICT, Settings
+
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
 from .plugin_manager import PluginController
-from app.utils import logger
-from app.services.ai_image import NaiClient
 
 
 def optional_parameters(func):
@@ -143,14 +146,14 @@ class MyProvider(Provider):
         bot: BOTClient,
         database: RedisDatabaseManager,
         settings: Settings,
-        directhttpx:DirectHttpx,
+        directhttpx: DirectHttpx,
         proxy_httpx: ProxyHttpx | None,
         llm: LLMHandler | None,
         siliconflow: SiliconFlowEmbedding | None,
         search_vectors: SearchVectors | None,
         nai_client: NaiClient | None,
-        
     ) -> PluginController:
+        logger.info(f"创建 PluginController，PLUGINS 列表长度: {len(PLUGINS)}, 内容: {PLUGINS}")
         plugin_objects: list[BasePlugin] = []
         for cls in PLUGINS:
             context = Context(

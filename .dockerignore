@@ -9,5 +9,15 @@ setting.toml
 vector
 logs
 debug
+
 docs
 plugins_config
+
+
+.git/
+Dockerfile
+docker-compose.yml
+README.md
+.github
+.gitignore
+run.bat

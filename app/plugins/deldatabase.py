@@ -1,6 +1,6 @@
 from app.models import FriendRecallNoticeEvent, GroupRecallNoticeEvent
 
-from ..base import BasePlugin
+from .base import BasePlugin
 
 
 class DeleteDatabaseMessage(

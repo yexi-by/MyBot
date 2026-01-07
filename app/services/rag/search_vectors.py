@@ -8,6 +8,10 @@ import numpy as np
 
 from .providers import SiliconFlowEmbedding
 
+# 默认文件名常量
+DEFAULT_INDEX_FILENAME = "index.faiss"
+DEFAULT_MAPPING_FILENAME = "id_mapping.json"
+
 
 class SearchVectors:
     """基于 FAISS 的向量搜索类。
@@ -35,8 +39,8 @@ class SearchVectors:
     async def create_from_directory(
         cls,
         directory: str,
-        index_filename: str = "index.faiss",
-        mapping_filename: str = "id_mapping.json",
+        index_filename: str = DEFAULT_INDEX_FILENAME,
+        mapping_filename: str = DEFAULT_MAPPING_FILENAME,
     ) -> Self:
         dir_path = Path(directory)
         index_path = dir_path / index_filename
