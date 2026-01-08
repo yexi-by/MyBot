@@ -6,7 +6,7 @@ from app.utils import create_retry_manager
 import zipfile
 import io
 import base64
-
+from app.utils import logger
 
 class NaiClient:
     def __init__(self, client: httpx.AsyncClient, url: str, api_key: str) -> None:
@@ -48,6 +48,7 @@ class NaiClient:
             error_types=(httpx.HTTPStatusError, httpx.RequestError),
             custom_checker=lambda x: not x,
         )
+        
         async for attempt in retrier:
             with attempt:
                 response = await self.client.post(
@@ -62,4 +63,3 @@ class NaiClient:
                         return base64_string
 
         raise RuntimeError("Retries exhausted")  # 规避下类型检查,这行是死代码
-

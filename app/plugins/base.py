@@ -10,7 +10,7 @@ import httpx
 from app.api import BOTClient
 from app.database import RedisDatabaseManager
 from app.models import AllEvent
-from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding, ContextHandler
+from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
 from app.services.ai_image import NaiClient
 from app.utils import logger
 from app.config import Settings

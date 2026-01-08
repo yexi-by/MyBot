@@ -1,23 +1,22 @@
 from app.models import GroupMessage
-from ..base import BasePlugin
-from app.utils import load_config, convert_basemodel_to_schema
-from .segments import PluginConfig, NaiImageKwargs
 from app.services import ContextHandler
-from .utils import build_group_chat_contexts
+from app.services.llm.schemas import ChatMessage
+from app.utils import convert_basemodel_to_schema, load_config, logger
+
+from ..base import BasePlugin
 from ..utils import (
-    find_replied_message_image_paths,
-    extract_text_from_message,
     aggregate_messages,
+    extract_text_from_message,
+    find_replied_message_image_paths,
     get_response_images,
 )
-from app.services.llm.schemas import ChatMessage
-from app.utils import logger
+from .segments import NaiImageKwargs, PluginConfig
+from .utils import build_group_chat_contexts
 
 # 配置文件路径
 MAX_RETRY_ATTEMPTS = 5
 GROUP_CONFIG_PATH = "plugins_config/nai_config.toml"
 TEXT_IMAGE_TOKEN = "/生图图片"
-IMAGE_IMAGE_TOKEN = "/参考生图"
 
 
 class NaiImage(BasePlugin[GroupMessage]):
@@ -42,7 +41,7 @@ class NaiImage(BasePlugin[GroupMessage]):
         conversation_history.append(user_prompt)
         attempt_count = 0
         while attempt_count <= MAX_RETRY_ATTEMPTS:
-            attempt_count+=1
+            attempt_count += 1
             raw_response = await self.context.llm.get_ai_text_response(
                 messages=conversation_history,
                 model_name="gemini-3-pro-preview",
@@ -58,6 +57,7 @@ class NaiImage(BasePlugin[GroupMessage]):
                 await self.context.bot.send_msg(
                     group_id=msg.group_id, image=file_image_base
                 )
+                break
             except Exception as e:
                 error_message = ChatMessage(role="user", text=f"出错了:\n{e}")
                 conversation_history.append(error_message)
@@ -85,20 +85,25 @@ class NaiImage(BasePlugin[GroupMessage]):
 
     async def run(self, msg: GroupMessage) -> bool:
         image_base64 = None
-        if msg.group_id not in self.group_contexts:
+        group_id = msg.group_id
+        at = msg.user_id
+        if group_id not in self.group_contexts:
             return False
         at_lst, text_list, image_url_lst, reply_id = aggregate_messages(msg=msg)
         text = "".join(text_list)
         prompt = extract_text_from_message(text=text, token=TEXT_IMAGE_TOKEN)
         if prompt is None:
             return False
+        await self.context.bot.send_msg(
+            group_id=group_id, at=at, text="正在生成图片...."
+        )
         if reply_id:
             image_base64 = await self.assemble_reply_message_details(
                 reply_id=reply_id, group_id=msg.group_id
             )
             if not image_base64:
                 await self.context.bot.send_msg(
-                    group_id=msg.group_id, at=msg.user_id, text="被回复的图片为空"
+                    group_id=group_id, at=at, text="被回复的图片为空"
                 )
                 return True
         chat_handler = self.group_contexts[msg.group_id]

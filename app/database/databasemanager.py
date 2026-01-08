@@ -3,9 +3,9 @@ import base64
 import time
 import uuid
 from pathlib import Path
-from typing import overload
+from typing import Final, overload
 from urllib.parse import urlparse
-
+from pydantic import ValidationError
 import aiofiles
 import filetype
 import httpx
@@ -25,6 +25,40 @@ from app.models import (
 from app.utils import create_retry_manager, logger
 
 type Message = GroupMessage | PrivateMessage | Notice | Meta | Request | SelfMessage
+
+# ==================== 常量定义 ====================
+BASE64_PREFIX: Final[str] = "base64://"
+BASE64_PREFIX_LEN: Final[int] = len(BASE64_PREFIX)
+BASE64_MODULO: Final[int] = 4
+BASE64_PADDING_CHAR: Final[str] = "="
+
+# 文件相关常量
+DEFAULT_IMAGE_EXT: Final[str] = ".jpg"
+DEFAULT_VIDEO_EXT: Final[str] = ".mp4"
+DEFAULT_BINARY_EXT: Final[str] = ".bin"
+LOCAL_FILE_MARKER: Final[str] = "local"
+
+# 媒体类型常量
+MEDIA_TYPE_IMAGE: Final[str] = "image"
+MEDIA_TYPE_VIDEO: Final[str] = "video"
+
+# 分块大小 (必须是 BASE64_MODULO 的倍数)
+CHUNK_SIZE: Final[int] = 1024 * 1024  # 1MB
+HEADER_SAMPLE_SIZE: Final[int] = 260
+DATA_URI_SEARCH_LIMIT: Final[int] = 200
+
+
+def fix_base64_padding(data: str) -> str:
+    """修正 Base64 字符串的 padding，确保长度是 4 的倍数。"""
+    padding_needed = (BASE64_MODULO - len(data) % BASE64_MODULO) % BASE64_MODULO
+    return data + BASE64_PADDING_CHAR * padding_needed
+
+
+def strip_base64_prefix(data: str) -> str:
+    """移除 base64:// 前缀（如果存在）。"""
+    if data.startswith(BASE64_PREFIX):
+        return data[BASE64_PREFIX_LEN:]
+    return data
 
 
 class RedisDatabaseManager:
@@ -81,7 +115,7 @@ class RedisDatabaseManager:
         self_id: int,
         group_id: int,
         message_id: int,
-    ) -> GroupMessage|None: ...
+    ) -> GroupMessage | SelfMessage | None: ...
 
     """查询群聊单条消息"""
 
@@ -92,28 +126,28 @@ class RedisDatabaseManager:
         self_id: int,
         user_id: int,
         message_id: int,
-    ) -> PrivateMessage|None: ...
+    ) -> PrivateMessage | SelfMessage | None: ...
 
     """查询私聊单条消息"""
 
     @overload
     async def search_messages(
         self, *, self_id: int, limit_tuple: tuple[int, int], group_id: int
-    ) -> list[GroupMessage]|None: ...
+    ) -> list[GroupMessage] | None: ...
 
     """查询群聊最新消息列表(分页用: offset, count)"""
 
     @overload
     async def search_messages(
         self, *, self_id: int, limit_tuple: tuple[int, int], user_id: int
-    ) -> list[PrivateMessage]|None: ...
+    ) -> list[PrivateMessage] | None: ...
 
     """查询私聊最新消息列表(分页用: offset, count)"""
 
     @overload
     async def search_messages(
         self, *, self_id: int, max_time: int, min_time: int, group_id: int
-    ) -> list[GroupMessage]|None: ...
+    ) -> list[GroupMessage] | None: ...
 
     """查询群聊时间段消息列表"""
 
@@ -175,7 +209,11 @@ class RedisDatabaseManager:
                 if not raw_json:
                     return None
                 if isinstance(raw_json, (str, bytes)):
-                    return TargetModel.model_validate_json(raw_json)
+                    try:
+                        raw_msgs = TargetModel.model_validate_json(raw_json)
+                    except ValidationError:  # 回复自己的消息 用SelfMessage这个格式
+                        raw_msgs = SelfMessage.model_validate_json(raw_json)
+                    return raw_msgs
 
             case (None, limit_tuple, max_time, min_time):
                 # 按照时间查询
@@ -324,7 +362,7 @@ class RedisDatabaseManager:
     ):
         """遍历消息中的媒体资源并分发保存任务。"""
         for index, segment in enumerate(msg.message):
-            if segment.type != "image" and segment.type != "video":
+            if not isinstance(segment, (Image, Video)):
                 continue
             match msg:
                 case GroupMessage() | PrivateMessage():
@@ -333,9 +371,7 @@ class RedisDatabaseManager:
                     )
                 case SelfMessage():
                     image_base64 = segment.data.file
-                    segment.data.file = (
-                        "local"  # 不应该存这base64字符串,这傻逼onebot11协议,先做个拷贝
-                    )
+                    segment.data.file = LOCAL_FILE_MARKER
                     await self._save_self_media(
                         segment=segment,
                         index=index,
@@ -355,7 +391,11 @@ class RedisDatabaseManager:
         parsed_path = Path(urlparse(url).path)
         extension = parsed_path.suffix
         if not extension:
-            extension = ".jpg" if segment.type == "image" else ".mp4"
+            extension = (
+                DEFAULT_IMAGE_EXT
+                if segment.type == MEDIA_TYPE_IMAGE
+                else DEFAULT_VIDEO_EXT
+            )
         file_name = f"{msg.message_id}_{index}{extension}"
         file_path = self.path / file_name
         segment.data.local_path = str(file_path)
@@ -408,17 +448,29 @@ class RedisDatabaseManager:
         """保存自发消息中的 Base64 媒体资源到本地文件。"""
         file_base64 = image_base64
         data_start_index = 0
-        comma_index = file_base64.find(",", 0, 200)
+
+        # 查找 Data URI 中的逗号分隔符
+        comma_index = file_base64.find(",", 0, DATA_URI_SEARCH_LIMIT)
         if comma_index != -1:
             data_start_index = comma_index + 1
-        header_slice = file_base64[data_start_index : data_start_index + 260]
+
+        # 处理 base64:// 前缀
+        actual_base64 = file_base64[data_start_index:]
+        actual_base64 = strip_base64_prefix(actual_base64)
+        if file_base64[data_start_index:].startswith(BASE64_PREFIX):
+            data_start_index += BASE64_PREFIX_LEN
+
+        # 获取头部用于检测文件类型
+        header_slice = actual_base64[:HEADER_SAMPLE_SIZE]
+        header_slice_padded = fix_base64_padding(header_slice)
+
         try:
-            first_bytes = base64.b64decode(header_slice)
+            first_bytes = base64.b64decode(header_slice_padded)
             kind = filetype.guess(first_bytes)
-            extension = "." + kind.extension if kind else ".bin"
+            extension = f".{kind.extension}" if kind else DEFAULT_BINARY_EXT
         except Exception as e:
             logger.exception(e)
-            extension = ".bin"
+            extension = DEFAULT_BINARY_EXT
 
         file_name = f"{message_id}_{index}{extension}"
         file_path = self.path / file_name
@@ -443,12 +495,20 @@ class RedisDatabaseManager:
         index: int,
     ):
         """将 Base64 编码的媒体数据分块解码并写入文件。"""
-        total_length = len(file_base64)
-        chunk_size = 1024 * 1024
+        # 处理 base64:// 前缀
+        actual_base64 = file_base64[data_start_index:]
+        actual_base64 = strip_base64_prefix(actual_base64)
+
+        total_length = len(actual_base64)
+
         try:
             async with aiofiles.open(file_path, "wb") as f:
-                for i in range(data_start_index, total_length, chunk_size):
-                    chunk = file_base64[i : i + chunk_size]
+                for i in range(0, total_length, CHUNK_SIZE):
+                    chunk = actual_base64[i : i + CHUNK_SIZE]
+                    # 对于最后一个块，添加必要的 padding
+                    is_last_chunk = i + CHUNK_SIZE >= total_length
+                    if is_last_chunk:
+                        chunk = fix_base64_padding(chunk)
                     decoded_chunk = await asyncio.to_thread(base64.b64decode, chunk)
                     await f.write(decoded_chunk)
         except Exception as e:

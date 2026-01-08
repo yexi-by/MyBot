@@ -19,6 +19,8 @@ from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
 from .plugin_manager import PluginController
 
+TIME_OUT = 30
+
 
 def optional_parameters(func):
     """
@@ -83,7 +85,7 @@ class MyProvider(Provider):
     @optional_parameters
     def get_proxy_httpx(self, settings: Settings) -> ProxyHttpx | None:
         proxy = settings.proxy
-        return ProxyHttpx(httpx.AsyncClient(proxy=proxy))
+        return ProxyHttpx(httpx.AsyncClient(proxy=proxy, timeout=TIME_OUT))
 
     @provide(scope=Scope.APP)
     @optional_parameters
@@ -111,11 +113,13 @@ class MyProvider(Provider):
     @provide(scope=Scope.APP)
     @optional_parameters
     def get_nai_client(
-        self, settings: Settings, client: DirectHttpx
+        self, settings: Settings, client: ProxyHttpx | None
     ) -> NaiClient | None:
         nai_config = settings.nai_settings
         if nai_config is None:
             raise ValueError("nai_settings is not configured")
+        if client is None:
+            raise ValueError("nai服务必须设置系统代理")
         return NaiClient(
             client=client,
             url=nai_config.base_url,

@@ -1,6 +1,7 @@
 from app.models import GroupMessage, PrivateMessage
 from app.utils import image_to_bytes_pathlib
 from typing import Literal, overload
+from app.models import SelfMessage
 
 
 def aggregate_messages(
@@ -23,12 +24,13 @@ def aggregate_messages(
             case "reply":
                 reply_id = segment.data.id
             case "text":
-                text_list.append(segment.data.text)
+                text = segment.data.text.strip()
+                text_list.append(text)
     return at_lst, text_list, image_url_lst, reply_id
 
 
 def find_replied_message_image_paths(
-    reply_message: GroupMessage | PrivateMessage,
+    reply_message: GroupMessage | PrivateMessage | SelfMessage,
 ) -> list[str]:
     image_path: list[str] = []
     for segment in reply_message.message:
