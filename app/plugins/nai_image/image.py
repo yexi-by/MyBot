@@ -16,7 +16,20 @@ from .utils import build_group_chat_contexts
 # 配置文件路径
 MAX_RETRY_ATTEMPTS = 5
 GROUP_CONFIG_PATH = "plugins_config/nai_config.toml"
-TEXT_IMAGE_TOKEN = "/生图图片"
+TEXT_IMAGE_TOKEN = "/生成图片"
+HELP_TOKEN = "/help生图"
+HELP_TEXT = f"""✨ AI生图使用指南 ✨
+
+🎨 文生图:
+发送: {TEXT_IMAGE_TOKEN} [提示词]
+示例: {TEXT_IMAGE_TOKEN} 一个在海边散步的白发少女，蓝眼睛，唯美风格
+说明: 你的提示词会经过LLM优化，可以使用自然语言描述，无需全是英文标签。
+
+🖼️ 图生图:
+回复图片发送: {TEXT_IMAGE_TOKEN} [提示词]
+说明: 在回复中带上新的描述，AI会基于原图进行重绘。
+
+💡 小贴士: 遇到生成失败会自动重试，重试时也是由LLM进行二次处理优化提示词。"""
 
 
 class NaiImage(BasePlugin[GroupMessage]):
@@ -91,6 +104,9 @@ class NaiImage(BasePlugin[GroupMessage]):
             return False
         at_lst, text_list, image_url_lst, reply_id = aggregate_messages(msg=msg)
         text = "".join(text_list)
+        if text == HELP_TOKEN:
+            await self.context.bot.send_msg(group_id=group_id, at=at, text=HELP_TEXT)
+            return True
         prompt = extract_text_from_message(text=text, token=TEXT_IMAGE_TOKEN)
         if prompt is None:
             return False

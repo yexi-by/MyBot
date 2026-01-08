@@ -24,6 +24,22 @@ GROUP_CONFIG_PATH = "plugins_config/group_config.toml"
 
 # 最大重试次数常量
 MAX_RETRY_ATTEMPTS = 10
+HELP_TOKEN = "/help对话"
+HELP_TEXT = """✨ AI助手使用指南 ✨
+
+💬 基础对话:
+发送: @机器人 [你的问题]
+说明: 直接与我对话，我会结合上下文进行回复。
+
+🌐 联网能力:
+说明: 我可以调用搜索工具(Firecrawl)获取最新信息，当你询问新闻或实时信息时，我会自动搜索。
+
+🖼️ 多模态交互:
+发送: @机器人 [图片] [问题]
+说明: 可以发送图片给我，或者引用图片进行提问，我能看懂图片内容哦。
+
+💡 智能特性:
+你的每一句话都会被我认真思考(LLM处理)，我会根据需要决定是否联网搜索或直接回答。"""
 
 
 class AIResponsePlugin(BasePlugin[GroupMessage]):
@@ -135,6 +151,13 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
         if msg.group_id not in self.group_contexts:
             return False
         at_lst, text_list, image_url_lst, reply_id = aggregate_messages(msg=msg)
+        text = "".join(text_list).strip()
+        if text == HELP_TOKEN:
+            await self.context.bot.send_msg(
+                group_id=msg.group_id, at=msg.user_id, text=HELP_TEXT
+            )
+            return True
+
         if self.context.bot.boot_id not in at_lst:
             return False
         chat_message_lst: list[ChatMessage] = []
