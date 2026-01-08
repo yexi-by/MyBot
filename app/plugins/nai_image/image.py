@@ -22,7 +22,7 @@ TEXT_IMAGE_TOKEN = "/生图图片"
 class NaiImage(BasePlugin[GroupMessage]):
     name = "ai生图插件"
     consumers_count = 1  # 官网锁定并发1
-    priority = 6
+    priority = 2
 
     def setup(self) -> None:
         config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
