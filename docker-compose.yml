@@ -1,0 +1,15 @@
+services:
+  mybot:
+    image: docker.io/yexi12345/mybotdev:latest
+    container_name: mybot
+    restart: unless-stopped
+    ports:
+      - "6055:6055"
+    volumes:
+      - ./debug:/app/debug
+      - ./logs:/app/logs
+      - ./plugins_config:/app/plugins_config
+      - ./vector:/app/vector
+      - ./setting.toml:/app/setting.toml
+
+    
