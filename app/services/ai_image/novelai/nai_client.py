@@ -1,12 +1,16 @@
-import httpx
+import asyncio
+import base64
+import io
 import random
+import zipfile
+
+import httpx
+
+from app.utils import create_retry_manager
+
 from .payload import CharCaption, get_payload
 from .utils import reencode_image
-from app.utils import create_retry_manager
-import zipfile
-import io
-import base64
-from app.utils import logger
+
 
 class NaiClient:
     def __init__(self, client: httpx.AsyncClient, url: str, api_key: str) -> None:
@@ -31,7 +35,7 @@ class NaiClient:
             seed = random.randint(1, 2**32 - 1)
         new_image_base64 = None
         if image_base64 is not None:
-            new_image_base64 = reencode_image(image_base64)
+            new_image_base64 = await asyncio.to_thread(reencode_image, image_base64)
 
         payloads = get_payload(
             prompt=prompt,
@@ -48,7 +52,7 @@ class NaiClient:
             error_types=(httpx.HTTPStatusError, httpx.RequestError),
             custom_checker=lambda x: not x,
         )
-        
+
         async for attempt in retrier:
             with attempt:
                 response = await self.client.post(
