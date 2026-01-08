@@ -4,23 +4,20 @@ from pydantic import TypeAdapter
 from app.models import GroupMessage, MessageSegment
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
-from app.utils import logger
-from .segments import PluginConfig
+from app.utils import convert_basemodel_to_schema, download_image, load_config, logger
 
 from ..base import BasePlugin
-from .segments import AIResponse
-from app.utils import (
-    download_image,
-    load_config,
-    convert_basemodel_to_schema,
-    
+from ..utils import (
+    aggregate_messages,
+    find_replied_message_image_paths,
+    get_response_images,
 )
+from .segments import AIResponse, PluginConfig
 from .utils import (
     build_group_chat_contexts,
     build_message_components,
     get_firecrawl_response,
 )
-from ..utils import aggregate_messages, find_replied_message_image_paths,get_response_images
 
 # 配置文件路径
 GROUP_CONFIG_PATH = "plugins_config/group_config.toml"
@@ -62,7 +59,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
     async def assemble_reply_message_details(
         self, reply_id: int, group_id: int
     ) -> ChatMessage | None:
-        image_bytes_list=None
+        image_bytes_list = None
         self_id = self.context.bot.boot_id
         reply_message = await self.context.database.search_messages(
             self_id=self_id, group_id=group_id, message_id=reply_id
@@ -74,7 +71,9 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             return None
         image_path = find_replied_message_image_paths(reply_message=reply_message)
         if image_path:
-            image_bytes_list=get_response_images(image_path=image_path,output_type="bytes")
+            image_bytes_list = get_response_images(
+                image_path=image_path, output_type="bytes"
+            )
         text_str = reply_message.model_dump_json(indent=2)
         text = f"以下是用户回复的那条消息的详情:\n{text_str}"
         chat_message = ChatMessage(role="user", image=image_bytes_list, text=text)
@@ -91,7 +90,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
         attempt_count = 0
         chat_handler.build_chatmessage(message_lst=chat_message_lst)
         while attempt_count <= MAX_RETRY_ATTEMPTS:
-            attempt_count+=1
+            attempt_count += 1
             raw_response = await self.context.llm.get_ai_text_response(
                 messages=conversation_history,
                 model_name="gemini-3-pro-preview",

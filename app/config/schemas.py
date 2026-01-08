@@ -13,3 +13,4 @@ class Settings(BaseSettings):
     video_and_image_path: str
     proxy: str | None = None
     nai_settings: NaiImageConfig | None = None
+    password:str

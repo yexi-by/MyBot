@@ -8,7 +8,7 @@ class DeleteDatabaseMessage(
 ):
     name = "删除对应撤回消息插件"
     consumers_count = 5
-    priority = 1
+    priority = 99
 
     def setup(self) -> None: ...
 

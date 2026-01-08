@@ -9,11 +9,11 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 
 from app.api import BOTClient
 from app.database import RedisDatabaseManager
-from app.models import Response
+from app.models import Response, Meta
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
 from app.services.ai_image import NaiClient
-from app.utils import logger, write_to_file
-
+from app.utils import logger
+from app.config import Settings
 from .di import DirectHttpx, ProxyHttpx
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
@@ -50,11 +50,14 @@ class NapCatServer:
         logger.info("服务已安全关闭")
 
     async def _check_auth_token(
-        self, websocket: WebSocket, token: str = "adm12345"
+        self,
+        websocket: WebSocket,
     ) -> None:
+        setting = await self.container.get(Settings)
+        password = setting.password
         headers = websocket.headers
         auth_header = headers.get("authorization", "")
-        expected_header = "Bearer " + token
+        expected_header = "Bearer " + password
         if not secrets.compare_digest(auth_header, expected_header):  # 防时序攻击
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             raise ValueError
@@ -82,11 +85,11 @@ class NapCatServer:
                     while True:
                         data_str = await websocket.receive_text()
                         data = json.loads(data_str)
-                        logger.debug(f"收到数据包: {data}")
-                        await write_to_file(data=data)
                         event = checker.get_event(data)
                         if event is None:
                             continue
+                        if not isinstance(event, Meta):
+                            logger.info(event.model_dump_json(indent=2))
                         bot.get_self_qq_id(msg=event)
                         task = asyncio.create_task(
                             dispatcher.dispatch_event(event=event)
