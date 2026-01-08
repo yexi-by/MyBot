@@ -114,11 +114,6 @@ class Context:
 
     @property
     @require_initialized
-    def llm_context_handler(self) -> ContextHandler:
-        return self._llm_context_handler  # type: ignore
-
-    @property
-    @require_initialized
     def nai_client(self) -> NaiClient:
         return self._nai_client  # type: ignore
 
@@ -172,7 +167,7 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
                 result = await self.run(msg=data)
                 future.set_result(result)
             except Exception as e:
-                logger.error(e)
+                logger.exception(e)
                 future.set_result(True)  # 强制消费链结束
             finally:
                 self.task_queue.task_done()

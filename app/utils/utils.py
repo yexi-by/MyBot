@@ -2,11 +2,12 @@ import base64
 import json
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, overload
 
 import aiofiles
 import filetype
 import httpx
+from pydantic import BaseModel
 
 # 调试文件名
 DEBUG_FILENAME = "debug/debug.jsonl"
@@ -97,4 +98,46 @@ async def download_image(url: str, client: httpx.AsyncClient) -> bytes:
     response = await client.get(url)
     response.raise_for_status()
     return response.content
-    return response.content
+
+
+@overload
+def image_to_bytes_pathlib(
+    image_path: str | Path, output_type: Literal["bytes"]
+) -> bytes: ...
+
+
+@overload
+def image_to_bytes_pathlib(
+    image_path: str | Path, output_type: Literal["base64"]
+) -> str: ...
+
+
+def image_to_bytes_pathlib(
+    image_path: str | Path, output_type: Literal["bytes", "base64"]
+) -> bytes | str:
+    """
+    读取图片并返回二进制数据或Base64字符串。
+
+    Args:
+        image_path: 图片路径
+        output_type: 'bytes' 返回原始二进制, 'base64' 返回纯Base64编码字符串
+    """
+    path_obj = Path(image_path)
+    file_bytes = path_obj.read_bytes()
+    if output_type == "base64":
+        return base64.b64encode(file_bytes).decode("utf-8")
+    return file_bytes
+
+
+def load_config[T](file_path: str | Path, model_cls: type[T]) -> T:
+    """从TOML文件加载配置并返回对应对象"""
+    path = Path(file_path)
+    config_data = load_toml_file(file_path=path)
+    config = model_cls(**config_data)
+    return config
+
+
+def convert_basemodel_to_schema(model_class: type[BaseModel]) -> str:
+    """将BaseModel模型转换为LLM能理解的JSON Schema字符串"""
+    schema = json.dumps(model_class.model_json_schema(), indent=2, ensure_ascii=False)
+    return schema

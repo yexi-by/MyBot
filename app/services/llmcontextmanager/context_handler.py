@@ -22,8 +22,13 @@ class ContextHandler:
     def messages_lst(self) -> list[ChatMessage]:
         return self._messages_lst[:]
 
-    def add_msg(self, msg: ChatMessage) -> None:
-        self._messages_lst.append(msg)
+    def add_msg(
+        self, msg: ChatMessage | None = None, msg_list: list[ChatMessage] | None = None
+    ) -> None:
+        if msg:
+            self._messages_lst.append(msg)
+        if msg_list:
+            self._messages_lst.extend(msg_list)
         if len(self._messages_lst) > self.max_context_length:
             del self._messages_lst[1:3]  # 滑动上下文 删除系统提示词后面的两段提示词
 
@@ -50,6 +55,8 @@ class ContextHandler:
     ) -> None: ...
     @overload
     def build_chatmessage(self, *, message: ChatMessage) -> None: ...
+    @overload
+    def build_chatmessage(self, *, message_lst: list[ChatMessage]) -> None: ...
 
     def build_chatmessage(
         self,
@@ -58,9 +65,11 @@ class ContextHandler:
         text: str | None = None,
         image: list[bytes] | list[str] | None = None,
         message: ChatMessage | None = None,
+        message_lst: list[ChatMessage] | None = None,
     ) -> None:
-        # 将 list[str] 转换为 list[bytes]
-
+        if message_lst:
+            self.add_msg(msg_list=message_lst)
+            return
         if message:
             self.add_msg(msg=message)
             return

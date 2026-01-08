@@ -10,8 +10,11 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from app.api import BOTClient
 from app.database import RedisDatabaseManager
 from app.models import Response
+from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
+from app.services.ai_image import NaiClient
 from app.utils import logger, write_to_file
 
+from .di import DirectHttpx, ProxyHttpx
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
 
@@ -26,14 +29,25 @@ class NapCatServer:
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
-        # 预热核心依赖项，避免首次连接时客户端超时
+        logger.info("正在初始化服务组件...")
+        # 因为dishka是惰性加载的,所以在首次运行的时候需要先把全局对象给预热提前加载
+        # 否则大概率发生*会话级*实例创建的时候缺少全局依赖导致创建失败的现象
         await self.container.get(RedisDatabaseManager)
-        logger.info("服务已启动")
+        # 预热可选组件
+        await self.container.get(DirectHttpx)
+        await self.container.get(ProxyHttpx | None)
+        await self.container.get(LLMHandler | None)
+        await self.container.get(SiliconFlowEmbedding | None)
+        await self.container.get(SearchVectors | None)
+        await self.container.get(NaiClient | None)
+        logger.info("服务启动完成，等待客户端连接")
         yield
+        logger.info("正在关闭服务...")
         redis_database_manager = await self.container.get(RedisDatabaseManager)
         await redis_database_manager.stop_consumers()
         await self.container.close()
-        logger.info("服务器关闭完成")
+        logger.info("redis数据库服务已关闭")
+        logger.info("服务已安全关闭")
 
     async def _check_auth_token(
         self, websocket: WebSocket, token: str = "adm12345"
@@ -88,24 +102,22 @@ class NapCatServer:
                             continue
                         await redis_database_manager.add_to_queue(event)
                 except WebSocketDisconnect as e:
-                    logger.info(f"WebSocket 连接断开: {e}")
+                    logger.info(f"客户端 {client_id} 断开连接: {e}")
                 except RuntimeError as e:
-                    # 处理 WebSocket 未连接或已关闭的情况
-                    logger.warning(f"WebSocket 运行时错误（连接可能已断开）: {e}")
+                    logger.warning(f"客户端 {client_id} 连接异常断开: {e}")
                 except Exception as e:
-                    logger.error(f"WebSocket 处理异常: {e}")
-                    # 只有在连接仍然打开时才尝试关闭
+                    logger.exception(f"客户端 {client_id} 处理异常: {e}")
                     if websocket.client_state.name == "CONNECTED":
                         try:
                             await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
                         except RuntimeError:
-                            pass  # 连接已关闭，忽略
+                            pass
                 finally:
-                    logger.info(f"正在清理会话 {client_id} 的插件资源...")
-                    shutdown_tasks = []
-                    for plugin in dispatcher.plugincontroller.plugin_objects:
-                        logger.info(f"等待插件 {plugin.name} 队列完成...")
-                        shutdown_tasks.append(plugin.stop_consumers())
+                    logger.info(f"正在清理客户端 {client_id} 的资源...")
+                    shutdown_tasks = [
+                        plugin.stop_consumers()
+                        for plugin in dispatcher.plugincontroller.plugin_objects
+                    ]
                     if shutdown_tasks:
                         await asyncio.gather(*shutdown_tasks)
-                    logger.info(f"会话 {client_id} 清理完成")
+                    logger.info(f"客户端 {client_id} 资源清理完成")

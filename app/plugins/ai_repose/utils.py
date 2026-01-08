@@ -1,31 +1,12 @@
-import json
-from pathlib import Path
-
-import httpx
 from firecrawl import AsyncFirecrawlApp
-from pydantic import BaseModel
-
-from app.models import At, BaseMessage, GroupMessage, MessageSegment, Reply, Text
+from app.models import At, MessageSegment, Reply, Text
 from app.services import ContextHandler
-from app.services.llm.schemas import ChatMessage
-from app.utils import download_image, load_text_file_sync, load_toml_file, logger
+from app.utils import (
+    load_text_file_sync,
+)
 
 from .firecrawl_model import Firecrawl
 from .segments import MessageContent, PluginConfig
-
-
-def load_config(file_path: str | Path) -> PluginConfig:
-    """从TOML文件加载配置并返回PluginConfig对象"""
-    path = Path(file_path)
-    config_data = load_toml_file(file_path=path)
-    config = PluginConfig(**config_data)
-    return config
-
-
-def convert_basemodel_to_schema(model_class: type[BaseModel]) -> str:
-    """将BaseModel模型转换为LLM能理解的JSON Schema字符串"""
-    schema = json.dumps(model_class.model_json_schema(), indent=2, ensure_ascii=False)
-    return schema
 
 
 def build_group_chat_contexts(
@@ -47,34 +28,6 @@ def build_group_chat_contexts(
             max_context_length=group_settings.max_context_length,
         )
     return group_contexts
-
-
-async def extract_message_images(
-    msg: BaseMessage, client: httpx.AsyncClient
-) -> ChatMessage:
-    """从消息中提取所有图片并构建ChatMessage对象"""
-    image_bytes_list: list[bytes] = []
-    for segment in msg.message:
-        if segment.type == "image":
-            url = segment.data.url
-            if url is None:
-                logger.warning("缺少url")
-                continue
-            image_bytes = await download_image(url=url, client=client)
-            image_bytes_list.append(image_bytes)
-    text = msg.model_dump_json()
-    chat_message = ChatMessage(role="user", image=image_bytes_list, text=text)
-    return chat_message
-
-
-def extract_at_mentions(msg: GroupMessage) -> list[int | str]:
-    """从群消息中提取所有@提及的用户QQ号"""
-    at_list: list[int | str] = []
-    for segment in msg.message:
-        if segment.type != "at":
-            continue
-        at_list.append(segment.data.qq)
-    return at_list
 
 
 def build_message_components(send_message: MessageContent) -> list[MessageSegment]:
@@ -110,3 +63,6 @@ async def get_firecrawl_response(
         result.append(response.model_dump_json(exclude_none=True))
     result_str = "\n".join(result)
     return result_str
+
+
+

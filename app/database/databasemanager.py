@@ -64,7 +64,7 @@ class RedisDatabaseManager:
                     asyncio.gather(*self.consumers, return_exceptions=True), timeout=3
                 )
             except asyncio.TimeoutError:
-                logger.error("RedisDatabaseManager消费者关闭超时")
+                logger.error("Redis数据库消费者关闭超时")
             finally:
                 self.consumers.clear()
 
@@ -81,7 +81,7 @@ class RedisDatabaseManager:
         self_id: int,
         group_id: int,
         message_id: int,
-    ) -> Message: ...
+    ) -> GroupMessage|None: ...
 
     """查询群聊单条消息"""
 
@@ -92,28 +92,28 @@ class RedisDatabaseManager:
         self_id: int,
         user_id: int,
         message_id: int,
-    ) -> Message: ...
+    ) -> PrivateMessage|None: ...
 
     """查询私聊单条消息"""
 
     @overload
     async def search_messages(
         self, *, self_id: int, limit_tuple: tuple[int, int], group_id: int
-    ) -> list[Message]: ...
+    ) -> list[GroupMessage]|None: ...
 
     """查询群聊最新消息列表(分页用: offset, count)"""
 
     @overload
     async def search_messages(
         self, *, self_id: int, limit_tuple: tuple[int, int], user_id: int
-    ) -> list[Message]: ...
+    ) -> list[PrivateMessage]|None: ...
 
     """查询私聊最新消息列表(分页用: offset, count)"""
 
     @overload
     async def search_messages(
         self, *, self_id: int, max_time: int, min_time: int, group_id: int
-    ) -> list[Message]: ...
+    ) -> list[GroupMessage]|None: ...
 
     """查询群聊时间段消息列表"""
 
@@ -128,7 +128,7 @@ class RedisDatabaseManager:
         user_id: int | None = None,
         max_time: int | None = None,
         min_time: int | None = None,
-    ) -> Message | list[Message] | None:
+    ) -> Message | list[GroupMessage] | list[PrivateMessage] | list[Message] | None:
         """查询消息，支持单条、分页和时间范围查询。"""
 
         def parse_results(
@@ -174,7 +174,7 @@ class RedisDatabaseManager:
                 )
                 if not raw_json:
                     return None
-                if isinstance(raw_json, str):
+                if isinstance(raw_json, (str, bytes)):
                     return TargetModel.model_validate_json(raw_json)
 
             case (None, limit_tuple, max_time, min_time):
@@ -206,7 +206,7 @@ class RedisDatabaseManager:
             try:
                 await self._store_msg(msg=msg)
             except Exception as e:
-                logger.error(e)
+                logger.exception(e)
             finally:
                 self.task_queue.task_done()
 
@@ -332,10 +332,16 @@ class RedisDatabaseManager:
                         msg=msg, segment=segment, index=index
                     )
                 case SelfMessage():
-                    image_base64=segment.data.file
-                    segment.data.file= "local" # 不应该存这base64字符串,这傻逼onebot11协议,先做个拷贝
+                    image_base64 = segment.data.file
+                    segment.data.file = (
+                        "local"  # 不应该存这base64字符串,这傻逼onebot11协议,先做个拷贝
+                    )
                     await self._save_self_media(
-                        segment=segment, index=index, message_id=msg.message_id, msg=msg,image_base64=image_base64
+                        segment=segment,
+                        index=index,
+                        message_id=msg.message_id,
+                        msg=msg,
+                        image_base64=image_base64,
                     )
 
     async def _dispatch_media_download(
@@ -389,13 +395,18 @@ class RedisDatabaseManager:
             file_path.unlink(missing_ok=True)
             await asyncio.sleep(5)  # 防止redis还没写入 就下载失败
             await self._clear_media_local_path(msg=msg, index=index)
-            logger.error(f"下载资源失败: {url}，错误信息: {error}")
+            logger.exception(f"下载资源失败: {url}，错误信息: {error}")
 
     async def _save_self_media(
-        self, segment: Image | Video, message_id: int, index: int, msg: SelfMessage,image_base64:str,
+        self,
+        segment: Image | Video,
+        message_id: int,
+        index: int,
+        msg: SelfMessage,
+        image_base64: str,
     ):
         """保存自发消息中的 Base64 媒体资源到本地文件。"""
-        file_base64 = image_base64 
+        file_base64 = image_base64
         data_start_index = 0
         comma_index = file_base64.find(",", 0, 200)
         if comma_index != -1:
@@ -406,7 +417,7 @@ class RedisDatabaseManager:
             kind = filetype.guess(first_bytes)
             extension = "." + kind.extension if kind else ".bin"
         except Exception as e:
-            logger.error(e)
+            logger.exception(e)
             extension = ".bin"
 
         file_name = f"{message_id}_{index}{extension}"
@@ -441,7 +452,7 @@ class RedisDatabaseManager:
                     decoded_chunk = await asyncio.to_thread(base64.b64decode, chunk)
                     await f.write(decoded_chunk)
         except Exception as e:
-            logger.error(e)
+            logger.exception(e)
             file_path.unlink(missing_ok=True)
             await self._clear_media_local_path(msg=msg, index=index)
 
@@ -470,7 +481,7 @@ class RedisDatabaseManager:
                 except WatchError:
                     continue
                 except Exception as e:
-                    logger.error(e)
+                    logger.exception(e)
                     break
 
     # ==================== 工具方法 ====================

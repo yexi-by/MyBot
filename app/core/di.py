@@ -36,7 +36,9 @@ def optional_parameters(func):
             try:
                 return await func(*args, **kwargs)
             except Exception as e:
-                logger.warning(f"可选组件初始化失败 [{return_type}]: {e}，将跳过。")
+                logger.warning(
+                    f"可选组件初始化失败,组件名: \t[{return_type}]\t: 错误:{e}，将跳过。"
+                )
                 return None
 
         return async_wrapper
@@ -47,7 +49,9 @@ def optional_parameters(func):
             try:
                 return func(*args, **kwargs)
             except Exception as e:
-                logger.warning(f"可选组件初始化失败 [{return_type}]: {e}，将跳过。")
+                logger.warning(
+                    f"可选组件初始化失败 组件名:\t[{return_type}]\t: 错误:{e}，将跳过。"
+                )
                 return None
 
         return sync_wrapper
@@ -81,7 +85,6 @@ class MyProvider(Provider):
         proxy = settings.proxy
         return ProxyHttpx(httpx.AsyncClient(proxy=proxy))
 
-
     @provide(scope=Scope.APP)
     @optional_parameters
     def get_llm_handler(self, settings: Settings) -> LLMHandler | None:
@@ -107,7 +110,9 @@ class MyProvider(Provider):
 
     @provide(scope=Scope.APP)
     @optional_parameters
-    def get_nai_client(self, settings: Settings, client: DirectHttpx) -> NaiClient | None:
+    def get_nai_client(
+        self, settings: Settings, client: DirectHttpx
+    ) -> NaiClient | None:
         nai_config = settings.nai_settings
         if nai_config is None:
             raise ValueError("nai_settings is not configured")
@@ -153,7 +158,6 @@ class MyProvider(Provider):
         search_vectors: SearchVectors | None,
         nai_client: NaiClient | None,
     ) -> PluginController:
-        logger.info(f"创建 PluginController，PLUGINS 列表长度: {len(PLUGINS)}, 内容: {PLUGINS}")
         plugin_objects: list[BasePlugin] = []
         for cls in PLUGINS:
             context = Context(
