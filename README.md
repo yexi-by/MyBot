@@ -4,15 +4,6 @@
 
 本项目主要用于学习和开发 QQ 机器人，集成了依赖注入、插件系统以及 LLM/RAG 等功能。
 
-## 🛠️ 技术栈
-
-*   **Web 框架**: FastAPI, Uvicorn (全异步设计)
-*   **依赖注入**: Dishka (APP/SESSION 双层作用域)
-*   **协议端**: NapCat (OneBot11/Red 协议)
-*   **插件机制**: 包含基于 AST 的静态死锁检测
-*   **数据存储**: Redis (消息队列与缓存), FAISS (向量数据库)
-*   **AI 支持**: OpenAI / Gemini / DeepSeek 接口集成, SiliconFlow Embedding
-*   **包管理**: uv
 
 ---
 
@@ -109,70 +100,75 @@ provider_type = "siliconflow"
 
 ## 🏗️ 架构说明
 
-### 1. 系统架构图
-
-系统通过 Dishka 容器进行组件管理，分为核心层、服务层和插件层。
+### 1. 系统完整架构图
 
 ```mermaid
 graph TB
-    subgraph External["外部环境"]
-        NapCat["NapCat (QQ协议)"]
+    subgraph External["外部层"]
+        NapCat["NapCat (Protocol)"]
+        LLM["LLM Providers (OpenAI/Gemini/Volc)"]
+        Redis[("Redis")]
+        FAISS[("FAISS Vector DB")]
+    end
+
+    subgraph DI["依赖注入容器 (Dishka)"]
+        Settings["配置管理"]
+        
+        subgraph Services["通用服务"]
+            LLMHandler["LLM Handler (Resilient Wrapper)"]
+            RAG["RAG Pipeline (Async Flow)"]
+            RedisMgr["Redis Manager"]
+        end
+        
+        subgraph Session["会话层"]
+            BotClient["BOT Client (Mixin架构)"]
+            Dispatcher["Event Dispatcher"]
+            PluginCtrl["Plugin Controller"]
+        end
     end
 
     subgraph Core["核心层"]
-        Server["NapCatServer"]
-        Dispatcher["EventDispatcher"]
-        PluginCtrl["PluginController"]
-    end
-
-    subgraph DI["依赖注入 (Dishka)"]
-        ScopeApp["Scope: APP (全局)"]
-        ScopeSession["Scope: SESSION (会话)"]
+        Server["NapCatServer (FastAPI)"]
+        Parser["Event Parser (Pydantic)"]
     end
 
     subgraph Plugins["插件层"]
-        P_List["各类业务插件"]
-        Queue["异步任务队列"]
+        P_Base["BasePlugin"]
+        P_Queue["Async Task Queue"]
+        P_Logic["User Logic"]
     end
 
-    NapCat <--> Server
-    Server --> Dispatcher
+    %% 连接
+    NapCat <==>|WebSocket| Server
+    Server --> Parser --> Dispatcher
     Dispatcher --> PluginCtrl
-    PluginCtrl --> Queue
-    Queue --> P_List
     
-    P_List --> DI
-    DI --> ScopeApp & ScopeSession
+    %% 服务交互
+    LLMHandler <--> LLM
+    RAG <--> FAISS & LLM
+    RedisMgr <--> Redis
+    BotClient --> NapCat
+
+    %% 插件交互
+    PluginCtrl --> P_Base
+    P_Base --> P_Queue --> P_Logic
+    P_Logic -->|Inject| BotClient & LLMHandler & RAG & RedisMgr
 ```
 
-### 2. 插件加载流程
+### 2. 处理流程说明
 
-在启动时，PluginController 会通过 AST 分析插件源码，检测潜在的死锁风险。
-
-```mermaid
-sequenceDiagram
-    participant Boot as 启动入口
-    participant Ctrl as PluginController
-    participant AST as AST分析
-    
-    Boot->>Ctrl: 加载插件类
-    Ctrl->>AST: 读取源码
-    AST->>AST: 分析 emit 调用链
-    AST-->>Ctrl: 返回依赖关系
-    Ctrl->>Ctrl: 检测是否存在环
-    
-    alt 存在死锁
-        Ctrl--xBoot: 报错并终止
-    else 检测通过
-        Ctrl->>Boot: 继续启动
-    end
-```
-
-### 3. 说明
-
-*   **NapCatServer**: 处理 WebSocket 连接和数据接收。
-*   **依赖注入**: 使用 Dishka 管理对象生命周期。`Scope.APP` 用于全局共享资源（如 Redis、LLM 客户端），`Scope.SESSION` 用于单次连接资源（如 BotClient）。
-*   **AST 分析**: 为了避免插件间互相 `emit` 事件导致死锁，项目在启动阶段会解析插件源码并构建调用图，发现闭环则禁止启动。
+1.  **连接管理**: `NapCatServer` 维护 WebSocket 连接，`Dishka` 为每个连接创建一个独立的 `Scope.SESSION` 容器，确保多账号/多连接之间的数据隔离。
+2.  **API 封装**: `BOTClient` 采用 **Mixin 模式** 设计，将 `MessageMixin`, `GroupMixin`, `FileMixin` 等组合成一个完整的客户端对象，提供类型完善的 API 调用。
+3.  **LLM 服务**: `LLMHandler` 封装了 `ResilientLLMProvider`，实现了对 OpenAI, Gemini, Volcengine 等多厂商接口的统一调用与错误重试。
+4.  **RAG 引擎**: 内置完整的 RAG 流水线：
+    *   **Splitter**: 智能文本切分（支持中英文标点优化）。
+    *   **TokenBucket**: 基于令牌桶算法的 API 速率限制。
+    *   **AsyncPipeline**: 生产者-消费者模式的异步向量化处理。
+    *   **FAISS**: 高性能向量检索。
+5.  **插件系统**:
+    *   **泛型事件**: `BasePlugin[T]` 自动推导订阅事件类型。
+    *   **并发模型**: 每个插件实例维护独立的 `asyncio.Queue` 和 Worker 池，互不阻塞。
+    *   **安全检查**: 启动时进行静态代码分析（AST），防止插件间循环调用导致死锁。
 
 ---
 
