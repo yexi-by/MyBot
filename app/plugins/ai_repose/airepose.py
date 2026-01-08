@@ -23,7 +23,7 @@ from .utils import (
 GROUP_CONFIG_PATH = "plugins_config/group_config.toml"
 
 # 最大重试次数常量
-MAX_RETRY_ATTEMPTS = 10
+MAX_RETRY_ATTEMPTS = 20
 HELP_TOKEN = "/help对话"
 HELP_TEXT = """✨ AI助手使用指南 ✨
 
@@ -101,10 +101,14 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
         chat_handler: ContextHandler,
         group_id: int,
     ) -> None:
-        conversation_history = chat_handler.messages_lst
+        conversation_history = (
+            chat_handler.messages_lst
+        )  # 当前轮次的历史对话 这里拿到的只是浅拷贝 不会影响实例属性
         conversation_history.extend(chat_message_lst)
         attempt_count = 0
-        chat_handler.build_chatmessage(message_lst=chat_message_lst)
+        history_chat_list: list[ChatMessage] = chat_message_lst[
+            :
+        ]  # 最终存入数据库的历史对话,剔除了token爆炸的工具输出 浅拷贝,防止后面那天忘记了
         while attempt_count <= MAX_RETRY_ATTEMPTS:
             attempt_count += 1
             raw_response = await self.context.llm.get_ai_text_response(
@@ -116,6 +120,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             try:
                 ai_response = AIResponse.model_validate_json(raw_response)
                 assistant_message = ChatMessage(role="assistant", text=raw_response)
+                history_chat_list.append(assistant_message)
                 conversation_history.append(assistant_message)
                 message_to_send = ai_response.send_message
                 firecrawl_request = ai_response.firecrawl
@@ -126,13 +131,6 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                     await self.context.bot.send_msg(
                         group_id=group_id, message_segment=message_segments
                     )
-                    adapter = TypeAdapter(list[MessageSegment])
-                    serialized_segments = adapter.dump_json(message_segments).decode(
-                        "utf-8"
-                    )
-                    chat_handler.build_chatmessage(
-                        role="assistant", text=serialized_segments
-                    )
                 if firecrawl_request:
                     tool_response = await get_firecrawl_response(
                         firecrawl=firecrawl_request, client=self.firecrawl_client
@@ -142,6 +140,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                     )
                     conversation_history.append(tool_output_message)
                 if ai_response.end:
+                    chat_handler.build_chatmessage(message_lst=history_chat_list)
                     break
             except Exception as e:
                 error_message = ChatMessage(role="user", text=f"出错了:\n{e}")
