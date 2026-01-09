@@ -1,6 +1,8 @@
+import traceback
+
 from firecrawl import AsyncFirecrawlApp
 from pydantic import TypeAdapter, ValidationError
-import traceback
+
 from app.models import GroupMessage
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
@@ -115,9 +117,6 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
         ]  # 最终存入数据库的历史对话,剔除了token爆炸的工具输出 浅拷贝,防止后面那天忘记了
         while attempt_count <= MAX_RETRY_ATTEMPTS:
             attempt_count += 1
-            adapter = TypeAdapter(list[ChatMessage])
-            json_str = adapter.dump_json(conversation_history, indent=2).decode("utf-8")
-            logger.debug(json_str)
             raw_response = await self.context.llm.get_ai_text_response(
                 messages=conversation_history,
                 model_name="gemini-3-pro-preview",
@@ -152,8 +151,13 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                         ),
                     )
                     conversation_history.append(tool_output_message)
-                if ai_response.end:
+                if ai_response.end is True:
                     chat_handler.build_chatmessage(message_lst=history_chat_list)
+                    adapter = TypeAdapter(list[ChatMessage])
+                    json_str = adapter.dump_json(
+                        chat_handler.messages_lst, indent=2
+                    ).decode("utf-8")
+                    logger.info(json_str)
                     break
             except ValidationError as ve:
                 logger.warning(f"LLM JSON 格式错误: {ve}")

@@ -21,9 +21,9 @@ class AIResponse(BaseModel):
     end: Annotated[
         bool,
         Field(
-            description="结束对话标志。设为 True 表示工具调用和任务执行完毕，将退出处理循环。如果同时进行了工具调用，会在工具执行完毕后退出。"
+            description="结束对话标志。当任务已完成，没有其他任务需要处理，且本轮对话应当结束时，请将其设定为 True。这将指示系统退出处理循环。"
         ),
-    ] = True
+    ] = False
 
 
 class GroupConfig(BaseModel):
