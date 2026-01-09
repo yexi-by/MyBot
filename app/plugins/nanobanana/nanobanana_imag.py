@@ -20,8 +20,8 @@ class PluginConfig(BaseSettings):
 
 class BananaImage(BasePlugin[GroupMessage]):
     name = "banana生图插件"
-    consumers_count = 1
-    priority = 10
+    consumers_count = 2
+    priority = 20
 
     def setup(self) -> None:
         self.config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
