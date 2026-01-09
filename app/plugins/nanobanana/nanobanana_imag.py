@@ -31,7 +31,7 @@ class BananaImage(BasePlugin[GroupMessage]):
 
     async def get_nanobanana_image(self, prompt: str, group_id: int) -> None:
         message = ChatMessage(role="user", text=prompt)
-        image_base64 = self.context.llm.get_image(
+        image_base64 = await self.context.llm.get_image(
             message=message, model="gemini-3-pro-image-4k", model_vendors="Antigravity"
         )
         file_image_base = f"base64://{image_base64}"

@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 import tomllib
 from pathlib import Path
 from typing import Any, Literal, overload
@@ -141,3 +142,22 @@ def convert_basemodel_to_schema(model_class: type[BaseModel]) -> str:
     """将BaseModel模型转换为LLM能理解的JSON Schema字符串"""
     schema = json.dumps(model_class.model_json_schema(), indent=2, ensure_ascii=False)
     return schema
+
+
+def clean_ai_json_response(text: str) -> str:
+    """
+    清理AI返回的JSON字符串中的Markdown格式
+    例如:
+    ```json
+    {"key": "value"}
+    ```
+    转换为:
+    {"key": "value"}
+    """
+    text = text.strip()
+    # 匹配 ```json ... ``` 或 ``` ... ```
+    pattern = r"```(?:json)?\s*(.*?)```"
+    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return text

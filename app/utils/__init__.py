@@ -9,7 +9,8 @@ from .utils import (
     load_toml_file,
     image_to_bytes_pathlib,
     load_config,
-    convert_basemodel_to_schema
+    convert_basemodel_to_schema,
+    clean_ai_json_response,
 )
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "load_toml_file",
     "image_to_bytes_pathlib",
     "load_config",
-    "convert_basemodel_to_schema"
+    "convert_basemodel_to_schema",
+    "clean_ai_json_response",
 ]

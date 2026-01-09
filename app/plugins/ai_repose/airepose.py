@@ -6,7 +6,13 @@ from pydantic import ValidationError
 from app.models import GroupMessage
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
-from app.utils import convert_basemodel_to_schema, download_image, load_config, logger
+from app.utils import (
+    clean_ai_json_response,
+    convert_basemodel_to_schema,
+    download_image,
+    load_config,
+    logger,
+)
 
 from ..base import BasePlugin
 from ..utils import (
@@ -124,6 +130,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             )
             logger.debug(raw_response)
             try:
+                raw_response = clean_ai_json_response(raw_response)
                 ai_response = AIResponse.model_validate_json(raw_response)
                 assistant_message = ChatMessage(role="assistant", text=raw_response)
                 history_chat_list.append(assistant_message)

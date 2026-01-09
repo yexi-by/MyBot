@@ -1,7 +1,12 @@
 from app.models import GroupMessage
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
-from app.utils import convert_basemodel_to_schema, load_config, logger
+from app.utils import (
+    clean_ai_json_response,
+    convert_basemodel_to_schema,
+    load_config,
+    logger,
+)
 import traceback
 from ..base import BasePlugin
 from ..utils import (
@@ -62,6 +67,7 @@ class NaiImage(BasePlugin[GroupMessage]):
             )
             try:
                 logger.debug(f"nai生图插件llm生成提示词内容:{raw_response}")
+                raw_response = clean_ai_json_response(raw_response)
                 ai_response = NaiImageKwargs.model_validate_json(raw_response)
                 kwargs = ai_response.model_dump()
                 image_base64 = await self.context.nai_client.generate_image(
