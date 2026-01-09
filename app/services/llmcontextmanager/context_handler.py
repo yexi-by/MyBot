@@ -7,8 +7,8 @@ class ContextHandler:
     """上下文管理"""
 
     def __init__(self, system_prompt: str, max_context_length: int) -> None:
-        if max_context_length < 2:
-            raise ValueError(f"最大上下文必须大于1,当前设置: {max_context_length}")
+        if max_context_length < 5:
+            raise ValueError(f"最大上下文必须大于5,当前设置: {max_context_length}")
         self.system_prompt = ChatMessage(role="system", text=system_prompt)
         self._messages_lst = [self.system_prompt]
         self.max_context_length = max_context_length
@@ -22,6 +22,26 @@ class ContextHandler:
     def messages_lst(self) -> list[ChatMessage]:
         return self._messages_lst[:]
 
+    def _context_cleanup_algorithm(self, message_lst: list[ChatMessage]) -> None:
+        """滑动上下文"""
+        start_index: int | None = None
+        end_index: int | None = None
+        for index, msg in enumerate(message_lst):
+            if msg.role == "system":
+                continue
+            if msg.role == "user":
+                if not start_index:
+                    start_index = index
+                    continue
+                else:
+                    end_index = index
+                    break
+        if start_index is not None:
+            if end_index is not None:
+                del self._messages_lst[start_index:end_index]
+            else:
+                del self._messages_lst[start_index:]
+
     def add_msg(
         self, msg: ChatMessage | None = None, msg_list: list[ChatMessage] | None = None
     ) -> None:
@@ -30,7 +50,7 @@ class ContextHandler:
         if msg_list:
             self._messages_lst.extend(msg_list)
         if len(self._messages_lst) > self.max_context_length:
-            del self._messages_lst[1:3]  # 滑动上下文 删除系统提示词后面的两段提示词
+            self._context_cleanup_algorithm(message_lst=self._messages_lst)
 
     @overload
     def build_chatmessage(

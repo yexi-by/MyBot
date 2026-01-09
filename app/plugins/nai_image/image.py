@@ -2,7 +2,7 @@ from app.models import GroupMessage
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
 from app.utils import convert_basemodel_to_schema, load_config, logger
-
+import traceback
 from ..base import BasePlugin
 from ..utils import (
     aggregate_messages,
@@ -33,7 +33,7 @@ HELP_TEXT = f"""✨ AI生图使用指南 ✨
 
 
 class NaiImage(BasePlugin[GroupMessage]):
-    name = "ai生图插件"
+    name = "nai生图插件"
     consumers_count = 1  # 官网锁定并发1
     priority = 50
 
@@ -61,6 +61,7 @@ class NaiImage(BasePlugin[GroupMessage]):
                 model_vendors="google",
             )
             try:
+                logger.debug(f"nai生图插件llm生成提示词内容:{raw_response}")
                 ai_response = NaiImageKwargs.model_validate_json(raw_response)
                 kwargs = ai_response.model_dump()
                 image_base64 = await self.context.nai_client.generate_image(
@@ -71,8 +72,13 @@ class NaiImage(BasePlugin[GroupMessage]):
                     group_id=msg.group_id, image=file_image_base
                 )
                 break
-            except Exception as e:
-                error_message = ChatMessage(role="user", text=f"出错了:\n{e}")
+            except Exception:
+                full_error = traceback.format_exc()
+                logger.exception("处理过程中发生内部错误")
+                error_message = ChatMessage(
+                    role="user",
+                    text=f"命令执行出错了，请根据以下堆栈信息修正输出:\n```python\n{full_error}\n```",
+                )
                 conversation_history.append(error_message)
 
     async def assemble_reply_message_details(self, reply_id: int, group_id: int):

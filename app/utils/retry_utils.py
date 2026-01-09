@@ -6,7 +6,22 @@ from tenacity import (
     retry_if_result,
     stop_after_attempt,
     wait_exponential,
+    RetryCallState
 )
+
+from app.utils.log import logger
+
+
+def _log_retry_attempt(retry_state: RetryCallState):
+    """重试前的日志回调"""
+    if retry_state.outcome is None:
+        return
+
+    if retry_state.outcome.failed:
+        exc = retry_state.outcome.exception()
+        logger.opt(exception=exc).debug(f"重试第 {retry_state.attempt_number} 次，错误: {exc}")
+    else:
+        logger.debug(f"重试第 {retry_state.attempt_number} 次，结果校验失败: {retry_state.outcome.result()}")
 
 
 def create_retry_manager(
@@ -39,6 +54,7 @@ def create_retry_manager(
         ...     with attempt:
         ...         result = await some_async_operation()
     """
+            
     retry_strategy = retry_if_exception_type(error_types)
     if custom_checker:
         retry_strategy = retry_strategy | retry_if_result(custom_checker)
@@ -47,4 +63,5 @@ def create_retry_manager(
         wait=wait_exponential(multiplier=1, min=retry_delay, max=10),
         retry=retry_strategy,
         reraise=True,
+        before_sleep=_log_retry_attempt,
     )

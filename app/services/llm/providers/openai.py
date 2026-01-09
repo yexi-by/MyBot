@@ -50,3 +50,13 @@ class OpenAIService(LLMProvider):
         )
         content = response.choices[0].message.content
         return content  # type:ignore
+
+    async def get_image(self, message: ChatMessage, model: str) -> str:
+        chat_messages = self._format_chat_messages(messages=[message])
+        response = await self.client.chat.completions.create(
+            model=model, messages=chat_messages
+        )
+        image_data = response.choices[0].message.content
+        if not image_data:
+            raise ValueError("未能从响应中获取图片数据")
+        return image_data

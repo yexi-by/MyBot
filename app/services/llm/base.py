@@ -1,5 +1,8 @@
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .schemas import ChatMessage
 
 class LLMProvider(ABC):
     """
@@ -17,9 +20,8 @@ class LLMProvider(ABC):
 
     async def get_image(
         self,
-        prompt: str,
+        message: "ChatMessage",
         model: str,
-        image_base64_list: list[str] | None = None,
     ) -> str:
         """
         生成图片（可选方法，不是所有提供商都支持）

@@ -71,29 +71,16 @@ class LLMHandler:
 
     async def get_image(
         self,
-        prompt: str,
-        model: str,
-        model_vendors: str,
-        image_base64_list: list[str] | None = None,
+        message:ChatMessage,
+        model:str,
+        model_vendors:str
     ) -> str:
-        """
-        生成图片
-        
-        Args:
-            prompt: 文本提示词
-            model: 模型名称
-            model_vendors: 服务商名称
-            image_base64_list: 可选的图片列表(base64编码的字符串)，用于图文生图
-            
-        Returns:
-            生成的图片base64编码字符串
-        """
+
         for llm in self.services:
             if llm.model_vendors != model_vendors:
                 continue
             return await llm.provider.get_image(
-                prompt=prompt,
-                model=model,
-                image_base64_list=image_base64_list,
+                message=message,
+                model=model
             )
         raise ValueError(f"未定义的服务商名:{model_vendors}")

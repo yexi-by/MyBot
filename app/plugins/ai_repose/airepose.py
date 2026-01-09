@@ -1,7 +1,7 @@
 import traceback
 
 from firecrawl import AsyncFirecrawlApp
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from app.models import GroupMessage
 from app.services import ContextHandler
@@ -153,11 +153,6 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                     conversation_history.append(tool_output_message)
                 if ai_response.end is True:
                     chat_handler.build_chatmessage(message_lst=history_chat_list)
-                    adapter = TypeAdapter(list[ChatMessage])
-                    json_str = adapter.dump_json(
-                        chat_handler.messages_lst, indent=2
-                    ).decode("utf-8")
-                    logger.info(json_str)
                     break
             except ValidationError as ve:
                 logger.warning(f"LLM JSON 格式错误: {ve}")

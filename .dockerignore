@@ -12,6 +12,7 @@ debug
 docs
 plugins_config
 .idea
+image
 
 .git/
 Dockerfile

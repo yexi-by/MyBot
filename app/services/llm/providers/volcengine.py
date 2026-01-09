@@ -59,29 +59,19 @@ class VolcengineService(LLMProvider):
 
     async def get_image(
         self,
-        prompt: str,
+        message: ChatMessage,
         model: str,
-        image_base64_list: list[str] | None = None,
     ) -> str:
-        """
-        生成图片（支持文生图和多图融合）
+        if not message.text:
+            raise ValueError("提示词为空请重新输入")
 
-        Args:
-            prompt: 文本提示词
-            model: 模型名称
-            image_base64_list: 可选的图片列表(base64编码的字符串)，用于多图融合（多图输入单图输出）
-
-        Returns:
-            生成的图片base64编码字符串
-        """
-        # 将 base64 字符串列表转换为 data URL 格式（支持多图输入）
+        prompt = message.text
         images = None
-        if image_base64_list:
+        if message.image:
             images = []
-            for base64_str in image_base64_list:
-                # 将base64字符串解码为bytes以检测MIME类型
-                img_bytes = base64.b64decode(base64_str)
+            for img_bytes in message.image:
                 mime_type = detect_image_mime_type(img_bytes)
+                base64_str = base64.b64encode(img_bytes).decode("utf-8")
                 images.append(f"data:{mime_type};base64,{base64_str}")
 
         # 调用图片生成接口
