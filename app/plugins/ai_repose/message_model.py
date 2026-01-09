@@ -11,7 +11,7 @@ class MessageContent(BaseModel):
     at: Annotated[
         int | Literal["all"] | None,
         Field(
-            description="要艾特的人的qq号。填 'all' 则艾特所有人。注意：如果已经使用 reply_to_message_id 回复某人，无需再填此字段，否则会重复艾特影响体验"
+            description="要艾特的人的qq号。填 'all' 则艾特所有人。禁止事项：如果使用了 reply_to_message_id，则绝对不要填写此字段，因为回复会自动艾特对方。"
         ),
     ] = None
     reply_to_message_id: Annotated[

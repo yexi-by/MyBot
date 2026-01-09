@@ -1,4 +1,4 @@
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, model_validator, field_serializer
 from typing import Literal
 from .base import LLMProvider
 from dataclasses import dataclass
@@ -23,6 +23,15 @@ class ChatMessage(BaseModel):
         if self.text is None and self.image is None:
             raise ValueError("必须提供 text 或 image")
         return self
+
+    @field_serializer("image")
+    def serialize_image(self, image: list[bytes] | None, _info):
+        if image is None:
+            return None
+        image_str_lst: list[str] = [
+            f"此图片字节码长度为{len(image_bytes)}" for image_bytes in image
+        ]
+        return image_str_lst
 
 
 @dataclass

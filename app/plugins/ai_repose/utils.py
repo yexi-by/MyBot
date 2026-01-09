@@ -36,12 +36,14 @@ def build_message_components(send_message: MessageContent) -> list[MessageSegmen
     text = send_message.text
     at = send_message.at
     reply = send_message.reply_to_message_id
-    if text:
-        text_segment = Text.new(text=text)
-        message_segments.append(text_segment)
+
     if at:
         at_segment = At.new(qq=at)
         message_segments.append(at_segment)
+    if text:
+        text_segment = Text.new(text=text)
+        message_segments.append(text_segment)
+
     if reply:
         reply_segment = Reply.new(id=reply)
         message_segments.append(reply_segment)
@@ -54,15 +56,12 @@ async def get_firecrawl_response(
     result: list[str] = []
     if firecrawl.scrape:
         response = await client.scrape(**firecrawl.scrape.model_dump())
-        result.append(response.model_dump_json(exclude_none=True))
+        result.append(response.model_dump_json(exclude_none=True, indent=2))
     if firecrawl.search:
         response = await client.search(**firecrawl.search.model_dump())
-        result.append(response.model_dump_json(exclude_none=True))
+        result.append(response.model_dump_json(exclude_none=True, indent=2))
     if firecrawl.map:
         response = await client.map(**firecrawl.map.model_dump())
-        result.append(response.model_dump_json(exclude_none=True))
+        result.append(response.model_dump_json(exclude_none=True, indent=2))
     result_str = "\n".join(result)
     return result_str
-
-
-

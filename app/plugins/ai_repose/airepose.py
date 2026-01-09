@@ -1,7 +1,7 @@
 from firecrawl import AsyncFirecrawlApp
-from pydantic import TypeAdapter
-
-from app.models import GroupMessage, MessageSegment
+from pydantic import TypeAdapter, ValidationError
+import traceback
+from app.models import GroupMessage
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
 from app.utils import convert_basemodel_to_schema, download_image, load_config, logger
@@ -91,7 +91,11 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                 image_path=image_path, output_type="bytes"
             )
         text_str = reply_message.model_dump_json(indent=2)
-        text = f"以下是用户回复的那条消息的详情:\n{text_str}"
+        text = (
+            f"### 上下文补充: 用户回复的消息内容\n"
+            f"用户是对以下消息进行的回复（请基于此理解用户的意图）:\n"
+            f"```json\n{text_str}\n```"
+        )
         chat_message = ChatMessage(role="user", image=image_bytes_list, text=text)
         return chat_message
 
@@ -103,7 +107,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
     ) -> None:
         conversation_history = (
             chat_handler.messages_lst
-        )  # 当前轮次的历史对话 这里拿到的只是浅拷贝 不会影响实例属性
+        )  # 当前轮次的历史对话 这里拿到得只是浅拷贝 不会影响实例属性
         conversation_history.extend(chat_message_lst)
         attempt_count = 0
         history_chat_list: list[ChatMessage] = chat_message_lst[
@@ -111,6 +115,9 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
         ]  # 最终存入数据库的历史对话,剔除了token爆炸的工具输出 浅拷贝,防止后面那天忘记了
         while attempt_count <= MAX_RETRY_ATTEMPTS:
             attempt_count += 1
+            adapter = TypeAdapter(list[ChatMessage])
+            json_str = adapter.dump_json(conversation_history, indent=2).decode("utf-8")
+            logger.debug(json_str)
             raw_response = await self.context.llm.get_ai_text_response(
                 messages=conversation_history,
                 model_name="gemini-3-pro-preview",
@@ -135,15 +142,36 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                     tool_response = await get_firecrawl_response(
                         firecrawl=firecrawl_request, client=self.firecrawl_client
                     )
+                    logger.debug(tool_response)
                     tool_output_message = ChatMessage(
-                        role="user", text=f"工具输出:\n{tool_response}"
+                        role="user",
+                        text=(
+                            f"### 工具 (Firecrawl) 执行结果:\n"
+                            f"```text\n{tool_response}\n```\n"
+                            f"请根据以上搜索结果继续回答。"
+                        ),
                     )
                     conversation_history.append(tool_output_message)
                 if ai_response.end:
                     chat_handler.build_chatmessage(message_lst=history_chat_list)
                     break
-            except Exception as e:
-                error_message = ChatMessage(role="user", text=f"出错了:\n{e}")
+            except ValidationError as ve:
+                logger.warning(f"LLM JSON 格式错误: {ve}")
+                error_text = (
+                    f"系统提示: 你生成的 JSON 格式无法解析，请严格按照 Schema 定义修正你的输出。\n"
+                    f"错误详情:\n{ve}\n"
+                    f"请重新生成 JSON。"
+                )
+                error_message = ChatMessage(role="user", text=error_text)
+                conversation_history.append(error_message)
+
+            except Exception:
+                full_error = traceback.format_exc()
+                logger.exception("处理过程中发生内部错误")
+                error_message = ChatMessage(
+                    role="user",
+                    text=f"命令执行出错了，请根据以下堆栈信息修正代码:\n```python\n{full_error}\n```",
+                )
                 conversation_history.append(error_message)
 
     async def run(self, msg: GroupMessage) -> bool:

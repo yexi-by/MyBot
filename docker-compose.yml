@@ -11,5 +11,6 @@ services:
       - ./plugins_config:/app/plugins_config
       - ./vector:/app/vector
       - ./setting.toml:/app/setting.toml
+      - ./data:/app/data
 
     
