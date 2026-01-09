@@ -29,13 +29,21 @@ class NaiClient:
         height: int,
         seed: int | None = None,
         image_base64: str | None = None,
-        v4_prompt_char_captions: list[CharCaption] | None = None,
+        v4_prompt_char_captions: list[CharCaption] | list[dict] | None = None,
     ) -> str:
         if seed is None:
             seed = random.randint(1, 2**32 - 1)
         new_image_base64 = None
         if image_base64 is not None:
             new_image_base64 = await asyncio.to_thread(reencode_image, image_base64)
+        char_caption: list[CharCaption] | list[dict] | None = None
+        if v4_prompt_char_captions:
+            char_caption = []
+            for item in v4_prompt_char_captions:
+                if isinstance(item, dict):
+                    char_caption.append(CharCaption.model_validate(item))
+                else:
+                    char_caption.append(item)
 
         payloads = get_payload(
             prompt=prompt,
@@ -43,7 +51,7 @@ class NaiClient:
             width=width,
             height=height,
             seed=seed,
-            v4_prompt_char_captions=v4_prompt_char_captions,
+            v4_prompt_char_captions=char_caption,
             image_base64=new_image_base64,
         )
         retrier = create_retry_manager(
