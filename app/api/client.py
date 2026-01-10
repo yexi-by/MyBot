@@ -17,6 +17,7 @@ from .mixins import (
     FileMixin,
     GroupMixin,
     MessageMixin,
+    StreamMixin,
     SystemMixin,
 )
 
@@ -28,6 +29,7 @@ class BOTClient(
     AlbumMixin,
     AccountMixin,
     SystemMixin,
+    StreamMixin,
     BaseMixin,
 ):
     """BOT 客户端
@@ -41,6 +43,7 @@ class BOTClient(
         - AlbumMixin: 群相册相关 API
         - AccountMixin: 账号相关 API（好友、个人信息等）
         - SystemMixin: 系统相关 API（版本、cookies、密钥等）
+        - StreamMixin: 流式操作相关 API（清理流临时文件、流式下载测试、流式上传文件等）
     """
 
     def __init__(self, websocket: WebSocket, database: RedisDatabaseManager) -> None:

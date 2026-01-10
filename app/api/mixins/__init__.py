@@ -9,6 +9,7 @@ from .base import BaseMixin
 from .file import FileMixin
 from .group import GroupMixin
 from .message import MessageMixin
+from .stream import StreamMixin
 from .system import SystemMixin
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "AlbumMixin",
     "AccountMixin",
     "SystemMixin",
+    "StreamMixin",
 ]

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Any
+from typing import Any, Literal
 
 
 class MessageData(BaseModel):
@@ -13,3 +13,4 @@ class Response(BaseModel):
     message: str
     echo: str | None = None
     wording: str
+    stream: Literal["stream-action", "normal-action"]|None=None
