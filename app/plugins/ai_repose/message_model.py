@@ -57,11 +57,11 @@ class KwargsGroupFile(BaseModel):
     file_id: Annotated[
         str | None,
         Field(
-            description="文件ID。优先使用此字段。与 file 字段二选一，用于指定要获取信息的具体文件。"
+            description="文件ID。优先使用此字段。与 file 字段二选一，用于标记唯一文件获取。"
         ),
     ] = None
     file: Annotated[
-        str | None, Field(description="文件路径/名称。与 file_id 字段二选一。")
+        str | None, Field(description="文件路径/名称。与 file_id 字段二选一，用于标记唯一文件获取。")
     ] = None
     chunk_size: Annotated[
         int,

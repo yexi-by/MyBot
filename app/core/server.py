@@ -101,7 +101,7 @@ class NapCatServer:
                             self._background_tasks.discard
                         )  # 做完自动删除 防内存泄漏
                         if isinstance(event, Response):
-                            bot.receive_data(response=event)
+                            await bot.receive_data(response=event)
                             continue
                         await redis_database_manager.add_to_queue(event)
                 except WebSocketDisconnect as e:
