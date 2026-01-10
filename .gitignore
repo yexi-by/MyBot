@@ -13,3 +13,5 @@ docs
 plugins_config
 .idea
 image
+data
+.vscode

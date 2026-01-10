@@ -13,6 +13,8 @@ docs
 plugins_config
 .idea
 image
+data
+.vscode
 
 .git/
 Dockerfile
