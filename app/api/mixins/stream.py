@@ -3,7 +3,7 @@
 from typing import AsyncGenerator
 
 from app.models.api.payloads import stream as stream_payload
-from app.models.events.response import Response
+from app.models.events.response import Response, StreamDataChunk
 
 from .base import BaseMixin
 
@@ -31,7 +31,10 @@ class StreamMixin(BaseMixin):
         )
         await self._send_payload(payload)
         async for chunk in self.wait_stream(echo):
-            if chunk is not None:
+            if (
+                isinstance(chunk.data, StreamDataChunk)
+                and chunk.data.data_type == "data_chunk"
+            ):
                 yield chunk
 
     async def upload_file_stream(
@@ -86,7 +89,10 @@ class StreamMixin(BaseMixin):
         )
         await self._send_payload(payload)
         async for chunk in self.wait_stream(echo):
-            if chunk is not None:
+            if isinstance(chunk.data, StreamDataChunk) and chunk.data.data_type in {
+                "file_chunk",
+                "data_chunk",
+            }:
                 yield chunk
 
     async def download_file_record_stream(
@@ -109,7 +115,10 @@ class StreamMixin(BaseMixin):
         )
         await self._send_payload(payload)
         async for chunk in self.wait_stream(echo):
-            if chunk is not None:
+            if isinstance(chunk.data, StreamDataChunk) and chunk.data.data_type in {
+                "file_chunk",
+                "data_chunk",
+            }:
                 yield chunk
 
     async def download_file_image_stream(
@@ -130,5 +139,8 @@ class StreamMixin(BaseMixin):
         )
         await self._send_payload(payload)
         async for chunk in self.wait_stream(echo):
-            if chunk is not None:
+            if isinstance(chunk.data, StreamDataChunk) and chunk.data.data_type in {
+                "file_chunk",
+                "data_chunk",
+            }:
                 yield chunk

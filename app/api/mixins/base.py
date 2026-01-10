@@ -10,7 +10,7 @@ from typing import AsyncGenerator, Protocol, runtime_checkable
 from fastapi import WebSocket
 
 from app.database import RedisDatabaseManager
-from app.models.events.response import Response, StreamData
+from app.models.events.response import Response, StreamData, StreamDataComplete, StreamDataError
 from app.utils import logger
 
 
@@ -44,13 +44,40 @@ type Payload = SupportsModelDumpJson  # 任何支持 model_dump_json 的对象
 type PayloadWithEcho = PayloadWithEchoProtocol  # 带有 echo 字段且支持序列化的 Payload
 
 
+class StreamTransmissionError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        echo: str,
+        status: str | None = None,
+        retcode: int | None = None,
+        message: str | None = None,
+        wording: str | None = None,
+    ) -> None:
+        parts: list[str] = [f"echo={echo}"]
+        if status is not None:
+            parts.append(f"status={status}")
+        if retcode is not None:
+            parts.append(f"retcode={retcode}")
+        if message:
+            parts.append(f"message={message}")
+        if wording:
+            parts.append(f"wording={wording}")
+        super().__init__("流式传输失败: " + ", ".join(parts))
+        self.echo = echo
+        self.status = status
+        self.retcode = retcode
+        self.message = message
+        self.wording = wording
+
+
 class BaseMixin:
     """基础 Mixin，提供 WebSocket 通信基础设施"""
 
     websocket: WebSocket
     database: RedisDatabaseManager
     echo_dict: dict[str, asyncio.Future[Response]]
-    streams_dict: dict[str, asyncio.Queue[Response | None]]
+    streams_dict: dict[str, asyncio.Queue[Response | None | BaseException]]
     boot_id: int
     timeout: int
 
@@ -63,16 +90,61 @@ class BaseMixin:
         echo = response.echo
         if not echo:
             return
-        if isinstance(response.data, StreamData):
-            if echo in self.streams_dict:
-                if response.data.data_type == "data_complete":
-                    await self.streams_dict[echo].put(None)
-                else:
-                    await self.streams_dict[echo].put(response)
-        else:
-            future = self.echo_dict.get(echo)
-            if future:
-                future.set_result(response)
+        stream_queue = self.streams_dict.get(echo)
+        if stream_queue is not None and response.stream == "stream-action":
+            if response.status != "ok" or response.retcode != 0:
+                stream_queue.put_nowait(
+                    StreamTransmissionError(
+                        echo=echo,
+                        status=response.status,
+                        retcode=response.retcode,
+                        message=response.message,
+                        wording=response.wording,
+                    )
+                )
+                return
+            data = response.data
+            if isinstance(data, StreamDataError):
+                stream_queue.put_nowait(
+                    StreamTransmissionError(
+                        echo=echo,
+                        status=response.status,
+                        retcode=response.retcode,
+                        message=data.message or response.message,
+                        wording=response.wording,
+                    )
+                )
+                return
+            if isinstance(data, StreamDataComplete):
+                stream_queue.put_nowait(None)
+                return
+            if isinstance(data, StreamData):
+                stream_queue.put_nowait(response)
+                return
+
+            if isinstance(data, dict):
+                data_type = data.get("data_type")
+                data_kind = data.get("type")
+                if data_kind == "response" and data_type in {"data_complete", "file_complete"}:
+                    stream_queue.put_nowait(None)
+                    return
+                if data_kind == "error" or data_type == "error":
+                    stream_queue.put_nowait(
+                        StreamTransmissionError(
+                            echo=echo,
+                            status=response.status,
+                            retcode=response.retcode,
+                            message=response.message,
+                            wording=response.wording,
+                        )
+                    )
+                    return
+                stream_queue.put_nowait(response)
+                return
+
+        future = self.echo_dict.get(echo)
+        if future:
+            future.set_result(response)
 
     async def create_future(self, echo: str) -> Response:
         """创建future 监听future完成"""
@@ -90,20 +162,40 @@ class BaseMixin:
         return result
 
     async def wait_stream(self, echo: str) -> AsyncGenerator[Response | None]:
-        queue: asyncio.Queue[Response | None] = asyncio.Queue()
+        queue: asyncio.Queue[Response | None | BaseException] = asyncio.Queue()
         self.streams_dict[echo] = queue
+        loop = asyncio.get_running_loop()
+        start_ts = loop.time()
+        last_ts = start_ts
+        chunk_count = 0
         try:
             while True:
                 try:
-                    response = await asyncio.wait_for(queue.get(), timeout=self.timeout)
+                    item = await asyncio.wait_for(queue.get(), timeout=self.timeout)
                 except asyncio.TimeoutError:
-                    logger.error(f"流式响应接收中断/超时 (echo={echo})")
+                    elapsed = loop.time() - start_ts
+                    idle = loop.time() - last_ts
+                    logger.error(
+                        f"流式响应接收中断/超时 (echo={echo}, elapsed={elapsed:.3f}s, idle={idle:.3f}s, chunks={chunk_count})"
+                    )
                     raise ValueError(f"流传输超时 (echo={echo})")
-                if response is None:
+                if item is None:
+                    elapsed = loop.time() - start_ts
+                    logger.debug(
+                        f"流式响应接收完成 (echo={echo}, elapsed={elapsed:.3f}s, chunks={chunk_count})"
+                    )
                     break
-                yield response
+                if isinstance(item, BaseException):
+                    raise item
+                last_ts = loop.time()
+                if isinstance(item.data, StreamData) and item.data.data_type in {
+                    "data_chunk",
+                    "file_chunk",
+                }:
+                    chunk_count += 1
+                yield item
         finally:
-            del self.streams_dict[echo]
+            self.streams_dict.pop(echo, None)
 
     async def _send_payload(self, payload: Payload) -> None:
         """发送 payload 到 WebSocket"""

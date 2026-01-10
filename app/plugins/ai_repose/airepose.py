@@ -15,7 +15,7 @@ from app.utils import (
     base64_to_bytes,
     detect_extension,
 )
-from app.models.events.response import StreamData
+from app.models.events.response import StreamDataChunk
 from ..base import BasePlugin
 from ..utils import (
     aggregate_messages,
@@ -120,8 +120,8 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             async for chunk in self.context.bot.download_file_stream(
                 **file.model_dump()
             ):
-                data = cast(StreamData, chunk.data)
-                chunk_list.append(data.data)
+                if isinstance(chunk.data, StreamDataChunk):
+                    chunk_list.append(chunk.data.data)
             base64_str = "".join(chunk_list)
 
             file_bytes = base64_to_bytes(data=base64_str)
