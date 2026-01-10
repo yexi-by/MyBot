@@ -57,7 +57,7 @@ class BOTClient(
         self.database = database
         self.echo_dict: dict[str, asyncio.Future[Response]] = {}
         self.boot_id: int = 0
-        self.timeout: int = 20
+        self.timeout: int = 1200
 
     def get_self_qq_id(self, msg: AllEvent) -> None:
         """获取自身 QQ 号，外部接口"""
