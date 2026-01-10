@@ -50,6 +50,6 @@ class BananaImage(BasePlugin[GroupMessage]):
         await self.context.bot.send_msg(
             group_id=group_id, at=user_id, text="正在生成图片...."
         )
-        await self.get_nanobanana_image(prompt=text, group_id=group_id)
+        await self.get_nanobanana_image(prompt=prompt, group_id=group_id)
 
         return True

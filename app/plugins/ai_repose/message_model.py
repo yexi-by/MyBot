@@ -20,3 +20,13 @@ class MessageContent(BaseModel):
             description="需要回复的那条消息的ID。重要：QQ回复消息会自动艾特被回复者，因此使用此字段时不要同时填写 at 字段，避免重复艾特"
         ),
     ] = None
+    
+class GetGroupRootFiles(BaseModel):
+    """获取群根目录下的所有文件"""
+    group_id: Annotated[int, Field(description="群聊ID")]
+    file_count: Annotated[int, Field(description="文件数量")]=50
+class GetGroupFilesByFolder(BaseModel):
+    """获取群目录下的所有文件"""
+    folder_id: Annotated[int, Field(description="和 folder 二选一")]
+    folder: Annotated[str, Field(description="和 folder_id 二选一")]
+    file_count: Annotated[int, Field(description="文件数量")]=50

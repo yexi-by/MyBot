@@ -146,17 +146,17 @@ def convert_basemodel_to_schema(model_class: type[BaseModel]) -> str:
 
 def clean_ai_json_response(text: str) -> str:
     """
-    清理AI返回的JSON字符串中的Markdown格式
-    例如:
-    ```json
-    {"key": "value"}
-    ```
-    转换为:
-    {"key": "value"}
+    智能清理 AI 返回的 JSON 字符串。
+    优先寻找最外层的 {} 结构，
+    只有当找不到外层 {} 且存在 ```json 包裹时才处理 Markdown。
     """
     text = text.strip()
-    # 匹配 ```json ... ``` 或 ``` ... ```
-    pattern = r"```(?:json)?\s*(.*?)```"
+    first_brace = text.find('{')
+    last_brace = text.rfind('}')
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        potential_json = text[first_brace : last_brace + 1]
+        return potential_json
+    pattern = r"^```(?:json)?\s*(.*?)```$"
     match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
     if match:
         return match.group(1).strip()
