@@ -4,7 +4,10 @@ import re
 import tomllib
 from pathlib import Path
 from typing import Any, Literal, overload
-
+import pandas as pd
+from pypdf import PdfReader
+import io
+import asyncio
 import aiofiles
 import filetype
 import httpx
@@ -84,14 +87,14 @@ def detect_image_mime_type(data: bytes | str) -> str:
 
 async def download_image(url: str, client: httpx.AsyncClient) -> bytes:
     """
-    异步下载图片
+    异步下载
 
     Args:
-        url: 图片的URL地址
+        url: 文件的URL地址
         client: httpx异步客户端实例
 
     Returns:
-        图片的字节数据
+        字节数据
 
     Raises:
         httpx.HTTPError: 当HTTP请求失败时
@@ -151,8 +154,8 @@ def clean_ai_json_response(text: str) -> str:
     只有当找不到外层 {} 且存在 ```json 包裹时才处理 Markdown。
     """
     text = text.strip()
-    first_brace = text.find('{')
-    last_brace = text.rfind('}')
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
     if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
         potential_json = text[first_brace : last_brace + 1]
         return potential_json
@@ -163,4 +166,35 @@ def clean_ai_json_response(text: str) -> str:
     return text
 
 
+def parse_pdf(file_bytes: bytes) -> str:
+    """解析PDF文件内容"""
+    with io.BytesIO(file_bytes) as stream:
+        reader = PdfReader(stream)
+        text_list = [
+            page.extract_text() for page in reader.pages if page.extract_text()
+        ]
+    text = "".join(text_list)
+    return text
 
+
+def parse_excel(file_bytes: bytes) -> str:
+    """解析excel内容"""
+    with io.BytesIO(file_bytes) as stream:
+        df = pd.read_excel(stream)
+        text = df.to_markdown(index=False)
+    return text
+
+
+async def bytes_to_text(
+    file_bytes: bytes, file_extension: Literal[".txt", ".pdf", ".xlsx", ".xls"]
+):
+    match file_extension:
+        case ".pdf":
+            text = await asyncio.to_thread(parse_pdf, file_bytes)
+        case ".xlsx" | ".xls":
+            text = await asyncio.to_thread(parse_excel, file_bytes)
+        case ".txt":
+            text = file_bytes.decode("utf-8")
+        case _:
+            raise ValueError(f"不支持的文件扩展名: {file_extension}")
+    return text

@@ -11,6 +11,7 @@ from .utils import (
     load_config,
     convert_basemodel_to_schema,
     clean_ai_json_response,
+    bytes_to_text
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "load_config",
     "convert_basemodel_to_schema",
     "clean_ai_json_response",
+    "bytes_to_text"
 ]

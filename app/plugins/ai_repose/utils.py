@@ -1,13 +1,14 @@
 from firecrawl import AsyncFirecrawlApp
 from app.models import At, MessageSegment, Reply, Text
 from app.services import ContextHandler
+import httpx
 from app.utils import (
     load_text_file_sync,
 )
 
 from .firecrawl_model import Firecrawl
 from .segments import MessageContent, PluginConfig
-
+from .message_model import GroupFile
 
 def build_group_chat_contexts(
     config: PluginConfig, schema: str
@@ -65,3 +66,5 @@ async def get_firecrawl_response(
         result.append(response.model_dump_json(exclude_none=True, indent=2))
     result_str = "\n".join(result)
     return result_str
+
+

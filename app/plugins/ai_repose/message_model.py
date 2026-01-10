@@ -26,7 +26,6 @@ class MessageContent(BaseModel):
 class KwargsGroupRootFiles(BaseModel):
     """获取群根目录文件列表"""
 
-    group_id: Annotated[int, Field(description="目标群聊的群号 (group_id)")]
     file_count: Annotated[
         int, Field(description="需要获取的文件数量限制，默认为 50")
     ] = 50
@@ -35,7 +34,6 @@ class KwargsGroupRootFiles(BaseModel):
 class KwargsGroupFilesByFolder(BaseModel):
     """获取群子目录文件列表"""
 
-    group_id: Annotated[int, Field(description="目标群聊的群号 (group_id)")]
     folder_id: Annotated[
         str | None,
         Field(

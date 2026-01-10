@@ -2,7 +2,7 @@ import traceback
 
 from firecrawl import AsyncFirecrawlApp
 from pydantic import ValidationError
-
+from typing import cast, Literal
 from app.models import GroupMessage
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
@@ -12,6 +12,7 @@ from app.utils import (
     download_image,
     load_config,
     logger,
+    bytes_to_text,
 )
 
 from ..base import BasePlugin
@@ -21,6 +22,8 @@ from ..utils import (
     get_response_images,
 )
 from .segments import AIResponse, PluginConfig
+from .message_model import GroupFile
+
 from .utils import (
     build_group_chat_contexts,
     build_message_components,
@@ -29,7 +32,12 @@ from .utils import (
 
 # 配置文件路径
 GROUP_CONFIG_PATH = "plugins_config/group_config.toml"
-
+FILE_EXTENSION_MAP: list[Literal[".txt", ".pdf", ".xlsx", ".xls"]] = [
+    ".txt",
+    ".pdf",
+    ".xlsx",
+    ".xls",
+]
 # 最大重试次数常量
 MAX_RETRY_ATTEMPTS = 20
 HELP_TOKEN = "/help对话"
@@ -79,6 +87,64 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             role="user", image=image_bytes_lst if image_bytes_lst else None, text=text
         )
         return chat_message
+
+    async def get_group_file(
+        self,
+        group_file: GroupFile,
+        group_id: int,
+        file_extension_map: list[
+            Literal[".txt", ".pdf", ".xlsx", ".xls"]
+        ] = FILE_EXTENSION_MAP,
+    ) -> str:
+        root_file = group_file.group_root_file
+        files_by_folder = group_file.group_files_by_folder
+        file = group_file.group_file
+        if root_file:
+            response = await self.context.bot.get_group_root_files(
+                group_id=group_id, file_count=root_file.file_count
+            )
+            return response.model_dump_json()
+        if files_by_folder:
+            response = await self.context.bot.get_group_files_by_folder(
+                group_id=group_id,
+                folder_id=files_by_folder.folder_id,
+                folder=files_by_folder.folder,
+                file_count=files_by_folder.file_count,
+            )
+            return response.model_dump_json()
+        # "data": {
+        # "file": "string",
+        # "url": "string",
+        # "file_size": "string",
+        # "file_name": "string",
+        # "base64": "string"
+        # }
+        if file:
+            response = await self.context.bot.get_file(
+                file_id=file.file_id, file=file.file
+            )
+            data = cast(dict[str, str], response.data)
+            file_name = data["file_name"]
+            url = data["url"]
+            file_extension = "." + file_name.rpartition(".")[-1]
+            if file_extension not in file_extension_map:
+                raise ValueError(
+                    f"不支持的文件类型: '{file_extension}'。"
+                    f"当前仅支持以下格式: {', '.join(file_extension_map)}。"
+                    f"请告知用户该文件类型暂不支持解析。"
+                )
+            file_bytes = await download_image(url=url, client=self.context.direct_httpx)
+            text = await bytes_to_text(
+                file_bytes=file_bytes, file_extension=file_extension
+            )
+            return text
+        raise ValueError(
+            "group_file 工具调用错误: 必须且只能填写以下三个字段之一: "
+            "'group_root_file'（获取群根目录文件列表）、"
+            "'group_files_by_folder'（获取群子目录文件列表）、"
+            "'group_file'（获取具体文件详情）。"
+            "当前所有字段均为空，请重新选择一个操作并填写相应参数。"
+        )
 
     async def assemble_reply_message_details(
         self, reply_id: int, group_id: int
@@ -137,6 +203,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                 conversation_history.append(assistant_message)
                 message_to_send = ai_response.send_message
                 firecrawl_request = ai_response.firecrawl
+                group_file = ai_response.group_file
                 if message_to_send:
                     message_segments = build_message_components(
                         send_message=message_to_send
@@ -158,7 +225,21 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                         ),
                     )
                     conversation_history.append(tool_output_message)
-                
+                if group_file:
+                    response = await self.get_group_file(
+                        group_file=group_file, group_id=group_id
+                    )
+                    logger.debug(response)
+                    group_file_message = ChatMessage(
+                        role="user",
+                        text=(
+                            f"### 工具 (GroupFile) 执行结果:\n"
+                            f"```text\n{response}\n```\n"
+                            f"请根据以上文件内容继续回答。"
+                        ),
+                    )
+                    conversation_history.append(group_file_message)
+
                 if ai_response.end is True:
                     chat_handler.build_chatmessage(message_lst=history_chat_list)
                     break
