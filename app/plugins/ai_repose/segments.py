@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Annotated
 from pydantic_settings import BaseSettings
-from .message_model import MessageContent
+from .message_model import MessageContent, GroupFile
 from .firecrawl_model import Firecrawl
 
 
@@ -12,6 +12,13 @@ class AIResponse(BaseModel):
         MessageContent | None,
         Field(description="如果判断需要向群聊发送消息,则填充此字段;无话可说，则留空"),
     ] = None
+    group_file: Annotated[
+        GroupFile | None,
+        Field(
+            description="如果用户请求查看群文件列表（根目录或子文件夹）或获取特定文件的信息/下载链接，请填充此字段。"
+        ),
+    ] = None
+
     firecrawl: Annotated[
         Firecrawl | None,
         Field(
@@ -25,7 +32,7 @@ class AIResponse(BaseModel):
         ),
     ] = False
 
-
+#------------------------------------
 class GroupConfig(BaseModel):
     """群组配置模型，定义单个群组的所有配置信息"""
 

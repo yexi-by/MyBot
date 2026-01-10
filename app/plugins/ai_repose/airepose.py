@@ -158,6 +158,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                         ),
                     )
                     conversation_history.append(tool_output_message)
+                
                 if ai_response.end is True:
                     chat_handler.build_chatmessage(message_lst=history_chat_list)
                     break
