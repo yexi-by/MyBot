@@ -59,7 +59,7 @@ def load_text_file_sync(file_path: str | Path) -> str:
 
 def detect_image_mime_type(data: bytes | str) -> str:
     """
-    检测图片格式并返回MIME类型
+    检测文件格式并返回MIME类型
 
     使用 filetype 库通过文件头魔数判断图片类型
 
@@ -84,6 +84,16 @@ def detect_image_mime_type(data: bytes | str) -> str:
     # 返回 MIME 类型
     return kind.mime
 
+def detect_extension(data: bytes) -> str:
+    """
+    使用 filetype 库检测后缀名。
+    返回不带点的后缀名（如 'png'），识别失败返回 'unknown'。
+    """
+    kind = filetype.guess(data)
+    if kind is None:
+        return "unknown"
+    return "." + kind.extension
+    
 
 async def download_image(url: str, client: httpx.AsyncClient) -> bytes:
     """

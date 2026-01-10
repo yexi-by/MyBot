@@ -14,4 +14,3 @@ class Settings(BaseSettings):
     proxy: str | None = None
     nai_settings: NaiImageConfig | None = None
     password:str
-    napcat_root_path:str

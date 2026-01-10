@@ -56,8 +56,9 @@ class BOTClient(
         self.websocket = websocket
         self.database = database
         self.echo_dict: dict[str, asyncio.Future[Response]] = {}
+        self.streams_dict: dict[str, asyncio.Queue[Response | None]] = {}
         self.boot_id: int = 0
-        self.timeout: int = 1200
+        self.timeout: int = 60
 
     def get_self_qq_id(self, msg: AllEvent) -> None:
         """获取自身 QQ 号，外部接口"""

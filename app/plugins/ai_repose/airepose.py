@@ -1,6 +1,4 @@
 import traceback
-import aiofiles
-from pathlib import Path
 from firecrawl import AsyncFirecrawlApp
 from pydantic import ValidationError
 from typing import cast, Literal
@@ -14,8 +12,10 @@ from app.utils import (
     load_config,
     logger,
     bytes_to_text,
+    base64_to_bytes,
+    detect_extension,
 )
-
+from app.models.events.response import StreamData
 from ..base import BasePlugin
 from ..utils import (
     aggregate_messages,
@@ -114,31 +114,24 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                 file_count=files_by_folder.file_count,
             )
             return response.model_dump_json()
-        # "data": {
-        # "file": "string",
-        # "url": "string",
-        # "file_size": "string",
-        # "file_name": "string",
-        # "base64": "string"
-        # }
+
         if file:
-            response = await self.context.bot.get_file(
-                file_id=file.file_id, file=file.file
-            )
-            data = cast(dict[str, str], response.data)
-            file_path = Path(data["file"])
-            file_extension = file_path.suffix
+            chunk_list: list[str] = []
+            async for chunk in self.context.bot.download_file_stream(
+                **file.model_dump()
+            ):
+                data = cast(StreamData, chunk.data)
+                chunk_list.append(data.data)
+            base64_str = "".join(chunk_list)
+
+            file_bytes = base64_to_bytes(data=base64_str)
+            file_extension = detect_extension(data=file_bytes)
             if file_extension not in file_extension_map:
                 raise ValueError(
                     f"不支持的文件类型: '{file_extension}'。"
                     f"当前仅支持以下格式: {', '.join(file_extension_map)}。"
                     f"请告知用户该文件类型暂不支持解析。"
                 )
-            # 路径在napcat项目路径/app/.config/QQ/NapCat/temp/里 docker 正常docker compose部署挂载路径需要去除app/并且拼接对应docker compose路径
-            relative_part = file_path.relative_to(OLD_PREFIX)
-            host_path = Path(self.context.settings.napcat_root_path) / relative_part
-            async with aiofiles.open(host_path, mode="rb") as f:
-                file_bytes = await f.read()
             text = await bytes_to_text(
                 file_bytes=file_bytes, file_extension=file_extension
             )

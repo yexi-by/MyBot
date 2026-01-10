@@ -1,5 +1,7 @@
 """流式操作 Mixin 类"""
 
+from typing import AsyncGenerator
+
 from app.models.api.payloads import stream as stream_payload
 from app.models.events.response import Response
 
@@ -18,14 +20,19 @@ class StreamMixin(BaseMixin):
         )
         return await self._send_and_wait(payload)
 
-    async def test_download_stream(self, error: bool = False) -> Response:
+    async def test_download_stream(
+        self, error: bool = False
+    ) -> AsyncGenerator[Response, None]:
         """流式下载测试"""
         echo = self._generate_echo()
         payload = stream_payload.TestDownloadStreamPayload(
             params=stream_payload.TestDownloadStreamParams(error=error),
             echo=echo,
         )
-        return await self._send_and_wait(payload)
+        await self._send_payload(payload)
+        async for chunk in self.wait_stream(echo):
+            if chunk is not None:
+                yield chunk
 
     async def upload_file_stream(
         self,
@@ -66,7 +73,7 @@ class StreamMixin(BaseMixin):
         file: str | None = None,
         file_id: str | None = None,
         chunk_size: int = 65536,
-    ) -> Response:
+    ) -> AsyncGenerator[Response, None]:
         """流式下载文件"""
         echo = self._generate_echo()
         payload = stream_payload.DownloadFileStreamPayload(
@@ -77,7 +84,10 @@ class StreamMixin(BaseMixin):
             ),
             echo=echo,
         )
-        return await self._send_and_wait(payload)
+        await self._send_payload(payload)
+        async for chunk in self.wait_stream(echo):
+            if chunk is not None:
+                yield chunk
 
     async def download_file_record_stream(
         self,
@@ -85,7 +95,7 @@ class StreamMixin(BaseMixin):
         file_id: str | None = None,
         chunk_size: int = 65536,
         out_format: str | None = None,
-    ) -> Response:
+    ) -> AsyncGenerator[Response, None]:
         """流式下载语音文件"""
         echo = self._generate_echo()
         payload = stream_payload.DownloadFileRecordStreamPayload(
@@ -97,14 +107,17 @@ class StreamMixin(BaseMixin):
             ),
             echo=echo,
         )
-        return await self._send_and_wait(payload)
+        await self._send_payload(payload)
+        async for chunk in self.wait_stream(echo):
+            if chunk is not None:
+                yield chunk
 
     async def download_file_image_stream(
         self,
         file: str | None = None,
         file_id: str | None = None,
         chunk_size: int = 65536,
-    ) -> Response:
+    ) -> AsyncGenerator[Response, None]:
         """流式下载图片"""
         echo = self._generate_echo()
         payload = stream_payload.DownloadFileImageStreamPayload(
@@ -115,4 +128,7 @@ class StreamMixin(BaseMixin):
             ),
             echo=echo,
         )
-        return await self._send_and_wait(payload)
+        await self._send_payload(payload)
+        async for chunk in self.wait_stream(echo):
+            if chunk is not None:
+                yield chunk

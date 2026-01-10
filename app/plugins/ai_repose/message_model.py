@@ -52,7 +52,7 @@ class KwargsGroupFilesByFolder(BaseModel):
 
 
 class KwargsGroupFile(BaseModel):
-    """获取文件信息"""
+    """用于流式下载群文件内容以获取文件详情"""
 
     file_id: Annotated[
         str | None,
@@ -63,6 +63,12 @@ class KwargsGroupFile(BaseModel):
     file: Annotated[
         str | None, Field(description="文件路径/名称。与 file_id 字段二选一。")
     ] = None
+    chunk_size: Annotated[
+        int,
+        Field(
+            description="流式下载的分块大小，单位为字节。默认为 65536 (64KB)。注意：文件内容仅支持流式下载"
+        ),
+    ] = 65536
 
 
 class GroupFile(BaseModel):
@@ -79,6 +85,6 @@ class GroupFile(BaseModel):
     group_file: Annotated[
         KwargsGroupFile | None,
         Field(
-            description="当用户想要获取某个具体文件的详细信息（如下载链接）时，使用此字段。"
+            description="当需要读取/分析群文件内容时使用此字段（流式下载）。"
         ),
     ] = None

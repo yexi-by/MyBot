@@ -5,12 +5,12 @@
 
 import asyncio
 import uuid
-from typing import Protocol, runtime_checkable
+from typing import AsyncGenerator, Protocol, runtime_checkable
 
 from fastapi import WebSocket
 
 from app.database import RedisDatabaseManager
-from app.models.events.response import Response
+from app.models.events.response import Response, StreamData
 from app.utils import logger
 
 
@@ -50,6 +50,7 @@ class BaseMixin:
     websocket: WebSocket
     database: RedisDatabaseManager
     echo_dict: dict[str, asyncio.Future[Response]]
+    streams_dict: dict[str, asyncio.Queue[Response | None]]
     boot_id: int
     timeout: int
 
@@ -57,10 +58,18 @@ class BaseMixin:
         """生成唯一的 echo 标识"""
         return str(uuid.uuid4())
 
-    def receive_data(self, response: Response) -> None:
+    async def receive_data(self, response: Response) -> None:
         """对外接口,找到对应future并填充"""
         echo = response.echo
-        if echo:
+        if not echo:
+            return
+        if isinstance(response.data, StreamData):
+            if echo in self.streams_dict:
+                if response.data.data_type == "data_complete":
+                    await self.streams_dict[echo].put(None)
+                else:
+                    await self.streams_dict[echo].put(response)
+        else:
             future = self.echo_dict.get(echo)
             if future:
                 future.set_result(response)
@@ -79,6 +88,22 @@ class BaseMixin:
         result = future.result()
         del self.echo_dict[echo]
         return result
+
+    async def wait_stream(self, echo: str) -> AsyncGenerator[Response | None]:
+        queue: asyncio.Queue[Response | None] = asyncio.Queue()
+        self.streams_dict[echo] = queue
+        try:
+            while True:
+                try:
+                    response = await asyncio.wait_for(queue.get(), timeout=self.timeout)
+                except asyncio.TimeoutError:
+                    logger.error(f"流式响应接收中断/超时 (echo={echo})")
+                    raise ValueError(f"流传输超时 (echo={echo})")
+                if response is None:
+                    break
+                yield response
+        finally:
+            del self.streams_dict[echo]
 
     async def _send_payload(self, payload: Payload) -> None:
         """发送 payload 到 WebSocket"""
