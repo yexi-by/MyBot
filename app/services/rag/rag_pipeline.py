@@ -22,7 +22,7 @@ VECTOR_DIR_NAME = "vector"
 TXT_FILE_PATTERN = "*.txt"
 
 
-async def write_to_file(folder_path: str, chunks: list[str]) -> None:
+async def save_debug_jsonl(folder_path: str, chunks: list[str]) -> None:
     """将文本块写入debug.txt文件用于调试。"""
     file_path = Path(folder_path) / DEBUG_FILENAME
     async with aiofiles.open(file_path, mode="w", encoding="utf-8") as f:

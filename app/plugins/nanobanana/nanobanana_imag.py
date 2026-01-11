@@ -3,8 +3,7 @@ from ..base import BasePlugin
 from pydantic_settings import BaseSettings
 from app.services.llm.schemas import ChatMessage
 from pydantic import BaseModel
-from app.utils import load_config
-from ..utils import aggregate_messages, extract_text_from_message
+from app.utils import extract_text_from_message, load_config, parse_message_chain
 
 GROUP_CONFIG_PATH = "plugins_config/nanobanana_config.toml"
 TEXT_IMAGE_TOKEN = "/香蕉生图"
@@ -42,7 +41,7 @@ class BananaImage(BasePlugin[GroupMessage]):
         user_id = msg.user_id
         if group_id not in self.group_list:
             return False
-        at_lst, text_list, image_url_lst, reply_id = aggregate_messages(msg=msg)
+        at_lst, text_list, image_url_lst, reply_id = parse_message_chain(msg=msg)
         text = "".join(text_list)
         prompt = extract_text_from_message(text=text, token=TEXT_IMAGE_TOKEN)
         if not prompt:

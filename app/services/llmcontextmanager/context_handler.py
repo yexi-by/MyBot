@@ -1,6 +1,6 @@
 from app.services.llm.schemas import ChatMessage
 from typing import Literal, overload, Self
-from app.utils import base64_to_bytes, load_text_file
+from app.utils import base64_to_bytes, read_text_file_async
 
 
 class ContextHandler:
@@ -15,7 +15,7 @@ class ContextHandler:
 
     @classmethod
     async def new(cls, path: str, max_context_length: int) -> Self:
-        system_prompt = await load_text_file(path)
+        system_prompt = await read_text_file_async(path)
         return cls(system_prompt=system_prompt, max_context_length=max_context_length)
 
     @property

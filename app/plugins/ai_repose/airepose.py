@@ -1,28 +1,25 @@
 import traceback
-
+from typing import cast
 from firecrawl import AsyncFirecrawlApp
 from pydantic import ValidationError
-
 from app.models import GroupMessage
-from app.models.events.response import StreamDataChunk
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
 from app.utils import (
-    base64_to_bytes,
     bytes_to_text,
-    clean_ai_json_response,
-    convert_basemodel_to_schema,
-    download_image,
+    detect_extension,
+    download_content,
+    get_reply_image_paths,
     load_config,
     logger,
+    parse_message_chain,
+    parse_validated_json,
+    pydantic_to_json_schema,
+    read_files_content,
 )
+from app.utils.message_utils import get_reply_message_from_db
 
 from ..base import BasePlugin
-from ..utils import (
-    aggregate_messages,
-    find_replied_message_image_paths,
-    get_response_images,
-)
 from .message_model import GroupFile
 from .segments import AIResponse, PluginConfig
 from .utils import (
@@ -60,7 +57,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
 
     def setup(self) -> None:
         config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
-        schema = convert_basemodel_to_schema(AIResponse)
+        schema = pydantic_to_json_schema(AIResponse)
         self.group_contexts = build_group_chat_contexts(config=config, schema=schema)
         self.firecrawl_client = AsyncFirecrawlApp(
             api_key=config.firecrawl_config.api_key,
@@ -72,7 +69,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
     ) -> ChatMessage:
         image_bytes_lst: list[bytes] = []
         for url in image_url_lst:
-            image_bytes = await download_image(
+            image_bytes = await download_content(
                 url=url, client=self.context.direct_httpx
             )
             image_bytes_lst.append(image_bytes)
@@ -100,51 +97,43 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             response = await self.context.bot.get_group_files_by_folder(
                 group_id=group_id,
                 folder_id=files_by_folder.folder_id,
-                folder=files_by_folder.folder,
                 file_count=files_by_folder.file_count,
             )
             return response.model_dump_json()
 
         if file:
-            chunk_list: list[str] = []
-            async for chunk in self.context.bot.download_file_stream(
-                **file.model_dump()
-            ):
-                if isinstance(chunk.data, StreamDataChunk):
-                    chunk_list.append(chunk.data.data)
-            base64_str = "".join(chunk_list)
-
-            file_bytes = base64_to_bytes(data=base64_str)
-            file_extension = file.extension
+            response = await self.context.bot.get_group_file_url(
+                group_id=group_id, file_id=file.file_id
+            )
+            data = cast(dict, response.data)
+            url = data.get("url", None)
+            if not url:
+                raise ValueError(f"url是空的,详情:{response}")
+            content = await download_content(url=url, client=self.context.direct_httpx)
+            file_extension = detect_extension(data=content)
             text = await bytes_to_text(
-                file_bytes=file_bytes, file_extension=file_extension
+                file_bytes=content, file_extension=file_extension
             )
             return text
-        raise ValueError(
-            "group_file 工具调用错误: 必须且只能填写以下三个字段之一: "
-            "'group_root_file'（获取群根目录文件列表）、"
-            "'group_files_by_folder'（获取群子目录文件列表）、"
-            "'group_file'（获取具体文件详情）。"
-            "当前所有字段均为空，请重新选择一个操作并填写相应参数。"
-        )
+        raise ValueError("GroupFile为空")
 
     async def assemble_reply_message_details(
         self, reply_id: int, group_id: int
     ) -> ChatMessage | None:
         image_bytes_list = None
         self_id = self.context.bot.boot_id
-        reply_message = await self.context.database.search_messages(
-            self_id=self_id, group_id=group_id, message_id=reply_id
+        reply_message = await get_reply_message_from_db(
+            database=self.context.database,
+            self_id=self_id,
+            group_id=group_id,
+            reply_id=reply_id,
         )
         if not reply_message:
-            logger.warning(
-                f"redis没有查到数据,请检查群号 {group_id} ,被回复的消息id: {reply_id} 是否在数据库中"
-            )
             return None
-        image_path = find_replied_message_image_paths(reply_message=reply_message)
+        image_path = get_reply_image_paths(reply_message=reply_message)
         if image_path:
-            image_bytes_list = get_response_images(
-                image_path=image_path, output_type="bytes"
+            image_bytes_list = read_files_content(
+                file_paths=image_path, output_type="bytes"
             )
         text_str = reply_message.model_dump_json(indent=2)
         text = (
@@ -178,8 +167,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             )
             logger.debug(raw_response)
             try:
-                raw_response = clean_ai_json_response(raw_response)
-                ai_response = AIResponse.model_validate_json(raw_response)
+                ai_response = parse_validated_json(raw_response, AIResponse)
                 assistant_message = ChatMessage(role="assistant", text=raw_response)
                 history_chat_list.append(assistant_message)
                 conversation_history.append(assistant_message)
@@ -247,7 +235,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
     async def run(self, msg: GroupMessage) -> bool:
         if msg.group_id not in self.group_contexts:
             return False
-        at_lst, text_list, image_url_lst, reply_id = aggregate_messages(msg=msg)
+        at_lst, text_list, image_url_lst, reply_id = parse_message_chain(msg=msg)
         text = "".join(text_list).strip()
         if text == HELP_TOKEN:
             await self.context.bot.send_msg(

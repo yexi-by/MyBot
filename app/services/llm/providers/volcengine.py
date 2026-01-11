@@ -7,7 +7,7 @@ from volcenginesdkarkruntime.types.chat import (
     ChatCompletionMessageParam,
 )
 
-from app.utils.utils import detect_image_mime_type
+from app.utils.utils import detect_mime_type
 
 from ..base import LLMProvider
 from ..schemas import ChatMessage
@@ -29,7 +29,7 @@ class VolcengineService(LLMProvider):
                 content_lst.append({"type": "text", "text": msg.text})
             if msg.image:
                 for image_bytes in msg.image:
-                    mime_type = detect_image_mime_type(image_bytes)
+                    mime_type = detect_mime_type(image_bytes)
                     base64_image = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('utf-8')}"
                     content_lst.append(
                         {
@@ -70,7 +70,7 @@ class VolcengineService(LLMProvider):
         if message.image:
             images = []
             for img_bytes in message.image:
-                mime_type = detect_image_mime_type(img_bytes)
+                mime_type = detect_mime_type(img_bytes)
                 base64_str = base64.b64encode(img_bytes).decode("utf-8")
                 images.append(f"data:{mime_type};base64,{base64_str}")
 

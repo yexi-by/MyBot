@@ -1,14 +1,13 @@
 from firecrawl import AsyncFirecrawlApp
 from app.models import At, MessageSegment, Reply, Text
 from app.services import ContextHandler
-import httpx
 from app.utils import (
-    load_text_file_sync,
+    read_text_file_sync,
 )
 
 from .firecrawl_model import Firecrawl
 from .segments import MessageContent, PluginConfig
-from .message_model import GroupFile
+
 
 def build_group_chat_contexts(
     config: PluginConfig, schema: str
@@ -16,11 +15,11 @@ def build_group_chat_contexts(
     """根据配置构建群聊上下文处理器字典"""
     group_contexts: dict[int, ContextHandler] = {}
     for group_settings in config.group_config:
-        system_prompt = load_text_file_sync(file_path=group_settings.system_prompt_path)
-        knowledge_base = load_text_file_sync(
+        system_prompt = read_text_file_sync(file_path=group_settings.system_prompt_path)
+        knowledge_base = read_text_file_sync(
             file_path=group_settings.knowledge_base_path
         )
-        function_path = load_text_file_sync(file_path=group_settings.function_path)
+        function_path = read_text_file_sync(file_path=group_settings.function_path)
         combined_prompt = "\n\n".join(
             [system_prompt, knowledge_base, function_path, schema]
         )
@@ -66,5 +65,3 @@ async def get_firecrawl_response(
         result.append(response.model_dump_json(exclude_none=True, indent=2))
     result_str = "\n".join(result)
     return result_str
-
-

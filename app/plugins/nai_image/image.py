@@ -2,19 +2,18 @@ from app.models import GroupMessage
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
 from app.utils import (
-    clean_ai_json_response,
-    convert_basemodel_to_schema,
+    extract_text_from_message,
+    get_reply_image_paths,
     load_config,
     logger,
+    parse_message_chain,
+    parse_validated_json,
+    pydantic_to_json_schema,
+    read_files_content,
 )
+from app.utils.message_utils import get_reply_message_from_db
 import traceback
 from ..base import BasePlugin
-from ..utils import (
-    aggregate_messages,
-    extract_text_from_message,
-    find_replied_message_image_paths,
-    get_response_images,
-)
 from .segments import NaiImageKwargs, PluginConfig
 from .utils import build_group_chat_contexts
 
@@ -44,7 +43,7 @@ class NaiImage(BasePlugin[GroupMessage]):
 
     def setup(self) -> None:
         config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
-        schema = convert_basemodel_to_schema(NaiImageKwargs)
+        schema = pydantic_to_json_schema(NaiImageKwargs)
         self.group_contexts = build_group_chat_contexts(config=config, schema=schema)
 
     async def send_ai_message(
@@ -67,8 +66,7 @@ class NaiImage(BasePlugin[GroupMessage]):
             )
             try:
                 logger.debug(f"nai生图插件llm生成提示词内容:{raw_response}")
-                raw_response = clean_ai_json_response(raw_response)
-                ai_response = NaiImageKwargs.model_validate_json(raw_response)
+                ai_response = parse_validated_json(raw_response, NaiImageKwargs)
                 kwargs = ai_response.model_dump()
                 image_base64 = await self.context.nai_client.generate_image(
                     image_base64=user_image_base64, width=1024, height=1024, **kwargs
@@ -88,22 +86,20 @@ class NaiImage(BasePlugin[GroupMessage]):
                 conversation_history.append(error_message)
 
     async def assemble_reply_message_details(self, reply_id: int, group_id: int):
-        reply_message = await self.context.database.search_messages(
+        reply_message = await get_reply_message_from_db(
+            database=self.context.database,
             self_id=self.context.bot.boot_id,
             group_id=group_id,
-            message_id=reply_id,
+            reply_id=reply_id,
         )
         if not reply_message:
-            logger.warning(
-                f"redis没有查到数据,请检查群号 {group_id} ,被回复的消息id: {reply_id} 是否在数据库中"
-            )
             return None
-        image_path = find_replied_message_image_paths(reply_message=reply_message)
+        image_path = get_reply_image_paths(reply_message=reply_message)
         if not image_path:
             logger.warning("找不到返回回复消息的图片路径,也有可能是消息里面没有图片")
             return None
-        image_base64_list = get_response_images(
-            image_path=image_path, output_type="base64"
+        image_base64_list = read_files_content(
+            file_paths=image_path, output_type="base64"
         )
         image_base64 = image_base64_list[0]  # novelai不支持单图
         return image_base64
@@ -114,7 +110,7 @@ class NaiImage(BasePlugin[GroupMessage]):
         at = msg.user_id
         if group_id not in self.group_contexts:
             return False
-        at_lst, text_list, image_url_lst, reply_id = aggregate_messages(msg=msg)
+        at_lst, text_list, image_url_lst, reply_id = parse_message_chain(msg=msg)
         text = "".join(text_list)
         if text == HELP_TOKEN:
             await self.context.bot.send_msg(group_id=group_id, at=at, text=HELP_TEXT)

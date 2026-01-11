@@ -4,7 +4,7 @@ from typing import cast
 from google import genai
 from google.genai import types
 
-from app.utils.utils import detect_image_mime_type
+from app.utils.utils import detect_mime_type
 
 from ..base import LLMProvider
 from ..schemas import ChatMessage
@@ -35,7 +35,7 @@ class GeminiService(LLMProvider):
                 parts.append(types.Part.from_text(text=msg.text))
             if msg.image:
                 for image_bytes in msg.image:
-                    mime_type = detect_image_mime_type(image_bytes)
+                    mime_type = detect_mime_type(image_bytes)
                     parts.append(
                         types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
                     )
@@ -71,7 +71,7 @@ class GeminiService(LLMProvider):
         contents: list[str | types.Part] = [message.text]
         if message.image:
             for image_bytes in message.image:
-                mime_type = detect_image_mime_type(image_bytes)
+                mime_type = detect_mime_type(image_bytes)
                 contents.append(
                     types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
                 )

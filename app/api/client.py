@@ -17,7 +17,6 @@ from .mixins import (
     FileMixin,
     GroupMixin,
     MessageMixin,
-    StreamMixin,
     SystemMixin,
 )
 
@@ -29,7 +28,6 @@ class BOTClient(
     AlbumMixin,
     AccountMixin,
     SystemMixin,
-    StreamMixin,
     BaseMixin,
 ):
     """BOT 客户端
@@ -56,7 +54,9 @@ class BOTClient(
         self.websocket = websocket
         self.database = database
         self.echo_dict: dict[str, asyncio.Future[Response]] = {}
-        self.streams_dict: dict[str, asyncio.Queue[Response | None | BaseException]] = {}
+        self.streams_dict: dict[
+            str, asyncio.Queue[Response | None | BaseException]
+        ] = {}
         self.boot_id: int = 0
         self.timeout: int = 120
 
