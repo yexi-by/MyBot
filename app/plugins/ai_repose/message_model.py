@@ -61,8 +61,15 @@ class KwargsGroupFile(BaseModel):
         ),
     ] = None
     file: Annotated[
-        str | None, Field(description="文件路径/名称。与 file_id 字段二选一，用于标记唯一文件获取。")
+        str | None,
+        Field(
+            description="文件路径/名称。与 file_id 字段二选一，用于标记唯一文件获取。"
+        ),
     ] = None
+    extension: Annotated[
+        Literal[".txt", ".pdf", ".xlsx", ".xls"],
+        Field(description="文件的后缀名"),
+    ]
     chunk_size: Annotated[
         int,
         Field(
@@ -84,7 +91,5 @@ class GroupFile(BaseModel):
     ] = None
     group_file: Annotated[
         KwargsGroupFile | None,
-        Field(
-            description="当需要读取/分析群文件内容时使用此字段（流式下载）。"
-        ),
+        Field(description="当需要读取/分析群文件内容时使用此字段（流式下载）。"),
     ] = None

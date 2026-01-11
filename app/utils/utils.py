@@ -1,17 +1,18 @@
+import asyncio
 import base64
+import io
 import json
 import re
 import tomllib
 from pathlib import Path
 from typing import Any, Literal, overload
-import pandas as pd
-from pypdf import PdfReader
-import io
-import asyncio
+
 import aiofiles
 import filetype
 import httpx
+import pandas as pd
 from pydantic import BaseModel
+from pypdf import PdfReader
 
 # 调试文件名
 DEBUG_FILENAME = "debug/debug.jsonl"
@@ -84,16 +85,17 @@ def detect_image_mime_type(data: bytes | str) -> str:
     # 返回 MIME 类型
     return kind.mime
 
-def detect_extension(data: bytes) -> str:
-    """
-    使用 filetype 库检测后缀名。
-    返回不带点的后缀名（如 'png'），识别失败返回 'unknown'。
-    """
-    kind = filetype.guess(data)
-    if kind is None:
-        return "unknown"
-    return "." + kind.extension
-    
+
+# def detect_extension(data: bytes) -> str:
+#     """
+#     使用 filetype 库检测后缀名。
+#     返回不带点的后缀名（如 'png'），识别失败返回 'unknown'。
+#     """
+#     kind = filetype.guess(data)
+#     if kind is None:
+#         return "unknown"
+#     return "." + kind.extension
+
 
 async def download_image(url: str, client: httpx.AsyncClient) -> bytes:
     """
@@ -207,4 +209,5 @@ async def bytes_to_text(
             text = file_bytes.decode("utf-8")
         case _:
             raise ValueError(f"不支持的文件扩展名: {file_extension}")
+    return text
     return text

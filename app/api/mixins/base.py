@@ -10,7 +10,12 @@ from typing import AsyncGenerator, Protocol, runtime_checkable
 from fastapi import WebSocket
 
 from app.database import RedisDatabaseManager
-from app.models.events.response import Response, StreamData, StreamDataComplete, StreamDataError
+from app.models.events.response import (
+    Response,
+    StreamData,
+    StreamDataComplete,
+    StreamDataError,
+)
 from app.utils import logger
 
 
@@ -125,7 +130,10 @@ class BaseMixin:
             if isinstance(data, dict):
                 data_type = data.get("data_type")
                 data_kind = data.get("type")
-                if data_kind == "response" and data_type in {"data_complete", "file_complete"}:
+                if data_kind == "response" and data_type in {
+                    "data_complete",
+                    "file_complete",
+                }:
                     stream_queue.put_nowait(None)
                     return
                 if data_kind == "error" or data_type == "error":
@@ -161,7 +169,7 @@ class BaseMixin:
         del self.echo_dict[echo]
         return result
 
-    async def wait_stream(self, echo: str) -> AsyncGenerator[Response | None]:
+    async def wait_stream(self, echo: str) -> AsyncGenerator[Response]:
         queue: asyncio.Queue[Response | None | BaseException] = asyncio.Queue()
         self.streams_dict[echo] = queue
         loop = asyncio.get_running_loop()

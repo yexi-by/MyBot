@@ -76,6 +76,7 @@ class StreamMixin(BaseMixin):
         file: str | None = None,
         file_id: str | None = None,
         chunk_size: int = 65536,
+        **kwargs,
     ) -> AsyncGenerator[Response, None]:
         """流式下载文件"""
         echo = self._generate_echo()

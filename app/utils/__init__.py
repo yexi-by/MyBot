@@ -12,7 +12,6 @@ from .utils import (
     convert_basemodel_to_schema,
     clean_ai_json_response,
     bytes_to_text,
-    detect_extension
 )
 
 __all__ = [
@@ -29,5 +28,4 @@ __all__ = [
     "convert_basemodel_to_schema",
     "clean_ai_json_response",
     "bytes_to_text",
-    "detect_extension"
 ]

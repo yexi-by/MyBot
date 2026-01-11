@@ -1,30 +1,30 @@
 import traceback
+
 from firecrawl import AsyncFirecrawlApp
 from pydantic import ValidationError
-from typing import cast, Literal
+
 from app.models import GroupMessage
+from app.models.events.response import StreamDataChunk
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
 from app.utils import (
+    base64_to_bytes,
+    bytes_to_text,
     clean_ai_json_response,
     convert_basemodel_to_schema,
     download_image,
     load_config,
     logger,
-    bytes_to_text,
-    base64_to_bytes,
-    detect_extension,
 )
-from app.models.events.response import StreamDataChunk
+
 from ..base import BasePlugin
 from ..utils import (
     aggregate_messages,
     find_replied_message_image_paths,
     get_response_images,
 )
-from .segments import AIResponse, PluginConfig
 from .message_model import GroupFile
-
+from .segments import AIResponse, PluginConfig
 from .utils import (
     build_group_chat_contexts,
     build_message_components,
@@ -34,12 +34,6 @@ from .utils import (
 # 配置文件路径
 OLD_PREFIX = "/app"
 GROUP_CONFIG_PATH = "plugins_config/group_config.toml"
-FILE_EXTENSION_MAP: list[Literal[".txt", ".pdf", ".xlsx", ".xls"]] = [
-    ".txt",
-    ".pdf",
-    ".xlsx",
-    ".xls",
-]
 # 最大重试次数常量
 MAX_RETRY_ATTEMPTS = 20
 HELP_TOKEN = "/help对话"
@@ -94,9 +88,6 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
         self,
         group_file: GroupFile,
         group_id: int,
-        file_extension_map: list[
-            Literal[".txt", ".pdf", ".xlsx", ".xls"]
-        ] = FILE_EXTENSION_MAP,
     ) -> str:
         root_file = group_file.group_root_file
         files_by_folder = group_file.group_files_by_folder
@@ -125,13 +116,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             base64_str = "".join(chunk_list)
 
             file_bytes = base64_to_bytes(data=base64_str)
-            file_extension = detect_extension(data=file_bytes)
-            if file_extension not in file_extension_map:
-                raise ValueError(
-                    f"不支持的文件类型: '{file_extension}'。"
-                    f"当前仅支持以下格式: {', '.join(file_extension_map)}。"
-                    f"请告知用户该文件类型暂不支持解析。"
-                )
+            file_extension = file.extension
             text = await bytes_to_text(
                 file_bytes=file_bytes, file_extension=file_extension
             )
