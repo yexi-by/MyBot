@@ -45,7 +45,6 @@ class KwargsGroupFilesByFolder(BaseModel):
 
 class KwargsGroupFile(BaseModel):
     """获取群文件下载链接"""
-
     file_id: Annotated[str, Field(description="需要下载的文件id")]
 
 

@@ -42,12 +42,12 @@ def parse_excel(file_bytes: bytes) -> str:
 
 
 async def bytes_to_text(
-    file_bytes: bytes, file_extension: Literal[".txt", ".pdf", ".xlsx", ".xls"] | str
+    file_bytes: bytes, file_extension: Literal[".pdf", ".xlsx", ".xls"] | str
 ) -> str:
     """
     将不同格式的文件字节数据转换为文本。
 
-    支持 .txt, .pdf, .xlsx, .xls 格式。
+    支持 .pdf, .xlsx, .xls 格式和其他可以被解码的文件。
 
     Args:
         file_bytes: 文件字节数据。
@@ -64,8 +64,9 @@ async def bytes_to_text(
             text = await asyncio.to_thread(parse_pdf, file_bytes)
         case ".xlsx" | ".xls":
             text = await asyncio.to_thread(parse_excel, file_bytes)
-        case ".txt":
-            text = file_bytes.decode("utf-8")
         case _:
-            raise ValueError(f"不支持的文件扩展名: {file_extension}")
+            try:
+                text = file_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                raise ValueError(f"不支持的文件扩展名: {file_extension}")
     return text
