@@ -32,7 +32,6 @@ from .utils import (
 )
 
 # 配置文件路径
-OLD_PREFIX = "/app"
 GROUP_CONFIG_PATH = "plugins_config/group_config.toml"
 # 最大重试次数常量
 MAX_RETRY_ATTEMPTS = 20

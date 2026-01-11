@@ -57,8 +57,7 @@ class NaiClient:
         retrier = create_retry_manager(
             retry_count=3,
             retry_delay=2,
-            error_types=(httpx.HTTPStatusError, httpx.RequestError),
-            custom_checker=lambda x: not x,
+            error_types=(httpx.HTTPStatusError, httpx.RequestError, ValueError),
         )
 
         async for attempt in retrier:
@@ -72,6 +71,8 @@ class NaiClient:
                     with zip_ref.open(image_filename) as image_file:
                         image_bytes = image_file.read()
                         base64_string = base64.b64encode(image_bytes).decode("utf-8")
+                        if not base64_string:
+                            raise ValueError("NovelAI 返回了空图片数据")
                         return base64_string
 
         raise RuntimeError("Retries exhausted")  # 规避下类型检查,这行是死代码
