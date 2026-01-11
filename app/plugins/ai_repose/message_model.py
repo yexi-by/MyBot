@@ -34,7 +34,7 @@ class KwargsGroupRootFiles(BaseModel):
 class KwargsGroupFilesByFolder(BaseModel):
     """获取群子目录文件列表"""
 
-    folder_id: Annotated[
+    folder: Annotated[
         str,
         Field(description="文件夹ID,用于指定要获取文件列表的子目录。"),
     ]

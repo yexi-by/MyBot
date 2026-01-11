@@ -94,9 +94,12 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             )
             return response.model_dump_json()
         if files_by_folder:
+            folder = files_by_folder.folder
+            if folder.startswith("/"):
+                folder = folder[1:]
             response = await self.context.bot.get_group_files_by_folder(
                 group_id=group_id,
-                folder_id=files_by_folder.folder_id,
+                folder=folder,
                 file_count=files_by_folder.file_count,
             )
             return response.model_dump_json()
@@ -105,8 +108,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             response = await self.context.bot.get_group_file_url(
                 group_id=group_id, file_id=file.file_id
             )
-            data = cast(dict, response.data)
-            url = data.get("url", None)
+            url = response.data.get("url", None)
             if not url:
                 raise ValueError(f"url是空的,详情:{response}")
             content = await download_content(url=url, client=self.context.direct_httpx)
@@ -155,9 +157,8 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
         )  # 当前轮次的历史对话 这里拿到得只是浅拷贝 不会影响实例属性
         conversation_history.extend(chat_message_lst)
         attempt_count = 0
-        history_chat_list: list[ChatMessage] = chat_message_lst[
-            :
-        ]  # 最终存入数据库的历史对话,剔除了token爆炸的工具输出 浅拷贝,防止后面那天忘记了
+        # 最终存入数据库的历史对话,剔除了token爆炸的工具输出 浅拷贝,防止后面那天忘记了
+        history_chat_list: list[ChatMessage] = chat_message_lst[:]
         while attempt_count <= MAX_RETRY_ATTEMPTS:
             attempt_count += 1
             raw_response = await self.context.llm.get_ai_text_response(

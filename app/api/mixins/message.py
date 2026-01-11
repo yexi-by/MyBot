@@ -18,7 +18,7 @@ from app.models import (
     Video,
 )
 from app.models.api.payloads import base as base_payload
-from app.models.events.response import MessageData, Response
+from app.models.events.response import Response
 
 from .base import BaseMixin
 
@@ -163,11 +163,11 @@ class MessageMixin(BaseMixin):
         result = await self.create_future(echo=echo)
         data = result.data
 
-        if not isinstance(data, MessageData):
+        if not isinstance(data, dict):
             raise ValueError("严重错误: 响应数据类型不正确")
 
         self_message = SelfMessage(
-            message_id=data.message_id,
+            message_id=data["message_id"],
             self_id=self.boot_id,
             group_id=group_id,
             user_id=user_id,
