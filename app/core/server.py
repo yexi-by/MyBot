@@ -2,7 +2,7 @@ import asyncio
 import json
 import secrets
 from contextlib import asynccontextmanager
-
+import copy
 from dishka import AsyncContainer
 from dishka.integrations.fastapi import FromDishka, inject, setup_dishka
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
@@ -33,13 +33,15 @@ class NapCatServer:
         # 因为dishka是惰性加载的,所以在首次运行的时候需要先把全局对象给预热提前加载
         # 否则大概率发生*会话级*实例创建的时候缺少全局依赖导致创建失败的现象
         await self.container.get(RedisDatabaseManager)
-        # 预热可选组件
-        await self.container.get(DirectHttpx)
-        await self.container.get(ProxyHttpx | None)
-        await self.container.get(LLMHandler | None)
-        await self.container.get(SiliconFlowEmbedding | None)
-        await self.container.get(SearchVectors | None)
-        await self.container.get(NaiClient | None)
+        # 并发预热组件
+        await asyncio.gather(
+            self.container.get(DirectHttpx),
+            self.container.get(ProxyHttpx | None),
+            self.container.get(LLMHandler | None),
+            self.container.get(SiliconFlowEmbedding | None),
+            self.container.get(SearchVectors | None),
+            self.container.get(NaiClient | None),
+        )
         logger.info("服务启动完成，等待客户端连接")
         yield
         logger.info("正在关闭服务...")
@@ -91,8 +93,11 @@ class NapCatServer:
                         if not isinstance(event, Meta):
                             logger.info(event.model_dump_json(indent=2))
                         bot.get_self_qq_id(msg=event)
+                        # 因为dispatch_event和add_to_queue对event进行并发处理可能会有不可观测的逻辑错误和竞争行为,
+                        # 这里对event进行深拷贝,防止隐性bug
+                        copy_event = copy.deepcopy(event)
                         task = asyncio.create_task(
-                            dispatcher.dispatch_event(event=event)
+                            dispatcher.dispatch_event(event=copy_event)
                         )
                         self._background_tasks.add(
                             task

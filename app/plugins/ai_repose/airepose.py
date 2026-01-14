@@ -1,5 +1,4 @@
 import traceback
-from typing import cast
 from firecrawl import AsyncFirecrawlApp
 from pydantic import ValidationError
 from app.models import GroupMessage

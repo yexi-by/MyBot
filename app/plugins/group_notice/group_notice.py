@@ -1,0 +1,92 @@
+from app.models import GroupRequestEvent, GroupDecreaseEvent, Text, Image
+from ..base import BasePlugin
+from .segments import PluginConfig
+
+from app.utils import load_config
+
+# 配置文件路径
+GROUP_CONFIG_PATH = "plugins_config/group_config.toml"
+
+GROUP_REQUEST_TEMPLATE = """✨ 新的加群申请 ✨
+
+👤 用户: {nickname} ({user_id})
+📝 验证信息: {comment}
+
+请管理员尽快处理~"""
+
+GROUP_DECREASE_LEAVE_TEMPLATE = """👋 成员离开提醒
+
+👤 用户: {nickname} ({user_id})
+💔 状态: 主动退群
+
+江湖路远，有缘再见~"""
+
+GROUP_DECREASE_KICK_TEMPLATE = """👢 成员变动提醒
+
+👤 用户: {nickname} ({user_id})
+🚫 状态: 被踢出群聊
+
+请大家遵守群规哦~"""
+
+GROUP_DECREASE_KICK_ME_TEMPLATE = """⚠️ Bot变动提醒
+
+🤖 Bot: {nickname} ({user_id})
+❌ 状态: 被移出群聊
+
+我还会回来的！"""
+
+
+class GroupNotice(BasePlugin[GroupRequestEvent | GroupDecreaseEvent]):
+    name = "GroupNotice"
+    consumers_count = 5
+    priority = 10
+
+    def setup(self) -> None:
+        config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
+        self.group_list: list[int] = [
+            group_config.group_id for group_config in config.group_config
+        ]
+        
+        
+    async def run(self, msg: GroupRequestEvent | GroupDecreaseEvent) -> bool:
+        if msg.group_id not in self.group_list:
+            return False
+
+        user_id = msg.user_id
+        nickname = "未知用户"
+        try:
+            user_info = await self.context.bot.get_stranger_info(user_id=user_id)
+            if user_info.data:
+                nickname = user_info.data.get("nickname", "未知用户")
+        except Exception:
+            pass
+
+        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+        text_content = ""
+
+        match msg:
+            case GroupRequestEvent():
+                text_content = GROUP_REQUEST_TEMPLATE.format(
+                    nickname=nickname, user_id=user_id, comment=msg.comment
+                )
+            case GroupDecreaseEvent(sub_type="leave"):
+                text_content = GROUP_DECREASE_LEAVE_TEMPLATE.format(
+                    nickname=nickname, user_id=user_id
+                )
+            case GroupDecreaseEvent(sub_type="kick"):
+                text_content = GROUP_DECREASE_KICK_TEMPLATE.format(
+                    nickname=nickname, user_id=user_id
+                )
+            case GroupDecreaseEvent(sub_type="kick_me"):
+                text_content = GROUP_DECREASE_KICK_ME_TEMPLATE.format(
+                    nickname=nickname, user_id=user_id
+                )
+            case _:
+                return False
+
+        message_list = [Text.new(text_content), Image.new(url=avatar_url)]
+        await self.context.bot.send_msg(
+            group_id=msg.group_id, message_segment=message_list
+        )
+
+        return True
