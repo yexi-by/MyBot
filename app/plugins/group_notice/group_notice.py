@@ -1,8 +1,16 @@
-from app.models import GroupRequestEvent, GroupDecreaseEvent, Text, Image
+import base64
+
+from app.models import (
+    GroupDecreaseEvent,
+    GroupRequestEvent,
+    Image,
+    MessageSegment,
+    Text,
+)
+from app.utils import download_content, load_config
+
 from ..base import BasePlugin
 from .segments import PluginConfig
-
-from app.utils import load_config
 
 # 配置文件路径
 GROUP_CONFIG_PATH = "plugins_config/group_config.toml"
@@ -46,8 +54,7 @@ class GroupNotice(BasePlugin[GroupRequestEvent | GroupDecreaseEvent]):
         self.group_list: list[int] = [
             group_config.group_id for group_config in config.group_config
         ]
-        
-        
+
     async def run(self, msg: GroupRequestEvent | GroupDecreaseEvent) -> bool:
         if msg.group_id not in self.group_list:
             return False
@@ -62,6 +69,17 @@ class GroupNotice(BasePlugin[GroupRequestEvent | GroupDecreaseEvent]):
             pass
 
         avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+
+        file_image_base = None
+        try:
+            content = await download_content(
+                url=avatar_url, client=self.context.direct_httpx
+            )
+            image_base64 = base64.b64encode(content).decode("utf-8")
+            file_image_base = f"base64://{image_base64}"
+        except Exception:
+            pass
+
         text_content = ""
 
         match msg:
@@ -84,7 +102,10 @@ class GroupNotice(BasePlugin[GroupRequestEvent | GroupDecreaseEvent]):
             case _:
                 return False
 
-        message_list = [Text.new(text_content), Image.new(url=avatar_url)]
+        message_list: list[MessageSegment] = [Text.new(text_content)]
+        if file_image_base:
+            message_list.append(Image.new(file=file_image_base))
+
         await self.context.bot.send_msg(
             group_id=msg.group_id, message_segment=message_list
         )
