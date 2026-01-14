@@ -53,3 +53,4 @@ class PluginConfig(BaseSettings):
 
     group_config: list[GroupConfig]
     firecrawl_config: FirecrawlConfig
+    model_name:str

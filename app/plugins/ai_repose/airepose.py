@@ -56,6 +56,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
 
     def setup(self) -> None:
         config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
+        self.model_name = config.model_name
         schema = pydantic_to_json_schema(AIResponse)
         self.group_contexts = build_group_chat_contexts(config=config, schema=schema)
         self.firecrawl_client = AsyncFirecrawlApp(
@@ -162,7 +163,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             attempt_count += 1
             raw_response = await self.context.llm.get_ai_text_response(
                 messages=conversation_history,
-                model_name="gemini-3-pro-preview",
+                model_name=self.model_name,
                 model_vendors="google",
             )
             logger.debug(raw_response)

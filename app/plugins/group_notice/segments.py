@@ -1,6 +1,5 @@
 from pydantic_settings import BaseSettings
 from pydantic import BaseModel
-from typing import Any
 
 
 class GroupConfig(BaseModel):
@@ -9,4 +8,3 @@ class GroupConfig(BaseModel):
 
 class PluginConfig(BaseSettings):
     group_config: list[GroupConfig]
-    firecrawl_config: Any | None = None

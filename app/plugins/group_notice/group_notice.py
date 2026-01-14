@@ -13,7 +13,7 @@ from ..base import BasePlugin
 from .segments import PluginConfig
 
 # 配置文件路径
-GROUP_CONFIG_PATH = "plugins_config/group_config.toml"
+GROUP_CONFIG_PATH = "plugins_config/nanobanana_config.toml"
 
 GROUP_REQUEST_TEMPLATE = """✨ 新的加群申请 ✨
 
