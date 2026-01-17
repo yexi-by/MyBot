@@ -48,11 +48,17 @@ HELP_TEXT = """✨ AI助手使用指南 ✨
 💡 智能特性:
 你的每一句话都会被我认真思考(LLM处理)，我会根据需要决定是否联网搜索或直接回答。"""
 
+# 插件配置
+CONSUMERS_COUNT = 5
+PRIORITY = 5
+JSON_INDENT = 2
+MODEL_VENDOR = "google"
+
 
 class AIResponsePlugin(BasePlugin[GroupMessage]):
     name = "ai回复插件"
-    consumers_count = 5
-    priority = 5
+    consumers_count = CONSUMERS_COUNT
+    priority = PRIORITY
 
     def setup(self) -> None:
         config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
@@ -73,7 +79,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                 url=url, client=self.context.direct_httpx
             )
             image_bytes_lst.append(image_bytes)
-        text_str = msg.model_dump_json(indent=2)
+        text_str = msg.model_dump_json(indent=JSON_INDENT)
         text = f"以下是用户发言:\n{text_str}"
         chat_message = ChatMessage(
             role="user", image=image_bytes_lst if image_bytes_lst else None, text=text
@@ -137,7 +143,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             image_bytes_list = read_files_content(
                 file_paths=image_path, output_type="bytes"
             )
-        text_str = reply_message.model_dump_json(indent=2)
+        text_str = reply_message.model_dump_json(indent=JSON_INDENT)
         text = (
             f"### 上下文补充: 用户回复的消息内容\n"
             f"用户是对以下消息进行的回复（请基于此理解用户的意图）:\n"
@@ -164,7 +170,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             raw_response = await self.context.llm.get_ai_text_response(
                 messages=conversation_history,
                 model_name=self.model_name,
-                model_vendors="google",
+                model_vendors=MODEL_VENDOR,
             )
             logger.debug(raw_response)
             try:

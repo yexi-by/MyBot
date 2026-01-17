@@ -2,13 +2,17 @@ from app.models import FriendRecallNoticeEvent, GroupRecallNoticeEvent
 
 from .base import BasePlugin
 
+# 插件配置
+CONSUMERS_COUNT = 5
+PRIORITY = 99
+
 
 class DeleteDatabaseMessage(
     BasePlugin[GroupRecallNoticeEvent | FriendRecallNoticeEvent]
 ):
     name = "删除对应撤回消息插件"
-    consumers_count = 5
-    priority = 99
+    consumers_count = CONSUMERS_COUNT
+    priority = PRIORITY
 
     def setup(self) -> None: ...
 

@@ -43,11 +43,16 @@ GROUP_DECREASE_KICK_ME_TEMPLATE = """⚠️ Bot变动提醒
 
 我还会回来的！"""
 
+# 插件配置
+CONSUMERS_COUNT = 5
+PRIORITY = 10
+AVATAR_URL_TEMPLATE = "https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+
 
 class GroupNotice(BasePlugin[GroupRequestEvent | GroupDecreaseEvent]):
     name = "GroupNotice"
-    consumers_count = 5
-    priority = 10
+    consumers_count = CONSUMERS_COUNT
+    priority = PRIORITY
 
     def setup(self) -> None:
         config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
@@ -68,7 +73,7 @@ class GroupNotice(BasePlugin[GroupRequestEvent | GroupDecreaseEvent]):
         except Exception:
             pass
 
-        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+        avatar_url = AVATAR_URL_TEMPLATE.format(user_id=user_id)
 
         file_image_base = None
         try:

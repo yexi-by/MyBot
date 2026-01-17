@@ -5,6 +5,9 @@ services:
     restart: unless-stopped
     ports:
       - "6055:6055"
+    environment:
+      - TZ=Asia/Shanghai 
+      - PYTHONUNBUFFERED=1
     volumes:
       - ./debug:/app/debug
       - ./logs:/app/logs

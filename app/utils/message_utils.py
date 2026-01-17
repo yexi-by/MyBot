@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 from app.models import GroupMessage, PrivateMessage, SelfMessage
 from app.utils.log import logger
@@ -140,3 +140,5 @@ async def get_reply_message_from_db(
         )
         return None
     return reply_message
+
+
