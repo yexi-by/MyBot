@@ -546,7 +546,7 @@ class RedisDatabaseManager:
 
     # ==================== 工具方法 ====================
 
-    def _create_task_reference(self, task: asyncio.Task):
+    def _create_task_reference(self, task: asyncio.Task)->None:
         """持有后台任务引用，防止被 GC 回收，完成后自动清理。"""
         self._background_tasks.add(
             task

@@ -47,6 +47,7 @@ class OpenAIService(LLMProvider):
         response = await self.client.chat.completions.create(
             model=model,
             messages=chat_messages,
+            **kwargs
         )
         content = response.choices[0].message.content
         return content  # type:ignore

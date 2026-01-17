@@ -16,6 +16,7 @@ import traceback
 from ..base import BasePlugin
 from .segments import NaiImageKwargs, PluginConfig
 from .utils import build_group_chat_contexts
+import asyncio
 
 # 配置文件路径
 MAX_RETRY_ATTEMPTS = 5
@@ -37,7 +38,7 @@ HELP_TEXT = f"""✨ AI生图使用指南 ✨
 💡 小贴士: 遇到生成失败会自动重试，重试时也是由LLM进行二次处理优化提示词。"""
 
 # 插件配置
-CONSUMERS_COUNT = 1
+CONSUMERS_COUNT = 10
 PRIORITY = 50
 MODEL_NAME = "gemini-3-pro-preview"
 MODEL_VENDOR = "google"
@@ -47,10 +48,11 @@ IMAGE_HEIGHT = 1024
 
 class NaiImage(BasePlugin[GroupMessage]):
     name = "nai生图插件"
-    consumers_count = CONSUMERS_COUNT  # 官网锁定并发1
+    consumers_count = CONSUMERS_COUNT
     priority = PRIORITY
 
     def setup(self) -> None:
+        self.lock = asyncio.Lock()  # 官网锁定并发1
         config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
         schema = pydantic_to_json_schema(NaiImageKwargs)
         self.group_contexts = build_group_chat_contexts(config=config, schema=schema)
@@ -78,12 +80,13 @@ class NaiImage(BasePlugin[GroupMessage]):
                 logger.debug(f"nai生图插件llm生成提示词内容:{raw_response}")
                 ai_response = parse_validated_json(raw_response, NaiImageKwargs)
                 kwargs = ai_response.model_dump()
-                image_base64 = await self.context.nai_client.generate_image(
-                    image_base64=user_image_base64,
-                    width=IMAGE_WIDTH,
-                    height=IMAGE_HEIGHT,
-                    **kwargs,
-                )
+                async with self.lock:
+                    image_base64 = await self.context.nai_client.generate_image(
+                        image_base64=user_image_base64,
+                        width=IMAGE_WIDTH,
+                        height=IMAGE_HEIGHT,
+                        **kwargs,
+                    )
                 file_image_base = f"base64://{image_base64}"
                 await self.context.bot.send_msg(
                     group_id=msg.group_id, image=file_image_base
