@@ -10,6 +10,7 @@ from app.utils import (
     parse_validated_json,
     pydantic_to_json_schema,
     read_files_content,
+    base64_to_bytes,
 )
 from app.utils.message_utils import get_reply_message_from_db
 import traceback
@@ -17,6 +18,7 @@ from ..base import BasePlugin
 from .segments import NaiImageKwargs, PluginConfig
 from .utils import build_group_chat_contexts
 import asyncio
+import random
 
 # 配置文件路径
 MAX_RETRY_ATTEMPTS = 5
@@ -44,6 +46,8 @@ MODEL_NAME = "gemini-3-pro-preview"
 MODEL_VENDOR = "google"
 IMAGE_WIDTH = 1024
 IMAGE_HEIGHT = 1024
+MAX_TIMEOUT = 10
+MIN_TIMEOUT = 5
 
 
 class NaiImage(BasePlugin[GroupMessage]):
@@ -65,7 +69,10 @@ class NaiImage(BasePlugin[GroupMessage]):
         user_image_base64: str | None,
     ) -> None:
         conversation_history = chat_handler.messages_lst
-        user_prompt = ChatMessage(role="user", text=prompt)
+        image_bytes_list: list[bytes] | None = None
+        if user_image_base64:
+            image_bytes_list = [base64_to_bytes(data=user_image_base64)]
+        user_prompt = ChatMessage(role="user", text=prompt, image=image_bytes_list)
         conversation_history.append(user_prompt)
         attempt_count = 0
         error_text: None | str = None
@@ -80,6 +87,8 @@ class NaiImage(BasePlugin[GroupMessage]):
                 logger.debug(f"nai生图插件llm生成提示词内容:{raw_response}")
                 ai_response = parse_validated_json(raw_response, NaiImageKwargs)
                 kwargs = ai_response.model_dump()
+                time = random.randint(MIN_TIMEOUT, MAX_TIMEOUT)
+                await asyncio.sleep(time)
                 async with self.lock:
                     image_base64 = await self.context.nai_client.generate_image(
                         image_base64=user_image_base64,

@@ -28,7 +28,7 @@ class BaseSegment[T](BaseModel):
 
 
 type MessageSegment = (
-    Text | At | Image | Reply | Face | Dice | Rps | File | Video | Record
+    Text | At | Image | Reply | Face | Dice | Rps | File | Video | Record | Json
 )
 
 
@@ -75,6 +75,10 @@ class RecordData(BaseModel):
     file: str  # "base64://"+base64编码 -发送
     file_size: int | None = None  # 文件大小(字节) -接收
     path: str | None = None  # 文件路径 -接收
+
+
+class JsonData(BaseModel):
+    data: dict
 
 
 class Text(BaseSegment[TextData]):
@@ -143,3 +147,8 @@ class Record(BaseSegment[RecordData]):
 
     type: Literal["record"] = "record"
     _arg_key = "file"
+
+
+class Json(BaseSegment[JsonData]):
+    type: Literal["json"] = "json"
+    _arg_key = "data"

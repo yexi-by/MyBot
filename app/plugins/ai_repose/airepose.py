@@ -69,6 +69,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             api_key=config.firecrawl_config.api_key,
             api_url=config.firecrawl_config.api_url,
         )
+        
 
     async def assemble_user_message(
         self, msg: GroupMessage, image_url_lst: list[str]
