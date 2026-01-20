@@ -19,9 +19,12 @@ from .segments import NaiImageKwargs, PluginConfig
 from .utils import build_group_chat_contexts
 import asyncio
 import random
+import time
 
 # 配置文件路径
 MAX_RETRY_ATTEMPTS = 5
+IMG2IMG_LIMIT_TIME = 60 * 60 * 4
+MAX_IMG2IMG_COUNT = 20
 GROUP_CONFIG_PATH = "plugins_config/nai_config.toml"
 TEXT_IMAGE_TOKEN = "/生成图片"
 HELP_TOKEN = "/help生图"
@@ -57,9 +60,19 @@ class NaiImage(BasePlugin[GroupMessage]):
 
     def setup(self) -> None:
         self.lock = asyncio.Lock()  # 官网锁定并发1
+        self.img2img_count = 0
+        self.next_reset_time = time.time() + IMG2IMG_LIMIT_TIME
+        # 保存任务引用以防止被垃圾回收
+        self.reset_task = asyncio.create_task(self.reset_counter_task())
         config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
         schema = pydantic_to_json_schema(NaiImageKwargs)
         self.group_contexts = build_group_chat_contexts(config=config, schema=schema)
+
+    async def reset_counter_task(self):
+        while True:
+            await asyncio.sleep(IMG2IMG_LIMIT_TIME)
+            self.img2img_count = 0
+            self.next_reset_time = time.time() + IMG2IMG_LIMIT_TIME
 
     async def send_ai_message(
         self,
@@ -87,9 +100,9 @@ class NaiImage(BasePlugin[GroupMessage]):
                 logger.debug(f"nai生图插件llm生成提示词内容:{raw_response}")
                 ai_response = parse_validated_json(raw_response, NaiImageKwargs)
                 kwargs = ai_response.model_dump()
-                time = random.randint(MIN_TIMEOUT, MAX_TIMEOUT)
-                await asyncio.sleep(time)
+                sleep_time = random.randint(MIN_TIMEOUT, MAX_TIMEOUT)
                 async with self.lock:
+                    await asyncio.sleep(sleep_time)
                     image_base64 = await self.context.nai_client.generate_image(
                         image_base64=user_image_base64,
                         width=IMAGE_WIDTH,
@@ -148,10 +161,19 @@ class NaiImage(BasePlugin[GroupMessage]):
         prompt = extract_text_from_message(text=text, token=TEXT_IMAGE_TOKEN)
         if prompt is None:
             return False
-        await self.context.bot.send_msg(
-            group_id=group_id, at=at, text="正在生成图片...."
-        )
+
         if reply_id:
+            if self.img2img_count >= MAX_IMG2IMG_COUNT:
+                wait_time = int(self.next_reset_time - time.time())
+                # 避免出现负数
+                wait_time = max(0, wait_time)
+                await self.context.bot.send_msg(
+                    group_id=group_id,
+                    at=at,
+                    text=f"图生图次数已达上限，请等待 {wait_time} 秒后再试。",
+                )
+                return True
+
             image_base64 = await self.assemble_reply_message_details(
                 reply_id=reply_id, group_id=msg.group_id
             )
@@ -160,6 +182,11 @@ class NaiImage(BasePlugin[GroupMessage]):
                     group_id=group_id, at=at, text="被回复的图片为空"
                 )
                 return True
+            self.img2img_count += 1
+
+        await self.context.bot.send_msg(
+            group_id=group_id, at=at, text="正在生成图片...."
+        )
         chat_handler = self.group_contexts[msg.group_id]
         await self.send_ai_message(
             msg=msg,

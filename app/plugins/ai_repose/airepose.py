@@ -4,6 +4,8 @@ from pydantic import ValidationError
 from app.models import GroupMessage
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from app.utils import (
     bytes_to_text,
     detect_extension,
@@ -69,7 +71,11 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             api_key=config.firecrawl_config.api_key,
             api_url=config.firecrawl_config.api_url,
         )
-        
+
+    def get_current_time(self) -> str:
+        beijing_time = datetime.now(ZoneInfo("Asia/Shanghai"))
+        time_str = beijing_time.strftime("%Y-%m-%d %H:%M:%S")
+        return time_str
 
     async def assemble_user_message(
         self, msg: GroupMessage, image_url_lst: list[str]
@@ -254,6 +260,10 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
         if self.context.bot.boot_id not in at_lst:
             return False
         chat_message_lst: list[ChatMessage] = []
+        time_str = self.get_current_time()
+        time_text = f"当前时间:{time_str}\n"
+        time_message = ChatMessage(role="user", text=time_text)
+        chat_message_lst.append(time_message)
         user_chat_message = await self.assemble_user_message(
             msg=msg, image_url_lst=image_url_lst
         )
