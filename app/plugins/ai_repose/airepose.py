@@ -1,11 +1,15 @@
+"""群聊 AI 回复插件。"""
+
 import traceback
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from firecrawl import AsyncFirecrawlApp
 from pydantic import ValidationError
+
 from app.models import GroupMessage
 from app.services import ContextHandler
 from app.services.llm.schemas import ChatMessage
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from app.utils import (
     bytes_to_text,
     detect_extension,
@@ -54,17 +58,20 @@ HELP_TEXT = """✨ AI助手使用指南 ✨
 CONSUMERS_COUNT = 5
 PRIORITY = 5
 JSON_INDENT = 2
-MODEL_VENDOR = "google"
 
 
 class AIResponsePlugin(BasePlugin[GroupMessage]):
+    """处理群聊中的 AI 对话请求。"""
+
     name = "ai回复插件"
     consumers_count = CONSUMERS_COUNT
     priority = PRIORITY
 
     def setup(self) -> None:
+        """加载插件配置并初始化上下文与工具客户端。"""
         config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
         self.model_name = config.model_name
+        self.model_vendors = config.model_vendors
         schema = pydantic_to_json_schema(AIResponse)
         self.group_contexts = build_group_chat_contexts(config=config, schema=schema)
         self.firecrawl_client = AsyncFirecrawlApp(
@@ -73,6 +80,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
         )
 
     def get_current_time(self) -> str:
+        """返回当前北京时间字符串。"""
         beijing_time = datetime.now(ZoneInfo("Asia/Shanghai"))
         time_str = beijing_time.strftime("%Y-%m-%d %H:%M:%S")
         return time_str
@@ -80,6 +88,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
     async def assemble_user_message(
         self, msg: GroupMessage, image_url_lst: list[str]
     ) -> ChatMessage:
+        """将用户消息和附带图片整理为 LLM 输入消息。"""
         image_bytes_lst: list[bytes] = []
         for url in image_url_lst:
             image_bytes = await download_content(
@@ -98,6 +107,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
         group_file: GroupFile,
         group_id: int,
     ) -> str:
+        """根据结构化指令读取群文件信息或下载具体文件内容。"""
         root_file = group_file.group_root_file
         files_by_folder = group_file.group_files_by_folder
         file = group_file.group_file
@@ -135,6 +145,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
     async def assemble_reply_message_details(
         self, reply_id: int, group_id: int
     ) -> ChatMessage | None:
+        """将被回复消息补充到当前对话上下文。"""
         image_bytes_list = None
         self_id = self.context.bot.boot_id
         reply_message = await get_reply_message_from_db(
@@ -165,6 +176,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
         chat_handler: ContextHandler,
         group_id: int,
     ) -> None:
+        """驱动 LLM 对话循环，并处理工具调用与最终回复。"""
         conversation_history = (
             chat_handler.messages_lst
         )  # 当前轮次的历史对话 这里拿到得只是浅拷贝 不会影响实例属性
@@ -177,7 +189,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
             raw_response = await self.context.llm.get_ai_text_response(
                 messages=conversation_history,
                 model_name=self.model_name,
-                model_vendors=MODEL_VENDOR,
+                model_vendors=self.model_vendors,
             )
             logger.debug(raw_response)
             try:
@@ -227,6 +239,10 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                 if ai_response.end is True:
                     chat_handler.build_chatmessage(message_lst=history_chat_list)
                     break
+                if not firecrawl_request and not group_file:
+                    # 防止模型理解能有问题出bug 导致以assistant结尾
+                    chat_handler.build_chatmessage(message_lst=history_chat_list)
+                    break
             except ValidationError as ve:
                 logger.warning(f"LLM JSON 格式错误: {ve}")
                 error_text = (
@@ -247,6 +263,7 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
                 conversation_history.append(error_message)
 
     async def run(self, msg: GroupMessage) -> bool:
+        """处理群消息事件并在需要时触发 AI 回复。"""
         if msg.group_id not in self.group_contexts:
             return False
         at_lst, text_list, image_url_lst, reply_id = parse_message_chain(msg=msg)

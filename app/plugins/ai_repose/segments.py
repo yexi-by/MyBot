@@ -1,12 +1,18 @@
-from pydantic import BaseModel, Field
+"""ai_repose 插件的数据模型定义。"""
+
 from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings
-from .message_model import MessageContent, GroupFile
+
 from .firecrawl_model import Firecrawl
+from .message_model import GroupFile, MessageContent
 
 
 class AIResponse(BaseModel):
-    """AI响应消息模型，包含可选的发送消息内容"""
+    """定义大模型返回给 ai_repose 插件的结构化响应。"""
+
+    model_config = ConfigDict(extra="forbid")
 
     send_message: Annotated[
         MessageContent | None,
@@ -32,9 +38,8 @@ class AIResponse(BaseModel):
         ),
     ] = False
 
-#------------------------------------
 class GroupConfig(BaseModel):
-    """群组配置模型，定义单个群组的所有配置信息"""
+    """定义单个群聊的上下文配置。"""
 
     group_id: int
     system_prompt_path: str
@@ -44,13 +49,16 @@ class GroupConfig(BaseModel):
 
 
 class FirecrawlConfig(BaseModel):
+    """定义 Firecrawl 客户端配置。"""
+
     api_key: str
     api_url: str
 
 
 class PluginConfig(BaseSettings):
-    """全局配置模型，包含所有群组的配置列表"""
+    """定义 ai_repose 插件的顶层配置。"""
 
     group_config: list[GroupConfig]
     firecrawl_config: FirecrawlConfig
-    model_name:str
+    model_name: str
+    model_vendors: str

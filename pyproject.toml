@@ -29,3 +29,8 @@ dependencies = [
     "websockets>=15.0.1",
     "xlrd>=2.0.2",
 ]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.38.4",
+]

@@ -23,7 +23,7 @@ import time
 
 # 配置文件路径
 MAX_RETRY_ATTEMPTS = 5
-IMG2IMG_LIMIT_TIME = 60 * 60 * 4
+IMG2IMG_LIMIT_TIME = 60 * 60 * 12
 MAX_IMG2IMG_COUNT = 20
 GROUP_CONFIG_PATH = "plugins_config/nai_config.toml"
 TEXT_IMAGE_TOKEN = "/生成图片"
@@ -161,6 +161,13 @@ class NaiImage(BasePlugin[GroupMessage]):
         prompt = extract_text_from_message(text=text, token=TEXT_IMAGE_TOKEN)
         if prompt is None:
             return False
+
+        prompt = prompt.strip()
+        if not prompt and not reply_id:
+            await self.context.bot.send_msg(
+                group_id=group_id, at=at, text="请描述你想要生成的图片内容"
+            )
+            return True
 
         if reply_id:
             if self.img2img_count >= MAX_IMG2IMG_COUNT:
