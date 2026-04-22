@@ -40,6 +40,7 @@ class ResilientLLMProvider(LLMProvider):
         self,
         message: ChatMessage,
         model: str,
+        **kwargs,
     ) -> str:
         retry_count = self.llm_config.retry_count
         retry_delay = self.llm_config.retry_delay
@@ -56,7 +57,7 @@ class ResilientLLMProvider(LLMProvider):
         async for attempt in retrier:
             with attempt:
                 response = await self.inner_provider.get_image(
-                    message=message, model=model
+                    message=message, model=model, **kwargs
                 )
                 if not response:
                     raise ValueError("LLM 提供商返回了空图片响应")

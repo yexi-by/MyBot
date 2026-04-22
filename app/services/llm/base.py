@@ -22,14 +22,15 @@ class LLMProvider(ABC):
         self,
         message: "ChatMessage",
         model: str,
+        **kwargs,
     ) -> str:
         """
         生成图片（可选方法，不是所有提供商都支持）
 
         Args:
-            prompt: 文本提示词
+            message: 图像生成消息，至少需要提供文本提示词
             model: 模型名称
-            image_base64_list: 可选的图片列表(base64编码的字符串)，用于图文生图
+            **kwargs: 提供商对应的额外图像生成参数
 
         Returns:
             生成的图片base64编码字符串

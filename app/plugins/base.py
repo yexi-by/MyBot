@@ -11,7 +11,6 @@ from app.api import BOTClient
 from app.database import RedisDatabaseManager
 from app.models import AllEvent
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
-from app.services.ai_image import NaiClient
 from app.utils import logger
 from app.config import Settings
 
@@ -85,7 +84,6 @@ class Context:
         llm: LLMHandler | None = None,
         siliconflow: SiliconFlowEmbedding | None = None,
         search_vectors: SearchVectors | None = None,
-        nai_client: NaiClient | None = None,
     ):
         self.settings = settings
         self.bot = bot
@@ -94,7 +92,6 @@ class Context:
         self._llm = llm
         self._siliconflow = siliconflow
         self._search_vectors = search_vectors
-        self._nai_client = nai_client
         self._proxy_httpx = proxy_httpx
 
     @property
@@ -111,11 +108,6 @@ class Context:
     @require_initialized
     def search_vectors(self) -> SearchVectors:
         return self._search_vectors  # type: ignore
-
-    @property
-    @require_initialized
-    def nai_client(self) -> NaiClient:
-        return self._nai_client  # type: ignore
 
     @property
     @require_initialized

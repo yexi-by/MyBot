@@ -65,22 +65,23 @@ class LLMHandler:
             if llm.model_vendors != model_vendors:
                 continue
             return await llm.provider.get_ai_response(
-                messages=messages, model=model_name
+                messages=messages, model=model_name, **kwargs
             )
         raise ValueError(f"未定义的服务商名:{model_vendors}")
 
     async def get_image(
         self,
-        message:ChatMessage,
-        model:str,
-        model_vendors:str
+        message: ChatMessage,
+        model: str,
+        model_vendors: str,
+        **kwargs,
     ) -> str:
-
         for llm in self.services:
             if llm.model_vendors != model_vendors:
                 continue
             return await llm.provider.get_image(
                 message=message,
-                model=model
+                model=model,
+                **kwargs,
             )
         raise ValueError(f"未定义的服务商名:{model_vendors}")

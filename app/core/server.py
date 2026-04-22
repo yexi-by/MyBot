@@ -11,7 +11,6 @@ from app.api import BOTClient
 from app.database import RedisDatabaseManager
 from app.models import Response, Meta
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
-from app.services.ai_image import NaiClient
 from app.utils import logger
 from app.config import Settings
 from .di import DirectHttpx, ProxyHttpx
@@ -40,7 +39,6 @@ class NapCatServer:
             self.container.get(LLMHandler | None),
             self.container.get(SiliconFlowEmbedding | None),
             self.container.get(SearchVectors | None),
-            self.container.get(NaiClient | None),
         )
         logger.info("服务启动完成，等待客户端连接")
         yield

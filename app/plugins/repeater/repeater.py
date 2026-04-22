@@ -2,9 +2,10 @@ from app.models import GroupMessage
 from ..base import BasePlugin
 from pydantic_settings import BaseSettings
 from pydantic import BaseModel
-from app.utils import load_config
+from app.utils import load_config_section
 
-GROUP_CONFIG_PATH = "plugins_config/nanobanana_config.toml"
+PLUGINS_CONFIG_PATH = "plugins_config/plugins.toml"
+CONFIG_SECTION = "shared_group"
 
 
 class GroupConfig(BaseModel):
@@ -17,7 +18,7 @@ class PluginConfig(BaseSettings):
 
 # 插件配置
 CONSUMERS_COUNT = 1
-PRIORITY = 10
+PRIORITY = -1  # 复读机应最后处理消息，避免抢在其他插件前面消费
 
 
 class Repeater(BasePlugin[GroupMessage]):
@@ -28,7 +29,11 @@ class Repeater(BasePlugin[GroupMessage]):
     priority = PRIORITY
 
     def setup(self) -> None:
-        self.config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
+        self.config = load_config_section(
+            file_path=PLUGINS_CONFIG_PATH,
+            section_name=CONFIG_SECTION,
+            model_cls=PluginConfig,
+        )
         self.group_list = [
             group_config.group_id for group_config in self.config.group_config
         ]

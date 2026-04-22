@@ -11,7 +11,6 @@ from app.api import BOTClient
 from app.database import RedisDatabaseManager
 from app.plugins import PLUGINS, BasePlugin, Context
 from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
-from app.services.ai_image import NaiClient
 from app.utils import logger
 from app.config import RAW_CONFIG_DICT, Settings
 
@@ -110,22 +109,6 @@ class MyProvider(Provider):
             directory=settings.faiss_file_location
         )
 
-    @provide(scope=Scope.APP)
-    @optional_parameters
-    def get_nai_client(
-        self, settings: Settings, client: ProxyHttpx | None
-    ) -> NaiClient | None:
-        nai_config = settings.nai_settings
-        if nai_config is None:
-            raise ValueError("nai_settings is not configured")
-        if client is None:
-            raise ValueError("nai服务必须设置系统代理")
-        return NaiClient(
-            client=client,
-            url=nai_config.base_url,
-            api_key=nai_config.api_key,
-        )
-
     # 可选服务结束
     @provide(scope=Scope.APP)
     def get_redis_client(self, settings: Settings) -> Redis:
@@ -160,7 +143,6 @@ class MyProvider(Provider):
         llm: LLMHandler | None,
         siliconflow: SiliconFlowEmbedding | None,
         search_vectors: SearchVectors | None,
-        nai_client: NaiClient | None,
     ) -> PluginController:
         plugin_objects: list[BasePlugin] = []
         for cls in PLUGINS:
@@ -171,7 +153,6 @@ class MyProvider(Provider):
                 llm=llm,
                 siliconflow=siliconflow,
                 search_vectors=search_vectors,
-                nai_client=nai_client,
                 direct_httpx=directhttpx,
                 proxy_httpx=proxy_httpx,
             )

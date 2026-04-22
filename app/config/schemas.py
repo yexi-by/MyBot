@@ -2,7 +2,6 @@ from pydantic_settings import BaseSettings
 
 from app.database.schemas import RedisConfig
 from app.services import EmbeddingConfig, LLMConfig, LLMContextConfig
-from app.services.ai_image import NaiImageConfig
 
 
 class Settings(BaseSettings):
@@ -13,5 +12,4 @@ class Settings(BaseSettings):
     redis_config: RedisConfig
     video_and_image_path: str
     proxy: str | None = None
-    nai_settings: NaiImageConfig | None = None
     password: str

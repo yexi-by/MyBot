@@ -1,11 +1,12 @@
 from pydantic_settings import BaseSettings
 
 from app.models import GroupBanEvent
-from app.utils import load_config, logger
+from app.utils import load_config_section, logger
 
 from ..base import BasePlugin
 
-CONFIG_PATH = "plugins_config/unban.toml"
+PLUGINS_CONFIG_PATH = "plugins_config/plugins.toml"
+CONFIG_SECTION = "unban"
 
 
 class PluginConfig(BaseSettings):
@@ -20,7 +21,11 @@ class UnbanPlugin(BasePlugin[GroupBanEvent]):
     priority = 10
 
     def setup(self) -> None:
-        self.config = load_config(file_path=CONFIG_PATH, model_cls=PluginConfig)
+        self.config = load_config_section(
+            file_path=PLUGINS_CONFIG_PATH,
+            section_name=CONFIG_SECTION,
+            model_cls=PluginConfig,
+        )
 
     async def run(self, msg: GroupBanEvent) -> bool:
         # 检查是否是禁言操作 (sub_type: ban)

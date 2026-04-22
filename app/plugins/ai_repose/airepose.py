@@ -15,7 +15,7 @@ from app.utils import (
     detect_extension,
     download_content,
     get_reply_image_paths,
-    load_config,
+    load_config_section,
     logger,
     parse_message_chain,
     parse_validated_json,
@@ -34,7 +34,8 @@ from .utils import (
 )
 
 # 配置文件路径
-GROUP_CONFIG_PATH = "plugins_config/group_config.toml"
+PLUGINS_CONFIG_PATH = "plugins_config/plugins.toml"
+CONFIG_SECTION = "ai_repose"
 # 最大重试次数常量
 MAX_RETRY_ATTEMPTS = 20
 HELP_TOKEN = "/help对话"
@@ -69,7 +70,11 @@ class AIResponsePlugin(BasePlugin[GroupMessage]):
 
     def setup(self) -> None:
         """加载插件配置并初始化上下文与工具客户端。"""
-        config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
+        config = load_config_section(
+            file_path=PLUGINS_CONFIG_PATH,
+            section_name=CONFIG_SECTION,
+            model_cls=PluginConfig,
+        )
         self.model_name = config.model_name
         self.model_vendors = config.model_vendors
         schema = pydantic_to_json_schema(AIResponse)

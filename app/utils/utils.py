@@ -200,6 +200,31 @@ def load_config[T](file_path: str | Path, model_cls: type[T]) -> T:
     return config
 
 
+def load_config_section[T](
+    file_path: str | Path, section_name: str, model_cls: type[T]
+) -> T:
+    """
+    从 TOML 文件读取指定配置节并返回对应对象。
+
+    Args:
+        file_path: TOML 配置文件路径。
+        section_name: 顶层配置节名称。
+        model_cls: Pydantic 模型类。
+
+    Returns:
+        T: 配置对象实例。
+
+    Raises:
+        ValueError: 当指定配置节不存在时抛出。
+    """
+    config_data = read_toml_file(file_path=file_path)
+    section_data = config_data.get(section_name)
+    if section_data is None:
+        raise ValueError(f"配置文件缺少 [{section_name}] 配置节")
+    config = model_cls(**section_data)
+    return config
+
+
 def pydantic_to_json_schema(model_class: type[BaseModel]) -> str:
     """
     将 Pydantic 模型转换为 LLM 能理解的 JSON Schema 字符串。

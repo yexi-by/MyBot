@@ -61,9 +61,16 @@ class VolcengineService(LLMProvider):
         self,
         message: ChatMessage,
         model: str,
+        **kwargs,
     ) -> str:
         if not message.text:
             raise ValueError("提示词为空请重新输入")
+        if "model" in kwargs or "prompt" in kwargs or "image" in kwargs:
+            raise ValueError("请使用 get_image 的 message 和 model 参数传入核心字段")
+        if kwargs.get("response_format") not in (None, "b64_json"):
+            raise ValueError("当前 get_image 仅支持 b64_json 返回格式")
+        if kwargs.get("stream") not in (None, False):
+            raise ValueError("当前 get_image 不支持流式图片响应")
 
         prompt = message.text
         images = None
@@ -74,14 +81,17 @@ class VolcengineService(LLMProvider):
                 base64_str = base64.b64encode(img_bytes).decode("utf-8")
                 images.append(f"data:{mime_type};base64,{base64_str}")
 
-        # 调用图片生成接口
+        request_kwargs = dict(kwargs)
+        request_kwargs["model"] = model
+        request_kwargs["prompt"] = prompt
+        request_kwargs["response_format"] = "b64_json"
+        request_kwargs["size"] = "2K"
+        request_kwargs["watermark"] = False
+        if images is not None:
+            request_kwargs["image"] = images
+
         response = await self.client.images.generate(
-            model=model,
-            prompt=prompt,
-            image=images,  # 传入 list[str] 或 None，支持多图融合
-            response_format="b64_json",  # 指定返回 base64 格式
-            size="2K",
-            watermark=False,
+            **request_kwargs,
         )
 
         # 从响应中提取 base64 编码的图片数据

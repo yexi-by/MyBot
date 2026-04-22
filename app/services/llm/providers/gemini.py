@@ -65,6 +65,7 @@ class GeminiService(LLMProvider):
         self,
         message: ChatMessage,
         model: str,
+        **kwargs,
     ) -> str:
         if not message.text:
             raise ValueError("提示词为空请重新输入")

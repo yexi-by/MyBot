@@ -7,13 +7,14 @@ from app.models import (
     MessageSegment,
     Text,
 )
-from app.utils import download_content, load_config
+from app.utils import download_content, load_config_section
 
 from ..base import BasePlugin
 from .segments import PluginConfig
 
 # 配置文件路径
-GROUP_CONFIG_PATH = "plugins_config/nanobanana_config.toml"
+PLUGINS_CONFIG_PATH = "plugins_config/plugins.toml"
+CONFIG_SECTION = "shared_group"
 
 GROUP_REQUEST_TEMPLATE = """✨ 新的加群申请 ✨
 
@@ -55,7 +56,11 @@ class GroupNotice(BasePlugin[GroupRequestEvent | GroupDecreaseEvent]):
     priority = PRIORITY
 
     def setup(self) -> None:
-        config = load_config(file_path=GROUP_CONFIG_PATH, model_cls=PluginConfig)
+        config = load_config_section(
+            file_path=PLUGINS_CONFIG_PATH,
+            section_name=CONFIG_SECTION,
+            model_cls=PluginConfig,
+        )
         self.group_list: list[int] = [
             group_config.group_id for group_config in config.group_config
         ]
