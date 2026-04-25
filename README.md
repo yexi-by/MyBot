@@ -53,7 +53,6 @@ docker compose up -d
 - `./plugins_config:/app/plugins_config`
 - `./data:/app/data`
 - `./logs:/app/logs`
-- `./debug:/app/debug`
 
 镜像内预装 Python、Node.js、npm、pnpm、yarn、uv/uvx、Docker CLI 和常用 MCP stdio 运行环境。
 

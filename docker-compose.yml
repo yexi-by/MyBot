@@ -9,7 +9,6 @@ services:
       - TZ=Asia/Shanghai 
       - PYTHONUNBUFFERED=1
     volumes:
-      - ./debug:/app/debug
       - ./logs:/app/logs
       - ./plugins_config:/app/plugins_config
       - ./setting.toml:/app/setting.toml
