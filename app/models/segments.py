@@ -4,7 +4,7 @@ from typing import Annotated, ClassVar, Literal, Self, cast
 
 from pydantic import BaseModel, Field
 
-from .common import JsonObject, JsonValue, NapCatId, NapCatModel
+from .common import JsonObject, JsonValue, NapCatId, NapCatModel, NapCatStringInteger
 
 
 class BaseSegment[T](NapCatModel):
@@ -52,7 +52,7 @@ class ImageData(NapCatModel):
     file_id: str | None = None
     file_size: int | None = None
     summary: str | None = None
-    sub_type: str | None = None
+    sub_type: NapCatStringInteger | None = None
 
 
 class FaceData(NapCatModel):

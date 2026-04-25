@@ -5,7 +5,7 @@ import unittest
 from pydantic import ValidationError
 
 from app.core.event_parser import EventTypeChecker
-from app.models import GroupMessage, Sender, StrictModel, Text
+from app.models import GroupMessage, Image, Sender, StrictModel, Text
 
 
 class StrictModelBoundaryTest(unittest.TestCase):
@@ -67,3 +67,36 @@ class StrictModelBoundaryTest(unittest.TestCase):
         assert isinstance(event, GroupMessage)
         self.assertEqual(event.group_id, "939506743")
         self.assertIsInstance(event.message[1], Text)
+
+    def test_image_sub_type_accepts_integer(self) -> None:
+        """图片消息段的 sub_type 支持 NapCat 上报整数并统一收敛为字符串。"""
+        event = EventTypeChecker().get_event(
+            {
+                "time": 1710000000,
+                "self_id": 742654932,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "user_id": 2172959822,
+                "message_id": 123456,
+                "group_id": 939506743,
+                "message": [
+                    {
+                        "type": "image",
+                        "data": {
+                            "file": "abc.image",
+                            "url": "https://example.com/a.png",
+                            "sub_type": 0,
+                        },
+                    }
+                ],
+                "raw_message": "[图片]",
+                "sender": {"user_id": 2172959822, "nickname": "夜袭"},
+                "message_format": "array",
+            }
+        )
+        self.assertIsInstance(event, GroupMessage)
+        assert isinstance(event, GroupMessage)
+        self.assertIsInstance(event.message[0], Image)
+        assert isinstance(event.message[0], Image)
+        self.assertEqual(event.message[0].data.sub_type, "0")
