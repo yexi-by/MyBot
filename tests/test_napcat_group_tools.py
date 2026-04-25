@@ -141,6 +141,22 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             raise AssertionError("工具错误信息必须是字符串")
         self.assertIn("@全体", error)
 
+    async def test_finish_conversation_tool_sets_control_flag(self) -> None:
+        """结束工具会设置本轮群聊处理的控制标记。"""
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, FakeBot()),
+            database=FakeDatabase(),
+            event=build_group_message(),
+        )
+
+        result = await executor.call_tool("qq__finish_conversation", {})
+
+        self.assertIs(executor.conversation_finished, True)
+        self.assertIsInstance(result, dict)
+        result_dict = cast(JsonObject, result)
+        self.assertIs(result_dict["ok"], True)
+        self.assertEqual(result_dict["effect"], "conversation_finished")
+
     def test_history_duration_requires_minutes(self) -> None:
         """按分钟查询历史时必须明确分钟数。"""
         with self.assertRaises(ValueError):

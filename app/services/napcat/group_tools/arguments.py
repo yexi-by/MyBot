@@ -18,15 +18,16 @@ class MentionUserArgs(StrictModel):
     """艾特指定群成员或全体成员的工具参数。"""
 
     user_id: NapCatId | Literal["all"] = Field(
-        description=(
-            "需要在最终群回复中艾特的对象。填写具体群成员 QQ 号时艾特该成员；"
-            "填写字符串 all 时艾特全体成员。普通回复正文不要放在此字段。"
-        )
+        description="要 @ 的 QQ 号；填写 all 表示 @ 全体成员。"
     )
 
 
 class ReplyCurrentMessageArgs(StrictModel):
     """引用当前群消息的工具参数。"""
+
+
+class FinishConversationArgs(StrictModel):
+    """结束当前群聊处理的工具参数。"""
 
 
 class ListGroupRootFilesArgs(StrictModel):

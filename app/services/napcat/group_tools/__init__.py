@@ -5,6 +5,7 @@ from .arguments import (
     HISTORY_TIME_FORMAT,
     MAX_HISTORY_LIMIT,
     MENTION_ALL,
+    FinishConversationArgs,
     GetGroupFileUrlArgs,
     GetGroupHistoryMessagesArgs,
     HistoryQueryMode,
@@ -23,6 +24,7 @@ from .protocols import (
 __all__ = [
     "BEIJING_TIMEZONE",
     "CachedNapCatMessage",
+    "FinishConversationArgs",
     "GetGroupFileUrlArgs",
     "GetGroupHistoryMessagesArgs",
     "HISTORY_TIME_FORMAT",

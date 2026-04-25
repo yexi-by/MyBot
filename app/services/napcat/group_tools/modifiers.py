@@ -40,6 +40,11 @@ class GroupMessageModifierToolset:
         """返回最终回复需要引用的消息 ID。"""
         return self._reply_message_id
 
+    @property
+    def has_modifiers(self) -> bool:
+        """返回当前是否存在待应用的消息修饰动作。"""
+        return self._reply_message_id is not None or bool(self._mentioned_user_ids)
+
     @classmethod
     def is_modifier_tool(cls, name: str) -> bool:
         """判断工具是否只用于修饰同轮最终群消息。"""
@@ -49,29 +54,13 @@ class GroupMessageModifierToolset:
         """向工具注册表登记消息修饰工具。"""
         registry.register_tool(
             name="qq__mention_user",
-            description=(
-                "消息修饰工具：让本轮最终群回复艾特指定群成员或全体成员。"
-                "它只修饰最终消息，不查询信息，也不会立即发送文本。"
-                "调用此工具时，同一轮 assistant 必须输出非空 content 作为最终群回复正文；"
-                "不要把正文写进参数。"
-                "user_id 填具体 QQ 号时艾特该群成员；填字符串 all 时尝试艾特全体成员。"
-                "如果当前配置关闭了 @全体，工具会返回错误结果，看到错误后请改用普通文本或艾特具体成员。"
-                "不要和 mcp__ 开头的信息工具在同一轮调用；需要外部信息时先调用信息工具，"
-                "拿到结果后再决定是否艾特。"
-            ),
+            description="在当前群回复中 @ 指定群成员或全体成员。",
             parameters_model=MentionUserArgs,
             handler=self.mention_user,
         )
         registry.register_tool(
             name="qq__reply_current_message",
-            description=(
-                "消息修饰工具：让本轮最终群回复引用当前正在处理的这条群消息。"
-                "它只修饰最终消息，不查询信息，也不会立即发送文本。"
-                "调用此工具时，同一轮 assistant 必须输出非空 content 作为最终群回复正文；"
-                "不要等待下一轮再给正文。"
-                "不要和 mcp__ 开头的信息工具在同一轮调用；需要外部信息时先调用信息工具，"
-                "拿到结果后再决定是否引用当前消息。"
-            ),
+            description="让当前群回复引用本次正在处理的群消息。",
             parameters_model=ReplyCurrentMessageArgs,
             handler=self.reply_current_message,
         )
@@ -107,8 +96,8 @@ class GroupMessageModifierToolset:
         if user_id == MENTION_ALL and not self.allow_mention_all:
             return {
                 "ok": False,
-                "error": "当前群聊配置关闭了 @全体 能力，不能艾特全体成员。请改用普通文本回复，或只艾特具体群成员。",
-                "effect": "mention_all_rejected",
+                "error": "当前群聊配置关闭了 @全体 能力。",
+                "effect": "mention_rejected",
                 "group_id": to_json_value(self.event.group_id),
                 "user_id": MENTION_ALL,
             }
@@ -116,7 +105,7 @@ class GroupMessageModifierToolset:
             self._mentioned_user_ids.append(user_id)
         return {
             "ok": True,
-            "effect": "final_group_message_will_mention_user",
+            "effect": "mention_registered",
             "group_id": to_json_value(self.event.group_id),
             "user_id": to_json_value(user_id),
         }
@@ -127,7 +116,7 @@ class GroupMessageModifierToolset:
         self._reply_message_id = self.event.message_id
         return {
             "ok": True,
-            "effect": "final_group_message_will_reply_current_message",
+            "effect": "reply_registered",
             "group_id": to_json_value(self.event.group_id),
             "message_id": to_json_value(self.event.message_id),
         }
