@@ -13,5 +13,11 @@ services:
       - ./plugins_config:/app/plugins_config
       - ./setting.toml:/app/setting.toml
       - ./data:/app/data
+      - mybot-venv:/app/.venv
+      - mybot-uv-cache:/app/.uv-cache
+
+volumes:
+  mybot-venv:
+  mybot-uv-cache:
 
     

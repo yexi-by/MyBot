@@ -20,3 +20,4 @@ class SettingsConfigTest(unittest.TestCase):
         self.assertEqual(settings.server.port, 6055)
         self.assertEqual(settings.server.websocket_path_prefix, "/ws")
         self.assertEqual(len(settings.llm.providers), 1)
+        self.assertNotIn("firecrawl", settings.mcp.mcpServers)

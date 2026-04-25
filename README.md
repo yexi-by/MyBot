@@ -53,14 +53,18 @@ docker compose up -d
 - `./plugins_config:/app/plugins_config`
 - `./data:/app/data`
 - `./logs:/app/logs`
+- `mybot-venv:/app/.venv`
+- `mybot-uv-cache:/app/.uv-cache`
 
-镜像内预装 Python、Node.js、npm、pnpm、yarn、uv/uvx、Docker CLI 和常用 MCP stdio 运行环境。
+镜像使用 `uv run --frozen --no-dev` 启动，Python 依赖按 `uv.lock` 在部署机同步到命名卷中。镜像内只预装 Python、uv/uvx、最新版 Node/npm/pnpm/yarn、Docker CLI、Git 和常用系统证书环境；具体 MCP server 由部署机的 `setting.toml` 自己配置。
 
 ## 配置说明
 
 全局配置放在 `setting.toml`，示例见 `setting.example.toml`。
 
 插件配置放在 `plugins_config/plugins.toml`。插件配置由各插件自己的 Pydantic 模型严格校验，未知字段会直接报错，避免配置拼错后静默失效。
+
+MCP 配置属于部署环境，不应写死到项目示例里。示例配置只保留通用 stdio 启动格式，例如 `npx` 或 `uvx`，真实 server 名称、参数和密钥由部署机自行填写。
 
 LLM 当前只维护 OpenAI 兼容协议面：
 

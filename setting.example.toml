@@ -37,11 +37,18 @@ compression = "gz"
 # 是否启用 MCP 工具加载。开发初期可以先保持 false。
 enabled = false
 
-[mcp.mcpServers.firecrawl]
-# Firecrawl MCP 示例；启用前需要填入自己的 Firecrawl 服务地址和 API Key。
+[mcp.mcpServers.node_stdio_example]
+# Node MCP stdio 示例；部署时替换为真实 MCP server 包名和环境变量。
 command = "npx"
-args = ["-y", "firecrawl-mcp"]
-env = { FIRECRAWL_API_KEY = "CHANGE_ME", FIRECRAWL_API_URL = "http://127.0.0.1:3002" }
+args = ["-y", "your-node-mcp-server-package"]
+env = { EXAMPLE_API_KEY = "CHANGE_ME" }
+disabled = true
+
+[mcp.mcpServers.python_stdio_example]
+# Python MCP stdio 示例；部署时替换为真实 uvx 包名和参数。
+command = "uvx"
+args = ["your-python-mcp-server-package"]
+env = { EXAMPLE_API_KEY = "CHANGE_ME" }
 disabled = true
 
 [llm]

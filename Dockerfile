@@ -1,32 +1,44 @@
-FROM python:3.13
+FROM python:3.13-slim
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# 安装运行时、MCP 常用命令环境与 jemalloc。Firecrawl MCP 依赖 Node.js 22+。
+# 镜像只提供项目运行时和常见 MCP stdio 启动器；具体 MCP server 由部署机配置决定。
+# Node 使用 NodeSource current，Docker 使用官方 CLI，避免 Debian 仓库里的旧版本卡住新 MCP。
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
     ca-certificates \
     curl \
-    gnupg \
-    && mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-    | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
-    > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    docker.io \
     git \
+    gnupg \
     libjemalloc2 \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && . /etc/os-release \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" \
+    > /etc/apt/sources.list.d/docker.list \
+    && curl -fsSL https://deb.nodesource.com/setup_current.x -o /tmp/nodesource_setup.sh \
+    && bash /tmp/nodesource_setup.sh \
+    && apt-get install -y --no-install-recommends \
+    docker-ce-cli \
     nodejs \
-    && npm install -g pnpm yarn \
-    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g npm@latest corepack@latest \
+    && corepack enable \
+    && corepack prepare pnpm@latest --activate \
+    && corepack prepare yarn@stable --activate \
+    && rm -rf /var/lib/apt/lists/* /tmp/nodesource_setup.sh \
     && ln -s /usr/lib/*/libjemalloc.so.2 /usr/lib/libjemalloc.so.2
 
 ENV PYTHONUNBUFFERED=1
-# 启用 jemalloc
 ENV LD_PRELOAD="/usr/lib/libjemalloc.so.2"
 ENV UV_PROJECT_ENVIRONMENT="/app/.venv"
-WORKDIR /app
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-cache --no-dev
+ENV UV_CACHE_DIR="/app/.uv-cache"
+ENV UV_LINK_MODE="copy"
+ENV UV_COMPILE_BYTECODE=1
 ENV PATH="/app/.venv/bin:$PATH"
-COPY . .
-CMD ["python", "-m", "app.main"]
+
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md ./
+COPY app ./app
+
+CMD ["uv", "run", "--frozen", "--no-dev", "python", "-m", "app.main"]
