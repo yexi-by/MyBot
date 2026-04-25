@@ -4,10 +4,10 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from app.models.common import JsonObject, NapCatId, NapCatStringInteger, StrictModel
+from app.models.common import JsonObject, NapCatId, NapCatModel, NapCatStringInteger
 
 
-class Notice(StrictModel):
+class Notice(NapCatModel):
     """通知事件基类。"""
 
     time: int
@@ -62,7 +62,7 @@ class GroupBanEvent(GroupNoticeEvent):
     sub_type: Literal["ban", "lift_ban"] | str
 
 
-class GroupUploadFile(StrictModel):
+class GroupUploadFile(NapCatModel):
     """群文件上传通知中的文件信息。"""
 
     id: str
@@ -96,7 +96,7 @@ class GroupEssenceEvent(GroupNoticeEvent):
     operator_id: NapCatId
 
 
-class MsgEmojiLike(StrictModel):
+class MsgEmojiLike(NapCatModel):
     """消息表情回应信息。"""
 
     emoji_id: str

@@ -2,10 +2,10 @@
 
 from typing import Literal
 
-from app.models.common import JsonValue, StrictModel
+from app.models.common import JsonValue, NapCatModel
 
 
-class Response(StrictModel):
+class Response(NapCatModel):
     """WebSocket Action 响应。"""
 
     status: str

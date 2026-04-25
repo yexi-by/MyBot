@@ -4,19 +4,66 @@ import unittest
 
 from pydantic import ValidationError
 
-from app.models import Sender
+from app.core.event_parser import EventTypeChecker
+from app.models import GroupMessage, Sender, StrictModel, Text
 
 
 class StrictModelBoundaryTest(unittest.TestCase):
-    """验证协议模型默认拒绝未知字段。"""
+    """验证内部模型和 NapCat 入站模型的边界策略。"""
 
-    def test_sender_rejects_unknown_field(self) -> None:
-        """NapCat 事件模型不会静默吞掉未知字段。"""
+    def test_internal_strict_model_rejects_unknown_field(self) -> None:
+        """内部严格模型仍然拒绝未知字段。"""
+
+        class DemoStrictModel(StrictModel):
+            """测试用严格模型。"""
+
+            name: str
+
         with self.assertRaises(ValidationError):
-            Sender.model_validate(
-                {
-                    "user_id": "10000",
+            DemoStrictModel.model_validate({"name": "夜袭", "unexpected": "拒绝"})
+
+    def test_napcat_sender_ignores_unknown_field(self) -> None:
+        """NapCat 入站模型忽略未消费的上游扩展字段。"""
+        sender = Sender.model_validate(
+            {
+                "user_id": "10000",
+                "nickname": "夜袭",
+                "unexpected": "上游扩展字段",
+            }
+        )
+        self.assertEqual(sender.user_id, "10000")
+        self.assertNotIn("unexpected", sender.model_dump())
+
+    def test_group_message_parser_accepts_extra_napcat_fields(self) -> None:
+        """事件解析器不会因为 NapCat 额外字段丢弃群消息。"""
+        event = EventTypeChecker().get_event(
+            {
+                "time": 1710000000,
+                "self_id": 742654932,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "user_id": 2172959822,
+                "message_id": 123456,
+                "group_id": 939506743,
+                "message": [
+                    {"type": "at", "data": {"qq": 742654932, "extra": "忽略"}},
+                    {"type": "text", "data": {"text": " 你好", "extra": "忽略"}},
+                ],
+                "raw_message": "@SMartBOT三国 你好",
+                "sender": {
+                    "user_id": 2172959822,
                     "nickname": "夜袭",
-                    "unexpected": "不应该被吞掉",
-                }
-            )
+                    "card": "",
+                    "role": "owner",
+                    "shut_up_timestamp": 0,
+                },
+                "message_format": "array",
+                "raw": {"上游": "额外字段"},
+                "上游新增字段": "忽略",
+            }
+        )
+        self.assertIsInstance(event, GroupMessage)
+        assert isinstance(event, GroupMessage)
+        self.assertEqual(event.group_id, "939506743")
+        self.assertIsInstance(event.message[1], Text)

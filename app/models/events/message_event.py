@@ -4,12 +4,12 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from app.models.common import JsonValue, NapCatId, NapCatStringInteger, StrictModel
+from app.models.common import JsonValue, NapCatId, NapCatModel, NapCatStringInteger
 
 from ..segments import MessageSegment
 
 
-class Sender(StrictModel):
+class Sender(NapCatModel):
     """消息发送者信息。"""
 
     user_id: NapCatId
@@ -23,7 +23,7 @@ class Sender(StrictModel):
     title: str | None = None
 
 
-class BaseMessage(StrictModel):
+class BaseMessage(NapCatModel):
     """消息事件公共字段。"""
 
     time: int

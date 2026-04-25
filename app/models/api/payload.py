@@ -1,9 +1,9 @@
 """NapCat WebSocket Action 请求模型。"""
 
-from app.models.common import JsonObject, StrictModel
+from app.models.common import JsonObject, NapCatModel
 
 
-class ActionPayload(StrictModel):
+class ActionPayload(NapCatModel):
     """NapCat WebSocket 请求载荷。"""
 
     action: str

@@ -4,10 +4,10 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from app.models.common import NapCatId, StrictModel
+from app.models.common import NapCatId, NapCatModel
 
 
-class Request(StrictModel):
+class Request(NapCatModel):
     """请求事件基类。"""
 
     time: int

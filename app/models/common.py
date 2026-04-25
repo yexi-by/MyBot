@@ -15,6 +15,12 @@ class StrictModel(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
 
+class NapCatModel(BaseModel):
+    """NapCat 入站协议模型基类，忽略未消费的上游扩展字段。"""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore")
+
+
 def normalize_string_or_integer(value: object) -> str:
     """将 NapCat 文档中的 string/integer 双类型字段统一收敛为字符串。"""
     # Pydantic 校验器入口只能接收 object；这里立即收窄到协议允许的标量类型。

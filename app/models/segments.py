@@ -4,10 +4,10 @@ from typing import Annotated, ClassVar, Literal, Self, cast
 
 from pydantic import BaseModel, Field
 
-from .common import JsonObject, JsonValue, NapCatId, StrictModel
+from .common import JsonObject, JsonValue, NapCatId, NapCatModel
 
 
-class BaseSegment[T](StrictModel):
+class BaseSegment[T](NapCatModel):
     """消息段通用基类。"""
 
     data: T
@@ -30,20 +30,20 @@ class BaseSegment[T](StrictModel):
         return cls(data=cast(T, arg))
 
 
-class TextData(StrictModel):
+class TextData(NapCatModel):
     """文本消息数据。"""
 
     text: str
 
 
-class AtData(StrictModel):
+class AtData(NapCatModel):
     """艾特消息数据。"""
 
     qq: NapCatId | Literal["all"]
     name: str | None = None
 
 
-class ImageData(StrictModel):
+class ImageData(NapCatModel):
     """图片消息数据。"""
 
     file: str
@@ -55,7 +55,7 @@ class ImageData(StrictModel):
     sub_type: str | None = None
 
 
-class FaceData(StrictModel):
+class FaceData(NapCatModel):
     """系统表情消息数据。"""
 
     id: NapCatId
@@ -64,13 +64,13 @@ class FaceData(StrictModel):
     chainCount: int | None = None
 
 
-class ReplyData(StrictModel):
+class ReplyData(NapCatModel):
     """回复消息数据。"""
 
     id: NapCatId
 
 
-class RecordData(StrictModel):
+class RecordData(NapCatModel):
     """语音消息数据。"""
 
     file: str
@@ -81,7 +81,7 @@ class RecordData(StrictModel):
     magic: bool | None = None
 
 
-class VideoData(StrictModel):
+class VideoData(NapCatModel):
     """视频消息数据。"""
 
     file: str
@@ -91,7 +91,7 @@ class VideoData(StrictModel):
     file_size: int | None = None
 
 
-class FileData(StrictModel):
+class FileData(NapCatModel):
     """文件消息数据。"""
 
     file: str
@@ -100,20 +100,20 @@ class FileData(StrictModel):
     file_size: int | None = None
 
 
-class JsonData(StrictModel):
+class JsonData(NapCatModel):
     """JSON 消息数据。"""
 
     data: str | JsonObject
 
 
-class ForwardData(StrictModel):
+class ForwardData(NapCatModel):
     """合并转发消息数据。"""
 
     id: str
     content: JsonValue = None
 
 
-class NodeData(StrictModel):
+class NodeData(NapCatModel):
     """合并转发节点消息数据。"""
 
     id: NapCatId | None = None
@@ -122,7 +122,7 @@ class NodeData(StrictModel):
     content: list["MessageSegment"] | str | None = None
 
 
-class MusicData(StrictModel):
+class MusicData(NapCatModel):
     """音乐消息数据。"""
 
     type: str
@@ -134,7 +134,7 @@ class MusicData(StrictModel):
     image: str | None = None
 
 
-class MFaceData(StrictModel):
+class MFaceData(NapCatModel):
     """商城表情消息数据。"""
 
     emoji_id: str
@@ -144,20 +144,20 @@ class MFaceData(StrictModel):
     url: str | None = None
 
 
-class MarkdownData(StrictModel):
+class MarkdownData(NapCatModel):
     """Markdown 消息数据。"""
 
     content: str
 
 
-class ContactData(StrictModel):
+class ContactData(NapCatModel):
     """推荐联系人或群聊消息数据。"""
 
     type: Literal["qq", "group"]
     id: NapCatId
 
 
-class PokeData(StrictModel):
+class PokeData(NapCatModel):
     """戳一戳消息数据。"""
 
     qq: NapCatId | None = None
@@ -166,7 +166,7 @@ class PokeData(StrictModel):
     name: str | None = None
 
 
-class LocationData(StrictModel):
+class LocationData(NapCatModel):
     """位置消息数据。"""
 
     lat: str
@@ -175,13 +175,13 @@ class LocationData(StrictModel):
     content: str | None = None
 
 
-class XmlData(StrictModel):
+class XmlData(NapCatModel):
     """XML 消息数据。"""
 
     data: str
 
 
-class MiniAppData(StrictModel):
+class MiniAppData(NapCatModel):
     """小程序消息数据。"""
 
     content: str | JsonObject

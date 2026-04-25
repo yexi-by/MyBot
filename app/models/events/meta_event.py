@@ -4,10 +4,10 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from app.models.common import JsonValue, NapCatId, StrictModel
+from app.models.common import JsonValue, NapCatId, NapCatModel
 
 
-class HeartbeatStatus(StrictModel):
+class HeartbeatStatus(NapCatModel):
     """心跳状态信息。"""
 
     online: bool | None = None
@@ -15,7 +15,7 @@ class HeartbeatStatus(StrictModel):
     stat: JsonValue = None
 
 
-class Meta(StrictModel):
+class Meta(NapCatModel):
     """元事件基类。"""
 
     time: int
