@@ -118,6 +118,8 @@ class OpenAIService(LLMProvider):
                     }
                     for tool_call in msg.tool_calls
                 ]
+            if msg.role == "assistant" and msg.reasoning_content is not None:
+                raw_message["reasoning_content"] = msg.reasoning_content
             chat_messages.append(
                 cast(ChatCompletionMessageParam, cast(object, raw_message))
             )

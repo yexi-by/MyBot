@@ -1,14 +1,47 @@
 """AI 群聊工具循环测试。"""
 
 import unittest
-from typing import cast
+from typing import Protocol, cast
 
 from app.models import GroupMessage, JsonObject, Response, Sender, Text
 from app.plugins.ai_group_chat.config import AIGroupChatConfig
 from app.plugins.ai_group_chat.tool_loop import GroupChatToolLoop
 from app.plugins.base import Context
 from app.services import ChatMessage, ContextHandler
-from app.services.llm.schemas import LLMResponse, LLMToolChoice, LLMToolDefinition
+from app.services.llm.schemas import (
+    LLMResponse,
+    LLMToolCall,
+    LLMToolChoice,
+    LLMToolDefinition,
+)
+
+
+class FakeLLMProtocol(Protocol):
+    """描述测试用 LLM 需要提供的异步响应接口。"""
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """返回测试用结构化模型响应。"""
+        ...
+
+
+class FakeMCPToolManagerProtocol(Protocol):
+    """描述测试用工具管理器需要提供的接口。"""
+
+    def list_tools(self) -> list[LLMToolDefinition]:
+        """返回测试用工具定义。"""
+        ...
+
+    async def call_tool(self, name: str, arguments: JsonObject) -> JsonObject:
+        """执行测试用工具调用。"""
+        ...
 
 
 class FakeBot:
@@ -28,12 +61,21 @@ class FakeBot:
 class FakeContext:
     """测试用插件上下文，只提供本测试需要的 Bot。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        llm: FakeLLMProtocol | None = None,
+        mcp_tool_manager: FakeMCPToolManagerProtocol | None = None,
+    ) -> None:
         """初始化测试依赖。"""
         self.bot: FakeBot = FakeBot()
         self.database: FakeDatabase = FakeDatabase()
-        self.llm: FakeLLM = FakeLLM()
-        self.mcp_tool_manager: FakeMCPToolManager = FakeMCPToolManager()
+        self.llm: FakeLLMProtocol = llm if llm is not None else FakeLLM()
+        self.mcp_tool_manager: FakeMCPToolManagerProtocol = (
+            mcp_tool_manager
+            if mcp_tool_manager is not None
+            else FakeMCPToolManager()
+        )
 
 
 class FakeDatabase:
@@ -70,12 +112,68 @@ class FakeMCPToolManager:
         return {"ok": True}
 
 
-def build_config(*, output_reasoning_content: bool) -> AIGroupChatConfig:
+class FakeInfoToolManager:
+    """测试用信息工具管理器，用于触发工具调用续问流程。"""
+
+    def list_tools(self) -> list[LLMToolDefinition]:
+        """返回一个测试信息工具。"""
+        return [
+            LLMToolDefinition(
+                name="test__lookup",
+                description="查询测试信息。",
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            )
+        ]
+
+    async def call_tool(self, name: str, arguments: JsonObject) -> JsonObject:
+        """返回固定工具结果。"""
+        _ = (name, arguments)
+        return {"ok": True, "value": "查到了"}
+
+
+class FakeToolCallLLM:
+    """测试用 LLM，先调用信息工具，再给出最终回复。"""
+
+    def __init__(self) -> None:
+        """初始化请求记录。"""
+        self.received_messages: list[list[ChatMessage]] = []
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """第一轮返回工具调用，第二轮返回最终正文。"""
+        _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
+        self.received_messages.append(messages[:])
+        if len(self.received_messages) == 1:
+            return LLMResponse(
+                reasoning_content="工具前思考",
+                tool_calls=[
+                    LLMToolCall(id="call-1", name="test__lookup", arguments={})
+                ],
+            )
+        return LLMResponse(content="工具后回复", reasoning_content="最终思考")
+
+
+def build_config(
+    *, output_reasoning_content: bool, pass_back_reasoning_content: bool = False
+) -> AIGroupChatConfig:
     """构造测试用 AI 群聊配置。"""
     return AIGroupChatConfig(
         model_name="gpt-5.5",
         model_vendors="CLIProxyAPI",
         output_reasoning_content=output_reasoning_content,
+        pass_back_reasoning_content=pass_back_reasoning_content,
         group_config=[],
     )
 
@@ -129,3 +227,60 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
         self.assertEqual(chat_handler.messages_lst[-1].text, "正式回复")
+        self.assertIsNone(chat_handler.messages_lst[-1].reasoning_content)
+
+    async def test_reasoning_can_be_passed_back_as_structured_field(self) -> None:
+        """开启思维链回传时，长期上下文保留结构化字段但正文仍然干净。"""
+        fake_context = FakeContext()
+        tool_loop = GroupChatToolLoop(
+            config=build_config(
+                output_reasoning_content=False,
+                pass_back_reasoning_content=True,
+            ),
+            context=cast(Context, fake_context),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_length=10)
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="用户消息")],
+        )
+
+        self.assertEqual(fake_context.bot.sent_texts, ["正式回复"])
+        self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
+        self.assertEqual(chat_handler.messages_lst[-1].text, "正式回复")
+        self.assertEqual(
+            chat_handler.messages_lst[-1].reasoning_content,
+            "模型思考",
+        )
+
+    async def test_tool_call_reasoning_is_passed_back_when_enabled(self) -> None:
+        """开启思维链回传时，工具调用续问也携带上一轮结构化思维链。"""
+        fake_llm = FakeToolCallLLM()
+        fake_context = FakeContext(
+            llm=fake_llm,
+            mcp_tool_manager=FakeInfoToolManager(),
+        )
+        tool_loop = GroupChatToolLoop(
+            config=build_config(
+                output_reasoning_content=False,
+                pass_back_reasoning_content=True,
+            ),
+            context=cast(Context, fake_context),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_length=10)
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="用户消息")],
+        )
+
+        second_request_messages = fake_llm.received_messages[1]
+        tool_call_message = next(
+            message for message in second_request_messages if message.tool_calls
+        )
+        self.assertEqual(tool_call_message.role, "assistant")
+        self.assertEqual(tool_call_message.reasoning_content, "工具前思考")
+        self.assertEqual(fake_context.bot.sent_texts, ["工具后回复"])

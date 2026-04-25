@@ -45,6 +45,7 @@ class ChatMessage(StrictModel):
 
     role: Literal["system", "user", "assistant", "tool"]
     text: str | None = None
+    reasoning_content: str | None = None
     image: list[bytes] | None = None
     tool_calls: list["LLMToolCall"] | None = None
     tool_call_id: str | None = None

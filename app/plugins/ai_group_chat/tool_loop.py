@@ -18,6 +18,7 @@ class ReplyContent:
 
     visible_content: str | None
     memory_content: str | None
+    memory_reasoning_content: str | None
 
 
 class GroupChatToolLoop:
@@ -73,6 +74,7 @@ class GroupChatToolLoop:
                     tool_history_messages=tool_history_messages,
                     visible_content=reply_content.visible_content,
                     memory_content=reply_content.memory_content,
+                    memory_reasoning_content=reply_content.memory_reasoning_content,
                 )
                 return
             if modifier_calls and information_calls:
@@ -121,6 +123,7 @@ class GroupChatToolLoop:
                         turn_messages=turn_messages,
                         tool_history_messages=tool_history_messages,
                         assistant_content=None,
+                        assistant_reasoning_content=None,
                     )
                     return
                 _ = await napcat_executor.send_final_text(reply_content.visible_content)
@@ -129,6 +132,7 @@ class GroupChatToolLoop:
                     turn_messages=turn_messages,
                     tool_history_messages=tool_history_messages,
                     assistant_content=reply_content.memory_content,
+                    assistant_reasoning_content=reply_content.memory_reasoning_content,
                 )
                 return
             information_history, _ = await self._execute_tool_calls(
@@ -162,6 +166,7 @@ class GroupChatToolLoop:
         tool_history_messages: list[ChatMessage],
         visible_content: str | None,
         memory_content: str | None,
+        memory_reasoning_content: str | None,
     ) -> None:
         """处理没有工具调用的最终响应。"""
         if visible_content is not None:
@@ -173,6 +178,7 @@ class GroupChatToolLoop:
             turn_messages=turn_messages,
             tool_history_messages=tool_history_messages,
             assistant_content=memory_content,
+            assistant_reasoning_content=memory_reasoning_content,
         )
 
     async def _request_final_content_after_modifiers(
@@ -224,6 +230,9 @@ class GroupChatToolLoop:
         assistant_message = ChatMessage(
             role="assistant",
             text=response.content,
+            reasoning_content=self._build_memory_reasoning_content(
+                response.reasoning_content
+            ),
             tool_calls=tool_calls,
         )
         working_messages.append(assistant_message)
@@ -312,13 +321,20 @@ class GroupChatToolLoop:
         turn_messages: list[ChatMessage],
         tool_history_messages: list[ChatMessage],
         assistant_content: str | None,
+        assistant_reasoning_content: str | None,
     ) -> None:
         """把本轮用户输入和最终回复写入群上下文。"""
         history_messages = turn_messages[:]
         if self.config.persist_tool_results:
             history_messages.extend(tool_history_messages)
         if assistant_content is not None:
-            history_messages.append(ChatMessage(role="assistant", text=assistant_content))
+            history_messages.append(
+                ChatMessage(
+                    role="assistant",
+                    text=assistant_content,
+                    reasoning_content=assistant_reasoning_content,
+                )
+            )
         chat_handler.build_chatmessage(message_lst=history_messages)
 
     def _normalize_content(self, content: str | None) -> str | None:
@@ -334,11 +350,22 @@ class GroupChatToolLoop:
         self, *, content: str | None, reasoning_content: str | None
     ) -> ReplyContent:
         """构造群内可见回复，并保持长期上下文只记录正式回复。"""
+        memory_reasoning_content = self._build_memory_reasoning_content(
+            reasoning_content
+        )
         if content is None:
-            return ReplyContent(visible_content=None, memory_content=None)
+            return ReplyContent(
+                visible_content=None,
+                memory_content=None,
+                memory_reasoning_content=memory_reasoning_content,
+            )
         reasoning_text = self._normalize_content(reasoning_content)
         if not self.config.output_reasoning_content or reasoning_text is None:
-            return ReplyContent(visible_content=content, memory_content=content)
+            return ReplyContent(
+                visible_content=content,
+                memory_content=content,
+                memory_reasoning_content=memory_reasoning_content,
+            )
         visible_content = (
             "【模型原生思维链】\n"
             "---\n"
@@ -347,4 +374,16 @@ class GroupChatToolLoop:
             "【回复】\n"
             f"{content}"
         )
-        return ReplyContent(visible_content=visible_content, memory_content=content)
+        return ReplyContent(
+            visible_content=visible_content,
+            memory_content=content,
+            memory_reasoning_content=memory_reasoning_content,
+        )
+
+    def _build_memory_reasoning_content(
+        self, reasoning_content: str | None
+    ) -> str | None:
+        """按配置决定是否把模型原生思维链作为结构化字段回传给后续请求。"""
+        if not self.config.pass_back_reasoning_content:
+            return None
+        return self._normalize_content(reasoning_content)

@@ -28,6 +28,7 @@ class AIGroupChatConfig(StrictModel):
     max_tool_rounds: int = Field(default=8, ge=1)
     correction_retry_count: int = Field(default=3, ge=1)
     output_reasoning_content: bool = False
+    pass_back_reasoning_content: bool = False
     enable_deepseek_v4_roleplay_instruct: bool = False
     allow_mention_all: bool = False
     persist_tool_results: bool = False
