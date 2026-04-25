@@ -6,6 +6,7 @@ from typing import Final
 
 CONFIG_PATH: Final[Path] = Path("plugins_config/plugins.toml")
 CONFIG_SECTION: Final[str] = "ai_group_chat"
+DEBUG_DUMP_DIR: Final[Path] = Path("plugins_config/ai_group_chat_debug")
 BEIJING_TIMEZONE: Final[timezone] = timezone(timedelta(hours=8))
 CONSUMERS_COUNT: Final[int] = 5
 PRIORITY: Final[int] = 5

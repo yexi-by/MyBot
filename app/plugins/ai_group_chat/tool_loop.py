@@ -4,12 +4,18 @@ from dataclasses import dataclass
 
 from app.models import GroupMessage, JsonObject, JsonValue
 from app.plugins.base import Context
-from app.services import ChatMessage, CompositeToolExecutor, ContextHandler, NapCatGroupToolExecutor
+from app.services import (
+    ChatMessage,
+    CompositeToolExecutor,
+    ContextHandler,
+    NapCatGroupToolExecutor,
+)
 from app.services.llm.schemas import LLMResponse, LLMToolCall, LLMToolDefinition
 from app.services.llm.tools import build_tool_result_message
 from app.utils.log import log_event
 
 from .config import AIGroupChatConfig
+from .debug_dump import AIGroupChatDebugDumper
 
 
 @dataclass(frozen=True)
@@ -24,10 +30,17 @@ class ReplyContent:
 class GroupChatToolLoop:
     """执行群聊专用的 OpenAI 工具调用流程。"""
 
-    def __init__(self, *, config: AIGroupChatConfig, context: Context) -> None:
+    def __init__(
+        self,
+        *,
+        config: AIGroupChatConfig,
+        context: Context,
+        debug_dumper: AIGroupChatDebugDumper,
+    ) -> None:
         """保存工具循环所需的配置和运行上下文。"""
         self.config: AIGroupChatConfig = config
         self.context: Context = context
+        self.debug_dumper: AIGroupChatDebugDumper = debug_dumper
 
     async def run(
         self,
@@ -51,7 +64,39 @@ class GroupChatToolLoop:
             [napcat_executor, self.context.mcp_tool_manager]
         )
         tools = tool_executor.list_tools()
-        for _ in range(self.config.max_tool_rounds):
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.tool_loop.start",
+            category="plugin",
+            message="AI 群聊工具循环开始",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            model_name=self.config.model_name,
+            model_vendors=self.config.model_vendors,
+            working_messages_count=len(working_messages),
+            tools_count=len(tools),
+            tool_names=[tool.name for tool in tools],
+        )
+        for round_index in range(1, self.config.max_tool_rounds + 1):
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.llm.request",
+                category="plugin",
+                message="准备请求 LLM",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                round_index=round_index,
+                messages_count=len(working_messages),
+                tools_count=len(tools),
+                tool_choice="auto",
+            )
+            await self.debug_dumper.append_llm_request(
+                group_id=msg.group_id,
+                round_index=round_index,
+                messages=working_messages,
+                tools=tools,
+                tool_choice="auto",
+            )
             response = await self.context.llm.get_ai_response_with_tools(
                 messages=working_messages,
                 model_vendors=self.config.model_vendors,
@@ -66,6 +111,30 @@ class GroupChatToolLoop:
             modifier_calls, information_calls = self._split_tool_calls(
                 tool_calls=response.tool_calls
             )
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.llm.response",
+                category="plugin",
+                message="LLM 返回群聊响应",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                round_index=round_index,
+                content_chars=len(content or ""),
+                visible_content_chars=len(reply_content.visible_content or ""),
+                memory_content_chars=len(reply_content.memory_content or ""),
+                reasoning_chars=len(response.reasoning_content or ""),
+                tool_calls_count=len(response.tool_calls),
+                modifier_tool_calls_count=len(modifier_calls),
+                information_tool_calls_count=len(information_calls),
+                tool_call_names=[tool_call.name for tool_call in response.tool_calls],
+            )
+            await self.debug_dumper.append_llm_response(
+                group_id=msg.group_id,
+                round_index=round_index,
+                response=response,
+                modifier_calls=modifier_calls,
+                information_calls=information_calls,
+            )
             if not response.tool_calls:
                 await self._finish_plain_response(
                     msg=msg,
@@ -78,6 +147,19 @@ class GroupChatToolLoop:
                 )
                 return
             if modifier_calls and information_calls:
+                log_event(
+                    level="DEBUG",
+                    event="ai_group_chat.tool_calls.mixed",
+                    category="plugin",
+                    message="模型混用了消息修饰工具和信息工具",
+                    group_id=msg.group_id,
+                    message_id=msg.message_id,
+                    round_index=round_index,
+                    modifier_tool_names=[tool_call.name for tool_call in modifier_calls],
+                    information_tool_names=[
+                        tool_call.name for tool_call in information_calls
+                    ],
+                )
                 corrections_count = self._append_correction(
                     working_messages=working_messages,
                     corrections_count=corrections_count,
@@ -93,10 +175,20 @@ class GroupChatToolLoop:
                     response=response,
                     tool_calls=modifier_calls,
                     tool_executor=tool_executor,
+                    group_id=msg.group_id,
                 )
                 tool_history_messages.extend(modifier_history)
                 if has_modifier_error:
                     napcat_executor.clear_message_modifiers()
+                    log_event(
+                        level="DEBUG",
+                        event="ai_group_chat.modifier_tool.error",
+                        category="plugin",
+                        message="消息修饰工具执行失败，已清理本地消息修饰状态",
+                        group_id=msg.group_id,
+                        message_id=msg.message_id,
+                        round_index=round_index,
+                    )
                     continue
                 if reply_content.visible_content is None:
                     log_event(
@@ -106,6 +198,8 @@ class GroupChatToolLoop:
                         message="模型调用了 QQ 消息修饰工具但没有输出正文，已转入二次正文生成",
                     )
                     reply_content = await self._request_final_content_after_modifiers(
+                        group_id=msg.group_id,
+                        round_index=round_index,
                         working_messages=working_messages,
                         tool_history_messages=tool_history_messages,
                         tools=tools,
@@ -125,8 +219,23 @@ class GroupChatToolLoop:
                         assistant_content=None,
                         assistant_reasoning_content=None,
                     )
+                    await self.debug_dumper.append_context_snapshot(
+                        group_id=msg.group_id,
+                        title="本轮静默结束后的长期上下文",
+                        messages=chat_handler.messages_lst,
+                    )
                     return
                 _ = await napcat_executor.send_final_text(reply_content.visible_content)
+                log_event(
+                    level="DEBUG",
+                    event="ai_group_chat.reply.sent_with_modifiers",
+                    category="plugin",
+                    message="已发送带消息修饰的 AI 群聊回复",
+                    group_id=msg.group_id,
+                    message_id=msg.message_id,
+                    visible_content_chars=len(reply_content.visible_content),
+                    memory_content_chars=len(reply_content.memory_content or ""),
+                )
                 self._persist_turn(
                     chat_handler=chat_handler,
                     turn_messages=turn_messages,
@@ -134,12 +243,18 @@ class GroupChatToolLoop:
                     assistant_content=reply_content.memory_content,
                     assistant_reasoning_content=reply_content.memory_reasoning_content,
                 )
+                await self.debug_dumper.append_context_snapshot(
+                    group_id=msg.group_id,
+                    title="本轮完成后的长期上下文",
+                    messages=chat_handler.messages_lst,
+                )
                 return
             information_history, _ = await self._execute_tool_calls(
                 working_messages=working_messages,
                 response=response,
                 tool_calls=information_calls,
                 tool_executor=tool_executor,
+                group_id=msg.group_id,
             )
             tool_history_messages.extend(information_history)
         raise RuntimeError(f"AI 群聊工具调用超过最大轮数: {self.config.max_tool_rounds}")
@@ -173,6 +288,25 @@ class GroupChatToolLoop:
             _ = await self.context.bot.send_msg(
                 group_id=msg.group_id, text=visible_content
             )
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.reply.sent_plain",
+                category="plugin",
+                message="已发送普通 AI 群聊回复",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                visible_content_chars=len(visible_content),
+                memory_content_chars=len(memory_content or ""),
+            )
+        else:
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.reply.silent",
+                category="plugin",
+                message="AI 群聊本轮无工具且无正文，静默结束",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+            )
         self._persist_turn(
             chat_handler=chat_handler,
             turn_messages=turn_messages,
@@ -180,10 +314,17 @@ class GroupChatToolLoop:
             assistant_content=memory_content,
             assistant_reasoning_content=memory_reasoning_content,
         )
+        await self.debug_dumper.append_context_snapshot(
+            group_id=msg.group_id,
+            title="本轮完成后的长期上下文",
+            messages=chat_handler.messages_lst,
+        )
 
     async def _request_final_content_after_modifiers(
         self,
         *,
+        group_id: str,
+        round_index: int,
         working_messages: list[ChatMessage],
         tool_history_messages: list[ChatMessage],
         tools: list[LLMToolDefinition],
@@ -199,12 +340,35 @@ class GroupChatToolLoop:
         )
         working_messages.append(prompt_message)
         tool_history_messages.append(prompt_message)
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.llm.final_content_request",
+            category="plugin",
+            message="消息修饰工具缺正文，准备禁用工具二次请求正文",
+            group_id=group_id,
+            round_index=round_index,
+            messages_count=len(working_messages),
+        )
+        await self.debug_dumper.append_llm_request(
+            group_id=group_id,
+            round_index=round_index,
+            messages=working_messages,
+            tools=tools,
+            tool_choice="none",
+        )
         response = await self.context.llm.get_ai_response_with_tools(
             messages=working_messages,
             model_vendors=self.config.model_vendors,
             model_name=self.config.model_name,
             tools=tools,
             tool_choice="none",
+        )
+        await self.debug_dumper.append_llm_response(
+            group_id=group_id,
+            round_index=round_index,
+            response=response,
+            modifier_calls=[],
+            information_calls=[],
         )
         if response.tool_calls:
             log_event(
@@ -225,6 +389,7 @@ class GroupChatToolLoop:
         response: LLMResponse,
         tool_calls: list[LLMToolCall],
         tool_executor: CompositeToolExecutor,
+        group_id: str,
     ) -> tuple[list[ChatMessage], bool]:
         """执行模型请求的工具调用，并把结果写回工作上下文。"""
         assistant_message = ChatMessage(
@@ -239,12 +404,39 @@ class GroupChatToolLoop:
         history_messages: list[ChatMessage] = [assistant_message]
         has_error = False
         for tool_call in tool_calls:
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.tool_call.start",
+                category="plugin",
+                message="开始执行模型请求的工具调用",
+                group_id=group_id,
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                arguments=tool_call.arguments,
+            )
             tool_message, is_error = await self._call_tool_for_model(
                 tool_call=tool_call,
                 tool_executor=tool_executor,
             )
             working_messages.append(tool_message)
             history_messages.append(tool_message)
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.tool_call.finished",
+                category="plugin",
+                message="模型请求的工具调用执行完成",
+                group_id=group_id,
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                is_error=is_error,
+                tool_message_chars=len(tool_message.text or ""),
+            )
+            await self.debug_dumper.append_tool_result(
+                group_id=group_id,
+                tool_call=tool_call,
+                tool_message=tool_message,
+                is_error=is_error,
+            )
             if is_error:
                 has_error = True
         return history_messages, has_error
@@ -335,6 +527,18 @@ class GroupChatToolLoop:
                     reasoning_content=assistant_reasoning_content,
                 )
             )
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.context.persist",
+            category="plugin",
+            message="AI 群聊本轮消息写入长期上下文",
+            turn_messages_count=len(turn_messages),
+            tool_history_messages_count=len(tool_history_messages),
+            persisted_messages_count=len(history_messages),
+            persist_tool_results=self.config.persist_tool_results,
+            assistant_content_chars=len(assistant_content or ""),
+            assistant_reasoning_chars=len(assistant_reasoning_content or ""),
+        )
         chat_handler.build_chatmessage(message_lst=history_messages)
 
     def _normalize_content(self, content: str | None) -> str | None:

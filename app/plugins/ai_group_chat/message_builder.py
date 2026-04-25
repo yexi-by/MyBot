@@ -57,6 +57,19 @@ class GroupChatMessageBuilder:
         """把当前群消息和可选引用消息整理为单条 LLM 输入。"""
         text_blocks = [self._format_current_message_markdown(msg=msg)]
         image_bytes: list[bytes] = []
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.message_builder.start",
+            category="plugin",
+            message="开始构造 AI 群聊用户输入",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            user_id=msg.user_id,
+            supports_multimodal=self.config.supports_multimodal,
+            append_deepseek_v4_roleplay_instruct=append_deepseek_v4_roleplay_instruct,
+            segment_count=len(msg.message),
+            raw_message=msg.raw_message,
+        )
         if self.config.supports_multimodal:
             image_bytes = await self._collect_message_images(msg=msg)
         reply_message = await self._load_reply_context_message(msg=msg)
@@ -68,6 +81,18 @@ class GroupChatMessageBuilder:
                 )
         if append_deepseek_v4_roleplay_instruct:
             text_blocks.append(DEEPSEEK_V4_ROLEPLAY_INSTRUCT)
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.message_builder.finished",
+            category="plugin",
+            message="AI 群聊用户输入构造完成",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            text_blocks_count=len(text_blocks),
+            text_chars=sum(len(text_block) for text_block in text_blocks),
+            image_count=len(image_bytes),
+            has_reply_context=reply_message is not None,
+        )
         return ChatMessage(
             role="user",
             text="\n\n".join(text_blocks),
@@ -80,19 +105,69 @@ class GroupChatMessageBuilder:
         """读取当前消息引用的历史群消息。"""
         reply_id = self._extract_reply_id(msg=msg)
         if reply_id is None:
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.reply_context.none",
+                category="plugin",
+                message="当前群消息没有引用消息",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+            )
             return None
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.reply_context.lookup",
+            category="plugin",
+            message="开始从 Redis 读取引用消息上下文",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            reply_message_id=reply_id,
+        )
         stored_message = await self.database.search_messages(
             self_id=msg.self_id,
             group_id=msg.group_id,
             message_id=reply_id,
         )
         if not isinstance(stored_message, GroupMessage):
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.reply_context.missing",
+                category="plugin",
+                message="Redis 中没有找到引用消息上下文",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                reply_message_id=reply_id,
+            )
             return None
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.reply_context.loaded",
+            category="plugin",
+            message="已从 Redis 读取引用消息上下文",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            reply_message_id=reply_id,
+            reply_user_id=stored_message.user_id,
+            reply_raw_message=stored_message.raw_message,
+            reply_segment_count=len(stored_message.message),
+        )
         return stored_message
 
     async def _collect_message_images(self, *, msg: GroupMessage) -> list[bytes]:
         """收集消息中的图片字节。"""
         image_bytes: list[bytes] = []
+        image_segments_count = sum(
+            1 for segment in msg.message if isinstance(segment, Image)
+        )
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.image_collect.start",
+            category="plugin",
+            message="开始收集群消息图片",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            image_segments_count=image_segments_count,
+        )
         for segment in msg.message:
             if not isinstance(segment, Image):
                 continue
@@ -112,6 +187,18 @@ class GroupChatMessageBuilder:
                 continue
             if data is not None:
                 image_bytes.append(data)
+                log_event(
+                    level="DEBUG",
+                    event="ai_group_chat.image_collect.loaded",
+                    category="plugin",
+                    message="群消息图片读取成功",
+                    group_id=msg.group_id,
+                    message_id=msg.message_id,
+                    file=segment.data.file,
+                    path=segment.data.path,
+                    url=segment.data.url,
+                    bytes_count=len(data),
+                )
                 continue
             log_event(
                 level="WARNING",
@@ -123,6 +210,15 @@ class GroupChatMessageBuilder:
                 path=segment.data.path,
                 url=segment.data.url,
             )
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.image_collect.finished",
+            category="plugin",
+            message="群消息图片收集完成",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            loaded_image_count=len(image_bytes),
+        )
         return image_bytes
 
     async def _load_image_bytes(self, *, segment: Image) -> bytes | None:

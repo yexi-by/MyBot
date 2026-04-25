@@ -5,6 +5,7 @@ from typing import Protocol, cast
 
 from app.models import GroupMessage, JsonObject, Response, Sender, Text
 from app.plugins.ai_group_chat.config import AIGroupChatConfig
+from app.plugins.ai_group_chat.debug_dump import AIGroupChatDebugDumper
 from app.plugins.ai_group_chat.tool_loop import GroupChatToolLoop
 from app.plugins.base import Context
 from app.services import ChatMessage, ContextHandler
@@ -202,9 +203,11 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
     async def test_reasoning_output_is_visible_but_not_persisted(self) -> None:
         """开启思维链展示时，长期上下文只保存正式回复。"""
         fake_context = FakeContext()
+        config = build_config(output_reasoning_content=True)
         tool_loop = GroupChatToolLoop(
-            config=build_config(output_reasoning_content=True),
+            config=config,
             context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
         )
         chat_handler = ContextHandler(system_prompt="系统提示词", max_context_length=10)
 
@@ -232,12 +235,14 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
     async def test_reasoning_can_be_passed_back_as_structured_field(self) -> None:
         """开启思维链回传时，长期上下文保留结构化字段但正文仍然干净。"""
         fake_context = FakeContext()
+        config = build_config(
+            output_reasoning_content=False,
+            pass_back_reasoning_content=True,
+        )
         tool_loop = GroupChatToolLoop(
-            config=build_config(
-                output_reasoning_content=False,
-                pass_back_reasoning_content=True,
-            ),
+            config=config,
             context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
         )
         chat_handler = ContextHandler(system_prompt="系统提示词", max_context_length=10)
 
@@ -262,12 +267,14 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             llm=fake_llm,
             mcp_tool_manager=FakeInfoToolManager(),
         )
+        config = build_config(
+            output_reasoning_content=False,
+            pass_back_reasoning_content=True,
+        )
         tool_loop = GroupChatToolLoop(
-            config=build_config(
-                output_reasoning_content=False,
-                pass_back_reasoning_content=True,
-            ),
+            config=config,
             context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
         )
         chat_handler = ContextHandler(system_prompt="系统提示词", max_context_length=10)
 
