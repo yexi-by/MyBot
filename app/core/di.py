@@ -9,7 +9,7 @@ from fastapi import WebSocket
 from redis.asyncio import Redis
 
 from app.api import BOTClient
-from app.config import RAW_CONFIG_DICT, Settings
+from app.config import Settings
 from app.database import RedisDatabaseManager
 from app.models import AllEvent
 from app.plugins import PLUGINS, BasePlugin, Context, load_all_plugins
@@ -18,8 +18,6 @@ from app.services import LLMHandler, MCPToolManager
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
 from .plugin_manager import PluginController
-
-TIME_OUT = 30
 
 DirectHttpx = NewType("DirectHttpx", httpx.AsyncClient)
 ProxyHttpx = NewType("ProxyHttpx", httpx.AsyncClient)
@@ -31,15 +29,20 @@ class MyProvider(Provider):
     # Dishka 的 from_context 返回提供器占位对象，第三方类型无法表达为 WebSocket 实例。
     websocket: ClassVar[object] = from_context(provides=WebSocket, scope=Scope.SESSION)
 
+    def __init__(self, settings: Settings) -> None:
+        """保存启动阶段已经校验过的全局配置。"""
+        super().__init__()
+        self.settings = settings
+
     @provide(scope=Scope.APP)
     def get_settings(self) -> Settings:
         """读取并构造全局配置。"""
-        return Settings.model_validate(RAW_CONFIG_DICT)
+        return self.settings
 
     @provide(scope=Scope.APP)
-    def get_direct_httpx(self) -> DirectHttpx:
+    def get_direct_httpx(self, settings: Settings) -> DirectHttpx:
         """创建不带代理的 HTTP 客户端。"""
-        return DirectHttpx(httpx.AsyncClient())
+        return DirectHttpx(httpx.AsyncClient(timeout=settings.network.timeout_seconds))
 
     @provide(scope=Scope.APP)
     def get_event_type_checker(self) -> EventTypeChecker:
@@ -49,17 +52,19 @@ class MyProvider(Provider):
     @provide(scope=Scope.APP)
     def get_proxy_httpx(self, settings: Settings) -> ProxyHttpx | None:
         """初始化可选代理 HTTP 客户端。"""
-        proxy = settings.proxy
+        proxy = settings.network.proxy
         if proxy is None:
             return None
-        return ProxyHttpx(httpx.AsyncClient(proxy=proxy, timeout=TIME_OUT))
+        return ProxyHttpx(
+            httpx.AsyncClient(proxy=proxy, timeout=settings.network.timeout_seconds)
+        )
 
     @provide(scope=Scope.APP)
     def get_llm_handler(self, settings: Settings) -> LLMHandler | None:
         """初始化可选 LLM 服务。"""
-        if not settings.llm_settings:
+        if not settings.llm.providers:
             return None
-        return LLMHandler.register_instance(settings.llm_settings)
+        return LLMHandler.register_instance(settings.llm.providers)
 
     @provide(scope=Scope.APP)
     def get_mcp_tool_manager(self, settings: Settings) -> MCPToolManager:
@@ -70,10 +75,10 @@ class MyProvider(Provider):
     def get_redis_client(self, settings: Settings) -> Redis:
         """创建 Redis 异步客户端。"""
         return Redis(
-            host=settings.redis_config.host,
-            port=settings.redis_config.port,
-            db=settings.redis_config.db,
-            password=settings.redis_config.password,
+            host=settings.redis.host,
+            port=settings.redis.port,
+            db=settings.redis.db,
+            password=settings.redis.password,
         )
 
     @provide(scope=Scope.APP)
@@ -81,7 +86,7 @@ class MyProvider(Provider):
         self, redis_client: Redis, settings: Settings, client: DirectHttpx
     ) -> RedisDatabaseManager:
         """创建 Redis 消息存储服务。"""
-        path = settings.video_and_image_path
+        path = settings.storage.media_path
         return RedisDatabaseManager(redis_client=redis_client, path=path, client=client)
 
     @provide(scope=Scope.SESSION)

@@ -27,9 +27,10 @@ from .event_parser import EventTypeChecker
 class NapCatServer:
     """承载 NapCat 反向 WebSocket 连接的 FastAPI 服务。"""
 
-    def __init__(self, container: AsyncContainer) -> None:
+    def __init__(self, container: AsyncContainer, settings: Settings) -> None:
         """创建 FastAPI 应用并注册路由。"""
         self.container: AsyncContainer = container
+        self.settings: Settings = settings
         self.app: FastAPI = FastAPI(lifespan=self.lifespan)
         setup_dishka(self.container, self.app)
         self._register_routes()
@@ -64,7 +65,14 @@ class NapCatServer:
     @asynccontextmanager
     async def lifespan(self, _app: FastAPI) -> AsyncIterator[None]:
         """管理应用启动预热与关闭清理。"""
-        log_run_start(message="正在初始化服务组件", host="0.0.0.0", port=6055)
+        log_run_start(
+            message="正在初始化服务组件",
+            app_name=self.settings.app.name,
+            environment=self.settings.app.environment,
+            host=self.settings.server.host,
+            port=self.settings.server.port,
+            websocket_path_prefix=self.settings.server.websocket_path_prefix,
+        )
         # 因为dishka是惰性加载的,所以在首次运行的时候需要先把全局对象给预热提前加载
         # 否则大概率发生*会话级*实例创建的时候缺少全局依赖导致创建失败的现象
         _ = await self.container.get(RedisDatabaseManager)
@@ -102,10 +110,10 @@ class NapCatServer:
     ) -> None:
         """校验 NapCat WebSocket Bearer Token。"""
         setting = await self.container.get(Settings)
-        password = setting.password
+        token = setting.napcat.websocket_token
         headers = websocket.headers
         auth_header = headers.get("authorization", "")
-        expected_header = "Bearer " + password
+        expected_header = "Bearer " + token
         if not secrets.compare_digest(auth_header, expected_header):  # 防时序攻击
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             raise ValueError("NapCat WebSocket Token 校验失败")
@@ -114,7 +122,9 @@ class NapCatServer:
     def _register_routes(self) -> None:
         """注册 WebSocket 路由。"""
 
-        @self.app.websocket("/ws/{client_id}")
+        websocket_path = f"{self.settings.server.websocket_path_prefix}/{{client_id}}"
+
+        @self.app.websocket(websocket_path)
         @inject
         async def websocket_endpoint(
             websocket: WebSocket,

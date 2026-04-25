@@ -1,11 +1,37 @@
-# NapCat 反向 WebSocket 连接密码，对应 NapCat WebSocket Client 的 Token。
-password = "CHANGE_ME_NAPCAT_TOKEN"
+# 应用元信息只用于日志和运维识别，不承载业务逻辑。
+[app]
+name = "MyBot"
+environment = "production"
 
-# 图片、视频等媒体缓存目录；首次运行会自动创建。
-video_and_image_path = "data"
+# 服务监听配置。NapCat 反向 WebSocket 默认连接 ws://<服务器IP>:6055/ws/napcat。
+[server]
+host = "0.0.0.0"
+port = 6055
+websocket_path_prefix = "/ws"
+access_log = false
+log_level = "info"
 
-# 可选 HTTP 代理。留空字符串表示不启用代理。
+# NapCat WebSocket Client 的 Token；服务端会按 Bearer Token 校验。
+[napcat]
+websocket_token = "CHANGE_ME_NAPCAT_TOKEN"
+
+# 图片、视频等媒体缓存目录；Docker 部署默认挂载到 /app/data。
+[storage]
+media_path = "data"
+
+# 项目通用出站网络配置；proxy 留空表示不启用代理。
+[network]
 proxy = ""
+timeout_seconds = 30
+
+# 统一日志配置。终端日志偏简洁，文件日志和结构化日志保留排障上下文。
+[logging]
+directory = "logs"
+console_level = "INFO"
+file_level = "DEBUG"
+rotation = "50 MB"
+retention = "30 days"
+compression = "gz"
 
 [mcp]
 # 是否启用 MCP 工具加载。开发初期可以先保持 false。
@@ -18,8 +44,10 @@ args = ["-y", "firecrawl-mcp"]
 env = { FIRECRAWL_API_KEY = "CHANGE_ME", FIRECRAWL_API_URL = "http://127.0.0.1:3002" }
 disabled = true
 
-[[llm_settings]]
+[llm]
 # LLM 服务只保留 OpenAI 兼容协议面，model_vendors 是插件里引用的供应商别名。
+
+[[llm.providers]]
 api_key = "sk-CHANGE_ME"
 base_url = "https://api.deepseek.com"
 model_vendors = "deepseek"
@@ -27,7 +55,7 @@ provider_type = "openai"
 retry_count = 3
 retry_delay = 1
 
-[redis_config]
+[redis]
 # Redis 用于缓存 NapCat 事件和群聊历史消息。
 host = "localhost"
 port = 6379

@@ -39,7 +39,7 @@ NapCat 反向 WebSocket 地址示例：
 ws://<本机局域网 IP>:6055/ws/napcat
 ```
 
-Token 使用 `setting.toml` 中的 `password`，NapCat 侧填写 Bearer Token 对应值即可。
+Token 使用 `setting.toml` 中 `[napcat].websocket_token`，NapCat 侧填写 Bearer Token 对应值即可。
 
 ## Docker
 
@@ -65,7 +65,9 @@ docker compose up -d
 LLM 当前只维护 OpenAI 兼容协议面：
 
 ```toml
-[[llm_settings]]
+[llm]
+
+[[llm.providers]]
 api_key = "sk-xxx"
 base_url = "https://api.deepseek.com"
 model_vendors = "deepseek"
