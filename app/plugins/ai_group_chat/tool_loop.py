@@ -1,5 +1,7 @@
 """AI 群聊插件的工具调用循环。"""
 
+from dataclasses import dataclass
+
 from app.models import GroupMessage, JsonObject, JsonValue
 from app.plugins.base import Context
 from app.services import ChatMessage, CompositeToolExecutor, ContextHandler, NapCatGroupToolExecutor
@@ -8,6 +10,14 @@ from app.services.llm.tools import build_tool_result_message
 from app.utils.log import log_event
 
 from .config import AIGroupChatConfig
+
+
+@dataclass(frozen=True)
+class ReplyContent:
+    """区分群内可见回复和写入长期上下文的回复。"""
+
+    visible_content: str | None
+    memory_content: str | None
 
 
 class GroupChatToolLoop:
@@ -48,7 +58,7 @@ class GroupChatToolLoop:
                 tools=tools,
             )
             content = self._normalize_content(response.content)
-            final_content = self._build_visible_content(
+            reply_content = self._build_reply_content(
                 content=content,
                 reasoning_content=response.reasoning_content,
             )
@@ -61,7 +71,8 @@ class GroupChatToolLoop:
                     chat_handler=chat_handler,
                     turn_messages=turn_messages,
                     tool_history_messages=tool_history_messages,
-                    content=final_content,
+                    visible_content=reply_content.visible_content,
+                    memory_content=reply_content.memory_content,
                 )
                 return
             if modifier_calls and information_calls:
@@ -85,19 +96,19 @@ class GroupChatToolLoop:
                 if has_modifier_error:
                     napcat_executor.clear_message_modifiers()
                     continue
-                if final_content is None:
+                if reply_content.visible_content is None:
                     log_event(
                         level="WARNING",
                         event="ai_group_chat.modifier_without_content",
                         category="plugin",
                         message="模型调用了 QQ 消息修饰工具但没有输出正文，已转入二次正文生成",
                     )
-                    final_content = await self._request_final_content_after_modifiers(
+                    reply_content = await self._request_final_content_after_modifiers(
                         working_messages=working_messages,
                         tool_history_messages=tool_history_messages,
                         tools=tools,
                     )
-                if final_content is None:
+                if reply_content.visible_content is None:
                     napcat_executor.clear_message_modifiers()
                     log_event(
                         level="WARNING",
@@ -112,12 +123,12 @@ class GroupChatToolLoop:
                         assistant_content=None,
                     )
                     return
-                _ = await napcat_executor.send_final_text(final_content)
+                _ = await napcat_executor.send_final_text(reply_content.visible_content)
                 self._persist_turn(
                     chat_handler=chat_handler,
                     turn_messages=turn_messages,
                     tool_history_messages=tool_history_messages,
-                    assistant_content=final_content,
+                    assistant_content=reply_content.memory_content,
                 )
                 return
             information_history, _ = await self._execute_tool_calls(
@@ -149,16 +160,19 @@ class GroupChatToolLoop:
         chat_handler: ContextHandler,
         turn_messages: list[ChatMessage],
         tool_history_messages: list[ChatMessage],
-        content: str | None,
+        visible_content: str | None,
+        memory_content: str | None,
     ) -> None:
         """处理没有工具调用的最终响应。"""
-        if content is not None:
-            _ = await self.context.bot.send_msg(group_id=msg.group_id, text=content)
+        if visible_content is not None:
+            _ = await self.context.bot.send_msg(
+                group_id=msg.group_id, text=visible_content
+            )
         self._persist_turn(
             chat_handler=chat_handler,
             turn_messages=turn_messages,
             tool_history_messages=tool_history_messages,
-            assistant_content=content,
+            assistant_content=memory_content,
         )
 
     async def _request_final_content_after_modifiers(
@@ -167,7 +181,7 @@ class GroupChatToolLoop:
         working_messages: list[ChatMessage],
         tool_history_messages: list[ChatMessage],
         tools: list[LLMToolDefinition],
-    ) -> str | None:
+    ) -> ReplyContent:
         """消息修饰工具缺正文时，禁用工具并二次请求最终群聊正文。"""
         prompt_message = ChatMessage(
             role="user",
@@ -193,7 +207,7 @@ class GroupChatToolLoop:
                 category="plugin",
                 message="工具已被禁用，但模型仍返回了工具调用，已忽略该工具调用",
             )
-        return self._build_visible_content(
+        return self._build_reply_content(
             content=self._normalize_content(response.content),
             reasoning_content=response.reasoning_content,
         )
@@ -316,13 +330,21 @@ class GroupChatToolLoop:
             return None
         return stripped_content
 
-    def _build_visible_content(
+    def _build_reply_content(
         self, *, content: str | None, reasoning_content: str | None
-    ) -> str | None:
-        """按插件配置决定是否把显式思考内容拼入最终可见回复。"""
+    ) -> ReplyContent:
+        """构造群内可见回复，并保持长期上下文只记录正式回复。"""
         if content is None:
-            return None
+            return ReplyContent(visible_content=None, memory_content=None)
         reasoning_text = self._normalize_content(reasoning_content)
         if not self.config.output_reasoning_content or reasoning_text is None:
-            return content
-        return f"（{reasoning_text}）\n{content}"
+            return ReplyContent(visible_content=content, memory_content=content)
+        visible_content = (
+            "【模型原生思维链】\n"
+            "---\n"
+            f"{reasoning_text}\n"
+            "---\n\n"
+            "【回复】\n"
+            f"{content}"
+        )
+        return ReplyContent(visible_content=visible_content, memory_content=content)
