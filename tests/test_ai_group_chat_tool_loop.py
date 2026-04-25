@@ -3,7 +3,7 @@
 import unittest
 from typing import Protocol, cast
 
-from app.models import GroupMessage, JsonObject, Response, Sender, Text
+from app.models import GroupMessage, JsonObject, MessageSegment, Response, Sender, Text
 from app.plugins.ai_group_chat.config import AIGroupChatConfig
 from app.plugins.ai_group_chat.debug_dump import AIGroupChatDebugDumper
 from app.plugins.ai_group_chat.tool_loop import GroupChatToolLoop
@@ -60,12 +60,33 @@ class FakeBot:
     def __init__(self) -> None:
         """初始化发送记录。"""
         self.sent_texts: list[str] = []
+        self.sent_segment_types: list[list[str]] = []
 
-    async def send_msg(self, *, group_id: str, text: str) -> Response:
+    async def send_msg(
+        self,
+        *,
+        group_id: str,
+        text: str | None = None,
+        message_segment: list[MessageSegment] | None = None,
+    ) -> Response:
         """记录发送文本并返回成功响应。"""
         _ = group_id
-        self.sent_texts.append(text)
+        if message_segment is not None:
+            self.sent_segment_types.append(
+                [message_segment_item.type for message_segment_item in message_segment]
+            )
+            self.sent_texts.append(self._extract_text(message_segment=message_segment))
+            return Response(status="ok", retcode=0)
+        if text is not None:
+            self.sent_texts.append(text)
         return Response(status="ok", retcode=0)
+
+    def _extract_text(self, *, message_segment: list[MessageSegment]) -> str:
+        """从消息段里提取文本，便于断言发送内容。"""
+        text_parts = [
+            segment.data.text for segment in message_segment if isinstance(segment, Text)
+        ]
+        return "".join(text_parts)
 
 
 class FakeContext:
@@ -187,12 +208,49 @@ class FakeToolCallLLM:
         self.received_messages.append(messages[:])
         if len(self.received_messages) == 1:
             return LLMResponse(
+                content="我先查一下",
                 reasoning_content="工具前思考",
                 tool_calls=[
                     LLMToolCall(id="call-1", name="test__lookup", arguments={})
                 ],
             )
         return LLMResponse(content="工具后回复", reasoning_content="最终思考")
+
+
+class FakeModifierToolCallLLM:
+    """测试用 LLM，调用消息修饰工具并同时给出正文。"""
+
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+    ) -> str:
+        """测试中不会触发纯文本压缩请求。"""
+        _ = (messages, model_vendors, model_name)
+        return "压缩摘要"
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """返回引用当前消息的工具调用和同轮正文。"""
+        _ = (messages, model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
+        return LLMResponse(
+            content="收到喵",
+            tool_calls=[
+                LLMToolCall(
+                    id="call-reply",
+                    name="qq__reply_current_message",
+                    arguments={},
+                )
+            ],
+        )
 
 
 class FakeCompressionLLM:
@@ -358,7 +416,31 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(tool_call_message.role, "assistant")
         self.assertEqual(tool_call_message.reasoning_content, "工具前思考")
-        self.assertEqual(fake_context.bot.sent_texts, ["工具后回复"])
+        self.assertEqual(fake_context.bot.sent_texts, ["我先查一下", "工具后回复"])
+        self.assertEqual(chat_handler.messages_lst[2].text, "我先查一下")
+        self.assertEqual(chat_handler.messages_lst[3].text, "工具后回复")
+
+    async def test_modifier_tool_content_is_sent_with_message_segments(self) -> None:
+        """消息修饰工具同轮 content 会按回复/艾特等消息段发送并写入上下文。"""
+        fake_context = FakeContext(llm=FakeModifierToolCallLLM())
+        config = build_config(output_reasoning_content=False)
+        tool_loop = GroupChatToolLoop(
+            config=config,
+            context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="回复我")],
+        )
+
+        self.assertEqual(fake_context.bot.sent_texts, ["收到喵"])
+        self.assertEqual(fake_context.bot.sent_segment_types, [["reply", "text"]])
+        self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
+        self.assertEqual(chat_handler.messages_lst[-1].text, "收到喵")
 
     async def test_context_compression_excludes_current_message_then_rebuilds(
         self,

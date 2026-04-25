@@ -26,7 +26,6 @@ class AIGroupChatConfig(StrictModel):
     model_vendors: str
     supports_multimodal: bool = False
     max_tool_rounds: int = Field(default=8, ge=1)
-    correction_retry_count: int = Field(default=3, ge=1)
     token_estimation_safety_factor: float = Field(default=1.25, ge=1)
     context_compression_notice: str = "上下文有点长，我先整理一下记忆，稍等我几秒喵~"
     output_reasoning_content: bool = False
