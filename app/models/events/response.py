@@ -1,13 +1,17 @@
-from typing import  Literal
+"""NapCat API 响应模型。"""
 
-from pydantic import BaseModel
+from typing import Literal
+
+from app.models.common import JsonValue, StrictModel
 
 
-class Response(BaseModel):
+class Response(StrictModel):
+    """WebSocket Action 响应。"""
+
     status: str
     retcode: int
-    data: dict
-    message: str
+    data: JsonValue = None
+    message: str = ""
     echo: str | None = None
-    wording: str
+    wording: str = ""
     stream: Literal["stream-action", "normal-action"] | None = None

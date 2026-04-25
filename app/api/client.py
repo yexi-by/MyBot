@@ -8,7 +8,7 @@ import asyncio
 from fastapi import WebSocket
 
 from app.database import RedisDatabaseManager
-from app.models import AllEvent, LifeCycle, Response
+from app.models import AllEvent, LifeCycle, NapCatId, Response
 
 from .mixins import (
     AccountMixin,
@@ -41,7 +41,6 @@ class BOTClient(
         - AlbumMixin: 群相册相关 API
         - AccountMixin: 账号相关 API（好友、个人信息等）
         - SystemMixin: 系统相关 API（版本、cookies、密钥等）
-        - StreamMixin: 流式操作相关 API（清理流临时文件、流式下载测试、流式上传文件等）
     """
 
     def __init__(self, websocket: WebSocket, database: RedisDatabaseManager) -> None:
@@ -51,13 +50,10 @@ class BOTClient(
             websocket: WebSocket 连接实例
             database: Redis 数据库管理器实例
         """
-        self.websocket = websocket
-        self.database = database
+        self.websocket: WebSocket = websocket
+        self.database: RedisDatabaseManager = database
         self.echo_dict: dict[str, asyncio.Future[Response]] = {}
-        self.streams_dict: dict[
-            str, asyncio.Queue[Response | None | BaseException]
-        ] = {}
-        self.boot_id: int = 0
+        self.boot_id: NapCatId = ""
         self.timeout: int = 120
 
     def get_self_qq_id(self, msg: AllEvent) -> None:

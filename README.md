@@ -1,238 +1,107 @@
 # MyBot
 
-基于 FastAPI 和 NapCat 的 QQ 机器人框架，使用 Python 3.13+ 开发。
+基于 FastAPI、NapCat、Redis 和 OpenAI 兼容 LLM 接口的 QQ 机器人框架，使用 Python 3.13+ 与 `uv` 管理依赖。
 
-本项目主要用于学习和开发 QQ 机器人，集成了依赖注入、插件系统以及 LLM/RAG 等功能。
+## 当前能力
 
+- NapCat 反向 WebSocket 服务，默认监听 `0.0.0.0:6055`。
+- 插件自动注册与按事件类型分发。
+- Redis 消息缓存、撤回同步清理和媒体缓存。
+- OpenAI 兼容 LLM 文本、工具调用、图片接口。
+- MCP stdio 工具接入。
+- 通用 NapCat 群聊本地工具集，包括回复、艾特、群文件查询和群历史查询。
 
----
+## 本地运行
 
-## 🚀 部署 (Docker)
-
-提供构建好的 Docker 镜像，可直接通过 Docker Compose 启动。
-
-### 1. 准备工作
-
-创建必要的目录和配置文件：
-
-```bash
-mkdir -p debug logs plugins_config vector
-touch setting.toml
-```
-
-### 2. 启动服务
-
-创建 `docker-compose.yml`：
-
-```yaml
-services:
-  mybot:
-    image: docker.io/yexi12345/mybotdev:latest
-    container_name: mybot
-    restart: unless-stopped
-    ports:
-      - "6055:6055"
-    volumes:
-      - ./debug:/app/debug
-      - ./logs:/app/logs
-      - ./plugins_config:/app/plugins_config
-      - ./vector:/app/vector
-      - ./setting.toml:/app/setting.toml
-```
-
-运行：
+1. 安装依赖：
 
 ```bash
-docker-compose up -d
-```
-
----
-
-## 💻 本地开发
-
-如需进行插件开发或调试，请参考以下步骤。**注意：本项目仅支持使用 `uv` 进行依赖管理。**
-
-### 1. 环境准备
-
-*   Python 3.13+
-*   Redis
-*   [NapCat](https://github.com/NapNeko/NapCatQQ)
-*   [uv](https://github.com/astral-sh/uv)
-
-### 2. 安装与运行
-
-```bash
-# 1. 安装依赖
 uv sync
-
-# 2. 配置 setting.toml (参考下方配置说明)
-cp setting.example.toml setting.toml  # 如果有示例文件的话，或者手动创建
-
-# 3. 运行
-uv run main.py
 ```
 
-### 配置文件示例 (`setting.toml`)
+2. 准备配置：
+
+```bash
+cp setting.example.toml setting.toml
+```
+
+3. 按需编辑 `setting.toml` 和 `plugins_config/plugins.toml`。
+
+4. 启动服务：
+
+```bash
+uv run python -m app.main
+```
+
+NapCat 反向 WebSocket 地址示例：
+
+```text
+ws://<本机局域网 IP>:6055/ws/napcat
+```
+
+Token 使用 `setting.toml` 中的 `password`，NapCat 侧填写 Bearer Token 对应值即可。
+
+## Docker
+
+```bash
+docker compose up -d
+```
+
+默认挂载：
+
+- `./setting.toml:/app/setting.toml`
+- `./plugins_config:/app/plugins_config`
+- `./data:/app/data`
+- `./logs:/app/logs`
+- `./debug:/app/debug`
+
+镜像内预装 Python、Node.js、npm、pnpm、yarn、uv/uvx、Docker CLI 和常用 MCP stdio 运行环境。
+
+## 配置说明
+
+全局配置放在 `setting.toml`，示例见 `setting.example.toml`。
+
+插件配置放在 `plugins_config/plugins.toml`。插件配置由各插件自己的 Pydantic 模型严格校验，未知字段会直接报错，避免配置拼错后静默失效。
+
+LLM 当前只维护 OpenAI 兼容协议面：
 
 ```toml
-faiss_file_location = "./vector"
-video_and_image_path = "./logs/media"
-password = "YOUR_NAPCAT_TOKEN"  # NapCat Token
-
-[redis_config]
-host = "localhost"
-port = 6379
-db = 0
-password = ""
-
 [[llm_settings]]
-api_key = "sk-xxxx"
-base_url = "https://api.openai.com/v1"
-model_vendors = "openai"
+api_key = "sk-xxx"
+base_url = "https://api.deepseek.com"
+model_vendors = "deepseek"
 provider_type = "openai"
-
-[embedding_settings]
-api_key = "sk-xxxx"
-provider_type = "siliconflow"
+retry_count = 3
+retry_delay = 1
 ```
 
----
+## 代码结构
 
-## 🏗️ 架构说明
-
-### 1. 系统完整架构图
-
-```mermaid
-graph TB
-    subgraph External["外部层"]
-        NapCat["NapCat (Protocol)"]
-        LLM["LLM Providers (OpenAI/Gemini/Volc)"]
-        Redis[("Redis")]
-        FAISS[("FAISS Vector DB")]
-    end
-
-    subgraph DI["依赖注入容器 (Dishka)"]
-        Settings["配置管理"]
-        
-        subgraph Services["通用服务"]
-            LLMHandler["LLM Handler (Resilient Wrapper)"]
-            RAG["RAG Pipeline (Async Flow)"]
-            RedisMgr["Redis Manager"]
-        end
-        
-        subgraph Session["会话层"]
-            BotClient["BOT Client (Mixin架构)"]
-            Dispatcher["Event Dispatcher"]
-            PluginCtrl["Plugin Controller"]
-        end
-    end
-
-    subgraph Core["核心层"]
-        Server["NapCatServer (FastAPI)"]
-        Parser["Event Parser (Pydantic)"]
-    end
-
-    subgraph Plugins["插件层"]
-        P_Base["BasePlugin"]
-        P_Queue["Async Task Queue"]
-        P_Logic["User Logic"]
-    end
-
-    %% 连接
-    NapCat <==>|WebSocket| Server
-    Server --> Parser --> Dispatcher
-    Dispatcher --> PluginCtrl
-    
-    %% 服务交互
-    LLMHandler <--> LLM
-    RAG <--> FAISS & LLM
-    RedisMgr <--> Redis
-    BotClient --> NapCat
-
-    %% 插件交互
-    PluginCtrl --> P_Base
-    P_Base --> P_Queue --> P_Logic
-    P_Logic -->|Inject| BotClient & LLMHandler & RAG & RedisMgr
+```text
+app/
+├── api/                  # NapCat WebSocket Action 封装
+├── config/               # 全局配置和插件配置加载
+├── core/                 # FastAPI 服务、DI、事件分发、插件控制器
+├── database/             # Redis 消息存储和媒体缓存
+├── models/               # NapCat 协议模型和 JSON 边界类型
+├── plugins/              # 插件实现
+│   ├── ai_group_chat/    # AI 智能群聊回复插件
+│   ├── auto_unban/       # 自动解禁插件
+│   ├── delete_recalled_message/
+│   ├── group_notice/
+│   └── image_generate/
+├── services/
+│   ├── llm/              # OpenAI 兼容 LLM、MCP、工具注册
+│   └── napcat/           # 通用 NapCat 本地工具集
+└── utils/                # 日志、重试、文件等通用工具
 ```
 
-### 2. 处理流程说明
+## 开发检查
 
-1.  **连接管理**: `NapCatServer` 维护 WebSocket 连接，`Dishka` 为每个连接创建一个独立的 `Scope.SESSION` 容器，确保多账号/多连接之间的数据隔离。
-2.  **API 封装**: `BOTClient` 采用 **Mixin 模式** 设计，将 `MessageMixin`, `GroupMixin`, `FileMixin` 等组合成一个完整的客户端对象，提供类型完善的 API 调用。
-3.  **LLM 服务**: `LLMHandler` 封装了 `ResilientLLMProvider`，实现了对 OpenAI, Gemini, Volcengine 等多厂商接口的统一调用与错误重试。
-4.  **RAG 引擎**: 内置完整的 RAG 流水线：
-    *   **Splitter**: 智能文本切分（支持中英文标点优化）。
-    *   **TokenBucket**: 基于令牌桶算法的 API 速率限制。
-    *   **AsyncPipeline**: 生产者-消费者模式的异步向量化处理。
-    *   **FAISS**: 高性能向量检索。
-5.  **插件系统**:
-    *   **泛型事件**: `BasePlugin[T]` 自动推导订阅事件类型。
-    *   **并发模型**: 每个插件实例维护独立的 `asyncio.Queue` 和 Worker 池，互不阻塞。
-    *   **安全检查**: 启动时进行静态代码分析（AST），防止插件间循环调用导致死锁。
-
----
-
-## 📂 项目结构
-
-```
-MyBot/
-├── app/
-│   ├── api/             # QQ 协议 API 封装
-│   ├── config/          # 配置定义
-│   ├── core/            # 核心组件 (Server, DI, Dispatcher)
-│   ├── database/        # 数据库操作
-│   ├── models/          # 数据模型 (Pydantic)
-│   ├── plugins/         # 插件目录
-│   │   ├── base.py      # 插件基类
-│   │   └── ...
-│   ├── services/        # 业务服务 (LLM, RAG 等)
-│   └── utils/           # 工具类
-├── main.py              # 入口文件
-└── ...
+```bash
+uv run basedpyright
+uv run python -m unittest discover -s tests
+uv run python -m compileall app
 ```
 
----
-
-## 🔌 插件开发
-
-继承 `BasePlugin` 类即可开发插件。
-
-### 1. 基础示例
-
-```python
-from app.plugins import BasePlugin
-from app.models import GroupMessage
-
-class MyPlugin(BasePlugin[GroupMessage]):
-    name = "demo_plugin"
-    consumers_count = 1
-    priority = 10
-
-    def setup(self) -> None:
-        # 初始化逻辑
-        pass
-
-    async def run(self, msg: GroupMessage) -> bool:
-        if msg.raw_message == "ping":
-            # 使用 self.context 调用 API
-            await self.context.bot.send_group_msg(
-                group_id=msg.group_id,
-                message="pong"
-            )
-            return True
-        return False
-```
-
-### 2. Context 对象
-
-插件可以通过 `self.context` 访问系统服务：
-
-*   `self.context.bot`: QQ 机器人 API
-*   `self.context.llm`: LLM 调用接口
-*   `self.context.database`: Redis 操作
-*   `self.context.search_vectors`: 向量检索
-*   `self.context.settings`: 全局配置
-
-## 📄 License
-
-GPL-3.0 License
+项目使用 `basedpyright` strict 模式，提交前需要保持 `0 errors, 0 warnings`。

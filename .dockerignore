@@ -1,27 +1,59 @@
+# Git 与本地工程状态
+.git/
+.github/
+.idea/
+.vscode/
+.vs/
+
+# Python 构建与缓存
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
 build/
 dist/
 wheels/
-*.egg-info
-.venv
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 真实配置、密钥与个人隐私
 setting.toml
-vector
-logs
-debug
-docs
-plugins_config
-.idea
-image
-data
-.vscode
-.vs
+setting.local.toml
+*.secret.toml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# 插件真实配置包含群号、提示词和私有开关，禁止进入镜像上下文
+plugins_config/
+
+# 运行产物与调试产物
+logs/
+debug/
+data/
+image/
+*.log
+*.trace
+*.tmp
+*.bak
 test.txt
 
-.git/
-Dockerfile
-docker-compose.yml
-README.md
-.github
-.gitignore
+# 历史归档代码只用于本地临时迁移
+archived_plugins/
+archived_plugins_config/
+
+# 无需进入镜像上下文的本地说明和脚本
+docs/
 run.bat
+docker-compose.yml
+
+# 保留构建所需文件和可公开示例
+!Dockerfile
+!README.md
+!setting.example.toml

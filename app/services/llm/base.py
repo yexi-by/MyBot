@@ -1,38 +1,48 @@
+"""LLM 服务商基类。"""
+
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .schemas import ChatMessage
+    from .schemas import (
+        ChatMessage,
+        ImageGenerationOptions,
+        LLMResponse,
+        LLMToolChoice,
+        LLMToolDefinition,
+    )
+
 
 class LLMProvider(ABC):
-    """
-    所有 AI 服务商必须继承的基类
-    """
+    """所有 LLM 服务商必须继承的基类。"""
 
     @abstractmethod
     async def get_ai_response(
         self,
-        messages: list,
+        messages: list["ChatMessage"],
         model: str,
-        **kwargs,
     ) -> str:
-        pass
+        """获取文本响应。"""
+        raise NotImplementedError
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list["ChatMessage"],
+        model: str,
+        tools: list["LLMToolDefinition"],
+        tool_choice: "LLMToolChoice" = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> "LLMResponse":
+        """获取可能包含工具调用的结构化响应。"""
+        _ = (messages, model, tools, tool_choice, parallel_tool_calls)
+        raise NotImplementedError(f"{self.__class__.__name__} 不支持工具调用")
 
     async def get_image(
         self,
         message: "ChatMessage",
         model: str,
-        **kwargs,
+        options: "ImageGenerationOptions | None" = None,
     ) -> str:
-        """
-        生成图片（可选方法，不是所有提供商都支持）
-
-        Args:
-            message: 图像生成消息，至少需要提供文本提示词
-            model: 模型名称
-            **kwargs: 提供商对应的额外图像生成参数
-
-        Returns:
-            生成的图片base64编码字符串
-        """
+        """生成图片，不支持该能力的服务商会显式报错。"""
+        _ = (message, model, options)
         raise NotImplementedError(f"{self.__class__.__name__} 不支持图像生成功能")

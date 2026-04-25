@@ -1,229 +1,239 @@
-from typing import Annotated, Any, Literal
+"""NapCat 通知事件模型。"""
 
-from pydantic import BaseModel, Field
+from typing import Annotated, Literal
+
+from pydantic import Field
+
+from app.models.common import JsonObject, NapCatId, NapCatStringInteger, StrictModel
 
 
-class Notice(BaseModel):
-    """通知事件基类"""
+class Notice(StrictModel):
+    """通知事件基类。"""
 
-    time: int  # 事件发生的 Unix 时间戳
-    self_id: int  # 收到事件的机器人 QQ 号
+    time: int
+    self_id: NapCatId
     post_type: Literal["notice"]
 
 
 class GroupNoticeEvent(Notice):
-    """群通知事件基类"""
+    """群通知事件基类。"""
 
-    group_id: int  # 群号
-    user_id: int  # 触发事件的用户 QQ 号
+    group_id: NapCatId
+    user_id: NapCatId
 
 
 class GroupRecallNoticeEvent(GroupNoticeEvent):
-    """群撤回消息通知事件"""
+    """群撤回消息通知事件。"""
 
     notice_type: Literal["group_recall"]
-    operator_id: int  # 操作者 QQ 号 (如果是自己撤回则与 user_id 相同)
-    message_id: int  # 被撤回的消息 ID
+    operator_id: NapCatId
+    message_id: NapCatId
 
 
 class GroupDecreaseEvent(GroupNoticeEvent):
-    """群成员减少通知事件"""
+    """群成员减少通知事件。"""
 
     notice_type: Literal["group_decrease"]
-    operator_id: int  # 操作者 QQ 号 (踢人时有效，主动退群时为 user_id)
-    sub_type: Literal["leave", "kick", "kick_me", "disband"]
-    # leave: 主动退群, kick: 被踢, kick_me: 登录号被踢, disband: 群解散
+    operator_id: NapCatId
+    sub_type: Literal["leave", "kick", "kick_me", "disband"] | str
 
 
 class GroupAdminNoticeEvent(GroupNoticeEvent):
-    """群管理员变更通知事件"""
+    """群管理员变更通知事件。"""
 
     notice_type: Literal["group_admin"]
-    sub_type: Literal["set", "unset"]
-    # set: 设置管理员, unset: 取消管理员
+    sub_type: Literal["set", "unset"] | str
 
 
 class GroupIncreaseEvent(GroupNoticeEvent):
-    """群成员增加通知事件"""
+    """群成员增加通知事件。"""
 
     notice_type: Literal["group_increase"]
-    operator_id: int  # 操作者 QQ 号 (即管理员/群主 QQ 号，approve 时为空)
-    sub_type: Literal["approve", "invite"]
-    # approve: 管理员同意入群, invite: 管理员邀请入群
+    operator_id: NapCatId | None = None
+    sub_type: Literal["approve", "invite"] | str
 
 
 class GroupBanEvent(GroupNoticeEvent):
-    """群成员禁言通知事件"""
+    """群成员禁言通知事件。"""
 
     notice_type: Literal["group_ban"]
-    operator_id: int  # 操作者 QQ 号
-    duration: int  # 禁言时长 (秒)，0 表示解除禁言
-    sub_type: Literal["ban", "lift_ban"]
-    # ban: 禁言, lift_ban: 解除禁言
+    operator_id: NapCatId
+    duration: int
+    sub_type: Literal["ban", "lift_ban"] | str
 
 
-class GroupUploadFile(BaseModel):
-    """群文件信息"""
+class GroupUploadFile(StrictModel):
+    """群文件上传通知中的文件信息。"""
 
-    id: str  # 文件 ID
-    name: str  # 文件名称
-    size: int  # 文件大小 (字节)
-    busid: int  # 文件总线 ID (用于下载文件)
+    id: str
+    name: str
+    size: int
+    busid: NapCatStringInteger | None = None
 
 
 class GroupUploadNoticeEvent(GroupNoticeEvent):
-    """群文件上传通知事件"""
+    """群文件上传通知事件。"""
 
     notice_type: Literal["group_upload"]
-    file: GroupUploadFile  # 文件信息
+    file: GroupUploadFile
 
 
 class GroupCardEvent(GroupNoticeEvent):
-    """群成员名片变更通知事件"""
+    """群成员名片变更通知事件。"""
 
     notice_type: Literal["group_card"]
-    card_new: str  # 新名片
-    card_old: str  # 旧名片
-
-
-class GroupNameEvent(GroupNoticeEvent):
-    """群名称变更通知事件"""
-
-    notice_type: Literal["notify"]
-    sub_type: Literal["group_name"]
-    name_new: str  # 新群名
-
-
-class GroupTitleEvent(GroupNoticeEvent):
-    """群头衔变更通知事件"""
-
-    notice_type: Literal["notify"]
-    sub_type: Literal["title"]
-    title: str  # 新头衔
+    card_new: str = ""
+    card_old: str = ""
 
 
 class GroupEssenceEvent(GroupNoticeEvent):
-    """群精华消息变更通知事件"""
+    """群精华消息变更通知事件。"""
 
     notice_type: Literal["essence"]
-    sub_type: Literal["add", "delete"]
-    # add: 添加精华, delete: 移除精华
-    message_id: int  # 消息 ID
-    sender_id: int  # 消息发送者 QQ 号
-    operator_id: int  # 操作者 QQ 号 (设置/取消精华的管理员)
+    sub_type: Literal["add", "delete"] | str
+    message_id: NapCatId
+    sender_id: NapCatId
+    operator_id: NapCatId
 
 
-class MsgEmojiLike(BaseModel):
-    """表情回应信息"""
+class MsgEmojiLike(StrictModel):
+    """消息表情回应信息。"""
 
-    emoji_id: str  # 表情 ID
-    count: int  # 该表情的回应数量
+    emoji_id: str
+    count: int
 
 
 class GroupMsgEmojiLikeEvent(GroupNoticeEvent):
-    """群消息表情回应通知事件 (NapCat 扩展)"""
+    """群消息表情回应通知事件。"""
 
     notice_type: Literal["group_msg_emoji_like"]
-    message_id: int  # 被回应的消息 ID
-    likes: list[MsgEmojiLike]  # 表情回应列表
-    is_add: bool = True  # 是否是添加表情 (True: 添加, False: 移除)
-
-
-class GroupPokeEvent(GroupNoticeEvent):
-    """群戳一戳通知事件"""
-
-    notice_type: Literal["notify"]
-    sub_type: Literal["poke"]
-    target_id: int  # 被戳的人 QQ 号
-    raw_info: Any = None  # 原始戳一戳信息 (NapCat 扩展, 包含戳一戳动作详情)
-
-
-class GroupLuckyKingEvent(GroupNoticeEvent):
-    """群红包运气王通知事件"""
-
-    notice_type: Literal["notify"]
-    sub_type: Literal["lucky_king"]
-    target_id: int  # 运气王 QQ 号
-
-
-class GroupHonorEvent(GroupNoticeEvent):
-    """群荣誉变更通知事件"""
-
-    notice_type: Literal["notify"]
-    sub_type: Literal["honor"]
-    honor_type: Literal["talkative", "performer", "emotion"]
-    # talkative: 龙王, performer: 群聊之火, emotion: 快乐源泉
+    message_id: NapCatId
+    likes: list[MsgEmojiLike]
+    is_add: bool = True
 
 
 class FriendAddNoticeEvent(Notice):
-    """好友添加通知事件 - 新好友已添加"""
+    """好友添加通知事件。"""
 
     notice_type: Literal["friend_add"]
-    user_id: int  # 新好友 QQ 号
+    user_id: NapCatId
 
 
 class FriendRecallNoticeEvent(Notice):
-    """好友撤回消息通知事件"""
+    """好友撤回消息通知事件。"""
 
     notice_type: Literal["friend_recall"]
-    user_id: int  # 好友 QQ 号
-    message_id: int  # 被撤回的消息 ID
-
-
-class FriendPokeEvent(Notice):
-    """好友戳一戳通知事件"""
-
-    notice_type: Literal["notify"]
-    sub_type: Literal["poke"]
-    target_id: int  # 被戳的人 QQ 号
-    user_id: int  # 发起戳一戳的人 QQ 号 (与 sender_id 相同)
-    sender_id: int  # 发送者 QQ 号
-    raw_info: Any = None  # 原始戳一戳信息 (NapCat 扩展)
-
-
-class ProfileLikeEvent(Notice):
-    """资料点赞通知事件 (NapCat 扩展) - 有人给你的资料卡点赞"""
-
-    notice_type: Literal["notify"]
-    sub_type: Literal["profile_like"]
-    operator_id: int  # 点赞人 QQ 号
-    operator_nick: str  # 点赞人昵称
-    times: int  # 点赞次数
-
-
-class InputStatusEvent(Notice):
-    """输入状态通知事件 (NapCat 扩展) - 对方正在输入"""
-
-    notice_type: Literal["notify"]
-    sub_type: Literal["input_status"]
-    status_text: str  # 状态文本，如 "对方正在输入..."
-    event_type: int  # 事件类型 (1: 开始输入)
-    user_id: int  # 用户 QQ 号
-    group_id: int = 0  # 群号 (私聊时为 0)
+    user_id: NapCatId
+    message_id: NapCatId
 
 
 class BotOfflineEvent(Notice):
-    """Bot 离线通知事件 (NapCat 扩展) - Bot 被挤下线等情况"""
+    """Bot 离线通知事件。"""
 
     notice_type: Literal["bot_offline"]
-    user_id: int  # Bot QQ 号
-    tag: str  # 离线标签/类型
-    message: str  # 离线原因描述
+    user_id: NapCatId
+    tag: str = ""
+    message: str = ""
+
+
+class NotifyBaseEvent(Notice):
+    """notify 通知事件公共字段。"""
+
+    notice_type: Literal["notify"]
+
+
+class NotifyEvent(NotifyBaseEvent):
+    """通用 notify 通知事件。"""
+
+    sub_type: str
+    group_id: NapCatId | None = None
+    user_id: NapCatId | None = None
+    target_id: NapCatId | None = None
+    sender_id: NapCatId | None = None
+    operator_id: NapCatId | None = None
+    operator_nick: str | None = None
+    times: int | None = None
+    status_text: str | None = None
+    event_type: int | None = None
+    raw_info: JsonObject | None = None
+    name_new: str | None = None
+    title: str | None = None
+    honor_type: str | None = None
+
+
+class GroupNotifyEvent(NotifyBaseEvent):
+    """群 notify 通知事件公共字段。"""
+
+    group_id: NapCatId
+    user_id: NapCatId
+
+
+class GroupPokeEvent(GroupNotifyEvent):
+    """群戳一戳通知事件。"""
+
+    sub_type: Literal["poke"]
+    target_id: NapCatId
+    raw_info: JsonObject | None = None
+
+
+class FriendPokeEvent(NotifyBaseEvent):
+    """好友戳一戳通知事件。"""
+
+    sub_type: Literal["poke"]
+    user_id: NapCatId
+    target_id: NapCatId
+    sender_id: NapCatId | None = None
+    raw_info: JsonObject | None = None
+
+
+class GroupNameEvent(GroupNotifyEvent):
+    """群名称变更通知事件。"""
+
+    sub_type: Literal["group_name"]
+    name_new: str
+
+
+class GroupTitleEvent(GroupNotifyEvent):
+    """群头衔变更通知事件。"""
+
+    sub_type: Literal["title"]
+    title: str
+
+
+class GroupLuckyKingEvent(GroupNotifyEvent):
+    """群红包运气王通知事件。"""
+
+    sub_type: Literal["lucky_king"]
+    target_id: NapCatId
+
+
+class GroupHonorEvent(GroupNotifyEvent):
+    """群荣誉变更通知事件。"""
+
+    sub_type: Literal["honor"]
+    honor_type: Literal["talkative", "performer", "emotion"] | str
+
+
+class ProfileLikeEvent(NotifyBaseEvent):
+    """资料点赞通知事件。"""
+
+    sub_type: Literal["profile_like"]
+    operator_id: NapCatId
+    operator_nick: str = ""
+    times: int
+
+
+class InputStatusEvent(NotifyBaseEvent):
+    """输入状态通知事件。"""
+
+    sub_type: Literal["input_status"]
+    user_id: NapCatId
+    group_id: NapCatId | None = None
+    status_text: str = ""
+    event_type: int
 
 
 type PokeEvent = GroupPokeEvent | FriendPokeEvent
-
-
-type NotifyEvent = Annotated[
-    GroupNameEvent
-    | GroupTitleEvent
-    | PokeEvent
-    | ProfileLikeEvent
-    | InputStatusEvent
-    | GroupLuckyKingEvent
-    | GroupHonorEvent,
-    Field(discriminator="sub_type"),
-]
 
 type NoticeEvent = Annotated[
     NotifyEvent

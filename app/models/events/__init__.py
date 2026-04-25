@@ -1,15 +1,10 @@
+"""NapCat 事件模型导出。"""
+
 from typing import Annotated
 
 from pydantic import Field
 
-from .message_event import (
-    BaseMessage,
-    GroupMessage,
-    MessageEvent,
-    PrivateMessage,
-    Sender,
-    SelfMessage,
-)
+from .message_event import BaseMessage, GroupMessage, MessageEvent, PrivateMessage, Sender
 from .meta_event import HeartBeat, LifeCycle, Meta, MetaEvent
 from .notice_event import (
     BotOfflineEvent,
@@ -47,51 +42,47 @@ type BotEvent = Annotated[
 ]
 
 type AllEvent = BotEvent | Response
+
 __all__ = [
-    # AllEvent
     "AllEvent",
-    # message_event
-    "MessageEvent",
     "BaseMessage",
-    "Sender",
+    "BotEvent",
+    "BotOfflineEvent",
+    "FriendAddNoticeEvent",
+    "FriendPokeEvent",
+    "FriendRecallNoticeEvent",
+    "FriendRequestEvent",
+    "GroupAdminNoticeEvent",
+    "GroupBanEvent",
+    "GroupCardEvent",
+    "GroupDecreaseEvent",
+    "GroupEssenceEvent",
+    "GroupHonorEvent",
+    "GroupIncreaseEvent",
+    "GroupLuckyKingEvent",
     "GroupMessage",
-    "PrivateMessage",
-    # meta_event
-    "MetaEvent",
-    "Meta",
-    "LifeCycle",
+    "GroupMsgEmojiLikeEvent",
+    "GroupNameEvent",
+    "GroupNoticeEvent",
+    "GroupPokeEvent",
+    "GroupRecallNoticeEvent",
+    "GroupRequestEvent",
+    "GroupTitleEvent",
+    "GroupUploadNoticeEvent",
     "HeartBeat",
-    # notice_event
+    "InputStatusEvent",
+    "LifeCycle",
+    "MessageEvent",
+    "Meta",
+    "MetaEvent",
     "Notice",
     "NoticeEvent",
     "NotifyEvent",
     "PokeEvent",
-    "GroupNoticeEvent",
-    "GroupRecallNoticeEvent",
-    "GroupDecreaseEvent",
-    "GroupAdminNoticeEvent",
-    "GroupIncreaseEvent",
-    "GroupBanEvent",
-    "GroupUploadNoticeEvent",
-    "GroupCardEvent",
-    "GroupNameEvent",
-    "GroupTitleEvent",
-    "GroupEssenceEvent",
-    "GroupMsgEmojiLikeEvent",
-    "GroupPokeEvent",
-    "GroupLuckyKingEvent",
-    "GroupHonorEvent",
-    "FriendAddNoticeEvent",
-    "FriendRecallNoticeEvent",
-    "FriendPokeEvent",
+    "PrivateMessage",
     "ProfileLikeEvent",
-    "InputStatusEvent",
-    "BotOfflineEvent",
-    # request_event
-    "RequestEvent",
     "Request",
-    "FriendRequestEvent",
-    "GroupRequestEvent",
-    "SelfMessage",
-    "Response"
+    "RequestEvent",
+    "Response",
+    "Sender",
 ]

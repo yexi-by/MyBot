@@ -1,4 +1,5 @@
-from .gemini import GeminiService
+"""LLM provider 公共导出。"""
+
 from .openai import OpenAIService
-from .volcengine import VolcengineService
-__all__ = ["GeminiService", "OpenAIService", "VolcengineService"]
+
+__all__ = ["OpenAIService"]

@@ -1,18 +1,19 @@
-import inspect
-from functools import wraps
-from typing import NewType, get_type_hints
+"""依赖注入容器配置。"""
+
+from typing import ClassVar, NewType
 
 import httpx
-from dishka import Provider, Scope, from_context, provide
+from dishka import Provider, Scope, from_context
+from dishka import provide as provide  # pyright: ignore[reportUnknownVariableType]
 from fastapi import WebSocket
 from redis.asyncio import Redis
 
 from app.api import BOTClient
-from app.database import RedisDatabaseManager
-from app.plugins import PLUGINS, BasePlugin, Context
-from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
-from app.utils import logger
 from app.config import RAW_CONFIG_DICT, Settings
+from app.database import RedisDatabaseManager
+from app.models import AllEvent
+from app.plugins import PLUGINS, BasePlugin, Context, load_all_plugins
+from app.services import LLMHandler, MCPToolManager
 
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
@@ -20,98 +21,54 @@ from .plugin_manager import PluginController
 
 TIME_OUT = 30
 
-
-def optional_parameters(func):
-    """
-    装饰器：捕获初始化异常并返回 None。
-    自动兼容 sync 和 async 函数。
-    """
-    hints = get_type_hints(func)
-    return_type = hints.get("return")
-    if return_type is None:
-        return_type = "unknown"
-    if inspect.iscoroutinefunction(func):
-
-        @wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            try:
-                return await func(*args, **kwargs)
-            except Exception as e:
-                logger.warning(
-                    f"可选组件初始化失败,组件名: \t[{return_type}]\t: 错误:{e}，将跳过。"
-                )
-                return None
-
-        return async_wrapper
-    else:
-
-        @wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            try:
-                return func(*args, **kwargs)
-            except Exception as e:
-                logger.warning(
-                    f"可选组件初始化失败 组件名:\t[{return_type}]\t: 错误:{e}，将跳过。"
-                )
-                return None
-
-        return sync_wrapper
-
-
 DirectHttpx = NewType("DirectHttpx", httpx.AsyncClient)
 ProxyHttpx = NewType("ProxyHttpx", httpx.AsyncClient)
 
 
 class MyProvider(Provider):
-    websocket = from_context(provides=WebSocket, scope=Scope.SESSION)
+    """声明应用运行所需的依赖对象。"""
+
+    # Dishka 的 from_context 返回提供器占位对象，第三方类型无法表达为 WebSocket 实例。
+    websocket: ClassVar[object] = from_context(provides=WebSocket, scope=Scope.SESSION)
 
     @provide(scope=Scope.APP)
     def get_settings(self) -> Settings:
-        return Settings(**RAW_CONFIG_DICT)
+        """读取并构造全局配置。"""
+        return Settings.model_validate(RAW_CONFIG_DICT)
 
     @provide(scope=Scope.APP)
     def get_direct_httpx(self) -> DirectHttpx:
+        """创建不带代理的 HTTP 客户端。"""
         return DirectHttpx(httpx.AsyncClient())
 
     @provide(scope=Scope.APP)
-    def get_event_type_checker(
-        self,
-    ) -> EventTypeChecker:
+    def get_event_type_checker(self) -> EventTypeChecker:
+        """创建事件类型解析器。"""
         return EventTypeChecker()
 
-    # 下面是可选项
     @provide(scope=Scope.APP)
-    @optional_parameters
     def get_proxy_httpx(self, settings: Settings) -> ProxyHttpx | None:
+        """初始化可选代理 HTTP 客户端。"""
         proxy = settings.proxy
+        if proxy is None:
+            return None
         return ProxyHttpx(httpx.AsyncClient(proxy=proxy, timeout=TIME_OUT))
 
     @provide(scope=Scope.APP)
-    @optional_parameters
     def get_llm_handler(self, settings: Settings) -> LLMHandler | None:
+        """初始化可选 LLM 服务。"""
+        if not settings.llm_settings:
+            return None
         return LLMHandler.register_instance(settings.llm_settings)
 
     @provide(scope=Scope.APP)
-    @optional_parameters
-    def get_siliconflow_embedding(
-        self, settings: Settings, client: DirectHttpx
-    ) -> SiliconFlowEmbedding | None:
-        assert settings.embedding_settings is not None
-        return SiliconFlowEmbedding(
-            embedding_config=settings.embedding_settings,
-            client=client,
-        )
+    def get_mcp_tool_manager(self, settings: Settings) -> MCPToolManager:
+        """创建 MCP 工具管理器。"""
+        return MCPToolManager(settings.mcp)
 
-    @provide(scope=Scope.APP)
-    @optional_parameters
-    async def get_search_vectors(self, settings: Settings) -> SearchVectors | None:
-        return await SearchVectors.create_from_directory(
-            directory=settings.faiss_file_location
-        )
-
-    # 可选服务结束
     @provide(scope=Scope.APP)
     def get_redis_client(self, settings: Settings) -> Redis:
+        """创建 Redis 异步客户端。"""
         return Redis(
             host=settings.redis_config.host,
             port=settings.redis_config.port,
@@ -123,6 +80,7 @@ class MyProvider(Provider):
     def get_redis_database_manager(
         self, redis_client: Redis, settings: Settings, client: DirectHttpx
     ) -> RedisDatabaseManager:
+        """创建 Redis 消息存储服务。"""
         path = settings.video_and_image_path
         return RedisDatabaseManager(redis_client=redis_client, path=path, client=client)
 
@@ -130,6 +88,7 @@ class MyProvider(Provider):
     def get_bot_client(
         self, websocket: WebSocket, database: RedisDatabaseManager
     ) -> BOTClient:
+        """创建当前 WebSocket 会话的机器人客户端。"""
         return BOTClient(websocket=websocket, database=database)
 
     @provide(scope=Scope.SESSION)
@@ -141,18 +100,18 @@ class MyProvider(Provider):
         directhttpx: DirectHttpx,
         proxy_httpx: ProxyHttpx | None,
         llm: LLMHandler | None,
-        siliconflow: SiliconFlowEmbedding | None,
-        search_vectors: SearchVectors | None,
+        mcp_tool_manager: MCPToolManager,
     ) -> PluginController:
-        plugin_objects: list[BasePlugin] = []
+        """实例化插件控制器。"""
+        load_all_plugins()
+        plugin_objects: list[BasePlugin[AllEvent]] = []
         for cls in PLUGINS:
             context = Context(
                 settings=settings,
                 bot=bot,
                 database=database,
                 llm=llm,
-                siliconflow=siliconflow,
-                search_vectors=search_vectors,
+                mcp_tool_manager=mcp_tool_manager,
                 direct_httpx=directhttpx,
                 proxy_httpx=proxy_httpx,
             )
@@ -164,4 +123,5 @@ class MyProvider(Provider):
     def get_event_dispatcher(
         self, plugincontroller: PluginController, bot: BOTClient
     ) -> EventDispatcher:
+        """创建会话事件分发器。"""
         return EventDispatcher(plugincontroller=plugincontroller, bot=bot)

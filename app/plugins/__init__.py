@@ -1,9 +1,11 @@
+"""插件自动发现入口。"""
+
 import importlib.util
 import sys
 from operator import attrgetter
 from pathlib import Path
 
-from app.utils import logger
+from app.utils.log import log_event
 
 from .base import PLUGINS, BasePlugin, Context
 
@@ -33,10 +35,15 @@ def load_all_plugins() -> None:
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-        logger.info(f"[加载成功] {module_name}")
+        log_event(
+            level="INFO",
+            event="plugin.loaded",
+            category="plugin",
+            message="插件模块加载成功",
+            module_name=module_name,
+        )
+
+    PLUGINS.sort(key=attrgetter("priority"), reverse=True)
 
 
-load_all_plugins()
-PLUGINS.sort(key=attrgetter("priority"), reverse=True)
-
-__all__ = ["PLUGINS", "BasePlugin", "Context"]
+__all__ = ["PLUGINS", "BasePlugin", "Context", "load_all_plugins"]

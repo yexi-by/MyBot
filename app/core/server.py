@@ -1,58 +1,106 @@
+"""FastAPI WebSocket 服务入口。"""
+
 import asyncio
+import copy
 import json
 import secrets
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-import copy
+from typing import cast
+
 from dishka import AsyncContainer
 from dishka.integrations.fastapi import FromDishka, inject, setup_dishka
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 
 from app.api import BOTClient
-from app.database import RedisDatabaseManager
-from app.models import Response, Meta
-from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
-from app.utils import logger
 from app.config import Settings
+from app.database import RedisDatabaseManager
+from app.models import Meta, Response
+from app.services import LLMHandler, MCPToolManager
+from app.utils.log import log_event, log_exception, log_run_end, log_run_start
+
 from .di import DirectHttpx, ProxyHttpx
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
 
 
 class NapCatServer:
+    """承载 NapCat 反向 WebSocket 连接的 FastAPI 服务。"""
+
     def __init__(self, container: AsyncContainer) -> None:
-        self.container = container
-        self.app = FastAPI(lifespan=self.lifespan)
+        """创建 FastAPI 应用并注册路由。"""
+        self.container: AsyncContainer = container
+        self.app: FastAPI = FastAPI(lifespan=self.lifespan)
         setup_dishka(self.container, self.app)
         self._register_routes()
-        self._background_tasks: set[asyncio.Task] = set()
+        self._background_tasks: set[asyncio.Task[None]] = set()
+
+    def _track_background_task(self, task: asyncio.Task[None]) -> None:
+        """持有后台事件分发任务引用，并在失败时记录异常。"""
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(self._log_background_task_result)
+
+    def _log_background_task_result(self, task: asyncio.Task[None]) -> None:
+        """记录后台事件分发任务的异常结果。"""
+        if task.cancelled():
+            log_event(
+                level="DEBUG",
+                event="event_dispatch.cancelled",
+                category="dispatcher",
+                message="事件分发任务已取消",
+            )
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        log_exception(
+            event="event_dispatch.exception",
+            category="dispatcher",
+            message="事件分发任务失败",
+            exc=exc,
+        )
 
     @asynccontextmanager
-    async def lifespan(self, app: FastAPI):
-        logger.info("正在初始化服务组件...")
+    async def lifespan(self, _app: FastAPI) -> AsyncIterator[None]:
+        """管理应用启动预热与关闭清理。"""
+        log_run_start(message="正在初始化服务组件", host="0.0.0.0", port=6055)
         # 因为dishka是惰性加载的,所以在首次运行的时候需要先把全局对象给预热提前加载
         # 否则大概率发生*会话级*实例创建的时候缺少全局依赖导致创建失败的现象
-        await self.container.get(RedisDatabaseManager)
+        _ = await self.container.get(RedisDatabaseManager)
+        mcp_tool_manager = await self.container.get(MCPToolManager)
+        await mcp_tool_manager.start()
         # 并发预热组件
-        await asyncio.gather(
+        _ = await asyncio.gather(
             self.container.get(DirectHttpx),
             self.container.get(ProxyHttpx | None),
             self.container.get(LLMHandler | None),
-            self.container.get(SiliconFlowEmbedding | None),
-            self.container.get(SearchVectors | None),
         )
-        logger.info("服务启动完成，等待客户端连接")
+        log_event(
+            level="SUCCESS",
+            event="app.startup.ready",
+            category="runtime",
+            message="服务启动完成，等待客户端连接",
+        )
         yield
-        logger.info("正在关闭服务...")
+        log_event(
+            level="INFO",
+            event="app.shutdown.start",
+            category="runtime",
+            message="正在关闭服务",
+        )
+        mcp_tool_manager = await self.container.get(MCPToolManager)
+        await mcp_tool_manager.close()
         redis_database_manager = await self.container.get(RedisDatabaseManager)
         await redis_database_manager.stop_consumers()
         await self.container.close()
-        logger.info("redis数据库服务已关闭")
-        logger.info("服务已安全关闭")
+        log_run_end(message="服务已安全关闭")
 
     async def _check_auth_token(
         self,
         websocket: WebSocket,
     ) -> None:
+        """校验 NapCat WebSocket Bearer Token。"""
         setting = await self.container.get(Settings)
         password = setting.password
         headers = websocket.headers
@@ -60,10 +108,12 @@ class NapCatServer:
         expected_header = "Bearer " + password
         if not secrets.compare_digest(auth_header, expected_header):  # 防时序攻击
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            raise ValueError
+            raise ValueError("NapCat WebSocket Token 校验失败")
         await websocket.accept()
 
-    def _register_routes(self):
+    def _register_routes(self) -> None:
+        """注册 WebSocket 路由。"""
+
         @self.app.websocket("/ws/{client_id}")
         @inject
         async def websocket_endpoint(
@@ -72,6 +122,7 @@ class NapCatServer:
             checker: FromDishka[EventTypeChecker],
             redis_database_manager: FromDishka[RedisDatabaseManager],
         ) -> None:
+            """处理单个 NapCat WebSocket 客户端连接。"""
             async with self.container(
                 context={WebSocket: websocket}
             ) as request_container:
@@ -84,12 +135,30 @@ class NapCatServer:
                 try:
                     while True:
                         data_str = await websocket.receive_text()
-                        data = json.loads(data_str)
+                        raw_data = cast(object, json.loads(data_str))
+                        if not isinstance(raw_data, dict):
+                            log_event(
+                                level="WARNING",
+                                event="websocket.event.invalid_payload",
+                                category="websocket",
+                                message="收到非对象格式事件，已跳过",
+                                client_id=client_id,
+                            )
+                            continue
+                        data = cast(dict[str, object], raw_data)
                         event = checker.get_event(data)
                         if event is None:
                             continue
-                        if not isinstance(event, Meta):
-                            logger.info(event.model_dump_json(indent=2))
+                        if not isinstance(event, (Meta, Response)):
+                            log_event(
+                                level="DEBUG",
+                                event="websocket.event.received",
+                                category="websocket",
+                                message="收到 NapCat 事件",
+                                client_id=client_id,
+                                event_type=event.post_type,
+                                event_model=type(event).__name__,
+                            )
                         bot.get_self_qq_id(msg=event)
                         # 因为dispatch_event和add_to_queue对event进行并发处理可能会有不可观测的逻辑错误和竞争行为,
                         # 这里对event进行深拷贝,防止隐性bug
@@ -97,33 +166,69 @@ class NapCatServer:
                         task = asyncio.create_task(
                             dispatcher.dispatch_event(event=copy_event)
                         )
-                        self._background_tasks.add(
-                            task
-                        )  # 持有asyncio.Task强引用，防止在某些情况被gc回收
-                        task.add_done_callback(
-                            self._background_tasks.discard
-                        )  # 做完自动删除 防内存泄漏
+                        self._track_background_task(task=task)
                         if isinstance(event, Response):
                             await bot.receive_data(response=event)
                             continue
                         await redis_database_manager.add_to_queue(event)
                 except WebSocketDisconnect as e:
-                    logger.info(f"客户端 {client_id} 断开连接: {e}")
+                    log_event(
+                        level="INFO",
+                        event="websocket.client.disconnected",
+                        category="websocket",
+                        message="客户端断开连接",
+                        client_id=client_id,
+                        reason=str(e),
+                    )
                 except RuntimeError as e:
-                    logger.warning(f"客户端 {client_id} 连接异常断开: {e}")
+                    log_event(
+                        level="WARNING",
+                        event="websocket.client.runtime_closed",
+                        category="websocket",
+                        message="客户端连接异常断开",
+                        client_id=client_id,
+                        reason=str(e),
+                    )
                 except Exception as e:
-                    logger.exception(f"客户端 {client_id} 处理异常: {e}")
+                    log_exception(
+                        event="websocket.client.exception",
+                        category="websocket",
+                        message="客户端处理异常",
+                        exc=e,
+                        client_id=client_id,
+                    )
                     if websocket.client_state.name == "CONNECTED":
                         try:
                             await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-                        except RuntimeError:
-                            pass
+                        except RuntimeError as close_error:
+                            log_event(
+                                level="DEBUG",
+                                event="websocket.client.close_failed",
+                                category="websocket",
+                                message="异常后关闭客户端连接失败",
+                                client_id=client_id,
+                                reason=str(close_error),
+                            )
                 finally:
-                    logger.info(f"正在清理客户端 {client_id} 的资源...")
+                    log_event(
+                        level="INFO",
+                        event="websocket.client.cleanup_start",
+                        category="websocket",
+                        message="正在清理客户端资源",
+                        client_id=client_id,
+                    )
                     shutdown_tasks = [
                         plugin.stop_consumers()
                         for plugin in dispatcher.plugincontroller.plugin_objects
                     ]
                     if shutdown_tasks:
-                        await asyncio.gather(*shutdown_tasks)
-                    logger.info(f"客户端 {client_id} 资源清理完成")
+                        _ = await asyncio.gather(*shutdown_tasks)
+                    log_event(
+                        level="SUCCESS",
+                        event="websocket.client.cleanup_done",
+                        category="websocket",
+                        message="客户端资源清理完成",
+                        client_id=client_id,
+                    )
+
+        _ = websocket_endpoint

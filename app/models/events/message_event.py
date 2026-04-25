@@ -1,58 +1,64 @@
+"""NapCat 消息事件模型。"""
+
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
+
+from app.models.common import JsonValue, NapCatId, NapCatStringInteger, StrictModel
 
 from ..segments import MessageSegment
 
 
-class Sender(BaseModel):
-    """消息发送者信息"""
+class Sender(StrictModel):
+    """消息发送者信息。"""
 
-    user_id: int  # 发送者 QQ 号
-    nickname: str  # 昵称
-    card: str | None = None  # 群名片/备注 (仅群消息有效)
-    role: str | None = None  # 群角色: owner/admin/member (仅群消息有效)
+    user_id: NapCatId
+    nickname: str = ""
+    card: str | None = None
+    sex: Literal["male", "female", "unknown"] | None = None
+    age: int | None = None
+    area: str | None = None
+    level: str | None = None
+    role: Literal["owner", "admin", "member"] | str | None = None
+    title: str | None = None
 
 
-class BaseMessage(BaseModel):
-    """消息事件基类"""
+class BaseMessage(StrictModel):
+    """消息事件公共字段。"""
 
-    time: int  # 事件发生的 Unix 时间戳
-    post_type: Literal["message"]
-    self_id: int  # 收到事件的机器人 QQ 号
-    user_id: int  # 发送者 QQ 号
-    message_id: int  # 消息 ID
-    sender: Sender  # 发送者信息
-    message: list[MessageSegment]  # 消息内容
-    # raw_message: str = ""  # CQ 码格式的原始消息 弃用
-    # font: int = 0  # 字体 (通常为 0，已弃用)
+    time: int
+    self_id: NapCatId
+    post_type: Literal["message", "message_sent"]
+    sub_type: str = "normal"
+    user_id: NapCatId
+    message_id: NapCatId
+    message: list[MessageSegment]
+    raw_message: str = ""
+    sender: Sender
+    font: NapCatStringInteger | None = None
+    message_format: Literal["array", "string"] | str | None = None
+    message_seq: NapCatId | None = None
+    real_id: NapCatId | None = None
+    target_id: NapCatId | None = None
+    raw: JsonValue = None
 
 
 class GroupMessage(BaseMessage):
-    """群消息事件"""
+    """群消息事件。"""
 
     message_type: Literal["group"]
-    sub_type: Literal["normal", "anonymous", "notice"] = "normal"
-    # normal: 普通消息, anonymous: 匿名消息, notice: 系统提示
-    group_id: int  # 群号
-    group_name: str  # 群名称 (NapCat 扩展字段)
+    sub_type: Literal["normal", "anonymous", "notice"] | str = "normal"
+    group_id: NapCatId
+    group_name: str | None = None
 
 
 class PrivateMessage(BaseMessage):
-    """私聊消息事件"""
+    """私聊消息事件。"""
 
     message_type: Literal["private"]
-    sub_type: Literal["friend", "group", "other"] = "friend"
-    # friend: 好友私聊, group: 群临时会话, other: 其他
-
-
-class SelfMessage(BaseModel):
-    message_id:int
-    self_id: int
-    group_id: int|None=None
-    user_id: int|None=None
-    time:int
-    message: list[MessageSegment]
+    sub_type: Literal["friend", "group", "other"] | str = "friend"
+    group_id: NapCatId | None = None
+    temp_source: int | None = None
 
 
 type MessageEvent = Annotated[

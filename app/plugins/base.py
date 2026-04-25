@@ -1,27 +1,49 @@
+"""插件基类、插件注册元类和插件运行上下文。"""
+
 from __future__ import annotations
 
 import asyncio
-from abc import ABCMeta, abstractmethod
-from typing import ClassVar, cast, Callable, Any, TYPE_CHECKING
-from functools import wraps
+from abc import ABC, ABCMeta, abstractmethod
+from collections.abc import Awaitable, Callable
+from typing import ClassVar, Protocol, cast
 
 import httpx
 
 from app.api import BOTClient
 from app.database import RedisDatabaseManager
 from app.models import AllEvent
-from app.services import LLMHandler, SearchVectors, SiliconFlowEmbedding
-from app.utils import logger
+from app.services import LLMHandler, MCPToolManager
 from app.config import Settings
+from app.utils.log import log_event, log_exception
 
-if TYPE_CHECKING:
-    from app.core.plugin_manager import PluginController
 
-PLUGINS: list[type["BasePlugin"]] = []
+class PluginControllerProtocol(Protocol):
+    """插件控制器在插件基类中需要使用的最小接口。"""
+
+    def register_listener(
+        self, event_name: str, callback: Callable[..., Awaitable[object]]
+    ) -> None:
+        """注册插件内部事件监听器。"""
+
+    async def broadcast(
+        self, event_name: str, kwargs: dict[str, object]
+    ) -> list[object | BaseException] | None:
+        """广播插件内部事件并返回监听器结果。"""
+
+
+PLUGINS: list[type["BasePlugin[AllEvent]"]] = []
 
 
 class PluginMeta(ABCMeta):
-    def __new__(mcs, name, bases, attrs):
+    """在插件类定义时校验元信息并完成自动注册。"""
+
+    def __new__(
+        mcs,
+        name: str,
+        bases: tuple[type, ...],
+        attrs: dict[str, object],
+    ) -> type:
+        """创建插件类并在定义期完成元信息校验。"""
         cls = super().__new__(mcs, name, bases, attrs)
         if bases and name != "BasePlugin":
             plugin_name = getattr(cls, "name", None)
@@ -44,36 +66,13 @@ class PluginMeta(ABCMeta):
                     raise ValueError(
                         f"已存在同名插件: {plugin_name},请修改插件 name 属性"
                     )
-            PLUGINS.append(cast(type["BasePlugin"], cls))
+            PLUGINS.append(cast(type["BasePlugin[AllEvent]"], cls))
         return cls
 
 
-def require_initialized(func):
-    """
-    属性装饰器：
-    1. 自动检查返回值是否为 None。
-    2. 如果是 None，自动通过反射读取函数定义的返回类型，抛出详细错误。
-    """
-    prop_name = func.__name__
-    hints = func.__annotations__
-    return_type = hints.get("return")
-    if return_type is None:
-        raise ValueError(f"无法获取属性 {prop_name} 的返回类型注解")
-    type_name = getattr(return_type, "__name__", str(return_type))
-
-    @wraps(func)
-    def wrapper(self, *args, **kwargs):
-        instance = func(self, *args, **kwargs)
-        if instance is None:
-            raise RuntimeError(
-                f"上下文中的 {type_name} 未正确初始化, 请检查配置文件中是否填写了相关字段。"
-            )
-        return instance
-
-    return wrapper
-
-
 class Context:
+    """插件运行时上下文，集中暴露可注入服务。"""
+
     def __init__(
         self,
         settings: Settings,
@@ -82,40 +81,42 @@ class Context:
         direct_httpx: httpx.AsyncClient,
         proxy_httpx: httpx.AsyncClient | None = None,
         llm: LLMHandler | None = None,
-        siliconflow: SiliconFlowEmbedding | None = None,
-        search_vectors: SearchVectors | None = None,
-    ):
-        self.settings = settings
-        self.bot = bot
-        self.database = database
-        self.direct_httpx = direct_httpx
-        self._llm = llm
-        self._siliconflow = siliconflow
-        self._search_vectors = search_vectors
-        self._proxy_httpx = proxy_httpx
+        mcp_tool_manager: MCPToolManager | None = None,
+    ) -> None:
+        """保存插件运行期可用服务。"""
+        self.settings: Settings = settings
+        self.bot: BOTClient = bot
+        self.database: RedisDatabaseManager = database
+        self.direct_httpx: httpx.AsyncClient = direct_httpx
+        self._llm: LLMHandler | None = llm
+        self._mcp_tool_manager: MCPToolManager | None = mcp_tool_manager
+        self._proxy_httpx: httpx.AsyncClient | None = proxy_httpx
 
     @property
-    @require_initialized
     def llm(self) -> LLMHandler:
-        return self._llm  # type: ignore
+        """返回 LLM 服务，未配置时显式报错。"""
+        if self._llm is None:
+            raise RuntimeError("上下文中的 LLMHandler 未正确初始化，请检查配置文件。")
+        return self._llm
 
     @property
-    @require_initialized
-    def siliconflow(self) -> SiliconFlowEmbedding:
-        return self._siliconflow  # type: ignore
-
-    @property
-    @require_initialized
-    def search_vectors(self) -> SearchVectors:
-        return self._search_vectors  # type: ignore
-
-    @property
-    @require_initialized
     def proxy_httpx(self) -> httpx.AsyncClient:
-        return self._proxy_httpx  # type: ignore
+        """返回代理 HTTP 客户端，未配置时显式报错。"""
+        if self._proxy_httpx is None:
+            raise RuntimeError("上下文中的 AsyncClient 未正确初始化，请检查代理配置。")
+        return self._proxy_httpx
+
+    @property
+    def mcp_tool_manager(self) -> MCPToolManager:
+        """返回 MCP 工具管理器。"""
+        if self._mcp_tool_manager is None:
+            raise RuntimeError("上下文中的 MCPToolManager 未正确初始化。")
+        return self._mcp_tool_manager
 
 
-class BasePlugin[T: AllEvent](metaclass=PluginMeta):
+class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
+    """所有插件的异步队列消费基类。"""
+
     name: ClassVar[str]
     consumers_count: ClassVar[int]
     priority: ClassVar[int]
@@ -124,20 +125,29 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
         self,
         context: Context,
     ) -> None:
-        self.context = context
+        """初始化插件上下文、任务队列和消费者。"""
+        self.context: Context = context
         self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
-        self.consumers: list[asyncio.Task] = []
-        self.controller: PluginController | None = None
-        self._pending_listeners: list[tuple[str, Callable]] = []
+        self.consumers: list[asyncio.Task[None]] = []
+        self.controller: PluginControllerProtocol | None = None
+        self._pending_listeners: list[
+            tuple[str, Callable[..., Awaitable[object]]]
+        ] = []
         self.register_consumers()
         self.setup()
 
-    def set_controller(self, controller: PluginController) -> None:
+    def pending_listeners(self) -> list[tuple[str, Callable[..., Awaitable[object]]]]:
+        """返回插件 setup 阶段暂存的内部事件监听器。"""
+        return list(self._pending_listeners)
+
+    def set_controller(self, controller: PluginControllerProtocol) -> None:
+        """绑定插件控制器并补注册 setup 阶段声明的监听器。"""
         self.controller = controller
         for event, func in self._pending_listeners:
             self.controller.register_listener(event_name=event, callback=func)
 
-    async def emit(self, event_name: str, **kwargs) -> Any:
+    async def emit(self, event_name: str, **kwargs: object) -> object | None:
+        """向插件内部事件总线发送事件。"""
         if self.controller:
             results = await self.controller.broadcast(
                 event_name=event_name, kwargs=kwargs
@@ -146,46 +156,64 @@ class BasePlugin[T: AllEvent](metaclass=PluginMeta):
                 return results
 
     async def add_to_queue(self, msg: T) -> bool:
-        """对外接口"""
+        """将事件放入插件队列并等待消费结果。"""
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
         await self.task_queue.put((msg, future))
         return await future
 
     async def consumer(self) -> None:
+        """持续消费插件事件队列。"""
         while True:
             data, future = await self.task_queue.get()
             try:
                 result = await self.run(msg=data)
                 future.set_result(result)
             except Exception as e:
-                logger.exception(e)
-                future.set_result(True)  # 强制消费链结束
+                log_exception(
+                    event="plugin.consumer.exception",
+                    category="plugin",
+                    message="插件处理事件失败",
+                    exc=e,
+                    plugin_name=self.name,
+                    event_model=type(data).__name__,
+                )
+                future.set_exception(e)
             finally:
                 self.task_queue.task_done()
 
     def register_consumers(self) -> None:
+        """启动插件消费者任务。"""
         for _ in range(self.consumers_count):
             consumer = asyncio.create_task(self.consumer())
             self.consumers.append(consumer)
 
     async def stop_consumers(self) -> None:
+        """取消并停止插件消费者任务。"""
         for consumer in self.consumers:
-            consumer.cancel()
+            _ = consumer.cancel()
         if self.consumers:
             try:
-                await asyncio.wait_for(
+                _ = await asyncio.wait_for(
                     asyncio.gather(*self.consumers, return_exceptions=True), timeout=3
                 )
             except asyncio.TimeoutError:
-                logger.error(f"{self.name}插件消费者关闭超时")
+                log_event(
+                    level="ERROR",
+                    event="plugin.consumer.stop_timeout",
+                    category="plugin",
+                    message="插件消费者关闭超时",
+                    plugin_name=self.name,
+                )
             finally:
                 self.consumers.clear()
 
     @abstractmethod
     def setup(self) -> None:
-        pass
+        """注册插件内部状态与监听器。"""
+        raise NotImplementedError
 
     @abstractmethod
     async def run(self, msg: T) -> bool:
-        pass
+        """处理指定事件并返回是否终止后续插件链。"""
+        raise NotImplementedError

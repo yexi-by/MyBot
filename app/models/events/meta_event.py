@@ -1,37 +1,41 @@
+"""NapCat 元事件模型。"""
+
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
+
+from app.models.common import JsonValue, NapCatId, StrictModel
 
 
-class HeartbeatStatus(BaseModel):
-    """心跳状态信息"""
+class HeartbeatStatus(StrictModel):
+    """心跳状态信息。"""
 
-    online: bool | None = None  # 当前 QQ 在线状态，None 表示无法获取
-    good: bool = True  # 状态是否正常
+    online: bool | None = None
+    good: bool = True
+    stat: JsonValue = None
 
 
-class Meta(BaseModel):
-    """元事件基类"""
+class Meta(StrictModel):
+    """元事件基类。"""
 
-    time: int  # 事件发生的 Unix 时间戳
-    self_id: int  # 收到事件的机器人 QQ 号
+    time: int
+    self_id: NapCatId
     post_type: Literal["meta_event"]
 
 
 class LifeCycle(Meta):
-    """生命周期事件 - Bot 连接/启用/禁用时触发"""
+    """生命周期事件。"""
 
     meta_event_type: Literal["lifecycle"]
-    sub_type: Literal["enable", "disable", "connect"]
-    # enable: OneBot 启用, disable: OneBot 禁用, connect: WebSocket 连接成功
+    sub_type: Literal["enable", "disable", "connect"] | str
 
 
 class HeartBeat(Meta):
-    """心跳事件 - 定期上报 Bot 状态"""
+    """心跳事件。"""
 
     meta_event_type: Literal["heartbeat"]
-    status: HeartbeatStatus  # 状态信息
-    interval: int  # 到下次心跳的间隔 (毫秒)
+    status: HeartbeatStatus
+    interval: int
 
 
 type MetaEvent = Annotated[

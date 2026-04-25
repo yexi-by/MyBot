@@ -1,18 +1,19 @@
+"""项目配置加载入口。"""
+
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import cast
 
-# 配置文件名
 CONFIG_FILENAME = "setting.toml"
 
 
-def load_config() -> dict[str, Any]:
-    # 使用项目根目录（app/config 文件夹的父目录的父目录）
+def load_config() -> dict[str, object]:
+    """读取项目根目录下的 TOML 配置文件。"""
     project_root = Path(__file__).resolve().parents[2]
     path = project_root / CONFIG_FILENAME
-    with open(path, "rb") as f:
-        toml_data = tomllib.load(f)
-        return toml_data
+    with path.open("rb") as file:
+        toml_data = tomllib.load(file)
+    return cast(dict[str, object], toml_data)
 
 
-RAW_CONFIG_DICT = load_config()
+RAW_CONFIG_DICT: dict[str, object] = load_config()

@@ -1,178 +1,98 @@
-"""
-日志配置模块 - 基于 Loguru 的生产级日志系统
+"""项目统一日志门面。
 
-提供统一的日志管理，支持：
-- 控制台彩色输出
-- 文件日志轮转
-- 结构化日志
-- 异常追踪增强
-- 模块级别日志器
-
-使用方法:
-    from log import logger
-    logger.info("Hello World")
-
-    # 或者获取模块专用日志器
-    from log import get_logger
-    log = get_logger("my_module")
-    log.info("模块日志")
+业务代码只通过本模块暴露的事件函数写日志，日志层统一负责字段渲染、
+终端视图、文件视图和异常链落盘。
 """
 
 from __future__ import annotations
 
 import os
 import sys
-from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from loguru import logger as _logger
 
+from app.models.common import JsonValue
+
 if TYPE_CHECKING:
-    from loguru import Logger
+    from loguru import Logger, Record
 
+LogLevel = Literal["DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR"]
 
-# ================================
-# 日志配置常量
-# ================================
-
-# 日志目录名称
 LOG_DIR_NAME = "logs"
-
-# 日志文件名模式
 APP_LOG_PATTERN = "{time:YYYY-MM-DD}_app.log"
 ERROR_LOG_PATTERN = "{time:YYYY-MM-DD}_error.log"
 STRUCTURED_LOG_PATTERN = "{time:YYYY-MM-DD}_structured.json"
 
-# 日志目录
 LOG_DIR = Path(LOG_DIR_NAME)
 LOG_DIR.mkdir(exist_ok=True)
 
-# 日志级别 (可通过环境变量覆盖)
-LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG")
-
-# 日志保留天数
+CONSOLE_LEVEL = os.getenv("LOG_CONSOLE_LEVEL", "INFO")
+FILE_LEVEL = os.getenv("LOG_FILE_LEVEL", "DEBUG")
 LOG_RETENTION = os.getenv("LOG_RETENTION", "30 days")
-
-# 单个日志文件最大大小
 LOG_ROTATION = os.getenv("LOG_ROTATION", "50 MB")
 
-# 是否启用 JSON 格式日志 (生产环境推荐)
-LOG_JSON_FORMAT = os.getenv("LOG_JSON_FORMAT", "false").lower() == "true"
-
-
-# ================================
-# 日志格式定义
-# ================================
-
-# 控制台格式 - 带颜色，简洁美观
 CONSOLE_FORMAT = (
-    "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+    "<green>{time:HH:mm:ss}</green> | "
     "<level>{level: <8}</level> | "
-    "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
+    "<cyan>{extra[category]}</cyan> | "
     "<level>{message}</level>"
+    "<dim>{extra[fields_text]}</dim>"
 )
 
-# 文件格式 - 详细信息，便于排查问题
 FILE_FORMAT = (
     "{time:YYYY-MM-DD HH:mm:ss.SSS} | "
     "{level: <8} | "
-    "{name}:{function}:{line} | "
+    "event={extra[event]} | "
+    "category={extra[category]} | "
     "{message}"
-)
-
-# JSON 格式字段 (用于生产环境日志聚合)
-JSON_FORMAT = (
-    '{{"timestamp": "{time:YYYY-MM-DDTHH:mm:ss.SSSZ}", '
-    '"level": "{level}", '
-    '"logger": "{name}", '
-    '"function": "{function}", '
-    '"line": {line}, '
-    '"message": "{message}", '
-    '"extra": {extra}}}'
+    "{extra[fields_text]}"
 )
 
 
-# ================================
-# 日志级别颜色配置
-# ================================
-
-LEVEL_COLORS = {
-    "TRACE": "<dim>",
-    "DEBUG": "<blue>",
-    "INFO": "<green>",
-    "SUCCESS": "<bold><green>",
-    "WARNING": "<yellow>",
-    "ERROR": "<red>",
-    "CRITICAL": "<bold><red><WHITE>",
-}
+def format_log_fields(fields: dict[str, JsonValue]) -> str:
+    """把结构化字段渲染成稳定、可扫读的日志后缀。"""
+    if not fields:
+        return ""
+    parts = [f"{key}={value}" for key, value in fields.items()]
+    return " | " + " ".join(parts)
 
 
-# ================================
-# 日志过滤器
-# ================================
+def _console_filter(record: "Record") -> bool:
+    """隐藏只应落盘的完整异常日志。"""
+    raw_target = record["extra"].get("target")
+    if not isinstance(raw_target, str):
+        return True
+    return raw_target != "file_only"
 
 
-def _level_filter(level: str):
-    """创建日志级别过滤器"""
-
-    def filter_func(record):
-        return record["level"].no >= _logger.level(level).no
-
-    return filter_func
-
-
-def _module_filter(module_name: str):
-    """创建模块过滤器"""
-
-    def filter_func(record):
-        return record["name"].startswith(module_name)
-
-    return filter_func
-
-
-# ================================
-# 日志配置函数
-# ================================
-
-
-def _configure_logger() -> Logger:
-    """
-    配置并返回 logger 实例
-
-    Returns:
-        配置好的 Logger 实例
-    """
-    # 移除默认处理器
+def _configure_logger() -> "Logger":
+    """配置终端、文本文件和结构化文件三类日志 sink。"""
     _logger.remove()
-
-    # ---- 控制台处理器 ----
-    _logger.add(
+    _ = _logger.add(
         sys.stderr,
         format=CONSOLE_FORMAT,
-        level=LOG_LEVEL,
+        level=CONSOLE_LEVEL,
         colorize=True,
-        backtrace=True,  # 显示完整的异常回溯
-        diagnose=True,  # 显示变量值 (生产环境建议关闭)
-        enqueue=True,  # 异步写入，提高性能
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+        filter=_console_filter,
     )
-
-    # ---- 常规日志文件 ----
-    _logger.add(
+    _ = _logger.add(
         LOG_DIR / APP_LOG_PATTERN,
-        format=FILE_FORMAT if not LOG_JSON_FORMAT else JSON_FORMAT,
-        level=LOG_LEVEL,
+        format=FILE_FORMAT,
+        level=FILE_LEVEL,
         rotation=LOG_ROTATION,
         retention=LOG_RETENTION,
-        compression="gz",  # 压缩旧日志
+        compression="gz",
         encoding="utf-8",
         enqueue=True,
         backtrace=True,
-        diagnose=False,  # 文件日志关闭诊断信息
+        diagnose=False,
     )
-
-    # ---- 错误日志文件 (单独记录 ERROR 及以上级别) ----
-    _logger.add(
+    _ = _logger.add(
         LOG_DIR / ERROR_LOG_PATTERN,
         format=FILE_FORMAT,
         level="ERROR",
@@ -182,187 +102,113 @@ def _configure_logger() -> Logger:
         encoding="utf-8",
         enqueue=True,
         backtrace=True,
-        diagnose=True,  # 错误日志保留诊断信息
+        diagnose=True,
     )
-
-    # ---- JSON 格式日志 (用于日志聚合系统) ----
-    if LOG_JSON_FORMAT:
-        _logger.add(
-            LOG_DIR / STRUCTURED_LOG_PATTERN,
-            format=JSON_FORMAT,
-            level=LOG_LEVEL,
-            rotation=LOG_ROTATION,
-            retention=LOG_RETENTION,
-            compression="gz",
-            encoding="utf-8",
-            enqueue=True,
-            serialize=True,  # 启用 JSON 序列化
-        )
-
+    _ = _logger.add(
+        LOG_DIR / STRUCTURED_LOG_PATTERN,
+        level=FILE_LEVEL,
+        rotation=LOG_ROTATION,
+        retention=LOG_RETENTION,
+        compression="gz",
+        encoding="utf-8",
+        enqueue=True,
+        serialize=True,
+    )
     return _logger
 
 
-# ================================
-# 公开接口
-# ================================
-
-# 配置并导出主 logger
-logger = _configure_logger()
+logger: Logger = _configure_logger()
 
 
-@lru_cache(maxsize=128)
-def get_logger(name: str) -> Logger:
-    """
-    获取模块专用日志器
-
-    Args:
-        name: 模块名称，通常使用 __name__
-
-    Returns:
-        绑定了模块名称的 Logger 实例
-
-    Example:
-        >>> from log import get_logger
-        >>> log = get_logger(__name__)
-        >>> log.info("模块专用日志")
-    """
-    return logger.bind(name=name)
-
-
-class LoggerContextManager:
-    """
-    日志上下文管理器，用于临时添加额外信息
-
-    Example:
-        >>> with LoggerContextManager(request_id="abc123", user_id=42):
-        ...     logger.info("带上下文的日志")
-    """
-
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-        self._context = None
-
-    def __enter__(self):
-        self._context = logger.contextualize(**self.kwargs)
-        return self._context.__enter__()
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._context is not None:
-            return self._context.__exit__(exc_type, exc_val, exc_tb)
-        return None
+def log_event(
+    *,
+    level: LogLevel,
+    event: str,
+    category: str,
+    message: str,
+    **fields: JsonValue,
+) -> None:
+    """记录一条结构化业务事件日志。"""
+    bound_logger = logger.bind(
+        event=event,
+        category=category,
+        fields=fields,
+        fields_text=format_log_fields(fields),
+    )
+    bound_logger.log(level, message)
 
 
-def log_context(**kwargs):
-    """
-    日志上下文装饰器/上下文管理器
-
-    Example:
-        >>> @log_context(module="auth")
-        ... def login():
-        ...     logger.info("用户登录")
-
-        >>> with log_context(request_id="abc"):
-        ...     logger.info("处理请求")
-    """
-    return LoggerContextManager(**kwargs)
-
-
-def setup_exception_handler():
-    """
-    设置全局异常处理器，确保未捕获的异常也被记录
-
-    Example:
-        >>> from log import setup_exception_handler
-        >>> setup_exception_handler()
-    """
-
-    def handle_exception(exc_type, exc_value, exc_traceback):
-        if issubclass(exc_type, KeyboardInterrupt):
-            sys.__excepthook__(exc_type, exc_value, exc_traceback)
-            return
-        logger.opt(exception=(exc_type, exc_value, exc_traceback)).critical(
-            "未捕获的异常"
-        )
-
-    sys.excepthook = handle_exception
+def log_exception(
+    *,
+    event: str,
+    category: str,
+    message: str,
+    exc: BaseException,
+    **fields: JsonValue,
+) -> None:
+    """记录异常摘要到终端，并把完整异常链写入文件日志。"""
+    log_event(
+        level="ERROR",
+        event=event,
+        category=category,
+        message=message,
+        error_type=type(exc).__name__,
+        error=str(exc),
+        **fields,
+    )
+    logger.bind(
+        event=f"{event}.traceback",
+        category=category,
+        fields=fields,
+        fields_text=format_log_fields(fields),
+        target="file_only",
+    ).opt(exception=exc).error(message)
 
 
-def log_function_call(*, level: str = "DEBUG", include_result: bool = False):
-    """
-    函数调用日志装饰器
-
-    Args:
-        level: 日志级别
-        include_result: 是否记录返回值
-
-    Example:
-        >>> @log_function_call(level="INFO", include_result=True)
-        ... def process_data(data):
-        ...     return data.upper()
-    """
-
-    def decorator(func):
-        from functools import wraps
-
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            func_name = func.__qualname__
-            logger.log(level, f"调用 {func_name} | args={args} kwargs={kwargs}")
-
-            try:
-                result = func(*args, **kwargs)
-                if include_result:
-                    logger.log(level, f"完成 {func_name} | result={result}")
-                else:
-                    logger.log(level, f"完成 {func_name}")
-                return result
-            except Exception as e:
-                logger.exception(f"异常 {func_name} | error={e}")
-                raise
-
-        @wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            func_name = func.__qualname__
-            logger.log(level, f"调用 {func_name} | args={args} kwargs={kwargs}")
-
-            try:
-                result = await func(*args, **kwargs)
-                if include_result:
-                    logger.log(level, f"完成 {func_name} | result={result}")
-                else:
-                    logger.log(level, f"完成 {func_name}")
-                return result
-            except Exception as e:
-                logger.exception(f"异常 {func_name} | error={e}")
-                raise
-
-        import asyncio
-
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        return wrapper
-
-    return decorator
+def log_run_start(*, message: str, **fields: JsonValue) -> None:
+    """记录一次应用运行开始事件。"""
+    log_event(
+        level="INFO",
+        event="app.run.start",
+        category="runtime",
+        message=message,
+        log_dir=str(LOG_DIR.absolute()),
+        console_level=CONSOLE_LEVEL,
+        file_level=FILE_LEVEL,
+        **fields,
+    )
 
 
-# ================================
-# 初始化
-# ================================
+def log_run_end(*, message: str, **fields: JsonValue) -> None:
+    """记录一次应用运行结束事件。"""
+    log_event(
+        level="SUCCESS",
+        event="app.run.end",
+        category="runtime",
+        message=message,
+        **fields,
+    )
 
-# 启动时记录一条日志
-logger.info(f"日志系统初始化完成 | 级别={LOG_LEVEL} 目录={LOG_DIR.absolute()}")
 
-
-# ================================
-# 模块导出
-# ================================
+log_event(
+    level="INFO",
+    event="log.initialized",
+    category="runtime",
+    message="日志系统初始化完成",
+    log_dir=str(LOG_DIR.absolute()),
+    console_level=CONSOLE_LEVEL,
+    file_level=FILE_LEVEL,
+)
 
 __all__ = [
-    "logger",
-    "get_logger",
-    "log_context",
-    "log_function_call",
-    "setup_exception_handler",
+    "CONSOLE_LEVEL",
+    "FILE_LEVEL",
     "LOG_DIR",
-    "LOG_LEVEL",
+    "LogLevel",
+    "format_log_fields",
+    "log_event",
+    "log_exception",
+    "log_run_end",
+    "log_run_start",
+    "logger",
 ]

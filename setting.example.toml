@@ -1,0 +1,35 @@
+# NapCat 反向 WebSocket 连接密码，对应 NapCat WebSocket Client 的 Token。
+password = "CHANGE_ME_NAPCAT_TOKEN"
+
+# 图片、视频等媒体缓存目录；首次运行会自动创建。
+video_and_image_path = "data"
+
+# 可选 HTTP 代理。留空字符串表示不启用代理。
+proxy = ""
+
+[mcp]
+# 是否启用 MCP 工具加载。开发初期可以先保持 false。
+enabled = false
+
+[mcp.mcpServers.firecrawl]
+# Firecrawl MCP 示例；启用前需要填入自己的 Firecrawl 服务地址和 API Key。
+command = "npx"
+args = ["-y", "firecrawl-mcp"]
+env = { FIRECRAWL_API_KEY = "CHANGE_ME", FIRECRAWL_API_URL = "http://127.0.0.1:3002" }
+disabled = true
+
+[[llm_settings]]
+# LLM 服务只保留 OpenAI 兼容协议面，model_vendors 是插件里引用的供应商别名。
+api_key = "sk-CHANGE_ME"
+base_url = "https://api.deepseek.com"
+model_vendors = "deepseek"
+provider_type = "openai"
+retry_count = 3
+retry_delay = 1
+
+[redis_config]
+# Redis 用于缓存 NapCat 事件和群聊历史消息。
+host = "localhost"
+port = 6379
+db = 0
+password = ""

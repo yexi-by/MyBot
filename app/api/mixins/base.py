@@ -1,66 +1,44 @@
-"""基础 Mixin 类
-
-提供 BOTClient 的基础功能，包括 WebSocket 通信和 Future 管理。
-"""
+"""NapCat WebSocket Action 基础能力。"""
 
 import asyncio
 import uuid
-from typing import Protocol, runtime_checkable
+from typing import cast
 
 from fastapi import WebSocket
 
 from app.database import RedisDatabaseManager
-from app.models.events.response import (
-    Response,
-)
-from app.utils import logger
-
-
-@runtime_checkable
-class SupportsModelDumpJson(Protocol):
-    """支持 model_dump_json 方法的协议（Pydantic BaseModel 兼容）"""
-
-    def model_dump_json(self) -> str: ...
-
-
-@runtime_checkable
-class SupportsEcho(Protocol):
-    """带有 echo 字段的协议"""
-
-    echo: str
-
-
-@runtime_checkable
-class PayloadWithEchoProtocol(SupportsModelDumpJson, SupportsEcho, Protocol):
-    """带有 echo 字段且支持序列化的 Payload 协议
-
-    用于类型标注需要 echo 字段的 Payload 类型，
-    如 PrivateMessagePayload, GroupMessagePayload 等。
-    """
-
-    pass
-
-
-# 使用 type 别名定义 Payload 类型
-type Payload = SupportsModelDumpJson  # 任何支持 model_dump_json 的对象
-type PayloadWithEcho = PayloadWithEchoProtocol  # 带有 echo 字段且支持序列化的 Payload
+from app.models.api import ActionPayload
+from app.models.common import JsonObject, NapCatId, to_json_value
+from app.models.events.response import Response
+from app.utils.log import log_event
 
 
 class BaseMixin:
-    """基础 Mixin，提供 WebSocket 通信基础设施"""
+    """基础 Mixin，封装 WebSocket Action 调用和响应等待。"""
 
-    websocket: WebSocket
-    database: RedisDatabaseManager
-    echo_dict: dict[str, asyncio.Future[Response]]
-    boot_id: int
-    timeout: int
+    websocket: WebSocket = cast(WebSocket, cast(object, None))
+    database: RedisDatabaseManager = cast(RedisDatabaseManager, cast(object, None))
+    echo_dict: dict[str, asyncio.Future[Response]] = cast(
+        dict[str, asyncio.Future[Response]], cast(object, None)
+    )
+    boot_id: NapCatId = ""
+    timeout: int = 0
 
     def _generate_echo(self) -> str:
-        """生成唯一的 echo 标识"""
+        """生成唯一 echo 标识。"""
         return str(uuid.uuid4())
 
+    def _build_params(self, **items: object) -> JsonObject:
+        """构造 NapCat 参数对象，过滤未传入的可选字段。"""
+        params: JsonObject = {}
+        for key, value in items.items():
+            if value is None:
+                continue
+            params[key] = to_json_value(value)
+        return params
+
     async def receive_data(self, response: Response) -> None:
-        """对外接口,找到对应future并填充"""
+        """将 Action 响应回填到等待中的 Future。"""
         echo = response.echo
         if not echo:
             return
@@ -69,25 +47,39 @@ class BaseMixin:
             future.set_result(response)
 
     async def create_future(self, echo: str) -> Response:
-        """创建future 监听future完成"""
+        """创建响应 Future 并等待 NapCat 回包。"""
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Response] = loop.create_future()
         self.echo_dict[echo] = future
         try:
-            await asyncio.wait_for(future, timeout=self.timeout)
-        except asyncio.TimeoutError:
+            _ = await asyncio.wait_for(future, timeout=self.timeout)
+        except asyncio.TimeoutError as exc:
             del self.echo_dict[echo]
-            logger.error(f"等待响应超时 (echo={echo}, timeout={self.timeout}s)")
-            raise ValueError(f"严重错误: 等待响应超时 (echo={echo})")
+            log_event(
+                level="ERROR",
+                event="napcat.action.timeout",
+                category="napcat_api",
+                message="等待 NapCat 响应超时",
+                echo=echo,
+                timeout=self.timeout,
+            )
+            raise TimeoutError(f"等待 NapCat 响应超时: {echo}") from exc
         result = future.result()
         del self.echo_dict[echo]
         return result
 
-    async def _send_payload(self, payload: Payload) -> None:
-        """发送 payload 到 WebSocket"""
-        await self.websocket.send_text(payload.model_dump_json())
+    async def _send_action(
+        self, action: str, params: JsonObject | None = None
+    ) -> None:
+        """发送不需要等待回包的 NapCat Action。"""
+        payload = ActionPayload(action=action, params=params)
+        await self.websocket.send_text(payload.model_dump_json(exclude_none=True))
 
-    async def _send_and_wait(self, payload: PayloadWithEcho) -> Response:
-        """发送 payload 并等待响应"""
-        await self._send_payload(payload)
-        return await self.create_future(echo=payload.echo)
+    async def _call_action(
+        self, action: str, params: JsonObject | None = None
+    ) -> Response:
+        """发送需要等待回包的 NapCat Action。"""
+        echo = self._generate_echo()
+        payload = ActionPayload(action=action, params=params, echo=echo)
+        await self.websocket.send_text(payload.model_dump_json(exclude_none=True))
+        return await self.create_future(echo=echo)

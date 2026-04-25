@@ -1,9 +1,18 @@
 FROM python:3.13
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# 安装 jemalloc 以优化内存分配和减少碎片
-RUN apt-get update && apt-get install -y libjemalloc2 && rm -rf /var/lib/apt/lists/* && \
-    ln -s /usr/lib/*/libjemalloc.so.2 /usr/lib/libjemalloc.so.2
+# 安装运行时、MCP 常用命令环境与 jemalloc。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    docker.io \
+    git \
+    libjemalloc2 \
+    nodejs \
+    npm \
+    && npm install -g pnpm yarn \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/lib/*/libjemalloc.so.2 /usr/lib/libjemalloc.so.2
 
 ENV PYTHONUNBUFFERED=1
 # 启用 jemalloc

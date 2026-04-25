@@ -1,15 +1,45 @@
-from .llm import LLMConfig, LLMHandler, ChatMessage
-from .rag import EmbeddingConfig, SiliconFlowEmbedding, SearchVectors, start
-from .llmcontextmanager import ContextHandler, LLMContextConfig
+"""服务层公共导出。"""
+
+from .llm import (
+    ChatMessage,
+    CompositeToolExecutor,
+    ContextHandler,
+    ImageGenerationOptions,
+    LLMConfig,
+    LLMContextConfig,
+    LLMHandler,
+    LLMResponse,
+    LLMToolCall,
+    LLMToolDefinition,
+    LLMToolExecutor,
+    LLMToolRegistry,
+    MCPConfig,
+    MCPServerConfig,
+    MCPToolManager,
+)
+from .napcat import (
+    NapCatGroupHistoryDatabase,
+    NapCatGroupToolBot,
+    NapCatGroupToolExecutor,
+)
 
 __all__ = [
-    "LLMConfig",
-    "EmbeddingConfig",
-    "SiliconFlowEmbedding",
-    "SearchVectors",
-    "start",
-    "LLMHandler",
-    "ContextHandler",
-    "LLMContextConfig",
     "ChatMessage",
+    "CompositeToolExecutor",
+    "ContextHandler",
+    "ImageGenerationOptions",
+    "LLMConfig",
+    "LLMContextConfig",
+    "LLMHandler",
+    "LLMResponse",
+    "LLMToolCall",
+    "LLMToolDefinition",
+    "LLMToolExecutor",
+    "LLMToolRegistry",
+    "MCPConfig",
+    "MCPServerConfig",
+    "MCPToolManager",
+    "NapCatGroupHistoryDatabase",
+    "NapCatGroupToolBot",
+    "NapCatGroupToolExecutor",
 ]
