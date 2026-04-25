@@ -1,10 +1,10 @@
 """NapCat OneBot 消息段模型。"""
 
-from typing import Annotated, ClassVar, Literal, Self, cast
+from typing import ClassVar, Literal, Self, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from .common import JsonObject, JsonValue, NapCatId, NapCatModel, NapCatStringInteger
+from .common import JsonValue, NapCatId, NapCatModel, NapCatStringInteger
 
 
 class BaseSegment[T](NapCatModel):
@@ -103,7 +103,7 @@ class FileData(NapCatModel):
 class JsonData(NapCatModel):
     """JSON 消息数据。"""
 
-    data: str | JsonObject
+    data: JsonValue
 
 
 class ForwardData(NapCatModel):
@@ -184,7 +184,7 @@ class XmlData(NapCatModel):
 class MiniAppData(NapCatModel):
     """小程序消息数据。"""
 
-    content: str | JsonObject
+    content: JsonValue
 
 
 class Text(BaseSegment[TextData]):
@@ -327,7 +327,14 @@ class MiniApp(BaseSegment[MiniAppData]):
     _arg_key: ClassVar[str | None] = "content"
 
 
-type MessageSegment = Annotated[
+class UnknownSegment(NapCatModel):
+    """未显式建模的 NapCat 消息段。"""
+
+    type: str
+    data: JsonValue = None
+
+
+type MessageSegment = (
     Text
     | At
     | Image
@@ -348,6 +355,6 @@ type MessageSegment = Annotated[
     | Poke
     | Location
     | Xml
-    | MiniApp,
-    Field(discriminator="type"),
-]
+    | MiniApp
+    | UnknownSegment
+)

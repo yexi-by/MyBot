@@ -16,9 +16,12 @@ class StrictModel(BaseModel):
 
 
 class NapCatModel(BaseModel):
-    """NapCat 入站协议模型基类，忽略未消费的上游扩展字段。"""
+    """NapCat 入站协议模型基类，吸收上游字段漂移。"""
 
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore")
+    model_config: ClassVar[ConfigDict] = ConfigDict(
+        extra="ignore",
+        coerce_numbers_to_str=True,
+    )
 
 
 def normalize_string_or_integer(value: object) -> str:

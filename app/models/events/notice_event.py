@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from app.models.common import JsonObject, NapCatId, NapCatModel, NapCatStringInteger
+from app.models.common import JsonValue, NapCatId, NapCatModel, NapCatStringInteger
 
 
 class Notice(NapCatModel):
@@ -155,7 +155,7 @@ class NotifyEvent(NotifyBaseEvent):
     times: int | None = None
     status_text: str | None = None
     event_type: int | None = None
-    raw_info: JsonObject | None = None
+    raw_info: JsonValue = None
     name_new: str | None = None
     title: str | None = None
     honor_type: str | None = None
@@ -173,7 +173,7 @@ class GroupPokeEvent(GroupNotifyEvent):
 
     sub_type: Literal["poke"]
     target_id: NapCatId
-    raw_info: JsonObject | None = None
+    raw_info: JsonValue = None
 
 
 class FriendPokeEvent(NotifyBaseEvent):
@@ -183,7 +183,7 @@ class FriendPokeEvent(NotifyBaseEvent):
     user_id: NapCatId
     target_id: NapCatId
     sender_id: NapCatId | None = None
-    raw_info: JsonObject | None = None
+    raw_info: JsonValue = None
 
 
 class GroupNameEvent(GroupNotifyEvent):

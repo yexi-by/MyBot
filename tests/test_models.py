@@ -5,7 +5,15 @@ import unittest
 from pydantic import ValidationError
 
 from app.core.event_parser import EventTypeChecker
-from app.models import GroupMessage, Image, Sender, StrictModel, Text
+from app.models import (
+    GroupMessage,
+    Image,
+    NotifyEvent,
+    Sender,
+    StrictModel,
+    Text,
+    UnknownSegment,
+)
 
 
 class StrictModelBoundaryTest(unittest.TestCase):
@@ -100,3 +108,99 @@ class StrictModelBoundaryTest(unittest.TestCase):
         self.assertIsInstance(event.message[0], Image)
         assert isinstance(event.message[0], Image)
         self.assertEqual(event.message[0].data.sub_type, "0")
+
+    def test_napcat_model_coerces_numeric_strings(self) -> None:
+        """NapCat 入站字符串字段遇到数字时会统一收敛为字符串。"""
+        event = EventTypeChecker().get_event(
+            {
+                "time": 1710000000,
+                "self_id": 742654932,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "user_id": 2172959822,
+                "message_id": 123456,
+                "group_id": 939506743,
+                "group_name": 123,
+                "message": [{"type": "text", "data": {"text": 456}}],
+                "raw_message": 456,
+                "sender": {"user_id": 2172959822, "nickname": 789, "card": 100},
+                "message_format": "array",
+            }
+        )
+        self.assertIsInstance(event, GroupMessage)
+        assert isinstance(event, GroupMessage)
+        self.assertEqual(event.group_name, "123")
+        self.assertEqual(event.raw_message, "456")
+        self.assertEqual(event.sender.nickname, "789")
+        self.assertEqual(event.sender.card, "100")
+        self.assertIsInstance(event.message[0], Text)
+        assert isinstance(event.message[0], Text)
+        self.assertEqual(event.message[0].data.text, "456")
+
+    def test_string_format_message_is_converted_to_text_segment(self) -> None:
+        """NapCat string 格式消息会转为 text 消息段。"""
+        event = EventTypeChecker().get_event(
+            {
+                "time": 1710000000,
+                "self_id": 742654932,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "user_id": 2172959822,
+                "message_id": 123456,
+                "group_id": 939506743,
+                "message": "纯文本消息",
+                "raw_message": "纯文本消息",
+                "sender": {"user_id": 2172959822, "nickname": "夜袭"},
+                "message_format": "string",
+            }
+        )
+        self.assertIsInstance(event, GroupMessage)
+        assert isinstance(event, GroupMessage)
+        self.assertIsInstance(event.message[0], Text)
+        assert isinstance(event.message[0], Text)
+        self.assertEqual(event.message[0].data.text, "纯文本消息")
+
+    def test_unknown_segment_does_not_drop_whole_message(self) -> None:
+        """未知消息段会保留为 UnknownSegment，不丢弃整条群消息。"""
+        event = EventTypeChecker().get_event(
+            {
+                "time": 1710000000,
+                "self_id": 742654932,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "user_id": 2172959822,
+                "message_id": 123456,
+                "group_id": 939506743,
+                "message": [{"type": "new_upstream_type", "data": {"value": 1}}],
+                "raw_message": "[新消息段]",
+                "sender": {"user_id": 2172959822, "nickname": "夜袭"},
+                "message_format": "array",
+            }
+        )
+        self.assertIsInstance(event, GroupMessage)
+        assert isinstance(event, GroupMessage)
+        self.assertIsInstance(event.message[0], UnknownSegment)
+        assert isinstance(event.message[0], UnknownSegment)
+        self.assertEqual(event.message[0].type, "new_upstream_type")
+
+    def test_notify_raw_info_accepts_non_object_json(self) -> None:
+        """notify raw_info 可接受上游任意 JSON 结构。"""
+        event = EventTypeChecker().get_event(
+            {
+                "time": 1710000000,
+                "self_id": 742654932,
+                "post_type": "notice",
+                "notice_type": "notify",
+                "sub_type": "poke",
+                "group_id": 939506743,
+                "user_id": 2172959822,
+                "target_id": 742654932,
+                "raw_info": [{"label": "上游数组"}],
+            }
+        )
+        self.assertIsInstance(event, NotifyEvent)
+        assert isinstance(event, NotifyEvent)
+        self.assertEqual(event.raw_info, [{"label": "上游数组"}])

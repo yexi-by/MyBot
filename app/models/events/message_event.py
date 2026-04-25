@@ -2,11 +2,24 @@
 
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from app.models.common import JsonValue, NapCatId, NapCatModel, NapCatStringInteger
 
 from ..segments import MessageSegment
+
+
+def normalize_message_segments(value: object) -> object:
+    """把 string 格式消息归一化为单个 text 消息段。"""
+    # Pydantic 入站钩子只能接收 object；这里在协议边界立即收窄。
+    if isinstance(value, str):
+        return [{"type": "text", "data": {"text": value}}]
+    return value
+
+
+type MessageSegments = Annotated[
+    list[MessageSegment], BeforeValidator(normalize_message_segments)
+]
 
 
 class Sender(NapCatModel):
@@ -32,7 +45,7 @@ class BaseMessage(NapCatModel):
     sub_type: str = "normal"
     user_id: NapCatId
     message_id: NapCatId
-    message: list[MessageSegment]
+    message: MessageSegments
     raw_message: str = ""
     sender: Sender
     font: NapCatStringInteger | None = None

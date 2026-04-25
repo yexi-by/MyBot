@@ -73,6 +73,7 @@ from .segments import (
     Reply,
     Rps,
     Text,
+    UnknownSegment,
     Video,
     Xml,
 )
@@ -145,6 +146,7 @@ __all__ = [
     "Sender",
     "StrictModel",
     "Text",
+    "UnknownSegment",
     "Video",
     "Xml",
     "to_json_value",
