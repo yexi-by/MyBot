@@ -29,6 +29,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /tmp/nodesource_setup.sh \
     && ln -s /usr/lib/*/libjemalloc.so.2 /usr/lib/libjemalloc.so.2
 
+ENV LANG="C.UTF-8"
+ENV LC_ALL="C.UTF-8"
+ENV PYTHONUTF8=1
+ENV PYTHONIOENCODING="utf-8"
 ENV PYTHONUNBUFFERED=1
 ENV LD_PRELOAD="/usr/lib/libjemalloc.so.2"
 ENV UV_PROJECT_ENVIRONMENT="/app/.venv"
