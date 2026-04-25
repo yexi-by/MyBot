@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -29,6 +30,15 @@ type DumpPhase = Literal[
 ]
 
 
+@dataclass(frozen=True)
+class MessageDelta:
+    """描述一次 Markdown 转储需要追加的消息增量。"""
+
+    previous_count: int
+    is_reset: bool
+    messages: list[ChatMessage]
+
+
 class AIGroupChatDebugDumper:
     """按启动批次把每个群的 LLM messages 完整写入 Markdown 文件。"""
 
@@ -40,6 +50,8 @@ class AIGroupChatDebugDumper:
         self.session_name: str = self.started_at.strftime("%Y%m%d_%H%M%S_%f")
         self._paths: dict[str, Path] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._last_request_message_counts: dict[str, int] = {}
+        self._last_context_message_counts: dict[str, int] = {}
 
     def initialize_group(
         self, *, group_config: GroupChatConfig, messages: list[ChatMessage]
@@ -49,6 +61,8 @@ class AIGroupChatDebugDumper:
             return None
         group_id = str(group_config.group_id)
         path = self._ensure_group_file(group_id=group_id)
+        self._last_request_message_counts[group_id] = len(messages)
+        self._last_context_message_counts[group_id] = len(messages)
         lines = [
             f"# AI 群聊上下文调试 - 群 {group_id}",
             "",
@@ -75,17 +89,37 @@ class AIGroupChatDebugDumper:
         tools: list[LLMToolDefinition],
         tool_choice: LLMToolChoice,
     ) -> None:
-        """追加一次发送给模型的完整请求上下文。"""
-        lines = [
-            *self._format_section_header(phase="模型请求", round_index=round_index),
-            f"- tool_choice: `{self._format_tool_choice(tool_choice=tool_choice)}`",
-            f"- tools_count: `{len(tools)}`",
-            "",
-            *self._format_tools(tools=tools),
-            "",
-            *self._format_messages(title="发送给模型的 messages", messages=messages),
-        ]
-        await self._append_section(group_id=group_id, lines=lines)
+        """追加一次发送给模型的请求上下文增量。"""
+        if not self.enabled:
+            return
+        group_key = str(group_id)
+        path = self._ensure_group_file(group_id=group_key)
+        lock = self._lock_for_group(group_id=group_key)
+        async with lock:
+            delta = self._consume_message_delta(
+                group_id=group_key,
+                messages=messages,
+                state=self._last_request_message_counts,
+            )
+            delta_title = (
+                "本次请求完整 messages（检测到上下文裁剪或重建）"
+                if delta.is_reset
+                else "本次请求新增 messages"
+            )
+            lines = [
+                *self._format_section_header(phase="模型请求", round_index=round_index),
+                f"- tool_choice: `{self._format_tool_choice(tool_choice=tool_choice)}`",
+                f"- tools_count: `{len(tools)}`",
+                f"- current_messages_count: `{len(messages)}`",
+                f"- previous_messages_count: `{delta.previous_count}`",
+                f"- new_messages_count: `{len(delta.messages)}`",
+                f"- context_reset: `{delta.is_reset}`",
+                "",
+                *self._format_tools(tools=tools),
+                "",
+                *self._format_messages(title=delta_title, messages=delta.messages),
+            ]
+            await self._write_section(path=path, lines=lines)
 
     async def append_llm_response(
         self,
@@ -157,12 +191,33 @@ class AIGroupChatDebugDumper:
         title: str,
         messages: list[ChatMessage],
     ) -> None:
-        """追加当前群长期上下文快照。"""
-        lines = [
-            *self._format_section_header(phase="长期上下文", round_index=None),
-            *self._format_messages(title=title, messages=messages),
-        ]
-        await self._append_section(group_id=group_id, lines=lines)
+        """追加当前群长期上下文变化。"""
+        if not self.enabled:
+            return
+        group_key = str(group_id)
+        path = self._ensure_group_file(group_id=group_key)
+        lock = self._lock_for_group(group_id=group_key)
+        async with lock:
+            delta = self._consume_message_delta(
+                group_id=group_key,
+                messages=messages,
+                state=self._last_context_message_counts,
+            )
+            delta_title = (
+                f"{title}完整 messages（检测到上下文裁剪或重建）"
+                if delta.is_reset
+                else f"{title}新增 messages"
+            )
+            lines = [
+                *self._format_section_header(phase="长期上下文", round_index=None),
+                f"- current_messages_count: `{len(messages)}`",
+                f"- previous_messages_count: `{delta.previous_count}`",
+                f"- new_messages_count: `{len(delta.messages)}`",
+                f"- context_reset: `{delta.is_reset}`",
+                "",
+                *self._format_messages(title=delta_title, messages=delta.messages),
+            ]
+            await self._write_section(path=path, lines=lines)
 
     def _ensure_group_file(self, *, group_id: str) -> Path:
         """确保指定群的本次启动调试文件存在。"""
@@ -198,8 +253,33 @@ class AIGroupChatDebugDumper:
         path = self._ensure_group_file(group_id=group_key)
         lock = self._lock_for_group(group_id=group_key)
         async with lock:
-            async with aiofiles.open(path, mode="a", encoding="utf-8") as file:
-                await file.write("\n\n" + "\n".join(lines) + "\n")
+            await self._write_section(path=path, lines=lines)
+
+    async def _write_section(self, *, path: Path, lines: list[str]) -> None:
+        """把已经格式化好的 Markdown 段落写入文件。"""
+        async with aiofiles.open(path, mode="a", encoding="utf-8") as file:
+            await file.write("\n\n" + "\n".join(lines) + "\n")
+
+    def _consume_message_delta(
+        self,
+        *,
+        group_id: str,
+        messages: list[ChatMessage],
+        state: dict[str, int],
+    ) -> "MessageDelta":
+        """计算本次需要写入 Markdown 的 messages 增量。"""
+        previous_count = state.get(group_id, 0)
+        is_reset = len(messages) < previous_count
+        if is_reset:
+            delta_messages = messages
+        else:
+            delta_messages = messages[previous_count:]
+        state[group_id] = len(messages)
+        return MessageDelta(
+            previous_count=previous_count,
+            is_reset=is_reset,
+            messages=delta_messages,
+        )
 
     def _lock_for_group(self, *, group_id: str) -> asyncio.Lock:
         """返回指定群调试文件的异步写锁。"""

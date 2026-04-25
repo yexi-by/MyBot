@@ -33,8 +33,10 @@ def build_group_config() -> GroupChatConfig:
 class AIGroupChatDebugDumperTest(unittest.IsolatedAsyncioTestCase):
     """验证 AI 群聊 Markdown 调试文件内容。"""
 
-    async def test_enabled_dumper_writes_startup_and_llm_sections(self) -> None:
-        """开启开关后，调试文件会记录启动 messages、请求和响应。"""
+    async def test_enabled_dumper_writes_startup_and_incremental_llm_sections(
+        self,
+    ) -> None:
+        """开启开关后，调试文件只追加请求新增 messages，避免重复旧上下文。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             dumper = AIGroupChatDebugDumper(config=build_config(enabled=True))
             dumper.root_dir = Path(temp_dir)
@@ -68,6 +70,17 @@ class AIGroupChatDebugDumperTest(unittest.IsolatedAsyncioTestCase):
                 ],
                 tool_choice="auto",
             )
+            await dumper.append_llm_request(
+                group_id="40000",
+                round_index=2,
+                messages=[
+                    ChatMessage(role="system", text="系统提示词"),
+                    ChatMessage(role="user", text="用户消息"),
+                    ChatMessage(role="assistant", text="工具调用中"),
+                ],
+                tools=[],
+                tool_choice="auto",
+            )
             await dumper.append_llm_response(
                 group_id="40000",
                 round_index=1,
@@ -90,11 +103,14 @@ class AIGroupChatDebugDumperTest(unittest.IsolatedAsyncioTestCase):
 
             content = path.read_text(encoding="utf-8")
             self.assertIn("启动初始化 messages", content)
-            self.assertIn("发送给模型的 messages", content)
+            self.assertIn("本次请求新增 messages", content)
             self.assertIn("系统提示词", content)
             self.assertIn("用户消息", content)
+            self.assertIn("工具调用中", content)
             self.assertIn("test__lookup", content)
             self.assertIn("模型思考", content)
+            self.assertEqual(content.count("### message 1: `system`"), 1)
+            self.assertEqual(content.count("用户消息"), 1)
 
     async def test_disabled_dumper_does_not_create_files(self) -> None:
         """关闭开关后，调试转储不会创建任何文件。"""
