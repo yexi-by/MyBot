@@ -11,59 +11,41 @@ ChatRole = Literal["system", "user", "assistant"]
 
 
 class ContextHandler:
-    """维护单个会话的系统提示词与滑动上下文。"""
+    """维护单个会话的系统提示词与完整上下文。"""
 
-    def __init__(self, system_prompt: str, max_context_length: int) -> None:
-        """初始化上下文并校验最大上下文长度。"""
-        if max_context_length < 5:
-            raise ValueError(f"最大上下文必须大于5,当前设置: {max_context_length}")
+    def __init__(self, system_prompt: str, max_context_tokens: int) -> None:
+        """初始化上下文并校验最大上下文 token 预算。"""
+        if max_context_tokens <= 0:
+            raise ValueError(f"最大上下文 token 必须大于0,当前设置: {max_context_tokens}")
         self.system_prompt: ChatMessage = ChatMessage(
             role="system", text=system_prompt
         )
         self._messages_lst: list[ChatMessage] = [self.system_prompt]
-        self.max_context_length: int = max_context_length
+        self.max_context_tokens: int = max_context_tokens
 
     @classmethod
-    async def new(cls, path: str, max_context_length: int) -> Self:
+    async def new(cls, path: str, max_context_tokens: int) -> Self:
         """从系统提示词文件创建上下文管理器。"""
         system_prompt = await read_text_file_async(path)
-        return cls(system_prompt=system_prompt, max_context_length=max_context_length)
+        return cls(system_prompt=system_prompt, max_context_tokens=max_context_tokens)
 
     @property
     def messages_lst(self) -> list[ChatMessage]:
         """返回当前上下文消息的浅拷贝。"""
         return self._messages_lst[:]
 
-    def _context_cleanup_algorithm(self, message_lst: list[ChatMessage]) -> None:
-        """按用户轮次滑动删除最早的一段非系统上下文。"""
-        start_index: int | None = None
-        end_index: int | None = None
-        for index, msg in enumerate(message_lst):
-            if msg.role == "system":
-                continue
-            if msg.role == "user":
-                if start_index is None:
-                    start_index = index
-                    continue
-                end_index = index
-                break
-        if start_index is None:
-            return
-        if end_index is not None:
-            del self._messages_lst[start_index:end_index]
-            return
-        del self._messages_lst[start_index:]
-
     def add_msg(
         self, msg: ChatMessage | None = None, msg_list: list[ChatMessage] | None = None
     ) -> None:
-        """向上下文追加单条或多条消息，并在超长时触发滑动清理。"""
+        """向上下文追加单条或多条消息。"""
         if msg is not None:
             self._messages_lst.append(msg)
         if msg_list is not None:
             self._messages_lst.extend(msg_list)
-        if len(self._messages_lst) > self.max_context_length:
-            self._context_cleanup_algorithm(message_lst=self._messages_lst)
+
+    def replace_history(self, *, messages: list[ChatMessage]) -> None:
+        """用新的非系统历史替换当前上下文历史。"""
+        self._messages_lst = [self.system_prompt, *messages]
 
     @overload
     def build_chatmessage(self, *, role: ChatRole, text: str) -> None:

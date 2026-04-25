@@ -60,7 +60,7 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             group_key = self._id_key(group_config.group_id)
             chat_handler = ContextHandler(
                 system_prompt=system_prompt,
-                max_context_length=group_config.max_context_length,
+                max_context_tokens=group_config.max_context_tokens,
             )
             self.group_contexts[group_key] = chat_handler
             dump_path = self.debug_dumper.initialize_group(
@@ -73,7 +73,7 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 category="plugin",
                 message="AI 群聊上下文初始化完成",
                 group_id=group_key,
-                max_context_length=group_config.max_context_length,
+                max_context_tokens=group_config.max_context_tokens,
                 system_prompt_chars=len(system_prompt),
                 debug_dump_path=str(dump_path) if dump_path is not None else "",
             )

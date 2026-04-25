@@ -16,7 +16,7 @@ class GroupChatConfig(StrictModel):
     group_id: NapCatId
     system_prompt_path: str
     knowledge_base_path: str
-    max_context_length: int = Field(ge=5)
+    max_context_tokens: int = Field(gt=0)
 
 
 class AIGroupChatConfig(StrictModel):
@@ -27,6 +27,8 @@ class AIGroupChatConfig(StrictModel):
     supports_multimodal: bool = False
     max_tool_rounds: int = Field(default=8, ge=1)
     correction_retry_count: int = Field(default=3, ge=1)
+    token_estimation_safety_factor: float = Field(default=1.25, ge=1)
+    context_compression_notice: str = "上下文有点长，我先整理一下记忆，稍等我几秒喵~"
     output_reasoning_content: bool = False
     pass_back_reasoning_content: bool = False
     debug_dump_messages: bool = False

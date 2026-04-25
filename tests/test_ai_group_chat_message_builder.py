@@ -53,7 +53,7 @@ def build_config() -> AIGroupChatConfig:
                 group_id="40000",
                 system_prompt_path="unused",
                 knowledge_base_path="unused",
-                max_context_length=10,
+                max_context_tokens=1000000,
             )
         ],
     )

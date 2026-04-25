@@ -23,6 +23,7 @@ from .constants import BEIJING_TIMEZONE, DEBUG_DUMP_DIR
 
 type DumpPhase = Literal[
     "启动初始化",
+    "上下文压缩",
     "模型请求",
     "模型响应",
     "工具结果",
@@ -68,7 +69,7 @@ class AIGroupChatDebugDumper:
             "",
             f"- 启动时间: {self.started_at.strftime('%Y-%m-%d %H:%M:%S %z')}",
             f"- 群号: `{group_id}`",
-            f"- 最大上下文条数: `{group_config.max_context_length}`",
+            f"- 最大上下文 token: `{group_config.max_context_tokens}`",
             f"- 系统提示词文件: `{group_config.system_prompt_path}`",
             f"- 知识库文件: `{group_config.knowledge_base_path}`",
             "",
@@ -156,6 +157,39 @@ class AIGroupChatDebugDumper:
             ),
             "",
             *self._format_tool_calls(tool_calls=response.tool_calls),
+        ]
+        await self._append_section(group_id=group_id, lines=lines)
+
+    async def append_context_compression(
+        self,
+        *,
+        group_id: NapCatId,
+        estimated_tokens: int,
+        max_context_tokens: int,
+        old_messages: list[ChatMessage],
+        dropped_image_count: int,
+        summary: str,
+    ) -> None:
+        """追加一次上下文压缩过程摘要。"""
+        lines = [
+            *self._format_section_header(phase="上下文压缩", round_index=None),
+            f"- estimated_tokens: `{estimated_tokens}`",
+            f"- max_context_tokens: `{max_context_tokens}`",
+            f"- old_messages_count: `{len(old_messages)}`",
+            f"- dropped_image_count: `{dropped_image_count}`",
+            f"- summary_chars: `{len(summary)}`",
+            "",
+            "## 被压缩的旧上下文",
+            "",
+            *self._format_messages(title="旧上下文 messages", messages=old_messages),
+            "",
+            "## 压缩摘要",
+            "",
+            *self._format_optional_text(
+                value=summary,
+                language="markdown",
+                empty_text="（压缩摘要为空）",
+            ),
         ]
         await self._append_section(group_id=group_id, lines=lines)
 

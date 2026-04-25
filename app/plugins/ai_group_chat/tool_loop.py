@@ -15,7 +15,10 @@ from app.services.llm.tools import build_tool_result_message
 from app.utils.log import log_event
 
 from .config import AIGroupChatConfig
+from .constants import DEEPSEEK_V4_ROLEPLAY_MODELS
+from .context_compressor import GroupChatContextCompressor
 from .debug_dump import AIGroupChatDebugDumper
+from .token_budget import ConservativeTokenEstimator, TokenBudgetEstimate
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,15 @@ class ReplyContent:
     visible_content: str | None
     memory_content: str | None
     memory_reasoning_content: str | None
+
+
+@dataclass(frozen=True)
+class PreparedTurnContext:
+    """描述本轮请求前整理好的工作上下文。"""
+
+    working_messages: list[ChatMessage]
+    turn_messages: list[ChatMessage]
+    replace_existing_history: bool
 
 
 class GroupChatToolLoop:
@@ -41,6 +53,12 @@ class GroupChatToolLoop:
         self.config: AIGroupChatConfig = config
         self.context: Context = context
         self.debug_dumper: AIGroupChatDebugDumper = debug_dumper
+        self.token_estimator: ConservativeTokenEstimator = ConservativeTokenEstimator(
+            safety_factor=config.token_estimation_safety_factor
+        )
+        self.context_compressor: GroupChatContextCompressor = (
+            GroupChatContextCompressor()
+        )
 
     async def run(
         self,
@@ -50,8 +68,6 @@ class GroupChatToolLoop:
         turn_messages: list[ChatMessage],
     ) -> None:
         """执行群聊专用工具调用循环。"""
-        working_messages = chat_handler.messages_lst
-        working_messages.extend(turn_messages)
         tool_history_messages: list[ChatMessage] = []
         corrections_count = 0
         napcat_executor = NapCatGroupToolExecutor(
@@ -64,6 +80,15 @@ class GroupChatToolLoop:
             [napcat_executor, self.context.mcp_tool_manager]
         )
         tools = tool_executor.list_tools()
+        prepared_context = await self._prepare_turn_context(
+            msg=msg,
+            chat_handler=chat_handler,
+            turn_messages=turn_messages,
+            tools=tools,
+        )
+        working_messages = prepared_context.working_messages
+        turn_messages = prepared_context.turn_messages
+        replace_existing_history = prepared_context.replace_existing_history
         log_event(
             level="DEBUG",
             event="ai_group_chat.tool_loop.start",
@@ -144,6 +169,7 @@ class GroupChatToolLoop:
                     visible_content=reply_content.visible_content,
                     memory_content=reply_content.memory_content,
                     memory_reasoning_content=reply_content.memory_reasoning_content,
+                    replace_existing_history=replace_existing_history,
                 )
                 return
             if modifier_calls and information_calls:
@@ -218,6 +244,7 @@ class GroupChatToolLoop:
                         tool_history_messages=tool_history_messages,
                         assistant_content=None,
                         assistant_reasoning_content=None,
+                        replace_existing_history=replace_existing_history,
                     )
                     await self.debug_dumper.append_context_snapshot(
                         group_id=msg.group_id,
@@ -242,6 +269,7 @@ class GroupChatToolLoop:
                     tool_history_messages=tool_history_messages,
                     assistant_content=reply_content.memory_content,
                     assistant_reasoning_content=reply_content.memory_reasoning_content,
+                    replace_existing_history=replace_existing_history,
                 )
                 await self.debug_dumper.append_context_snapshot(
                     group_id=msg.group_id,
@@ -258,6 +286,148 @@ class GroupChatToolLoop:
             )
             tool_history_messages.extend(information_history)
         raise RuntimeError(f"AI 群聊工具调用超过最大轮数: {self.config.max_tool_rounds}")
+
+    async def _prepare_turn_context(
+        self,
+        *,
+        msg: GroupMessage,
+        chat_handler: ContextHandler,
+        turn_messages: list[ChatMessage],
+        tools: list[LLMToolDefinition],
+    ) -> PreparedTurnContext:
+        """在请求模型前按 token 预算决定是否压缩旧上下文。"""
+        candidate_messages = [*chat_handler.messages_lst, *turn_messages]
+        budget = self.token_estimator.check_request(
+            messages=candidate_messages,
+            tools=tools,
+            max_context_tokens=chat_handler.max_context_tokens,
+        )
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.context_budget.checked",
+            category="plugin",
+            message="AI 群聊上下文预算检查完成",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            estimated_tokens=budget.estimated_tokens,
+            max_context_tokens=budget.max_context_tokens,
+            should_compress=budget.should_compress,
+            current_history_messages_count=len(chat_handler.messages_lst),
+            turn_messages_count=len(turn_messages),
+            tools_count=len(tools),
+        )
+        if not budget.should_compress:
+            return PreparedTurnContext(
+                working_messages=candidate_messages,
+                turn_messages=turn_messages,
+                replace_existing_history=False,
+            )
+        _ = await self.context.bot.send_msg(
+            group_id=msg.group_id,
+            text=self.config.context_compression_notice,
+        )
+        summary = await self._compress_existing_context(
+            msg=msg,
+            chat_handler=chat_handler,
+            budget=budget,
+        )
+        rebuilt_user_message = self.context_compressor.build_rebuilt_user_message(
+            summary=summary,
+            current_turn_messages=turn_messages,
+            append_roleplay_instruct=self._should_append_roleplay_instruct_after_compression(),
+        )
+        rebuilt_turn_messages = [rebuilt_user_message]
+        rebuilt_working_messages = [chat_handler.system_prompt, *rebuilt_turn_messages]
+        rebuilt_budget = self.token_estimator.check_request(
+            messages=rebuilt_working_messages,
+            tools=tools,
+            max_context_tokens=chat_handler.max_context_tokens,
+        )
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.context_compressed.rebuilt",
+            category="plugin",
+            message="AI 群聊上下文压缩后已重建本轮请求",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            rebuilt_estimated_tokens=rebuilt_budget.estimated_tokens,
+            max_context_tokens=rebuilt_budget.max_context_tokens,
+            rebuilt_should_still_compress=rebuilt_budget.should_compress,
+            rebuilt_user_chars=len(rebuilt_user_message.text or ""),
+            rebuilt_image_count=len(rebuilt_user_message.image or []),
+        )
+        if rebuilt_budget.should_compress:
+            raise RuntimeError(
+                "AI 群聊上下文压缩后仍超过最大上下文预算，"
+                f"estimated={rebuilt_budget.estimated_tokens}, "
+                f"max={rebuilt_budget.max_context_tokens}"
+            )
+        return PreparedTurnContext(
+            working_messages=rebuilt_working_messages,
+            turn_messages=rebuilt_turn_messages,
+            replace_existing_history=True,
+        )
+
+    async def _compress_existing_context(
+        self,
+        *,
+        msg: GroupMessage,
+        chat_handler: ContextHandler,
+        budget: TokenBudgetEstimate,
+    ) -> str:
+        """用临时 LLM 请求压缩已有正式上下文，不包含当前新消息。"""
+        history_messages = chat_handler.messages_lst[1:]
+        compression_messages, compression_input = (
+            self.context_compressor.build_compression_messages(
+                system_prompt=chat_handler.system_prompt,
+                history_messages=history_messages,
+            )
+        )
+        log_event(
+            level="WARNING",
+            event="ai_group_chat.context_compression.triggered",
+            category="plugin",
+            message="AI 群聊上下文超过预算，开始压缩旧上下文",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            estimated_tokens=budget.estimated_tokens,
+            max_context_tokens=budget.max_context_tokens,
+            old_history_messages_count=len(history_messages),
+            dropped_image_count=compression_input.dropped_image_count,
+        )
+        summary = await self.context.llm.get_ai_text_response(
+            messages=compression_messages,
+            model_vendors=self.config.model_vendors,
+            model_name=self.config.model_name,
+        )
+        normalized_summary = self._normalize_content(summary)
+        if normalized_summary is None:
+            raise ValueError("AI 群聊上下文压缩返回了空摘要")
+        await self.debug_dumper.append_context_compression(
+            group_id=msg.group_id,
+            estimated_tokens=budget.estimated_tokens,
+            max_context_tokens=budget.max_context_tokens,
+            old_messages=compression_input.messages,
+            dropped_image_count=compression_input.dropped_image_count,
+            summary=normalized_summary,
+        )
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.context_compression.finished",
+            category="plugin",
+            message="AI 群聊旧上下文压缩完成",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            summary_chars=len(normalized_summary),
+        )
+        return normalized_summary
+
+    def _should_append_roleplay_instruct_after_compression(self) -> bool:
+        """判断压缩重建后的首条 user 是否需要重新追加角色沉浸要求。"""
+        return (
+            self.config.enable_deepseek_v4_roleplay_instruct
+            and self.config.model_name in DEEPSEEK_V4_ROLEPLAY_MODELS
+        )
 
     def _split_tool_calls(
         self, *, tool_calls: list[LLMToolCall]
@@ -282,6 +452,7 @@ class GroupChatToolLoop:
         visible_content: str | None,
         memory_content: str | None,
         memory_reasoning_content: str | None,
+        replace_existing_history: bool,
     ) -> None:
         """处理没有工具调用的最终响应。"""
         if visible_content is not None:
@@ -313,6 +484,7 @@ class GroupChatToolLoop:
             tool_history_messages=tool_history_messages,
             assistant_content=memory_content,
             assistant_reasoning_content=memory_reasoning_content,
+            replace_existing_history=replace_existing_history,
         )
         await self.debug_dumper.append_context_snapshot(
             group_id=msg.group_id,
@@ -514,6 +686,7 @@ class GroupChatToolLoop:
         tool_history_messages: list[ChatMessage],
         assistant_content: str | None,
         assistant_reasoning_content: str | None,
+        replace_existing_history: bool,
     ) -> None:
         """把本轮用户输入和最终回复写入群上下文。"""
         history_messages = turn_messages[:]
@@ -536,9 +709,12 @@ class GroupChatToolLoop:
             tool_history_messages_count=len(tool_history_messages),
             persisted_messages_count=len(history_messages),
             persist_tool_results=self.config.persist_tool_results,
+            replace_existing_history=replace_existing_history,
             assistant_content_chars=len(assistant_content or ""),
             assistant_reasoning_chars=len(assistant_reasoning_content or ""),
         )
+        if replace_existing_history:
+            chat_handler.replace_history(messages=[])
         chat_handler.build_chatmessage(message_lst=history_messages)
 
     def _normalize_content(self, content: str | None) -> str | None:

@@ -20,6 +20,15 @@ from app.services.llm.schemas import (
 class FakeLLMProtocol(Protocol):
     """描述测试用 LLM 需要提供的异步响应接口。"""
 
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+    ) -> str:
+        """返回测试用纯文本响应。"""
+        ...
+
     async def get_ai_response_with_tools(
         self,
         messages: list[ChatMessage],
@@ -86,6 +95,16 @@ class FakeDatabase:
 class FakeLLM:
     """测试用 LLM，总是返回带思维链的正式回复。"""
 
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+    ) -> str:
+        """测试中默认不会触发纯文本压缩请求。"""
+        _ = (messages, model_vendors, model_name)
+        return "压缩摘要"
+
     async def get_ai_response_with_tools(
         self,
         messages: list[ChatMessage],
@@ -144,6 +163,16 @@ class FakeToolCallLLM:
         """初始化请求记录。"""
         self.received_messages: list[list[ChatMessage]] = []
 
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+    ) -> str:
+        """测试中不会触发纯文本压缩请求。"""
+        _ = (messages, model_vendors, model_name)
+        return "压缩摘要"
+
     async def get_ai_response_with_tools(
         self,
         messages: list[ChatMessage],
@@ -166,15 +195,54 @@ class FakeToolCallLLM:
         return LLMResponse(content="工具后回复", reasoning_content="最终思考")
 
 
+class FakeCompressionLLM:
+    """测试用 LLM，先压缩上下文，再返回最终回复。"""
+
+    def __init__(self) -> None:
+        """初始化请求记录。"""
+        self.compression_messages: list[ChatMessage] = []
+        self.received_messages: list[list[ChatMessage]] = []
+
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+    ) -> str:
+        """记录压缩请求并返回固定摘要。"""
+        _ = (model_vendors, model_name)
+        self.compression_messages = messages[:]
+        return "旧上下文摘要：用户之前在讨论上下文压缩。"
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """记录正式请求并返回最终正文。"""
+        _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
+        self.received_messages.append(messages[:])
+        return LLMResponse(content="压缩后回复")
+
+
 def build_config(
-    *, output_reasoning_content: bool, pass_back_reasoning_content: bool = False
+    *,
+    output_reasoning_content: bool,
+    pass_back_reasoning_content: bool = False,
+    model_name: str = "gpt-5.5",
+    context_compression_notice: str = "上下文有点长，我先整理一下记忆，稍等我几秒喵~",
 ) -> AIGroupChatConfig:
     """构造测试用 AI 群聊配置。"""
     return AIGroupChatConfig(
-        model_name="gpt-5.5",
+        model_name=model_name,
         model_vendors="CLIProxyAPI",
         output_reasoning_content=output_reasoning_content,
         pass_back_reasoning_content=pass_back_reasoning_content,
+        context_compression_notice=context_compression_notice,
         group_config=[],
     )
 
@@ -209,7 +277,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             context=cast(Context, fake_context),
             debug_dumper=AIGroupChatDebugDumper(config=config),
         )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_length=10)
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
 
         await tool_loop.run(
             msg=build_message(),
@@ -244,7 +312,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             context=cast(Context, fake_context),
             debug_dumper=AIGroupChatDebugDumper(config=config),
         )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_length=10)
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
 
         await tool_loop.run(
             msg=build_message(),
@@ -276,7 +344,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             context=cast(Context, fake_context),
             debug_dumper=AIGroupChatDebugDumper(config=config),
         )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_length=10)
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
 
         await tool_loop.run(
             msg=build_message(),
@@ -291,3 +359,51 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool_call_message.role, "assistant")
         self.assertEqual(tool_call_message.reasoning_content, "工具前思考")
         self.assertEqual(fake_context.bot.sent_texts, ["工具后回复"])
+
+    async def test_context_compression_excludes_current_message_then_rebuilds(
+        self,
+    ) -> None:
+        """上下文超预算时，先压缩旧历史，再用摘要、当前消息和角色要求重建请求。"""
+        fake_llm = FakeCompressionLLM()
+        fake_context = FakeContext(llm=fake_llm)
+        config = build_config(
+            output_reasoning_content=False,
+            model_name="deepseek-v4-pro",
+            context_compression_notice="我先整理一下记忆喵~",
+        )
+        config.enable_deepseek_v4_roleplay_instruct = True
+        tool_loop = GroupChatToolLoop(
+            config=config,
+            context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=8000)
+        chat_handler.build_chatmessage(
+            message_lst=[
+                ChatMessage(role="user", text="旧消息一" * 100),
+                ChatMessage(role="assistant", text="旧回复一" * 100),
+            ]
+        )
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="当前新消息")],
+        )
+
+        compression_user_text = fake_llm.compression_messages[1].text or ""
+        self.assertIn("旧消息一", compression_user_text)
+        self.assertNotIn("当前新消息", compression_user_text)
+        self.assertEqual(
+            fake_context.bot.sent_texts,
+            ["我先整理一下记忆喵~", "压缩后回复"],
+        )
+        final_messages = fake_llm.received_messages[0]
+        self.assertEqual([message.role for message in final_messages], ["system", "user"])
+        final_user_text = final_messages[1].text or ""
+        self.assertIn("旧上下文摘要", final_user_text)
+        self.assertIn("当前新消息", final_user_text)
+        self.assertIn("【角色沉浸要求】", final_user_text)
+        self.assertEqual(len(chat_handler.messages_lst), 3)
+        self.assertEqual(chat_handler.messages_lst[1].text, final_user_text)
+        self.assertEqual(chat_handler.messages_lst[2].text, "压缩后回复")

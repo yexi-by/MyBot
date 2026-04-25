@@ -26,7 +26,7 @@ def build_group_config() -> GroupChatConfig:
         group_id="40000",
         system_prompt_path="prompts/system.md",
         knowledge_base_path="prompts/knowledge.md",
-        max_context_length=10,
+        max_context_tokens=1000000,
     )
 
 

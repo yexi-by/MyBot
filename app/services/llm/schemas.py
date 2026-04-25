@@ -117,7 +117,7 @@ class LLMContextConfig(StrictModel):
     """定义 LLM 上下文管理配置。"""
 
     system_prompt_path: str
-    max_context_length: int
+    max_context_tokens: int
 
 
 type LLMToolChoice = Literal["auto", "none", "required"] | JsonObject
