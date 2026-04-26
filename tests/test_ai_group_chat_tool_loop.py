@@ -1,6 +1,8 @@
 """AI 群聊工具循环测试。"""
 
+import tempfile
 import unittest
+from pathlib import Path
 from typing import Protocol, cast
 
 from app.models import GroupMessage, JsonObject, MessageSegment, Response, Sender, Text
@@ -217,6 +219,52 @@ class FakeToolCallLLM:
         return LLMResponse(content="工具后回复", reasoning_content="最终思考")
 
 
+class FakeMultiRoundToolCallLLM:
+    """测试用 LLM，连续两轮调用信息工具后再给出最终回复。"""
+
+    def __init__(self) -> None:
+        """初始化请求记录。"""
+        self.received_messages: list[list[ChatMessage]] = []
+
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+    ) -> str:
+        """测试中不会触发纯文本压缩请求。"""
+        _ = (messages, model_vendors, model_name)
+        return "压缩摘要"
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """前两轮分别调用信息工具，第三轮给出最终正文。"""
+        _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
+        self.received_messages.append(messages[:])
+        if len(self.received_messages) == 1:
+            return LLMResponse(
+                content="第一次先查一下",
+                tool_calls=[
+                    LLMToolCall(id="call-1", name="test__lookup", arguments={})
+                ],
+            )
+        if len(self.received_messages) == 2:
+            return LLMResponse(
+                content="我再补查一下",
+                tool_calls=[
+                    LLMToolCall(id="call-2", name="test__lookup", arguments={})
+                ],
+            )
+        return LLMResponse(content="两次工具结果都看完了")
+
+
 class FakeModifierToolCallLLM:
     """测试用 LLM，调用消息修饰工具并同时给出正文。"""
 
@@ -418,6 +466,19 @@ def build_config(
         context_compression_notice=context_compression_notice,
         group_config=[],
     )
+
+
+def configure_deepseek_v4_prompts(
+    *, config: AIGroupChatConfig, prompt_root: Path
+) -> None:
+    """给测试配置写入 DeepSeek V4 Depth 0 提示词文件。"""
+    extra_path = prompt_root / "extra_requirements.md"
+    roleplay_path = prompt_root / "roleplay_instruct.md"
+    extra_path.write_text("群聊动作偏好：需要引用或艾特时必须说完整的话。", encoding="utf-8")
+    roleplay_path.write_text("【角色沉浸要求】保持第一人称内心独白。", encoding="utf-8")
+    config.enable_deepseek_v4_roleplay_instruct = True
+    config.deepseek_v4_extra_requirements_path = str(extra_path)
+    config.deepseek_v4_roleplay_instruct_path = str(roleplay_path)
 
 
 def build_message() -> GroupMessage:
@@ -642,50 +703,166 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(chat_handler.messages_lst[-1].text, "不用回复")
 
+    async def test_deepseek_v4_depth_zero_prompt_is_added_to_each_formal_request(
+        self,
+    ) -> None:
+        """DeepSeek V4 正式请求每次都追加临时 Depth 0 user prompt。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_llm = FakeToolCallLLM()
+            fake_context = FakeContext(
+                llm=fake_llm,
+                mcp_tool_manager=FakeInfoToolManager(),
+            )
+            config = build_config(
+                output_reasoning_content=False,
+                model_name="deepseek-v4-pro",
+            )
+            configure_deepseek_v4_prompts(
+                config=config,
+                prompt_root=Path(temp_dir),
+            )
+            tool_loop = GroupChatToolLoop(
+                config=config,
+                context=cast(Context, fake_context),
+                debug_dumper=AIGroupChatDebugDumper(config=config),
+            )
+            chat_handler = ContextHandler(
+                system_prompt="系统提示词",
+                max_context_tokens=1000000,
+            )
+
+            await tool_loop.run(
+                msg=build_message(),
+                chat_handler=chat_handler,
+                turn_messages=[ChatMessage(role="user", text="用户消息")],
+            )
+
+            self.assertEqual(len(fake_llm.received_messages), 2)
+            for request_messages in fake_llm.received_messages:
+                depth_zero_message = request_messages[-1]
+                depth_zero_text = depth_zero_message.text or ""
+                self.assertEqual(depth_zero_message.role, "user")
+                self.assertIn("<其他需求>", depth_zero_text)
+                self.assertIn("<角色沉浸式扮演需求>", depth_zero_text)
+            first_real_user_text = fake_llm.received_messages[0][1].text or ""
+            self.assertNotIn("<角色沉浸式扮演需求>", first_real_user_text)
+            persisted_text = "\n".join(
+                message.text or "" for message in chat_handler.messages_lst
+            )
+            self.assertNotIn("<其他需求>", persisted_text)
+            self.assertNotIn("<角色沉浸式扮演需求>", persisted_text)
+
+    async def test_deepseek_v4_depth_zero_prompt_follows_accumulated_tool_results(
+        self,
+    ) -> None:
+        """多轮信息工具续问时，每次请求都以累积工具结果加 Depth 0 结尾。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_llm = FakeMultiRoundToolCallLLM()
+            fake_context = FakeContext(
+                llm=fake_llm,
+                mcp_tool_manager=FakeInfoToolManager(),
+            )
+            config = build_config(
+                output_reasoning_content=False,
+                model_name="deepseek-v4-pro",
+            )
+            configure_deepseek_v4_prompts(
+                config=config,
+                prompt_root=Path(temp_dir),
+            )
+            tool_loop = GroupChatToolLoop(
+                config=config,
+                context=cast(Context, fake_context),
+                debug_dumper=AIGroupChatDebugDumper(config=config),
+            )
+            chat_handler = ContextHandler(
+                system_prompt="系统提示词",
+                max_context_tokens=1000000,
+            )
+
+            await tool_loop.run(
+                msg=build_message(),
+                chat_handler=chat_handler,
+                turn_messages=[ChatMessage(role="user", text="连续查两次")],
+            )
+
+            self.assertEqual(len(fake_llm.received_messages), 3)
+            first_request = fake_llm.received_messages[0]
+            second_request = fake_llm.received_messages[1]
+            third_request = fake_llm.received_messages[2]
+            self.assertEqual([message.role for message in first_request], ["system", "user", "user"])
+            self.assertEqual(
+                [message.role for message in second_request],
+                ["system", "user", "assistant", "tool", "user"],
+            )
+            self.assertEqual(
+                [message.role for message in third_request],
+                ["system", "user", "assistant", "tool", "assistant", "tool", "user"],
+            )
+            self.assertEqual(second_request[-2].tool_call_id, "call-1")
+            self.assertIn("<角色沉浸式扮演需求>", second_request[-1].text or "")
+            self.assertEqual(third_request[-4].tool_call_id, "call-1")
+            self.assertEqual(third_request[-2].tool_call_id, "call-2")
+            self.assertIn("<角色沉浸式扮演需求>", third_request[-1].text or "")
+
     async def test_context_compression_excludes_current_message_then_rebuilds(
         self,
     ) -> None:
-        """上下文超预算时，先压缩旧历史，再用摘要、当前消息和角色要求重建请求。"""
-        fake_llm = FakeCompressionLLM()
-        fake_context = FakeContext(llm=fake_llm)
-        config = build_config(
-            output_reasoning_content=False,
-            model_name="deepseek-v4-pro",
-            context_compression_notice="我先整理一下记忆喵~",
-        )
-        config.enable_deepseek_v4_roleplay_instruct = True
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
-        )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=8000)
-        chat_handler.build_chatmessage(
-            message_lst=[
-                ChatMessage(role="user", text="旧消息一" * 100),
-                ChatMessage(role="assistant", text="旧回复一" * 100),
-            ]
-        )
+        """上下文超预算时，压缩请求不注入 Depth 0，正式请求才注入。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_llm = FakeCompressionLLM()
+            fake_context = FakeContext(llm=fake_llm)
+            config = build_config(
+                output_reasoning_content=False,
+                model_name="deepseek-v4-pro",
+                context_compression_notice="我先整理一下记忆喵~",
+            )
+            configure_deepseek_v4_prompts(
+                config=config,
+                prompt_root=Path(temp_dir),
+            )
+            tool_loop = GroupChatToolLoop(
+                config=config,
+                context=cast(Context, fake_context),
+                debug_dumper=AIGroupChatDebugDumper(config=config),
+            )
+            chat_handler = ContextHandler(
+                system_prompt="系统提示词",
+                max_context_tokens=8000,
+            )
+            chat_handler.build_chatmessage(
+                message_lst=[
+                    ChatMessage(role="user", text="旧消息一" * 100),
+                    ChatMessage(role="assistant", text="旧回复一" * 100),
+                ]
+            )
 
-        await tool_loop.run(
-            msg=build_message(),
-            chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="当前新消息")],
-        )
+            await tool_loop.run(
+                msg=build_message(),
+                chat_handler=chat_handler,
+                turn_messages=[ChatMessage(role="user", text="当前新消息")],
+            )
 
-        compression_user_text = fake_llm.compression_messages[1].text or ""
-        self.assertIn("旧消息一", compression_user_text)
-        self.assertNotIn("当前新消息", compression_user_text)
-        self.assertEqual(
-            fake_context.bot.sent_texts,
-            ["我先整理一下记忆喵~", "压缩后回复"],
-        )
-        final_messages = fake_llm.received_messages[0]
-        self.assertEqual([message.role for message in final_messages], ["system", "user"])
-        final_user_text = final_messages[1].text or ""
-        self.assertIn("旧上下文摘要", final_user_text)
-        self.assertIn("当前新消息", final_user_text)
-        self.assertIn("【角色沉浸要求】", final_user_text)
-        self.assertEqual(len(chat_handler.messages_lst), 3)
-        self.assertEqual(chat_handler.messages_lst[1].text, final_user_text)
-        self.assertEqual(chat_handler.messages_lst[2].text, "压缩后回复")
+            compression_user_text = fake_llm.compression_messages[1].text or ""
+            self.assertIn("旧消息一", compression_user_text)
+            self.assertNotIn("当前新消息", compression_user_text)
+            self.assertNotIn("<角色沉浸式扮演需求>", compression_user_text)
+            self.assertEqual(
+                fake_context.bot.sent_texts,
+                ["我先整理一下记忆喵~", "压缩后回复"],
+            )
+            final_messages = fake_llm.received_messages[0]
+            self.assertEqual(
+                [message.role for message in final_messages],
+                ["system", "user", "user"],
+            )
+            rebuilt_user_text = final_messages[1].text or ""
+            depth_zero_text = final_messages[2].text or ""
+            self.assertIn("旧上下文摘要", rebuilt_user_text)
+            self.assertIn("当前新消息", rebuilt_user_text)
+            self.assertNotIn("【角色沉浸要求】", rebuilt_user_text)
+            self.assertIn("<其他需求>", depth_zero_text)
+            self.assertIn("<角色沉浸式扮演需求>", depth_zero_text)
+            self.assertEqual(len(chat_handler.messages_lst), 3)
+            self.assertEqual(chat_handler.messages_lst[1].text, rebuilt_user_text)
+            self.assertEqual(chat_handler.messages_lst[2].text, "压缩后回复")

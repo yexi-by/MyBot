@@ -7,7 +7,7 @@ from pydantic import Field
 from app.config.plugin_config import load_plugin_config
 from app.models import NapCatId, StrictModel
 
-from .constants import CONFIG_PATH, CONFIG_SECTION, MESSAGE_MODIFIER_BEHAVIOR_PROMPT
+from .constants import CONFIG_PATH, CONFIG_SECTION
 
 
 class GroupChatConfig(StrictModel):
@@ -32,6 +32,12 @@ class AIGroupChatConfig(StrictModel):
     pass_back_reasoning_content: bool = False
     debug_dump_messages: bool = False
     enable_deepseek_v4_roleplay_instruct: bool = False
+    deepseek_v4_extra_requirements_path: str = (
+        "plugins_config/ai_group_chat/prompts/deepseek_v4/extra_requirements.md"
+    )
+    deepseek_v4_roleplay_instruct_path: str = (
+        "plugins_config/ai_group_chat/prompts/deepseek_v4/roleplay_instruct.md"
+    )
     allow_mention_all: bool = False
     persist_tool_results: bool = False
     group_config: list[GroupChatConfig]
@@ -47,12 +53,10 @@ def load_ai_group_chat_config() -> AIGroupChatConfig:
 
 
 def build_system_prompt(*, group_config: GroupChatConfig) -> str:
-    """组合角色提示词、知识库和群聊动作偏好。"""
+    """组合角色提示词和知识库。"""
     system_prompt = _read_text_file(group_config.system_prompt_path)
     knowledge_base = _read_text_file(group_config.knowledge_base_path)
-    return "\n\n".join(
-        [system_prompt, knowledge_base, MESSAGE_MODIFIER_BEHAVIOR_PROMPT]
-    )
+    return "\n\n".join([system_prompt, knowledge_base])
 
 
 def _read_text_file(file_path: str) -> str:

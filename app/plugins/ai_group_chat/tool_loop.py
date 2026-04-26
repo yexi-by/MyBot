@@ -18,6 +18,7 @@ from .config import AIGroupChatConfig
 from .constants import DEEPSEEK_V4_ROLEPLAY_MODELS
 from .context_compressor import GroupChatContextCompressor
 from .debug_dump import AIGroupChatDebugDumper
+from .deepseek_v4_prompt import DeepSeekV4PromptPack, load_deepseek_v4_prompt_pack
 from .token_budget import ConservativeTokenEstimator, TokenBudgetEstimate
 
 
@@ -58,6 +59,9 @@ class GroupChatToolLoop:
         )
         self.context_compressor: GroupChatContextCompressor = (
             GroupChatContextCompressor()
+        )
+        self.deepseek_v4_prompt_pack: DeepSeekV4PromptPack | None = (
+            self._load_deepseek_v4_prompt_pack()
         )
 
     async def run(
@@ -103,6 +107,10 @@ class GroupChatToolLoop:
             tool_names=[tool.name for tool in tools],
         )
         for round_index in range(1, self.config.max_tool_rounds + 1):
+            request_messages = self._build_llm_request_messages(
+                working_messages=working_messages
+            )
+            depth_zero_injected = self.deepseek_v4_prompt_pack is not None
             log_event(
                 level="DEBUG",
                 event="ai_group_chat.llm.request",
@@ -111,12 +119,14 @@ class GroupChatToolLoop:
                 group_id=msg.group_id,
                 message_id=msg.message_id,
                 round_index=round_index,
-                messages_count=len(working_messages),
+                messages_count=len(request_messages),
+                working_messages_count=len(working_messages),
+                deepseek_v4_depth_zero_injected=depth_zero_injected,
                 tools_count=len(tools),
                 tool_choice="auto",
             )
             response = await self.context.llm.get_ai_response_with_tools(
-                messages=working_messages,
+                messages=request_messages,
                 model_vendors=self.config.model_vendors,
                 model_name=self.config.model_name,
                 tools=tools,
@@ -225,8 +235,11 @@ class GroupChatToolLoop:
     ) -> PreparedTurnContext:
         """在请求模型前按 token 预算决定是否压缩旧上下文。"""
         candidate_messages = [*chat_handler.messages_lst, *turn_messages]
+        candidate_request_messages = self._build_llm_request_messages(
+            working_messages=candidate_messages
+        )
         budget = self.token_estimator.check_request(
-            messages=candidate_messages,
+            messages=candidate_request_messages,
             tools=tools,
             max_context_tokens=chat_handler.max_context_tokens,
         )
@@ -242,6 +255,8 @@ class GroupChatToolLoop:
             should_compress=budget.should_compress,
             current_history_messages_count=len(chat_handler.messages_lst),
             turn_messages_count=len(turn_messages),
+            request_messages_count=len(candidate_request_messages),
+            deepseek_v4_depth_zero_injected=self.deepseek_v4_prompt_pack is not None,
             tools_count=len(tools),
         )
         if not budget.should_compress:
@@ -262,12 +277,14 @@ class GroupChatToolLoop:
         rebuilt_user_message = self.context_compressor.build_rebuilt_user_message(
             summary=summary,
             current_turn_messages=turn_messages,
-            append_roleplay_instruct=self._should_append_roleplay_instruct_after_compression(),
         )
         rebuilt_turn_messages = [rebuilt_user_message]
         rebuilt_working_messages = [chat_handler.system_prompt, *rebuilt_turn_messages]
+        rebuilt_request_messages = self._build_llm_request_messages(
+            working_messages=rebuilt_working_messages
+        )
         rebuilt_budget = self.token_estimator.check_request(
-            messages=rebuilt_working_messages,
+            messages=rebuilt_request_messages,
             tools=tools,
             max_context_tokens=chat_handler.max_context_tokens,
         )
@@ -283,6 +300,7 @@ class GroupChatToolLoop:
             rebuilt_should_still_compress=rebuilt_budget.should_compress,
             rebuilt_user_chars=len(rebuilt_user_message.text or ""),
             rebuilt_image_count=len(rebuilt_user_message.image or []),
+            rebuilt_request_messages_count=len(rebuilt_request_messages),
         )
         if rebuilt_budget.should_compress:
             raise RuntimeError(
@@ -342,12 +360,41 @@ class GroupChatToolLoop:
         )
         return normalized_summary
 
-    def _should_append_roleplay_instruct_after_compression(self) -> bool:
-        """判断压缩重建后的首条 user 是否需要重新追加角色沉浸要求。"""
+    def _load_deepseek_v4_prompt_pack(self) -> DeepSeekV4PromptPack | None:
+        """在 DeepSeek V4 开关命中时读取 Depth 0 提示词包。"""
+        if not self._should_use_deepseek_v4_depth_zero_prompt():
+            return None
+        prompt_pack = load_deepseek_v4_prompt_pack(config=self.config)
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.deepseek_v4_prompt.loaded",
+            category="plugin",
+            message="DeepSeek V4 Depth 0 提示词已加载",
+            model_name=self.config.model_name,
+            extra_requirements_path=str(prompt_pack.extra_requirements_path),
+            roleplay_instruct_path=str(prompt_pack.roleplay_instruct_path),
+            extra_requirements_chars=len(prompt_pack.extra_requirements),
+            roleplay_instruct_chars=len(prompt_pack.roleplay_instruct),
+        )
+        return prompt_pack
+
+    def _should_use_deepseek_v4_depth_zero_prompt(self) -> bool:
+        """判断当前模型是否需要注入 DeepSeek V4 Depth 0 user prompt。"""
         return (
             self.config.enable_deepseek_v4_roleplay_instruct
             and self.config.model_name in DEEPSEEK_V4_ROLEPLAY_MODELS
         )
+
+    def _build_llm_request_messages(
+        self, *, working_messages: list[ChatMessage]
+    ) -> list[ChatMessage]:
+        """生成本次正式 LLM 请求 messages，不污染长期上下文。"""
+        if self.deepseek_v4_prompt_pack is None:
+            return working_messages
+        return [
+            *working_messages,
+            self.deepseek_v4_prompt_pack.build_depth_zero_message(),
+        ]
 
     def _split_tool_calls(
         self, *, tool_calls: list[LLMToolCall]

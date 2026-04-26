@@ -10,7 +10,6 @@ from app.utils.log import log_event
 from .config import AIGroupChatConfig, build_system_prompt, load_ai_group_chat_config
 from .constants import (
     CONSUMERS_COUNT,
-    DEEPSEEK_V4_ROLEPLAY_MODELS,
     PRIORITY,
 )
 from .debug_dump import AIGroupChatDebugDumper
@@ -30,7 +29,6 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
         """读取插件配置并初始化每个群的上下文。"""
         self.config: AIGroupChatConfig = load_ai_group_chat_config()
         self.group_contexts: dict[str, ContextHandler] = {}
-        self.deepseek_v4_roleplay_instruct_groups: set[str] = set()
         self.debug_dumper: AIGroupChatDebugDumper = AIGroupChatDebugDumper(
             config=self.config
         )
@@ -107,10 +105,6 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             )
             return False
         chat_handler = self.group_contexts[group_key]
-        append_roleplay_instruct = self._should_append_deepseek_v4_roleplay_instruct(
-            group_key=group_key,
-            chat_handler=chat_handler,
-        )
         log_event(
             level="DEBUG",
             event="ai_group_chat.event.accepted",
@@ -122,12 +116,8 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             raw_message=msg.raw_message,
             segment_count=len(msg.message),
             context_messages_count=len(chat_handler.messages_lst),
-            append_roleplay_instruct=append_roleplay_instruct,
         )
-        turn_messages = await self.message_builder.build_turn_messages(
-            msg=msg,
-            append_deepseek_v4_roleplay_instruct=append_roleplay_instruct,
-        )
+        turn_messages = await self.message_builder.build_turn_messages(msg=msg)
         log_event(
             level="DEBUG",
             event="ai_group_chat.turn_messages.built",
@@ -139,8 +129,6 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             text_chars=sum(len(message.text or "") for message in turn_messages),
             image_count=sum(len(message.image or []) for message in turn_messages),
         )
-        if append_roleplay_instruct:
-            self.deepseek_v4_roleplay_instruct_groups.add(group_key)
         await self.tool_loop.run(
             msg=msg,
             chat_handler=chat_handler,
@@ -156,21 +144,6 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             context_messages_count=len(chat_handler.messages_lst),
         )
         return True
-
-    def _should_append_deepseek_v4_roleplay_instruct(
-        self, *, group_key: str, chat_handler: ContextHandler
-    ) -> bool:
-        """判断是否应在首轮用户输入末尾追加 DeepSeek V4 角色沉浸 Marker。"""
-        return (
-            self.config.enable_deepseek_v4_roleplay_instruct
-            and self.config.model_name in DEEPSEEK_V4_ROLEPLAY_MODELS
-            and group_key not in self.deepseek_v4_roleplay_instruct_groups
-            and self._is_first_user_turn(chat_handler=chat_handler)
-        )
-
-    def _is_first_user_turn(self, *, chat_handler: ContextHandler) -> bool:
-        """判断当前群上下文是否还没有用户消息。"""
-        return not any(message.role == "user" for message in chat_handler.messages_lst)
 
     def _is_bot_mentioned(self, *, msg: GroupMessage) -> bool:
         """判断当前群消息是否艾特了机器人。"""

@@ -9,7 +9,6 @@ import httpx
 from app.database import RedisDatabaseManager
 from app.models import GroupMessage, Sender, Text
 from app.plugins.ai_group_chat.config import AIGroupChatConfig, GroupChatConfig
-from app.plugins.ai_group_chat.constants import DEEPSEEK_V4_ROLEPLAY_INSTRUCT
 from app.plugins.ai_group_chat.message_builder import GroupChatMessageBuilder
 
 
@@ -89,10 +88,7 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
         )
 
         chat_message = asyncio.run(
-            builder.build_user_message(
-                msg=build_message(),
-                append_deepseek_v4_roleplay_instruct=False,
-            )
+            builder.build_user_message(msg=build_message())
         )
 
         self.assertIsNotNone(chat_message.text)
@@ -103,20 +99,17 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
         self.assertIn("你好呀", text)
         self.assertNotIn("message_id", text)
 
-    def test_deepseek_roleplay_marker_appends_to_user_message_tail(self) -> None:
-        """DeepSeek V4 Marker 会追加到首轮用户提示词末尾。"""
+    def test_user_message_never_contains_deepseek_depth_zero_prompt(self) -> None:
+        """真实用户消息只描述当前群消息，不携带 DSV4 临时提示词。"""
         builder = GroupChatMessageBuilder(
             config=build_config(),
             database=cast(RedisDatabaseManager, EmptyDatabase()),
             http_client=cast(httpx.AsyncClient, object()),
         )
 
-        chat_message = asyncio.run(
-            builder.build_user_message(
-                msg=build_message(),
-                append_deepseek_v4_roleplay_instruct=True,
-            )
-        )
+        chat_message = asyncio.run(builder.build_user_message(msg=build_message()))
 
         text = chat_message.text or ""
-        self.assertTrue(text.endswith(DEEPSEEK_V4_ROLEPLAY_INSTRUCT))
+        self.assertNotIn("<其他需求>", text)
+        self.assertNotIn("<角色沉浸式扮演需求>", text)
+        self.assertNotIn("【角色沉浸要求】", text)

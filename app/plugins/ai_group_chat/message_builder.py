@@ -14,7 +14,6 @@ from app.utils.log import log_event
 from .config import AIGroupChatConfig
 from .constants import (
     BEIJING_TIMEZONE,
-    DEEPSEEK_V4_ROLEPLAY_INSTRUCT,
     ROLE_LABELS,
 )
 
@@ -38,21 +37,14 @@ class GroupChatMessageBuilder:
         self,
         *,
         msg: GroupMessage,
-        append_deepseek_v4_roleplay_instruct: bool,
     ) -> list[ChatMessage]:
         """构造本轮提交给 LLM 的用户消息。"""
-        return [
-            await self.build_user_message(
-                msg=msg,
-                append_deepseek_v4_roleplay_instruct=append_deepseek_v4_roleplay_instruct,
-            )
-        ]
+        return [await self.build_user_message(msg=msg)]
 
     async def build_user_message(
         self,
         *,
         msg: GroupMessage,
-        append_deepseek_v4_roleplay_instruct: bool,
     ) -> ChatMessage:
         """把当前群消息和可选引用消息整理为单条 LLM 输入。"""
         text_blocks = [self._format_current_message_markdown(msg=msg)]
@@ -66,7 +58,6 @@ class GroupChatMessageBuilder:
             message_id=msg.message_id,
             user_id=msg.user_id,
             supports_multimodal=self.config.supports_multimodal,
-            append_deepseek_v4_roleplay_instruct=append_deepseek_v4_roleplay_instruct,
             segment_count=len(msg.message),
             raw_message=msg.raw_message,
         )
@@ -79,8 +70,6 @@ class GroupChatMessageBuilder:
                 image_bytes.extend(
                     await self._collect_message_images(msg=reply_message)
                 )
-        if append_deepseek_v4_roleplay_instruct:
-            text_blocks.append(DEEPSEEK_V4_ROLEPLAY_INSTRUCT)
         log_event(
             level="DEBUG",
             event="ai_group_chat.message_builder.finished",

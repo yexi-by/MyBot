@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from app.services import ChatMessage
 from app.services.llm.schemas import LLMToolCall
 
-from .constants import DEEPSEEK_V4_ROLEPLAY_INSTRUCT
-
 
 @dataclass(frozen=True)
 class CompressionInput:
@@ -59,9 +57,8 @@ class GroupChatContextCompressor:
         *,
         summary: str,
         current_turn_messages: list[ChatMessage],
-        append_roleplay_instruct: bool,
     ) -> ChatMessage:
-        """把摘要、当前消息和可选角色沉浸要求合成新的首条 user。"""
+        """把摘要和当前消息合成新的首条 user。"""
         text_parts = [
             "## 历史摘要",
             "",
@@ -73,12 +70,9 @@ class GroupChatContextCompressor:
         image_bytes: list[bytes] = []
         for message in current_turn_messages:
             if message.text:
-                current_text = self._remove_roleplay_instruct(text=message.text)
-                text_parts.extend([current_text, ""])
+                text_parts.extend([message.text, ""])
             if message.image:
                 image_bytes.extend(message.image)
-        if append_roleplay_instruct:
-            text_parts.append(DEEPSEEK_V4_ROLEPLAY_INSTRUCT)
         return ChatMessage(
             role="user",
             text="\n".join(text_parts).strip(),
@@ -137,7 +131,3 @@ class GroupChatContextCompressor:
         for tool_call in tool_calls:
             lines.append(f"- {tool_call.name}: {tool_call.arguments}")
         return lines
-
-    def _remove_roleplay_instruct(self, *, text: str) -> str:
-        """移除当前消息里可能已有的 DeepSeek 角色沉浸要求，避免重建后重复。"""
-        return text.replace(DEEPSEEK_V4_ROLEPLAY_INSTRUCT, "").strip()
