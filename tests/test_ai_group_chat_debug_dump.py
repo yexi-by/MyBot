@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from shutil import rmtree
 from pathlib import Path
 
 from app.plugins.ai_group_chat.config import AIGroupChatConfig, GroupChatConfig
@@ -161,6 +162,33 @@ class AIGroupChatDebugDumperTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("context_reset: `True`", content)
             self.assertIn("历史摘要 + 当前消息", content)
             self.assertEqual(content.count("旧消息"), 1)
+
+    async def test_runtime_deleted_debug_directory_is_recreated(self) -> None:
+        """运行中删除调试目录后，下一次写入会自动重建而不打断流程。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dumper = AIGroupChatDebugDumper(config=build_config(enabled=True))
+            dumper.root_dir = Path(temp_dir)
+            path = dumper.initialize_group(
+                group_config=build_group_config(),
+                messages=[ChatMessage(role="system", text="系统提示词")],
+            )
+            self.assertIsNotNone(path)
+            if path is None:
+                raise AssertionError("调试文件路径不应为空")
+            rmtree(path.parent)
+
+            await dumper.append_context_snapshot(
+                group_id="40000",
+                title="目录删除后的长期上下文",
+                messages=[
+                    ChatMessage(role="system", text="系统提示词"),
+                    ChatMessage(role="user", text="目录删除后新消息"),
+                ],
+            )
+
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("原调试文件或目录曾在运行中被删除", content)
+            self.assertIn("目录删除后新消息", content)
 
     async def test_disabled_dumper_does_not_create_files(self) -> None:
         """关闭开关后，调试转储不会创建任何文件。"""

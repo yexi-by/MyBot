@@ -147,7 +147,7 @@ class GroupChatToolLoop:
                 tool_call_names=[tool_call.name for tool_call in response.tool_calls],
             )
             if response.tool_calls:
-                await self._handle_tool_response(
+                should_continue = await self._handle_tool_response(
                     msg=msg,
                     napcat_executor=napcat_executor,
                     working_messages=working_messages,
@@ -160,7 +160,7 @@ class GroupChatToolLoop:
                     tool_history_messages=tool_history_messages,
                     round_index=round_index,
                 )
-                if information_calls:
+                if should_continue:
                     continue
                 await self._finish_turn(
                     msg=msg,
@@ -376,7 +376,7 @@ class GroupChatToolLoop:
         sent_content_messages: list[ChatMessage],
         tool_history_messages: list[ChatMessage],
         round_index: int,
-    ) -> None:
+    ) -> bool:
         """处理包含工具调用的响应，同时保留 content 立即发群的副作用。"""
         log_event(
             level="DEBUG",
@@ -396,6 +396,30 @@ class GroupChatToolLoop:
                 tool_calls=response.tool_calls,
             )
         )
+        if modifier_calls and reply_content.visible_content is None:
+            modifier_error_history = self._append_modifier_missing_text_errors(
+                working_messages=working_messages,
+                modifier_calls=modifier_calls,
+            )
+            tool_history_messages.extend(modifier_error_history)
+            log_event(
+                level="WARNING",
+                event="ai_group_chat.modifier_tool.missing_reply_text",
+                category="plugin",
+                message="模型只调用了消息修饰工具但没有写回复正文，已把错误返回给模型重试",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                round_index=round_index,
+                modifier_tool_names=[tool_call.name for tool_call in modifier_calls],
+            )
+            information_history, _ = await self._execute_tool_call_results(
+                working_messages=working_messages,
+                tool_calls=information_calls,
+                tool_executor=tool_executor,
+                group_id=msg.group_id,
+            )
+            tool_history_messages.extend(information_history)
+            return True
         modifier_history, has_modifier_error = await self._execute_tool_call_results(
             working_messages=working_messages,
             tool_calls=modifier_calls,
@@ -430,6 +454,34 @@ class GroupChatToolLoop:
             group_id=msg.group_id,
         )
         tool_history_messages.extend(information_history)
+        return bool(information_calls)
+
+    def _append_modifier_missing_text_errors(
+        self,
+        *,
+        working_messages: list[ChatMessage],
+        modifier_calls: list[LLMToolCall],
+    ) -> list[ChatMessage]:
+        """为没有回复正文的消息修饰工具调用生成模型可读错误。"""
+        history_messages: list[ChatMessage] = []
+        for tool_call in modifier_calls:
+            result: JsonObject = {
+                "ok": False,
+                "effect": "modifier_rejected",
+                "tool_name": tool_call.name,
+                "error": (
+                    "你刚才只调用了 QQ 消息修饰动作，但没有写出要发送到群里的回复。"
+                    "请重新生成：如果仍需要引用或艾特，可以继续调用对应动作，"
+                    "但必须同时写出自然、完整、可以直接发到群里的话。"
+                ),
+            }
+            tool_message = build_tool_result_message(
+                tool_call_id=tool_call.id,
+                result=result,
+            )
+            working_messages.append(tool_message)
+            history_messages.append(tool_message)
+        return history_messages
 
     async def _finish_turn(
         self,

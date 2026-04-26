@@ -253,6 +253,57 @@ class FakeModifierToolCallLLM:
         )
 
 
+class FakeModifierWithoutTextThenReplyLLM:
+    """测试用 LLM，先只调用修饰工具，收到错误后补正文。"""
+
+    def __init__(self) -> None:
+        """初始化请求记录。"""
+        self.received_messages: list[list[ChatMessage]] = []
+
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+    ) -> str:
+        """测试中不会触发纯文本压缩请求。"""
+        _ = (messages, model_vendors, model_name)
+        return "压缩摘要"
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """第一轮只调用引用工具，第二轮带正文重新引用。"""
+        _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
+        self.received_messages.append(messages[:])
+        if len(self.received_messages) == 1:
+            return LLMResponse(
+                tool_calls=[
+                    LLMToolCall(
+                        id="call-empty-reply",
+                        name="qq__reply_current_message",
+                        arguments={},
+                    )
+                ]
+            )
+        return LLMResponse(
+            content="我在喵~ 刚刚差点只摆动作不说话了！",
+            tool_calls=[
+                LLMToolCall(
+                    id="call-fixed-reply",
+                    name="qq__reply_current_message",
+                    arguments={},
+                )
+            ],
+        )
+
+
 class FakeNoToolLLM:
     """测试用 LLM，输出无工具正文后应由插件自动结束。"""
 
@@ -505,6 +556,43 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_context.bot.sent_segment_types, [["reply", "text"]])
         self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
         self.assertEqual(chat_handler.messages_lst[-1].text, "收到喵")
+
+    async def test_modifier_tool_without_text_returns_error_and_retries(self) -> None:
+        """只调用消息修饰工具但不说话时，会把错误返回给模型重试。"""
+        fake_llm = FakeModifierWithoutTextThenReplyLLM()
+        fake_context = FakeContext(llm=fake_llm)
+        config = build_config(output_reasoning_content=False)
+        tool_loop = GroupChatToolLoop(
+            config=config,
+            context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="还活着?")],
+        )
+
+        self.assertEqual(
+            fake_context.bot.sent_texts,
+            ["我在喵~ 刚刚差点只摆动作不说话了！"],
+        )
+        self.assertEqual(fake_context.bot.sent_segment_types, [["reply", "text"]])
+        self.assertEqual(len(fake_llm.received_messages), 2)
+        retry_messages = fake_llm.received_messages[1]
+        modifier_error_message = next(
+            message
+            for message in retry_messages
+            if message.role == "tool" and message.tool_call_id == "call-empty-reply"
+        )
+        self.assertIn("没有写出要发送到群里的回复", modifier_error_message.text or "")
+        self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
+        self.assertEqual(
+            chat_handler.messages_lst[-1].text,
+            "我在喵~ 刚刚差点只摆动作不说话了！",
+        )
 
     async def test_plain_content_without_tools_sends_once_and_finishes(self) -> None:
         """无工具正文会发群一次，然后自动结束本轮。"""

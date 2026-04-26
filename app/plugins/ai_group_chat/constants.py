@@ -20,6 +20,8 @@ MESSAGE_MODIFIER_BEHAVIOR_PROMPT: Final[str] = (
     "当用户明确要求你回复某条消息、艾特某人、提醒某人，或上下文中使用引用和艾特能让回复更清楚时，"
     "你应更主动地使用可用的 QQ 消息修饰动作来完成表达。"
     "消息修饰动作只负责最终消息的形式，仍然需要给出自然、完整、可以直接发送的正文。"
+    "如果你使用引用当前消息、艾特群成员或艾特全体成员这些动作，必须同时写出要发到群里的完整回复；"
+    "不要只调用动作不说话。只调用动作但不写回复会失败，系统会要求你重写。"
 )
 DEEPSEEK_V4_ROLEPLAY_MODELS: Final[frozenset[str]] = frozenset(
     {"deepseek-v4-pro", "deepseek-v4-flash"}

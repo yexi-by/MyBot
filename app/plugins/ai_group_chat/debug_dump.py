@@ -10,6 +10,7 @@ import aiofiles
 
 from app.models import NapCatId
 from app.services.llm.schemas import ChatMessage, LLMToolCall
+from app.utils.log import log_event
 
 from .config import AIGroupChatConfig, GroupChatConfig
 from .constants import BEIJING_TIMEZONE, DEBUG_DUMP_DIR
@@ -113,7 +114,18 @@ class AIGroupChatDebugDumper:
                     context_reset=delta.is_reset,
                 ),
             ]
-            await self._write_section(path=path, lines=lines)
+            try:
+                await self._write_section(path=path, lines=lines)
+            except OSError as exc:
+                log_event(
+                    level="WARNING",
+                    event="ai_group_chat.debug_dump.write_failed",
+                    category="plugin",
+                    message="AI 群聊调试文件写入失败，已跳过本次调试转储",
+                    group_id=group_key,
+                    path=str(path),
+                    error=str(exc),
+                )
 
     def _ensure_group_file(self, *, group_id: str) -> Path:
         """确保指定群的本次启动调试文件存在。"""
@@ -142,7 +154,20 @@ class AIGroupChatDebugDumper:
 
     async def _write_section(self, *, path: Path, lines: list[str]) -> None:
         """把已经格式化好的 Markdown 段落追加到文件。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        should_write_rebuild_header = not path.exists()
         async with aiofiles.open(path, mode="a", encoding="utf-8") as file:
+            if should_write_rebuild_header:
+                await file.write(
+                    "\n".join(
+                        [
+                            f"# AI 群聊长期上下文调试 - 群 {path.parent.name}",
+                            "",
+                            "- 说明: `原调试文件或目录曾在运行中被删除，本文件已自动重建`",
+                            "",
+                        ]
+                    )
+                )
             await file.write("\n\n" + "\n".join(lines) + "\n")
 
     def _consume_message_delta(
