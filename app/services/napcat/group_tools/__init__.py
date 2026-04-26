@@ -10,8 +10,6 @@ from .arguments import (
     HistoryQueryMode,
     ListGroupFilesByFolderArgs,
     ListGroupRootFilesArgs,
-    MentionUserArgs,
-    ReplyCurrentMessageArgs,
 )
 from .executor import NapCatGroupToolExecutor
 from .protocols import (
@@ -31,9 +29,7 @@ __all__ = [
     "ListGroupRootFilesArgs",
     "MAX_HISTORY_LIMIT",
     "MENTION_ALL",
-    "MentionUserArgs",
     "NapCatGroupHistoryDatabase",
     "NapCatGroupToolBot",
     "NapCatGroupToolExecutor",
-    "ReplyCurrentMessageArgs",
 ]

@@ -136,9 +136,6 @@ class GroupChatToolLoop:
                 content=content,
                 reasoning_content=response.reasoning_content,
             )
-            modifier_calls, information_calls = self._split_tool_calls(
-                tool_calls=response.tool_calls
-            )
             log_event(
                 level="DEBUG",
                 event="ai_group_chat.llm.response",
@@ -152,47 +149,35 @@ class GroupChatToolLoop:
                 memory_content_chars=len(reply_content.memory_content or ""),
                 reasoning_chars=len(response.reasoning_content or ""),
                 tool_calls_count=len(response.tool_calls),
-                modifier_tool_calls_count=len(modifier_calls),
-                information_tool_calls_count=len(information_calls),
                 tool_call_names=[tool_call.name for tool_call in response.tool_calls],
             )
-            if response.tool_calls:
-                should_continue = await self._handle_tool_response(
+            content_sent = False
+            if reply_content.visible_content is not None:
+                content_sent = await self._send_reply_content(
                     msg=msg,
                     napcat_executor=napcat_executor,
                     working_messages=working_messages,
-                    response=response,
                     reply_content=reply_content,
-                    modifier_calls=modifier_calls,
-                    information_calls=information_calls,
-                    tool_executor=tool_executor,
                     sent_content_messages=sent_content_messages,
+                    round_index=round_index,
+                    event_name="ai_group_chat.reply.sent",
+                    log_message="模型返回正文，已解析 content 标记并发送群消息",
+                )
+                if not content_sent:
+                    continue
+
+            if response.tool_calls:
+                await self._handle_tool_response(
+                    msg=msg,
+                    working_messages=working_messages,
+                    response=response,
+                    tool_executor=tool_executor,
                     tool_history_messages=tool_history_messages,
                     round_index=round_index,
                 )
-                if should_continue:
-                    continue
-                await self._finish_turn(
-                    msg=msg,
-                    chat_handler=chat_handler,
-                    turn_messages=turn_messages,
-                    sent_content_messages=sent_content_messages,
-                    tool_history_messages=tool_history_messages,
-                    replace_existing_history=replace_existing_history,
-                    title="无信息工具调用自动结束后的长期上下文",
-                )
-                return
+                continue
 
-            if reply_content.visible_content is not None:
-                await self._send_reply_content(
-                    msg=msg,
-                    reply_content=reply_content,
-                    napcat_executor=napcat_executor,
-                    use_modifiers=napcat_executor.has_message_modifiers,
-                    sent_content_messages=sent_content_messages,
-                    event_name="ai_group_chat.reply.sent_without_tools",
-                    log_message="模型返回正文且没有信息工具调用，已发送正文并结束本轮",
-                )
+            if content_sent:
                 await self._finish_turn(
                     msg=msg,
                     chat_handler=chat_handler,
@@ -396,45 +381,26 @@ class GroupChatToolLoop:
             self.deepseek_v4_prompt_pack.build_depth_zero_message(),
         ]
 
-    def _split_tool_calls(
-        self, *, tool_calls: list[LLMToolCall]
-    ) -> tuple[list[LLMToolCall], list[LLMToolCall]]:
-        """按 NapCat 消息修饰工具和信息工具拆分工具调用。"""
-        modifier_calls: list[LLMToolCall] = []
-        information_calls: list[LLMToolCall] = []
-        for tool_call in tool_calls:
-            if NapCatGroupToolExecutor.is_message_modifier_tool(tool_call.name):
-                modifier_calls.append(tool_call)
-                continue
-            information_calls.append(tool_call)
-        return modifier_calls, information_calls
-
     async def _handle_tool_response(
         self,
         *,
         msg: GroupMessage,
-        napcat_executor: NapCatGroupToolExecutor,
         working_messages: list[ChatMessage],
         response: LLMResponse,
-        reply_content: ReplyContent,
-        modifier_calls: list[LLMToolCall],
-        information_calls: list[LLMToolCall],
         tool_executor: CompositeToolExecutor,
-        sent_content_messages: list[ChatMessage],
         tool_history_messages: list[ChatMessage],
         round_index: int,
-    ) -> bool:
-        """处理包含工具调用的响应，同时保留 content 立即发群的副作用。"""
+    ) -> None:
+        """处理模型请求的信息工具调用，并把工具结果写回本轮工作上下文。"""
         log_event(
             level="DEBUG",
             event="ai_group_chat.tool_response.handle",
             category="plugin",
-            message="模型响应包含工具调用，先处理消息修饰并发送正文，再继续执行工具",
+            message="模型响应包含信息工具调用，开始执行工具并继续本轮",
             group_id=msg.group_id,
             message_id=msg.message_id,
             round_index=round_index,
-            modifier_tool_names=[tool_call.name for tool_call in modifier_calls],
-            information_tool_names=[tool_call.name for tool_call in information_calls],
+            tool_names=[tool_call.name for tool_call in response.tool_calls],
         )
         tool_history_messages.extend(
             self._append_tool_call_response(
@@ -443,92 +409,13 @@ class GroupChatToolLoop:
                 tool_calls=response.tool_calls,
             )
         )
-        if modifier_calls and reply_content.visible_content is None:
-            modifier_error_history = self._append_modifier_missing_text_errors(
-                working_messages=working_messages,
-                modifier_calls=modifier_calls,
-            )
-            tool_history_messages.extend(modifier_error_history)
-            log_event(
-                level="WARNING",
-                event="ai_group_chat.modifier_tool.missing_reply_text",
-                category="plugin",
-                message="模型只调用了消息修饰工具但没有写回复正文，已把错误返回给模型重试",
-                group_id=msg.group_id,
-                message_id=msg.message_id,
-                round_index=round_index,
-                modifier_tool_names=[tool_call.name for tool_call in modifier_calls],
-            )
-            information_history, _ = await self._execute_tool_call_results(
-                working_messages=working_messages,
-                tool_calls=information_calls,
-                tool_executor=tool_executor,
-                group_id=msg.group_id,
-            )
-            tool_history_messages.extend(information_history)
-            return True
-        modifier_history, has_modifier_error = await self._execute_tool_call_results(
+        tool_result_history, _ = await self._execute_tool_call_results(
             working_messages=working_messages,
-            tool_calls=modifier_calls,
+            tool_calls=response.tool_calls,
             tool_executor=tool_executor,
             group_id=msg.group_id,
         )
-        tool_history_messages.extend(modifier_history)
-        if has_modifier_error:
-            napcat_executor.clear_message_modifiers()
-            log_event(
-                level="DEBUG",
-                event="ai_group_chat.modifier_tool.error",
-                category="plugin",
-                message="消息修饰工具执行失败，已清理本地消息修饰状态",
-                group_id=msg.group_id,
-                message_id=msg.message_id,
-                round_index=round_index,
-            )
-        await self._send_reply_content(
-            msg=msg,
-            reply_content=reply_content,
-            napcat_executor=napcat_executor,
-            use_modifiers=napcat_executor.has_message_modifiers,
-            sent_content_messages=sent_content_messages,
-            event_name="ai_group_chat.reply.sent_with_tool_calls",
-            log_message="模型返回正文并请求工具，已发送正文后继续执行工具",
-        )
-        information_history, _ = await self._execute_tool_call_results(
-            working_messages=working_messages,
-            tool_calls=information_calls,
-            tool_executor=tool_executor,
-            group_id=msg.group_id,
-        )
-        tool_history_messages.extend(information_history)
-        return bool(information_calls)
-
-    def _append_modifier_missing_text_errors(
-        self,
-        *,
-        working_messages: list[ChatMessage],
-        modifier_calls: list[LLMToolCall],
-    ) -> list[ChatMessage]:
-        """为没有回复正文的消息修饰工具调用生成模型可读错误。"""
-        history_messages: list[ChatMessage] = []
-        for tool_call in modifier_calls:
-            result: JsonObject = {
-                "ok": False,
-                "effect": "modifier_rejected",
-                "tool_name": tool_call.name,
-                "error": (
-                    "你刚才只调用了 QQ 消息修饰动作，但没有写出要发送到群里的回复。"
-                    "请重新生成：如果仍需要引用或艾特，可以继续调用对应动作，"
-                    "但必须同时写出自然、完整、可以直接发到群里的话。"
-                ),
-            }
-            tool_message = build_tool_result_message(
-                tool_call_id=tool_call.id,
-                result=result,
-            )
-            working_messages.append(tool_message)
-            history_messages.append(tool_message)
-        return history_messages
+        tool_history_messages.extend(tool_result_history)
 
     async def _finish_turn(
         self,
@@ -563,22 +450,40 @@ class GroupChatToolLoop:
         msg: GroupMessage,
         reply_content: ReplyContent,
         napcat_executor: NapCatGroupToolExecutor,
-        use_modifiers: bool,
+        working_messages: list[ChatMessage],
         sent_content_messages: list[ChatMessage],
+        round_index: int,
         event_name: str,
         log_message: str,
-    ) -> None:
+    ) -> bool:
         """只要模型返回正文，就立即发送，并把正文记入长期上下文候选。"""
         if reply_content.visible_content is None:
-            return
-        if use_modifiers:
-            _ = await napcat_executor.send_final_text(reply_content.visible_content)
-            napcat_executor.clear_message_modifiers()
-        else:
-            _ = await self.context.bot.send_msg(
-                group_id=msg.group_id,
-                text=reply_content.visible_content,
+            return False
+        try:
+            _ = await napcat_executor.send_content(reply_content.visible_content)
+        except ValueError as exc:
+            working_messages.append(
+                ChatMessage(
+                    role="user",
+                    text=(
+                        "你刚才输出的群消息标记格式有误，消息没有发送。"
+                        f"错误原因：{exc}。请重新生成一条完整、自然、可以直接发到群里的回复；"
+                        "如果需要引用当前消息，用 <Reply>；如果需要艾特某个 QQ，用 <At>QQ号</At>。"
+                    ),
+                )
             )
+            log_event(
+                level="WARNING",
+                event="ai_group_chat.content_directive.invalid",
+                category="plugin",
+                message="模型输出的群消息标记无效，已要求模型重写",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                round_index=round_index,
+                error=str(exc),
+                content_chars=len(reply_content.visible_content),
+            )
+            return False
         if reply_content.memory_content is not None:
             sent_content_messages.append(
                 ChatMessage(
@@ -594,11 +499,11 @@ class GroupChatToolLoop:
             message=log_message,
             group_id=msg.group_id,
             message_id=msg.message_id,
-            use_modifiers=use_modifiers,
             visible_content_chars=len(reply_content.visible_content),
             memory_content_chars=len(reply_content.memory_content or ""),
             memory_reasoning_chars=len(reply_content.memory_reasoning_content or ""),
         )
+        return True
 
     def _append_tool_call_response(
         self,

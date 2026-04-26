@@ -5,25 +5,13 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from app.models import NapCatId, StrictModel
+from app.models import StrictModel
 
 MENTION_ALL: Literal["all"] = "all"
 MAX_HISTORY_LIMIT: int = 100
 BEIJING_TIMEZONE: timezone = timezone(timedelta(hours=8))
 HISTORY_TIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
 type HistoryQueryMode = Literal["recent_count", "recent_duration", "date_range"]
-
-
-class MentionUserArgs(StrictModel):
-    """艾特指定群成员或全体成员的工具参数。"""
-
-    user_id: NapCatId | Literal["all"] = Field(
-        description="要 @ 的 QQ 号；填写 all 表示 @ 全体成员。"
-    )
-
-
-class ReplyCurrentMessageArgs(StrictModel):
-    """引用当前群消息的工具参数。"""
 
 
 class ListGroupRootFilesArgs(StrictModel):

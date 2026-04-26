@@ -265,8 +265,8 @@ class FakeMultiRoundToolCallLLM:
         return LLMResponse(content="两次工具结果都看完了")
 
 
-class FakeModifierToolCallLLM:
-    """测试用 LLM，调用消息修饰工具并同时给出正文。"""
+class FakeMarkedContentLLM:
+    """测试用 LLM，在 content 中输出引用和艾特标记。"""
 
     async def get_ai_text_response(
         self,
@@ -287,22 +287,13 @@ class FakeModifierToolCallLLM:
         tool_choice: LLMToolChoice = "auto",
         parallel_tool_calls: bool = True,
     ) -> LLMResponse:
-        """返回引用当前消息的工具调用和同轮正文。"""
+        """返回带 `<Reply>` 和 `<At>` 标记的正文。"""
         _ = (messages, model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
-        return LLMResponse(
-            content="收到喵",
-            tool_calls=[
-                LLMToolCall(
-                    id="call-reply",
-                    name="qq__reply_current_message",
-                    arguments={},
-                )
-            ],
-        )
+        return LLMResponse(content="<Reply>\n<At>20000</At>\n收到喵")
 
 
-class FakeModifierWithoutTextThenReplyLLM:
-    """测试用 LLM，先只调用修饰工具，收到错误后补正文。"""
+class FakeInvalidDirectiveThenReplyLLM:
+    """测试用 LLM，先输出非法标记，收到错误后改写正文。"""
 
     def __init__(self) -> None:
         """初始化请求记录。"""
@@ -327,29 +318,12 @@ class FakeModifierWithoutTextThenReplyLLM:
         tool_choice: LLMToolChoice = "auto",
         parallel_tool_calls: bool = True,
     ) -> LLMResponse:
-        """第一轮只调用引用工具，第二轮带正文重新引用。"""
+        """第一轮使用被禁用的 @全体，第二轮改成合法引用。"""
         _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
         self.received_messages.append(messages[:])
         if len(self.received_messages) == 1:
-            return LLMResponse(
-                tool_calls=[
-                    LLMToolCall(
-                        id="call-empty-reply",
-                        name="qq__reply_current_message",
-                        arguments={},
-                    )
-                ]
-            )
-        return LLMResponse(
-            content="我在喵~ 刚刚差点只摆动作不说话了！",
-            tool_calls=[
-                LLMToolCall(
-                    id="call-fixed-reply",
-                    name="qq__reply_current_message",
-                    arguments={},
-                )
-            ],
-        )
+            return LLMResponse(content="<At>all</At>\n大家看这里")
+        return LLMResponse(content="<Reply>\n我在喵~ 已经改成合法标记了！")
 
 
 class FakeNoToolLLM:
@@ -596,9 +570,9 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chat_handler.messages_lst[2].text, "我先查一下")
         self.assertEqual(chat_handler.messages_lst[3].text, "工具后回复")
 
-    async def test_modifier_tool_content_is_sent_with_message_segments(self) -> None:
-        """消息修饰工具同轮 content 会按回复/艾特等消息段发送并写入上下文。"""
-        fake_context = FakeContext(llm=FakeModifierToolCallLLM())
+    async def test_content_directives_are_sent_with_message_segments(self) -> None:
+        """content 中的 `<Reply>` / `<At>` 会转换成消息段，长期上下文保留原文。"""
+        fake_context = FakeContext(llm=FakeMarkedContentLLM())
         config = build_config(output_reasoning_content=False)
         tool_loop = GroupChatToolLoop(
             config=config,
@@ -613,14 +587,17 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             turn_messages=[ChatMessage(role="user", text="回复我")],
         )
 
-        self.assertEqual(fake_context.bot.sent_texts, ["收到喵"])
-        self.assertEqual(fake_context.bot.sent_segment_types, [["reply", "text"]])
+        self.assertEqual(fake_context.bot.sent_texts, [" 收到喵"])
+        self.assertEqual(fake_context.bot.sent_segment_types, [["reply", "at", "text"]])
         self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
-        self.assertEqual(chat_handler.messages_lst[-1].text, "收到喵")
+        self.assertEqual(
+            chat_handler.messages_lst[-1].text,
+            "<Reply>\n<At>20000</At>\n收到喵",
+        )
 
-    async def test_modifier_tool_without_text_returns_error_and_retries(self) -> None:
-        """只调用消息修饰工具但不说话时，会把错误返回给模型重试。"""
-        fake_llm = FakeModifierWithoutTextThenReplyLLM()
+    async def test_invalid_content_directive_returns_error_and_retries(self) -> None:
+        """非法 content 标记不会发群，会追加临时纠错消息让模型重试。"""
+        fake_llm = FakeInvalidDirectiveThenReplyLLM()
         fake_context = FakeContext(llm=fake_llm)
         config = build_config(output_reasoning_content=False)
         tool_loop = GroupChatToolLoop(
@@ -638,21 +615,21 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             fake_context.bot.sent_texts,
-            ["我在喵~ 刚刚差点只摆动作不说话了！"],
+            ["我在喵~ 已经改成合法标记了！"],
         )
         self.assertEqual(fake_context.bot.sent_segment_types, [["reply", "text"]])
         self.assertEqual(len(fake_llm.received_messages), 2)
         retry_messages = fake_llm.received_messages[1]
-        modifier_error_message = next(
+        directive_error_message = next(
             message
             for message in retry_messages
-            if message.role == "tool" and message.tool_call_id == "call-empty-reply"
+            if message.role == "user" and "标记格式有误" in (message.text or "")
         )
-        self.assertIn("没有写出要发送到群里的回复", modifier_error_message.text or "")
+        self.assertIn("@全体", directive_error_message.text or "")
         self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
         self.assertEqual(
             chat_handler.messages_lst[-1].text,
-            "我在喵~ 刚刚差点只摆动作不说话了！",
+            "<Reply>\n我在喵~ 已经改成合法标记了！",
         )
 
     async def test_plain_content_without_tools_sends_once_and_finishes(self) -> None:
@@ -828,7 +805,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             )
             chat_handler = ContextHandler(
                 system_prompt="系统提示词",
-                max_context_tokens=8000,
+                max_context_tokens=6000,
             )
             chat_handler.build_chatmessage(
                 message_lst=[

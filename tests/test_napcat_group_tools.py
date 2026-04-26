@@ -3,7 +3,7 @@
 import unittest
 from typing import cast
 
-from app.models import GroupMessage, JsonObject, MessageSegment, NapCatId, Response, Sender, Text
+from app.models import GroupMessage, MessageSegment, NapCatId, Response, Sender, Text
 from app.services.napcat.group_tools import (
     GetGroupHistoryMessagesArgs,
     NapCatGroupToolExecutor,
@@ -104,17 +104,17 @@ class FakeDatabase:
 class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
     """验证 NapCat 本地工具行为。"""
 
-    async def test_modifier_tools_build_reply_at_and_spaced_text(self) -> None:
-        """回复和艾特工具会修饰最终消息，并在正文前补空格。"""
+    async def test_content_directives_build_reply_at_and_spaced_text(self) -> None:
+        """content 标记会修饰最终消息，并在正文前补空格。"""
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
             database=FakeDatabase(),
             event=build_group_message(),
         )
 
-        _ = await executor.call_tool("qq__reply_current_message", {})
-        _ = await executor.call_tool("qq__mention_user", {"user_id": "20000"})
-        segments = executor.build_final_message_segments("测试通过")
+        segments = executor.build_message_segments_from_content(
+            "<Reply>\n<At>20000</At>\n测试通过"
+        )
 
         self.assertEqual([segment.type for segment in segments], ["reply", "at", "text"])
         text_segment = segments[-1]
@@ -122,8 +122,8 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         text_segment = cast(Text, text_segment)
         self.assertEqual(text_segment.data.text, " 测试通过")
 
-    async def test_mention_all_disabled_returns_model_visible_error(self) -> None:
-        """关闭 @全体 时工具返回模型可读错误。"""
+    async def test_mention_all_disabled_raises_model_visible_error(self) -> None:
+        """关闭 @全体 时 content 标记解析会返回模型可读错误。"""
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
             database=FakeDatabase(),
@@ -131,18 +131,11 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             allow_mention_all=False,
         )
 
-        result = await executor.call_tool("qq__mention_user", {"user_id": "all"})
+        with self.assertRaisesRegex(ValueError, "@全体"):
+            _ = executor.build_message_segments_from_content("<At>all</At>\n测试")
 
-        self.assertIsInstance(result, dict)
-        result_dict = cast(JsonObject, result)
-        self.assertIs(result_dict["ok"], False)
-        error = result_dict["error"]
-        if not isinstance(error, str):
-            raise AssertionError("工具错误信息必须是字符串")
-        self.assertIn("@全体", error)
-
-    async def test_executor_does_not_expose_conversation_finish_tool(self) -> None:
-        """本地群工具集不再暴露模型主动结束对话的工具。"""
+    async def test_executor_does_not_expose_message_modifier_tools(self) -> None:
+        """本地群工具集不再暴露艾特、引用和主动结束这类动作工具。"""
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
             database=FakeDatabase(),
@@ -151,8 +144,8 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
 
         tool_names = {tool.name for tool in executor.list_tools()}
 
-        self.assertIn("qq__mention_user", tool_names)
-        self.assertIn("qq__reply_current_message", tool_names)
+        self.assertNotIn("qq__mention_user", tool_names)
+        self.assertNotIn("qq__reply_current_message", tool_names)
         self.assertNotIn("qq__finish_conversation", tool_names)
 
     def test_history_duration_requires_minutes(self) -> None:
