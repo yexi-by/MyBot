@@ -115,13 +115,6 @@ class GroupChatToolLoop:
                 tools_count=len(tools),
                 tool_choice="auto",
             )
-            await self.debug_dumper.append_llm_request(
-                group_id=msg.group_id,
-                round_index=round_index,
-                messages=working_messages,
-                tools=tools,
-                tool_choice="auto",
-            )
             response = await self.context.llm.get_ai_response_with_tools(
                 messages=working_messages,
                 model_vendors=self.config.model_vendors,
@@ -153,13 +146,6 @@ class GroupChatToolLoop:
                 information_tool_calls_count=len(information_calls),
                 tool_call_names=[tool_call.name for tool_call in response.tool_calls],
             )
-            await self.debug_dumper.append_llm_response(
-                group_id=msg.group_id,
-                round_index=round_index,
-                response=response,
-                modifier_calls=modifier_calls,
-                information_calls=information_calls,
-            )
             if response.tool_calls:
                 await self._handle_tool_response(
                     msg=msg,
@@ -174,28 +160,28 @@ class GroupChatToolLoop:
                     tool_history_messages=tool_history_messages,
                     round_index=round_index,
                 )
-                if napcat_executor.conversation_finished:
-                    await self._finish_turn(
-                        msg=msg,
-                        chat_handler=chat_handler,
-                        turn_messages=turn_messages,
-                        sent_content_messages=sent_content_messages,
-                        tool_history_messages=tool_history_messages,
-                        replace_existing_history=replace_existing_history,
-                        title="模型显式结束后的长期上下文",
-                    )
-                    return
-                continue
+                if information_calls:
+                    continue
+                await self._finish_turn(
+                    msg=msg,
+                    chat_handler=chat_handler,
+                    turn_messages=turn_messages,
+                    sent_content_messages=sent_content_messages,
+                    tool_history_messages=tool_history_messages,
+                    replace_existing_history=replace_existing_history,
+                    title="无信息工具调用自动结束后的长期上下文",
+                )
+                return
 
-            if reply_content.visible_content is None:
-                log_event(
-                    level="WARNING",
-                    event="ai_group_chat.empty_without_finish_tool",
-                    category="plugin",
-                    message="模型没有正文，也没有调用结束工具，本轮静默结束",
-                    group_id=msg.group_id,
-                    message_id=msg.message_id,
-                    round_index=round_index,
+            if reply_content.visible_content is not None:
+                await self._send_reply_content(
+                    msg=msg,
+                    reply_content=reply_content,
+                    napcat_executor=napcat_executor,
+                    use_modifiers=napcat_executor.has_message_modifiers,
+                    sent_content_messages=sent_content_messages,
+                    event_name="ai_group_chat.reply.sent_without_tools",
+                    log_message="模型返回正文且没有信息工具调用，已发送正文并结束本轮",
                 )
                 await self._finish_turn(
                     msg=msg,
@@ -204,24 +190,29 @@ class GroupChatToolLoop:
                     sent_content_messages=sent_content_messages,
                     tool_history_messages=tool_history_messages,
                     replace_existing_history=replace_existing_history,
-                    title="空响应兜底结束后的长期上下文",
+                    title="无工具调用自动结束后的长期上下文",
                 )
                 return
 
-            await self._send_reply_content(
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.empty_without_tools",
+                category="plugin",
+                message="模型没有正文，也没有信息工具调用，本轮静默结束",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                round_index=round_index,
+            )
+            await self._finish_turn(
                 msg=msg,
-                reply_content=reply_content,
-                napcat_executor=napcat_executor,
-                use_modifiers=napcat_executor.has_message_modifiers,
+                chat_handler=chat_handler,
+                turn_messages=turn_messages,
                 sent_content_messages=sent_content_messages,
-                event_name="ai_group_chat.reply.sent_without_tools",
-                log_message="模型返回正文但未调用结束工具，已发送正文并继续等待模型显式结束",
+                tool_history_messages=tool_history_messages,
+                replace_existing_history=replace_existing_history,
+                title="空响应自动结束后的长期上下文",
             )
-            self._append_plain_response(
-                working_messages=working_messages,
-                response=response,
-                content=content,
-            )
+            return
         raise RuntimeError(f"AI 群聊工具调用超过最大轮数: {self.config.max_tool_rounds}")
 
     async def _prepare_turn_context(
@@ -340,14 +331,6 @@ class GroupChatToolLoop:
         normalized_summary = self._normalize_content(summary)
         if normalized_summary is None:
             raise ValueError("AI 群聊上下文压缩返回了空摘要")
-        await self.debug_dumper.append_context_compression(
-            group_id=msg.group_id,
-            estimated_tokens=budget.estimated_tokens,
-            max_context_tokens=budget.max_context_tokens,
-            old_messages=compression_input.messages,
-            dropped_image_count=compression_input.dropped_image_count,
-            summary=normalized_summary,
-        )
         log_event(
             level="DEBUG",
             event="ai_group_chat.context_compression.finished",
@@ -475,26 +458,6 @@ class GroupChatToolLoop:
             messages=chat_handler.messages_lst,
         )
 
-    def _append_plain_response(
-        self,
-        *,
-        working_messages: list[ChatMessage],
-        response: LLMResponse,
-        content: str | None,
-    ) -> None:
-        """把无工具调用但未结束的 assistant 正文写回当前工作上下文。"""
-        if content is None:
-            return
-        working_messages.append(
-            ChatMessage(
-                role="assistant",
-                text=content,
-                reasoning_content=self._build_memory_reasoning_content(
-                    response.reasoning_content
-                ),
-            )
-        )
-
     async def _send_reply_content(
         self,
         *,
@@ -595,12 +558,6 @@ class GroupChatToolLoop:
                 tool_name=tool_call.name,
                 is_error=is_error,
                 tool_message_chars=len(tool_message.text or ""),
-            )
-            await self.debug_dumper.append_tool_result(
-                group_id=group_id,
-                tool_call=tool_call,
-                tool_message=tool_message,
-                is_error=is_error,
             )
             if is_error:
                 has_error = True

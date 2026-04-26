@@ -2,11 +2,17 @@
 
 from typing import ClassVar, Literal, override
 
-from app.models import GroupMessage, JsonObject, JsonValue, MessageSegment, NapCatId, Response
+from app.models import (
+    GroupMessage,
+    JsonObject,
+    JsonValue,
+    MessageSegment,
+    NapCatId,
+    Response,
+)
 from app.services.llm.schemas import LLMToolDefinition, LLMToolExecutor
 from app.services.llm.tools import LLMToolRegistry
 
-from .control import GroupConversationControlToolset
 from .files import GroupFileToolset
 from .history import GroupHistoryToolset
 from .modifiers import GroupMessageModifierToolset
@@ -18,9 +24,6 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
 
     MESSAGE_MODIFIER_TOOL_NAMES: ClassVar[frozenset[str]] = (
         GroupMessageModifierToolset.tool_names
-    )
-    CONVERSATION_FINISH_TOOL_NAMES: ClassVar[frozenset[str]] = (
-        GroupConversationControlToolset.tool_names
     )
 
     def __init__(
@@ -36,9 +39,6 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
             bot=bot,
             event=event,
             allow_mention_all=allow_mention_all,
-        )
-        self._control: GroupConversationControlToolset = (
-            GroupConversationControlToolset()
         )
         self._files: GroupFileToolset = GroupFileToolset(bot=bot, event=event)
         self._history: GroupHistoryToolset = GroupHistoryToolset(
@@ -62,20 +62,10 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
         """返回当前是否存在待应用的消息修饰动作。"""
         return self._modifiers.has_modifiers
 
-    @property
-    def conversation_finished(self) -> bool:
-        """返回模型是否请求结束本次群聊处理。"""
-        return self._control.conversation_finished
-
     @classmethod
     def is_message_modifier_tool(cls, name: str) -> bool:
         """判断工具是否只用于修饰同轮最终群消息。"""
         return name in cls.MESSAGE_MODIFIER_TOOL_NAMES
-
-    @classmethod
-    def is_conversation_finish_tool(cls, name: str) -> bool:
-        """判断工具是否用于显式结束本次群聊处理。"""
-        return name in cls.CONVERSATION_FINISH_TOOL_NAMES
 
     @override
     def list_tools(self) -> list[LLMToolDefinition]:
@@ -102,6 +92,5 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
     def _register_tools(self) -> None:
         """注册当前群聊工具定义。"""
         self._modifiers.register_tools(self._registry)
-        self._control.register_tools(self._registry)
         self._files.register_tools(self._registry)
         self._history.register_tools(self._registry)

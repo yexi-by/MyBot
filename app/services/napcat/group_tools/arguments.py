@@ -26,10 +26,6 @@ class ReplyCurrentMessageArgs(StrictModel):
     """引用当前群消息的工具参数。"""
 
 
-class FinishConversationArgs(StrictModel):
-    """结束当前群聊处理的工具参数。"""
-
-
 class ListGroupRootFilesArgs(StrictModel):
     """获取当前群根目录文件列表的工具参数。"""
 

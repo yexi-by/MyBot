@@ -137,17 +137,7 @@ class FakeLLM:
     ) -> LLMResponse:
         """返回无工具调用的模型响应。"""
         _ = (messages, model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
-        return LLMResponse(
-            content="正式回复",
-            reasoning_content="模型思考",
-            tool_calls=[
-                LLMToolCall(
-                    id="call-finish",
-                    name="qq__finish_conversation",
-                    arguments={},
-                )
-            ],
-        )
+        return LLMResponse(content="正式回复", reasoning_content="模型思考")
 
 
 class FakeMCPToolManager:
@@ -224,17 +214,7 @@ class FakeToolCallLLM:
                     LLMToolCall(id="call-1", name="test__lookup", arguments={})
                 ],
             )
-        return LLMResponse(
-            content="工具后回复",
-            reasoning_content="最终思考",
-            tool_calls=[
-                LLMToolCall(
-                    id="call-finish",
-                    name="qq__finish_conversation",
-                    arguments={},
-                )
-            ],
-        )
+        return LLMResponse(content="工具后回复", reasoning_content="最终思考")
 
 
 class FakeModifierToolCallLLM:
@@ -268,18 +248,13 @@ class FakeModifierToolCallLLM:
                     id="call-reply",
                     name="qq__reply_current_message",
                     arguments={},
-                ),
-                LLMToolCall(
-                    id="call-finish",
-                    name="qq__finish_conversation",
-                    arguments={},
-                ),
+                )
             ],
         )
 
 
-class FakeNoToolContinueLLM:
-    """测试用 LLM，先输出无工具正文，再显式结束。"""
+class FakeNoToolLLM:
+    """测试用 LLM，输出无工具正文后应由插件自动结束。"""
 
     def __init__(self) -> None:
         """初始化请求记录。"""
@@ -304,21 +279,42 @@ class FakeNoToolContinueLLM:
         tool_choice: LLMToolChoice = "auto",
         parallel_tool_calls: bool = True,
     ) -> LLMResponse:
-        """第一轮只输出正文，第二轮调用结束工具。"""
+        """返回无工具正文并记录请求。"""
         _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
         self.received_messages.append(messages[:])
-        if len(self.received_messages) == 1:
-            return LLMResponse(content="第一句")
-        return LLMResponse(
-            content="第二句",
-            tool_calls=[
-                LLMToolCall(
-                    id="call-finish",
-                    name="qq__finish_conversation",
-                    arguments={},
-                )
-            ],
-        )
+        return LLMResponse(content="第一句")
+
+
+class FakeEmptyLLM:
+    """测试用 LLM，返回空响应后应由插件静默结束。"""
+
+    def __init__(self) -> None:
+        """初始化请求记录。"""
+        self.received_messages: list[list[ChatMessage]] = []
+
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+    ) -> str:
+        """测试中不会触发纯文本压缩请求。"""
+        _ = (messages, model_vendors, model_name)
+        return "压缩摘要"
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """返回空响应并记录请求。"""
+        _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
+        self.received_messages.append(messages[:])
+        return LLMResponse()
 
 
 class FakeCompressionLLM:
@@ -352,16 +348,7 @@ class FakeCompressionLLM:
         """记录正式请求并返回最终正文。"""
         _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
         self.received_messages.append(messages[:])
-        return LLMResponse(
-            content="压缩后回复",
-            tool_calls=[
-                LLMToolCall(
-                    id="call-finish",
-                    name="qq__finish_conversation",
-                    arguments={},
-                )
-            ],
-        )
+        return LLMResponse(content="压缩后回复")
 
 
 def build_config(
@@ -519,9 +506,9 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
         self.assertEqual(chat_handler.messages_lst[-1].text, "收到喵")
 
-    async def test_plain_content_continues_until_finish_tool(self) -> None:
-        """无工具正文会发群并继续，直到模型调用结束工具。"""
-        fake_llm = FakeNoToolContinueLLM()
+    async def test_plain_content_without_tools_sends_once_and_finishes(self) -> None:
+        """无工具正文会发群一次，然后自动结束本轮。"""
+        fake_llm = FakeNoToolLLM()
         fake_context = FakeContext(llm=fake_llm)
         config = build_config(output_reasoning_content=False)
         tool_loop = GroupChatToolLoop(
@@ -537,12 +524,35 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             turn_messages=[ChatMessage(role="user", text="继续说")],
         )
 
-        self.assertEqual(fake_context.bot.sent_texts, ["第一句", "第二句"])
-        self.assertEqual(len(fake_llm.received_messages), 2)
-        self.assertEqual(fake_llm.received_messages[1][-1].role, "assistant")
-        self.assertEqual(fake_llm.received_messages[1][-1].text, "第一句")
-        self.assertEqual(chat_handler.messages_lst[-2].text, "第一句")
-        self.assertEqual(chat_handler.messages_lst[-1].text, "第二句")
+        self.assertEqual(fake_context.bot.sent_texts, ["第一句"])
+        self.assertEqual(len(fake_llm.received_messages), 1)
+        self.assertEqual(chat_handler.messages_lst[-1].text, "第一句")
+
+    async def test_empty_content_without_tools_finishes_silently(self) -> None:
+        """无工具且无正文时不发送群消息，但当前用户消息仍进入长期上下文。"""
+        fake_llm = FakeEmptyLLM()
+        fake_context = FakeContext(llm=fake_llm)
+        config = build_config(output_reasoning_content=False)
+        tool_loop = GroupChatToolLoop(
+            config=config,
+            context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="不用回复")],
+        )
+
+        self.assertEqual(fake_context.bot.sent_texts, [])
+        self.assertEqual(len(fake_llm.received_messages), 1)
+        self.assertEqual(
+            [message.role for message in chat_handler.messages_lst],
+            ["system", "user"],
+        )
+        self.assertEqual(chat_handler.messages_lst[-1].text, "不用回复")
 
     async def test_context_compression_excludes_current_message_then_rebuilds(
         self,
