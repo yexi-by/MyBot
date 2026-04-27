@@ -8,7 +8,7 @@ import asyncio
 from fastapi import WebSocket
 
 from app.database import RedisDatabaseManager
-from app.models import AllEvent, LifeCycle, NapCatId, Response
+from app.models import AllEvent, NapCatId, Response
 
 from .mixins import (
     AccountMixin,
@@ -57,6 +57,6 @@ class BOTClient(
         self.timeout: int = 120
 
     def get_self_qq_id(self, msg: AllEvent) -> None:
-        """获取自身 QQ 号，外部接口"""
-        if isinstance(msg, LifeCycle):
+        """从 NapCat 事件中刷新机器人自身 QQ 号。"""
+        if not isinstance(msg, Response):
             self.boot_id = msg.self_id

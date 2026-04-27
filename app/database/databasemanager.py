@@ -14,15 +14,22 @@ from redis.asyncio import Redis
 from redis.exceptions import WatchError
 
 from app.models import (
+    At,
     GroupMessage,
     Image,
+    MessageSegment,
     Meta,
     NapCatId,
     Notice,
     PrivateMessage,
+    Reply,
     Request,
+    Sender,
+    Text,
     Video,
 )
+from app.utils.encoding import base64_to_bytes
+from app.utils.file_type import detect_extension
 from app.utils.log import log_event, log_exception
 from app.utils.retry_utils import create_retry_manager
 
@@ -30,6 +37,8 @@ type StoredMessage = GroupMessage | PrivateMessage | Notice | Meta | Request
 type SearchModel = type[GroupMessage] | type[PrivateMessage] | type[Notice] | type[Meta] | type[Request]
 type RedisValue = str | bytes | bytearray
 
+BASE64_FILE_PREFIX: Final[str] = "base64://"
+DATA_URL_PREFIX: Final[str] = "data:"
 DEFAULT_IMAGE_EXT: Final[str] = ".jpg"
 DEFAULT_VIDEO_EXT: Final[str] = ".mp4"
 LOCAL_FILE_MARKER: Final[str] = "local"
@@ -180,6 +189,121 @@ class RedisDatabaseManager:
         _ = pipe.zadd(zset_key, {actual_msg_id: actual_time_id})
         _ = await pipe.execute()
 
+    async def store_outgoing_message(
+        self,
+        *,
+        self_id: NapCatId,
+        message_id: NapCatId,
+        message_segments: list[MessageSegment],
+        group_id: NapCatId | None = None,
+        user_id: NapCatId | None = None,
+    ) -> None:
+        """把机器人主动发送成功的消息写入 Redis，供后续引用消息检索。"""
+        if group_id is None and user_id is None:
+            raise ValueError("保存出站消息时必须指定 group_id 或 user_id")
+        if group_id is not None and user_id is not None:
+            raise ValueError("保存出站消息时不能同时指定 group_id 和 user_id")
+        segments = [segment.model_copy(deep=True) for segment in message_segments]
+        await self._save_outgoing_inline_images(
+            message_id=message_id,
+            message_segments=segments,
+        )
+        sender = Sender(user_id=self_id, nickname="机器人")
+        message_time = int(time.time())
+        raw_message = self._build_raw_message(message_segments=segments)
+        if group_id is not None:
+            msg = GroupMessage(
+                time=message_time,
+                self_id=self_id,
+                post_type="message_sent",
+                message_type="group",
+                sub_type="normal",
+                user_id=self_id,
+                message_id=message_id,
+                group_id=group_id,
+                message=segments,
+                raw_message=raw_message,
+                sender=sender,
+            )
+        else:
+            if user_id is None:
+                raise ValueError("保存私聊出站消息时 user_id 不能为空")
+            msg = PrivateMessage(
+                time=message_time,
+                self_id=self_id,
+                post_type="message_sent",
+                message_type="private",
+                sub_type="friend",
+                user_id=user_id,
+                message_id=message_id,
+                message=segments,
+                raw_message=raw_message,
+                sender=sender,
+                group_id=None,
+            )
+        await self._store_msg(msg=msg)
+        log_event(
+            level="DEBUG",
+            event="redis.outgoing_message.stored",
+            category="redis",
+            message="已保存机器人出站消息",
+            self_id=self_id,
+            group_id=group_id,
+            user_id=user_id,
+            message_id=message_id,
+        )
+
+    async def _save_outgoing_inline_images(
+        self, *, message_id: NapCatId, message_segments: list[MessageSegment]
+    ) -> None:
+        """把出站消息中的内联 Base64 图片落成本地文件，避免 Redis 存大段图片。"""
+        for index, segment in enumerate(message_segments):
+            if not isinstance(segment, Image):
+                continue
+            source = segment.data.file
+            if source.startswith(BASE64_FILE_PREFIX):
+                image_bytes = base64_to_bytes(source.removeprefix(BASE64_FILE_PREFIX))
+            elif source.startswith(DATA_URL_PREFIX):
+                image_bytes = base64_to_bytes(source)
+            else:
+                self._attach_existing_outgoing_image_source(segment=segment)
+                continue
+            extension = detect_extension(image_bytes)
+            if extension == ".unknown":
+                extension = DEFAULT_IMAGE_EXT
+            file_path = self.path / f"{message_id}_{index}{extension}"
+            async with aiofiles.open(file_path, "wb") as file:
+                _ = await file.write(image_bytes)
+            segment.data.file = file_path.name
+            segment.data.path = str(file_path)
+            segment.data.summary = segment.data.summary or "[图片]"
+
+    def _attach_existing_outgoing_image_source(self, *, segment: Image) -> None:
+        """为 URL 或本地路径形式的出站图片补充可复用读取来源。"""
+        source = segment.data.file
+        if source.startswith(("http://", "https://")):
+            segment.data.url = segment.data.url or source
+            return
+        source_path = Path(source)
+        if source_path.is_file():
+            segment.data.path = segment.data.path or str(source_path)
+
+    def _build_raw_message(self, *, message_segments: list[MessageSegment]) -> str:
+        """生成用于历史展示的简化 CQ 字符串。"""
+        parts: list[str] = []
+        for segment in message_segments:
+            if isinstance(segment, Text):
+                parts.append(segment.data.text)
+            elif isinstance(segment, At):
+                parts.append(f"[CQ:at,qq={segment.data.qq}]")
+            elif isinstance(segment, Reply):
+                parts.append(f"[CQ:reply,id={segment.data.id}]")
+            elif isinstance(segment, Image):
+                parts.append(f"[CQ:image,file={segment.data.file}]")
+            else:
+                parts.append(f"[CQ:{segment.type}]")
+        return "".join(parts)
+
     async def _search_raw(
         self,
         *,
@@ -312,6 +436,8 @@ class RedisDatabaseManager:
         self, segment: Image | Video, msg: GroupMessage | PrivateMessage, index: int
     ) -> None:
         """创建单个媒体下载任务。"""
+        if segment.data.path:
+            return
         url = segment.data.url
         if not url:
             log_event(

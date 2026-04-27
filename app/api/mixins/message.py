@@ -17,6 +17,8 @@ from app.models import (
     Text,
     Video,
 )
+from app.models.common import JsonObject
+from app.utils.log import log_event
 
 from .base import BaseMixin
 
@@ -136,7 +138,68 @@ class MessageMixin(BaseMixin):
             params = self._build_params(
                 message_type="group", group_id=group_id, message=message_segment
             )
-        return await self._call_action("send_msg", params)
+        response = await self._call_action("send_msg", params)
+        await self._store_sent_message(
+            response=response,
+            group_id=group_id,
+            user_id=user_id,
+            message_segment=message_segment,
+        )
+        return response
+
+    async def _store_sent_message(
+        self,
+        *,
+        response: Response,
+        message_segment: list[MessageSegment],
+        group_id: NapCatId | None,
+        user_id: NapCatId | None,
+    ) -> None:
+        """在发送成功后保存出站消息，支持后续引用机器人自己的消息。"""
+        if response.status != "ok" or response.retcode != 0:
+            return
+        if not self.boot_id:
+            log_event(
+                level="WARNING",
+                event="napcat.sent_message.self_id_missing",
+                category="napcat_api",
+                message="发送成功但机器人 self_id 尚未初始化，无法保存出站消息",
+            )
+            return
+        message_id = self._extract_sent_message_id(response=response)
+        if message_id is None:
+            log_event(
+                level="WARNING",
+                event="napcat.sent_message.message_id_missing",
+                category="napcat_api",
+                message="发送成功但 NapCat 响应缺少 message_id，无法保存出站消息",
+                response_data=response.data,
+            )
+            return
+        await self.database.store_outgoing_message(
+            self_id=self.boot_id,
+            message_id=message_id,
+            group_id=group_id,
+            user_id=user_id,
+            message_segments=message_segment,
+        )
+
+    def _extract_sent_message_id(self, *, response: Response) -> NapCatId | None:
+        """从 NapCat send_msg 响应中提取消息 ID。"""
+        data = response.data
+        if not isinstance(data, dict):
+            return None
+        response_data: JsonObject = data
+        raw_message_id = response_data.get("message_id")
+        if isinstance(raw_message_id, bool):
+            return None
+        if isinstance(raw_message_id, int):
+            return str(raw_message_id)
+        if isinstance(raw_message_id, str):
+            message_id = raw_message_id.strip()
+            if message_id:
+                return message_id
+        return None
 
     async def delete_msg(self, message_id: NapCatId) -> None:
         """撤回消息。"""
