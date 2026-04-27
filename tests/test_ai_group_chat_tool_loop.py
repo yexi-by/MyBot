@@ -451,7 +451,7 @@ def configure_deepseek_v4_prompts(
     extra_path.write_text("群聊动作偏好：需要引用或艾特时必须说完整的话。", encoding="utf-8")
     roleplay_path.write_text("【角色沉浸要求】保持第一人称内心独白。", encoding="utf-8")
     config.enable_deepseek_v4_roleplay_instruct = True
-    config.deepseek_v4_extra_requirements_path = str(extra_path)
+    config.extra_requirements_path = str(extra_path)
     config.deepseek_v4_roleplay_instruct_path = str(roleplay_path)
 
 

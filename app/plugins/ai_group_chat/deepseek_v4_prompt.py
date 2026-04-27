@@ -5,7 +5,7 @@ from pathlib import Path
 
 from app.services import ChatMessage
 
-from .config import AIGroupChatConfig
+from .config import AIGroupChatConfig, load_extra_requirements
 
 
 @dataclass(frozen=True)
@@ -35,10 +35,10 @@ class DeepSeekV4PromptPack:
 
 def load_deepseek_v4_prompt_pack(*, config: AIGroupChatConfig) -> DeepSeekV4PromptPack:
     """按插件配置读取 DeepSeek V4 Depth 0 提示词文件。"""
-    extra_requirements_path = Path(config.deepseek_v4_extra_requirements_path)
+    extra_requirements_path = Path(config.extra_requirements_path)
     roleplay_instruct_path = Path(config.deepseek_v4_roleplay_instruct_path)
     return DeepSeekV4PromptPack(
-        extra_requirements=_read_prompt_file(path=extra_requirements_path),
+        extra_requirements=load_extra_requirements(config=config),
         roleplay_instruct=_read_prompt_file(path=roleplay_instruct_path),
         extra_requirements_path=extra_requirements_path,
         roleplay_instruct_path=roleplay_instruct_path,

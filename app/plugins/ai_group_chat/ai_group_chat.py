@@ -54,7 +54,10 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             group_count=len(self.config.group_config),
         )
         for group_config in self.config.group_config:
-            system_prompt = build_system_prompt(group_config=group_config)
+            system_prompt = build_system_prompt(
+                config=self.config,
+                group_config=group_config,
+            )
             group_key = self._id_key(group_config.group_id)
             chat_handler = ContextHandler(
                 system_prompt=system_prompt,

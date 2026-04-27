@@ -25,7 +25,9 @@ class GroupFileToolset:
             name="qq__list_group_root_files",
             description=(
                 "信息工具：查看当前群群文件根目录列表。"
-                "当用户询问群文件、想找文件、需要先确认 file_id 时使用。"
+                "当你判断群文件信息有助于回答当前问题时，应主动调用此工具。"
+                "典型场景：对话中提及了文件、资料、文档、资源等关键词，"
+                "或有人在找某个文件但你不确定群里是否有，或需要先获取 file_id 以便后续操作。"
                 "此工具只返回文件列表，不发送群消息。"
             ),
             parameters_model=ListGroupRootFilesArgs,
@@ -35,7 +37,8 @@ class GroupFileToolset:
             name="qq__list_group_files_by_folder",
             description=(
                 "信息工具：查看当前群某个群文件夹内的文件列表。"
-                "需要先知道 folder_id 或文件夹路径/名称；如果不知道文件夹标识，先调用 qq__list_group_root_files。"
+                "当你已知目标文件夹的 folder_id 或路径/名称时，应主动调用此工具深入查看文件夹内容。"
+                "如果尚不知道文件夹标识，应先调用 qq__list_group_root_files 获取。"
                 "此工具只返回文件列表，不发送群消息。"
             ),
             parameters_model=ListGroupFilesByFolderArgs,
@@ -44,8 +47,10 @@ class GroupFileToolset:
         registry.register_tool(
             name="qq__get_group_file_url",
             description=(
-                "信息工具：获取当前群指定群文件的下载链接和 NapCat 原始响应。"
-                "需要先通过群文件列表确认 file_id。此工具只返回链接信息，不发送群消息。"
+                "信息工具：获取当前群指定群文件的下载链接。"
+                "当你需要为群成员提供文件下载地址时，应主动调用此工具。"
+                "需要先通过 qq__list_group_root_files 或 qq__list_group_files_by_folder 获取 file_id。"
+                "此工具只返回链接信息，不发送群消息。"
             ),
             parameters_model=GetGroupFileUrlArgs,
             handler=self.get_group_file_url,

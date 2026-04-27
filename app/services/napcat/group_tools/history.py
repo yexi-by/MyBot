@@ -28,11 +28,13 @@ class GroupHistoryToolset:
         registry.register_tool(
             name="qq__get_group_history_messages",
             description=(
-                "信息工具：查看当前群的群聊历史消息。"
-                "只读取本地 Redis 缓存，不请求 NapCat 远端历史；不允许指定 group_id，始终限定为当前群。"
+                "信息工具：读取当前群的群聊历史消息。"
+                "只读取本地 Redis 缓存，不请求 NapCat 远端历史；始终限定为当前群。"
                 "支持三种查询模式：recent_count 查询最近 N 条；recent_duration 查询最近若干分钟；"
                 "date_range 按北京时间起止范围查询。"
-                "当用户让你回顾刚才群里聊了什么、总结最近对话、查找最近某人说过的话时使用。"
+                "当你需要了解当前群近期聊天内容来辅助回答时，应主动调用此工具。"
+                "典型场景：有人提到了之前的对话但你缺少上下文、需要确认某人说过什么、"
+                "需要回顾最近讨论的话题以给出更准确的回复、有人提问而答案可能在近期消息中。"
                 "此工具只返回历史消息，不发送群消息。"
             ),
             parameters_model=GetGroupHistoryMessagesArgs,

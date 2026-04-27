@@ -14,8 +14,7 @@ from app.services.llm.schemas import LLMResponse, LLMToolCall, LLMToolDefinition
 from app.services.llm.tools import build_tool_result_message
 from app.utils.log import log_event
 
-from .config import AIGroupChatConfig
-from .constants import DEEPSEEK_V4_ROLEPLAY_MODELS
+from .config import AIGroupChatConfig, should_use_deepseek_v4_depth_zero_prompt
 from .context_compressor import GroupChatContextCompressor
 from .debug_dump import AIGroupChatDebugDumper
 from .deepseek_v4_prompt import DeepSeekV4PromptPack, load_deepseek_v4_prompt_pack
@@ -365,10 +364,7 @@ class GroupChatToolLoop:
 
     def _should_use_deepseek_v4_depth_zero_prompt(self) -> bool:
         """判断当前模型是否需要注入 DeepSeek V4 Depth 0 user prompt。"""
-        return (
-            self.config.enable_deepseek_v4_roleplay_instruct
-            and self.config.model_name in DEEPSEEK_V4_ROLEPLAY_MODELS
-        )
+        return should_use_deepseek_v4_depth_zero_prompt(config=self.config)
 
     def _build_llm_request_messages(
         self, *, working_messages: list[ChatMessage]
