@@ -9,12 +9,6 @@ from app.config.plugin_config import load_plugin_config
 from app.models import GroupMessage, Image, NapCatId, Reply, StrictModel, Text
 from app.plugins.base import BasePlugin
 from app.services import ChatMessage
-from app.services.llm.schemas import (
-    ImageGenerationOptions,
-    ImageGenerationQuality,
-    ImageGenerationSize,
-    ImageInputFidelity,
-)
 from app.utils.log import log_event, log_exception
 
 CONFIG_SECTION: Final[str] = "image_generate"
@@ -40,9 +34,6 @@ class ImageGenerateConfig(StrictModel):
     group_ids: list[NapCatId]
     model_name: str
     model_vendors: str
-    size: ImageGenerationSize | None = None
-    quality: ImageGenerationQuality | None = None
-    input_fidelity: ImageInputFidelity | None = None
 
 
 class ImageGeneratePlugin(BasePlugin[GroupMessage]):
@@ -60,11 +51,6 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
             model_cls=ImageGenerateConfig,
         )
         self.group_ids: set[NapCatId] = set(self.config.group_ids)
-        self.image_options: ImageGenerationOptions = ImageGenerationOptions(
-            size=self.config.size,
-            quality=self.config.quality,
-            input_fidelity=self.config.input_fidelity,
-        )
 
     @override
     async def run(self, msg: GroupMessage) -> bool:
@@ -240,7 +226,6 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
                 message=message,
                 model=self.config.model_name,
                 model_vendors=self.config.model_vendors,
-                options=self.image_options,
             )
         except Exception as exc:
             log_exception(

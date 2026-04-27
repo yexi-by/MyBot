@@ -2,7 +2,7 @@
 
 import base64
 import json
-from typing import Final, Literal, cast, override
+from typing import Final, cast, override
 
 from openai import AsyncOpenAI
 from openai.types.chat import (
@@ -19,10 +19,6 @@ from app.utils.file_type import detect_mime_type
 from ..base import LLMProvider
 from ..schemas import (
     ChatMessage,
-    ImageGenerationOptions,
-    ImageGenerationQuality,
-    ImageGenerationSize,
-    ImageInputFidelity,
     LLMResponse,
     LLMToolCall,
     LLMToolChoice,
@@ -42,24 +38,6 @@ REASONING_TEXT_KEYS: Final[tuple[str, ...]] = (
     "summary",
     "output_text",
 )
-type OpenAIEditSize = Literal[
-    "auto",
-    "256x256",
-    "512x512",
-    "1024x1024",
-    "1536x1024",
-    "1024x1536",
-]
-OPENAI_EDIT_ALLOWED_SIZES: Final[tuple[OpenAIEditSize, ...]] = (
-    "auto",
-    "256x256",
-    "512x512",
-    "1024x1024",
-    "1536x1024",
-    "1024x1536",
-)
-
-
 class OpenAIService(LLMProvider):
     """OpenAI 兼容服务实现。"""
 
@@ -300,9 +278,8 @@ class OpenAIService(LLMProvider):
         self,
         message: ChatMessage,
         model: str,
-        options: ImageGenerationOptions | None = None,
     ) -> str:
-        """使用标准 OpenAI 兼容图片接口生成图片。"""
+        """使用标准 OpenAI 兼容图片接口生成图片，仅传递接口必需参数。"""
         if not message.text:
             raise ValueError("提示词为空请重新输入")
 
@@ -312,52 +289,10 @@ class OpenAIService(LLMProvider):
                 image=image_files,
                 model=model,
                 prompt=message.text,
-                response_format="b64_json",
-                size=self._resolve_edit_size(options=options),
-                quality=self._resolve_quality(options=options),
-                input_fidelity=self._resolve_input_fidelity(options=options),
             )
         else:
             response = await self.client.images.generate(
                 model=model,
                 prompt=message.text,
-                response_format="b64_json",
-                size=self._resolve_size(options=options),
-                quality=self._resolve_quality(options=options),
             )
         return self._extract_base64_image(response)
-
-    def _resolve_size(
-        self, *, options: ImageGenerationOptions | None
-    ) -> ImageGenerationSize | None:
-        """读取图片尺寸配置。"""
-        if options is None:
-            return None
-        return options.size
-
-    def _resolve_edit_size(
-        self, *, options: ImageGenerationOptions | None
-    ) -> OpenAIEditSize | None:
-        """读取图生图尺寸配置，并拒绝编辑接口不支持的宽图尺寸。"""
-        size = self._resolve_size(options=options)
-        if size is None:
-            return None
-        if size not in OPENAI_EDIT_ALLOWED_SIZES:
-            raise ValueError(f"OpenAI 图片编辑接口不支持尺寸: {size}")
-        return size
-
-    def _resolve_quality(
-        self, *, options: ImageGenerationOptions | None
-    ) -> ImageGenerationQuality | None:
-        """读取图片质量配置。"""
-        if options is None:
-            return None
-        return options.quality
-
-    def _resolve_input_fidelity(
-        self, *, options: ImageGenerationOptions | None
-    ) -> ImageInputFidelity | None:
-        """读取图生图输入保真度配置。"""
-        if options is None:
-            return None
-        return options.input_fidelity

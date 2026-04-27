@@ -7,28 +7,6 @@ from pydantic import Field, field_serializer, model_validator
 
 from app.models import JsonObject, JsonValue, StrictModel
 
-type ImageGenerationSize = Literal[
-    "auto",
-    "256x256",
-    "512x512",
-    "1024x1024",
-    "1536x1024",
-    "1024x1536",
-    "1792x1024",
-    "1024x1792",
-]
-type ImageGenerationQuality = Literal["standard", "low", "medium", "high", "auto"]
-type ImageInputFidelity = Literal["high", "low"]
-
-
-class ImageGenerationOptions(StrictModel):
-    """定义图片生成接口的通用可选参数。"""
-
-    size: ImageGenerationSize | None = None
-    quality: ImageGenerationQuality | None = None
-    input_fidelity: ImageInputFidelity | None = None
-
-
 class LLMConfig(StrictModel):
     """定义单个 LLM 服务商配置。"""
 
@@ -99,7 +77,6 @@ class LLMProviderProtocol(Protocol):
         self,
         message: ChatMessage,
         model: str,
-        options: ImageGenerationOptions | None = None,
     ) -> str:
         """获取图片响应。"""
         ...

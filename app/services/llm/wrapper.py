@@ -9,7 +9,6 @@ from app.utils.retry_utils import create_retry_manager
 from .base import LLMProvider
 from .schemas import (
     ChatMessage,
-    ImageGenerationOptions,
     LLMConfig,
     LLMResponse,
     LLMToolChoice,
@@ -89,7 +88,6 @@ class ResilientLLMProvider(LLMProvider):
         self,
         message: ChatMessage,
         model: str,
-        options: ImageGenerationOptions | None = None,
     ) -> str:
         """调用底层图片接口，并在可恢复错误时重试。"""
         retrier = create_retry_manager(
@@ -107,7 +105,6 @@ class ResilientLLMProvider(LLMProvider):
                 response = await self.inner_provider.get_image(
                     message=message,
                     model=model,
-                    options=options,
                 )
                 if not response:
                     raise ValueError("LLM 提供商返回了空图片响应")

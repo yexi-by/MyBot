@@ -7,7 +7,6 @@ from openai import AsyncOpenAI
 from .providers.openai import OpenAIService
 from .schemas import (
     ChatMessage,
-    ImageGenerationOptions,
     LLMConfig,
     LLMProviderWrapper,
     LLMResponse,
@@ -136,7 +135,6 @@ class LLMHandler:
         message: ChatMessage,
         model: str,
         model_vendors: str,
-        options: ImageGenerationOptions | None = None,
     ) -> str:
         """获取指定模型厂商的图片响应。"""
         for llm in self.services:
@@ -145,6 +143,5 @@ class LLMHandler:
             return await llm.provider.get_image(
                 message=message,
                 model=model,
-                options=options,
             )
         raise ValueError(f"未定义的服务商名:{model_vendors}")

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .schemas import (
         ChatMessage,
-        ImageGenerationOptions,
         LLMResponse,
         LLMToolChoice,
         LLMToolDefinition,
@@ -41,8 +40,7 @@ class LLMProvider(ABC):
         self,
         message: "ChatMessage",
         model: str,
-        options: "ImageGenerationOptions | None" = None,
     ) -> str:
         """生成图片，不支持该能力的服务商会显式报错。"""
-        _ = (message, model, options)
+        _ = (message, model)
         raise NotImplementedError(f"{self.__class__.__name__} 不支持图像生成功能")
