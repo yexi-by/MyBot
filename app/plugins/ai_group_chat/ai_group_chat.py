@@ -14,7 +14,7 @@ from .constants import (
 )
 from .debug_dump import AIGroupChatDebugDumper
 from .message_builder import GroupChatMessageBuilder
-from .tool_loop import GroupChatToolLoop
+from .tool_loop import ActiveModelConfig, GroupChatToolLoop
 
 
 class AIGroupChatPlugin(BasePlugin[GroupMessage]):
@@ -120,7 +120,13 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             segment_count=len(msg.message),
             context_messages_count=len(chat_handler.messages_lst),
         )
-        turn_messages = await self.message_builder.build_turn_messages(msg=msg)
+        built_turn_messages = await self.message_builder.build_turn_messages(
+            msg=msg,
+            collect_images=True,
+        )
+        active_model = self.select_active_model(
+            contains_image=built_turn_messages.contains_image
+        )
         log_event(
             level="DEBUG",
             event="ai_group_chat.turn_messages.built",
@@ -128,14 +134,22 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             message="AI 群聊本轮输入构造完成",
             group_id=group_key,
             message_id=msg.message_id,
-            turn_messages_count=len(turn_messages),
-            text_chars=sum(len(message.text or "") for message in turn_messages),
-            image_count=sum(len(message.image or []) for message in turn_messages),
+            turn_messages_count=len(built_turn_messages.turn_messages),
+            text_chars=sum(
+                len(message.text or "")
+                for message in built_turn_messages.turn_messages
+            ),
+            image_count=built_turn_messages.loaded_image_count,
+            contains_image=built_turn_messages.contains_image,
+            active_model_name=active_model.model_name,
+            active_model_vendors=active_model.model_vendors,
+            used_multimodal_fallback=active_model.used_multimodal_fallback,
         )
         await self.tool_loop.run(
             msg=msg,
             chat_handler=chat_handler,
-            turn_messages=turn_messages,
+            turn_messages=built_turn_messages.turn_messages,
+            active_model=active_model,
         )
         log_event(
             level="DEBUG",
@@ -147,6 +161,31 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             context_messages_count=len(chat_handler.messages_lst),
         )
         return True
+
+    def select_active_model(self, *, contains_image: bool) -> ActiveModelConfig:
+        """根据本轮图片状态选择正式请求使用的模型。"""
+        if self.config.supports_multimodal:
+            return ActiveModelConfig(
+                model_name=self.config.model_name,
+                model_vendors=self.config.model_vendors,
+                supports_multimodal=True,
+            )
+        if not contains_image:
+            return ActiveModelConfig(
+                model_name=self.config.model_name,
+                model_vendors=self.config.model_vendors,
+                supports_multimodal=False,
+            )
+        fallback_model_name = self.config.multimodal_fallback_model_name
+        fallback_model_vendors = self.config.multimodal_fallback_model_vendors
+        if fallback_model_name is None or fallback_model_vendors is None:
+            raise RuntimeError("多模态备用模型配置缺失")
+        return ActiveModelConfig(
+            model_name=fallback_model_name,
+            model_vendors=fallback_model_vendors,
+            supports_multimodal=True,
+            used_multimodal_fallback=True,
+        )
 
     def _is_bot_mentioned(self, *, msg: GroupMessage) -> bool:
         """判断当前群消息是否艾特了机器人。"""

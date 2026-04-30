@@ -17,19 +17,23 @@ class DeepSeekV4PromptPack:
     extra_requirements_path: Path
     roleplay_instruct_path: Path
 
-    def build_depth_zero_message(self) -> ChatMessage:
+    def build_depth_zero_message(self, *, include_extra_requirements: bool = True) -> ChatMessage:
         """构造不进入长期上下文的 Depth 0 user message。"""
-        text = (
-            "<其他需求>\n"
-            f"{self.extra_requirements}\n"
-            "</其他需求>\n\n"
+        text_parts: list[str] = []
+        if include_extra_requirements:
+            text_parts.append(
+                "<其他需求>\n"
+                f"{self.extra_requirements}\n"
+                "</其他需求>"
+            )
+        text_parts.append(
             "<角色沉浸式扮演需求>\n"
             f"{self.roleplay_instruct}\n"
             "</角色沉浸式扮演需求>"
         )
         return ChatMessage(
             role="user",
-            text=text,
+            text="\n\n".join(text_parts),
         )
 
 

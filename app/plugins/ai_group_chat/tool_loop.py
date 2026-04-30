@@ -14,7 +14,12 @@ from app.services.llm.schemas import LLMResponse, LLMToolCall, LLMToolDefinition
 from app.services.llm.tools import build_tool_result_message
 from app.utils.log import log_event
 
-from .config import AIGroupChatConfig, should_use_deepseek_v4_depth_zero_prompt
+from .config import (
+    AIGroupChatConfig,
+    load_extra_requirements,
+    should_use_deepseek_v4_depth_zero_prompt,
+    should_use_deepseek_v4_depth_zero_prompt_for_model,
+)
 from .context_compressor import GroupChatContextCompressor
 from .debug_dump import AIGroupChatDebugDumper
 from .deepseek_v4_prompt import DeepSeekV4PromptPack, load_deepseek_v4_prompt_pack
@@ -39,6 +44,25 @@ class PreparedTurnContext:
     replace_existing_history: bool
 
 
+@dataclass(frozen=True)
+class ActiveModelConfig:
+    """描述本轮正式 LLM 请求使用的模型。"""
+
+    model_name: str
+    model_vendors: str
+    supports_multimodal: bool
+    used_multimodal_fallback: bool = False
+
+
+@dataclass(frozen=True)
+class TurnPromptInjection:
+    """描述本轮正式请求需要临时追加的提示词。"""
+
+    messages: list[ChatMessage]
+    deepseek_v4_depth_zero_injected: bool
+    general_requirements_injected: bool
+
+
 class GroupChatToolLoop:
     """执行群聊专用的 OpenAI 工具调用流程。"""
 
@@ -59,9 +83,6 @@ class GroupChatToolLoop:
         self.context_compressor: GroupChatContextCompressor = (
             GroupChatContextCompressor()
         )
-        self.deepseek_v4_prompt_pack: DeepSeekV4PromptPack | None = (
-            self._load_deepseek_v4_prompt_pack()
-        )
 
     async def run(
         self,
@@ -69,8 +90,19 @@ class GroupChatToolLoop:
         msg: GroupMessage,
         chat_handler: ContextHandler,
         turn_messages: list[ChatMessage],
+        active_model: ActiveModelConfig | None = None,
     ) -> None:
         """执行群聊专用工具调用循环。"""
+        if active_model is None:
+            active_model = ActiveModelConfig(
+                model_name=self.config.model_name,
+                model_vendors=self.config.model_vendors,
+                supports_multimodal=self.config.supports_multimodal,
+            )
+        prompt_injection = self._build_turn_prompt_injection(
+            active_model=active_model,
+            system_prompt=chat_handler.system_prompt,
+        )
         tool_history_messages: list[ChatMessage] = []
         sent_content_messages: list[ChatMessage] = []
         napcat_executor = NapCatGroupToolExecutor(
@@ -88,6 +120,7 @@ class GroupChatToolLoop:
             chat_handler=chat_handler,
             turn_messages=turn_messages,
             tools=tools,
+            prompt_injection=prompt_injection,
         )
         working_messages = prepared_context.working_messages
         turn_messages = prepared_context.turn_messages
@@ -99,17 +132,19 @@ class GroupChatToolLoop:
             message="AI 群聊工具循环开始",
             group_id=msg.group_id,
             message_id=msg.message_id,
-            model_name=self.config.model_name,
-            model_vendors=self.config.model_vendors,
+            model_name=active_model.model_name,
+            model_vendors=active_model.model_vendors,
+            supports_multimodal=active_model.supports_multimodal,
+            used_multimodal_fallback=active_model.used_multimodal_fallback,
             working_messages_count=len(working_messages),
             tools_count=len(tools),
             tool_names=[tool.name for tool in tools],
         )
         for round_index in range(1, self.config.max_tool_rounds + 1):
             request_messages = self._build_llm_request_messages(
-                working_messages=working_messages
+                working_messages=working_messages,
+                prompt_injection=prompt_injection,
             )
-            depth_zero_injected = self.deepseek_v4_prompt_pack is not None
             log_event(
                 level="DEBUG",
                 event="ai_group_chat.llm.request",
@@ -120,14 +155,22 @@ class GroupChatToolLoop:
                 round_index=round_index,
                 messages_count=len(request_messages),
                 working_messages_count=len(working_messages),
-                deepseek_v4_depth_zero_injected=depth_zero_injected,
+                deepseek_v4_depth_zero_injected=(
+                    prompt_injection.deepseek_v4_depth_zero_injected
+                ),
+                general_requirements_injected=(
+                    prompt_injection.general_requirements_injected
+                ),
+                active_model_name=active_model.model_name,
+                active_model_vendors=active_model.model_vendors,
+                used_multimodal_fallback=active_model.used_multimodal_fallback,
                 tools_count=len(tools),
                 tool_choice="auto",
             )
             response = await self.context.llm.get_ai_response_with_tools(
                 messages=request_messages,
-                model_vendors=self.config.model_vendors,
-                model_name=self.config.model_name,
+                model_vendors=active_model.model_vendors,
+                model_name=active_model.model_name,
                 tools=tools,
             )
             content = self._normalize_content(response.content)
@@ -216,11 +259,13 @@ class GroupChatToolLoop:
         chat_handler: ContextHandler,
         turn_messages: list[ChatMessage],
         tools: list[LLMToolDefinition],
+        prompt_injection: TurnPromptInjection,
     ) -> PreparedTurnContext:
         """在请求模型前按 token 预算决定是否压缩历史上下文。"""
         candidate_messages = [*chat_handler.messages_lst, *turn_messages]
         candidate_request_messages = self._build_llm_request_messages(
-            working_messages=candidate_messages
+            working_messages=candidate_messages,
+            prompt_injection=prompt_injection,
         )
         budget = self.token_estimator.check_request(
             messages=candidate_request_messages,
@@ -240,7 +285,12 @@ class GroupChatToolLoop:
             current_history_messages_count=len(chat_handler.messages_lst),
             turn_messages_count=len(turn_messages),
             request_messages_count=len(candidate_request_messages),
-            deepseek_v4_depth_zero_injected=self.deepseek_v4_prompt_pack is not None,
+            deepseek_v4_depth_zero_injected=(
+                prompt_injection.deepseek_v4_depth_zero_injected
+            ),
+            general_requirements_injected=(
+                prompt_injection.general_requirements_injected
+            ),
             tools_count=len(tools),
         )
         if not budget.should_compress:
@@ -265,7 +315,8 @@ class GroupChatToolLoop:
         rebuilt_turn_messages = [rebuilt_user_message]
         rebuilt_working_messages = [chat_handler.system_prompt, *rebuilt_turn_messages]
         rebuilt_request_messages = self._build_llm_request_messages(
-            working_messages=rebuilt_working_messages
+            working_messages=rebuilt_working_messages,
+            prompt_injection=prompt_injection,
         )
         rebuilt_budget = self.token_estimator.check_request(
             messages=rebuilt_request_messages,
@@ -344,17 +395,55 @@ class GroupChatToolLoop:
         )
         return normalized_summary
 
-    def _load_deepseek_v4_prompt_pack(self) -> DeepSeekV4PromptPack | None:
-        """在 DeepSeek V4 开关命中时读取 Depth 0 提示词包。"""
-        if not self._should_use_deepseek_v4_depth_zero_prompt():
-            return None
+    def _build_turn_prompt_injection(
+        self, *, active_model: ActiveModelConfig, system_prompt: ChatMessage
+    ) -> TurnPromptInjection:
+        """按本轮正式模型构造不写入长期上下文的提示词。"""
+        if should_use_deepseek_v4_depth_zero_prompt_for_model(
+            config=self.config,
+            model_name=active_model.model_name,
+        ):
+            prompt_pack = self._load_deepseek_v4_prompt_pack(
+                model_name=active_model.model_name
+            )
+            include_extra_requirements = not self._system_contains_text(
+                system_prompt=system_prompt,
+                text=prompt_pack.extra_requirements,
+            )
+            return TurnPromptInjection(
+                messages=[
+                    prompt_pack.build_depth_zero_message(
+                        include_extra_requirements=include_extra_requirements,
+                    )
+                ],
+                deepseek_v4_depth_zero_injected=True,
+                general_requirements_injected=include_extra_requirements,
+            )
+        if self._should_inject_general_requirements(
+            active_model=active_model,
+            system_prompt=system_prompt,
+        ):
+            extra_requirements = load_extra_requirements(config=self.config)
+            return TurnPromptInjection(
+                messages=[self._build_extra_requirements_message(extra_requirements)],
+                deepseek_v4_depth_zero_injected=False,
+                general_requirements_injected=True,
+            )
+        return TurnPromptInjection(
+            messages=[],
+            deepseek_v4_depth_zero_injected=False,
+            general_requirements_injected=False,
+        )
+
+    def _load_deepseek_v4_prompt_pack(self, *, model_name: str) -> DeepSeekV4PromptPack:
+        """读取 DeepSeek V4 Depth 0 提示词包。"""
         prompt_pack = load_deepseek_v4_prompt_pack(config=self.config)
         log_event(
             level="DEBUG",
             event="ai_group_chat.deepseek_v4_prompt.loaded",
             category="plugin",
             message="DeepSeek V4 Depth 0 提示词已加载",
-            model_name=self.config.model_name,
+            model_name=model_name,
             extra_requirements_path=str(prompt_pack.extra_requirements_path),
             roleplay_instruct_path=str(prompt_pack.roleplay_instruct_path),
             extra_requirements_chars=len(prompt_pack.extra_requirements),
@@ -362,19 +451,49 @@ class GroupChatToolLoop:
         )
         return prompt_pack
 
+    def _should_inject_general_requirements(
+        self, *, active_model: ActiveModelConfig, system_prompt: ChatMessage
+    ) -> bool:
+        """判断备用非 DeepSeek V4 模型是否需要临时通用群聊要求。"""
+        if active_model.model_name == self.config.model_name:
+            return False
+        if not should_use_deepseek_v4_depth_zero_prompt(config=self.config):
+            return False
+        extra_requirements = load_extra_requirements(config=self.config)
+        return not self._system_contains_text(
+            system_prompt=system_prompt,
+            text=extra_requirements,
+        )
+
+    def _build_extra_requirements_message(self, extra_requirements: str) -> ChatMessage:
+        """构造只包含通用群聊行为要求的临时 user 消息。"""
+        return ChatMessage(
+            role="user",
+            text=(
+                "<其他需求>\n"
+                f"{extra_requirements}\n"
+                "</其他需求>"
+            ),
+        )
+
+    def _system_contains_text(self, *, system_prompt: ChatMessage, text: str) -> bool:
+        """判断长期 system prompt 是否已经包含指定提示词文本。"""
+        system_text = system_prompt.text or ""
+        return text.strip() in system_text
+
     def _should_use_deepseek_v4_depth_zero_prompt(self) -> bool:
         """判断当前模型是否需要注入 DeepSeek V4 Depth 0 user prompt。"""
         return should_use_deepseek_v4_depth_zero_prompt(config=self.config)
 
     def _build_llm_request_messages(
-        self, *, working_messages: list[ChatMessage]
+        self, *, working_messages: list[ChatMessage], prompt_injection: TurnPromptInjection
     ) -> list[ChatMessage]:
         """生成本次正式 LLM 请求 messages，不污染长期上下文。"""
-        if self.deepseek_v4_prompt_pack is None:
+        if not prompt_injection.messages:
             return working_messages
         return [
             *working_messages,
-            self.deepseek_v4_prompt_pack.build_depth_zero_message(),
+            *prompt_injection.messages,
         ]
 
     async def _handle_tool_response(

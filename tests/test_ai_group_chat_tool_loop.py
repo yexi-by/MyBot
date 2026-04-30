@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from app.models import GroupMessage, JsonObject, MessageSegment, Response, Sender, Text
+from app.plugins.ai_group_chat.ai_group_chat import AIGroupChatPlugin
 from app.plugins.ai_group_chat.config import AIGroupChatConfig
 from app.plugins.ai_group_chat.debug_dump import AIGroupChatDebugDumper
-from app.plugins.ai_group_chat.tool_loop import GroupChatToolLoop
+from app.plugins.ai_group_chat.tool_loop import ActiveModelConfig, GroupChatToolLoop
 from app.plugins.base import Context
 from app.services import ChatMessage, ContextHandler
 from app.services.llm.schemas import (
@@ -397,6 +398,8 @@ class FakeCompressionLLM:
         """初始化请求记录。"""
         self.compression_messages: list[ChatMessage] = []
         self.received_messages: list[list[ChatMessage]] = []
+        self.compression_model_calls: list[tuple[str, str]] = []
+        self.formal_model_calls: list[tuple[str, str]] = []
 
     async def get_ai_text_response(
         self,
@@ -405,7 +408,7 @@ class FakeCompressionLLM:
         model_name: str,
     ) -> str:
         """记录压缩请求并返回固定摘要。"""
-        _ = (model_vendors, model_name)
+        self.compression_model_calls.append((model_vendors, model_name))
         self.compression_messages = messages[:]
         return "历史上下文摘要：用户在讨论上下文压缩。"
 
@@ -419,9 +422,44 @@ class FakeCompressionLLM:
         parallel_tool_calls: bool = True,
     ) -> LLMResponse:
         """记录正式请求并返回最终正文。"""
-        _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
+        _ = (tools, tool_choice, parallel_tool_calls)
+        self.formal_model_calls.append((model_vendors, model_name))
         self.received_messages.append(messages[:])
         return LLMResponse(content="压缩后回复")
+
+
+class FakeRoutingLLM:
+    """测试用 LLM，记录正式请求使用的模型。"""
+
+    def __init__(self) -> None:
+        """初始化请求记录。"""
+        self.received_messages: list[list[ChatMessage]] = []
+        self.formal_model_calls: list[tuple[str, str]] = []
+
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+    ) -> str:
+        """测试中不会触发纯文本压缩请求。"""
+        _ = (messages, model_vendors, model_name)
+        return "压缩摘要"
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """记录正式请求模型并返回正文。"""
+        _ = (tools, tool_choice, parallel_tool_calls)
+        self.formal_model_calls.append((model_vendors, model_name))
+        self.received_messages.append(messages[:])
+        return LLMResponse(content="路由回复")
 
 
 def build_config(
@@ -429,12 +467,17 @@ def build_config(
     output_reasoning_content: bool,
     pass_back_reasoning_content: bool = False,
     model_name: str = "gpt-5.5",
+    model_vendors: str = "CLIProxyAPI",
+    supports_multimodal: bool = False,
     context_compression_notice: str = "上下文有点长，我先整理一下记忆，稍等我几秒喵~",
 ) -> AIGroupChatConfig:
     """构造测试用 AI 群聊配置。"""
     return AIGroupChatConfig(
         model_name=model_name,
-        model_vendors="CLIProxyAPI",
+        model_vendors=model_vendors,
+        supports_multimodal=supports_multimodal,
+        multimodal_fallback_model_name="gpt-5.5-vision",
+        multimodal_fallback_model_vendors="CLIProxyAPI",
         output_reasoning_content=output_reasoning_content,
         pass_back_reasoning_content=pass_back_reasoning_content,
         context_compression_notice=context_compression_notice,
@@ -475,6 +518,43 @@ def build_message() -> GroupMessage:
 
 class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
     """验证 AI 群聊回复展示和上下文写入策略。"""
+
+    def test_plugin_selects_fallback_model_when_image_exists(self) -> None:
+        """主模型不支持多模态且本轮有图片时选择备用模型。"""
+        plugin = object.__new__(AIGroupChatPlugin)
+        plugin.config = build_config(output_reasoning_content=False)
+
+        active_model = plugin.select_active_model(contains_image=True)
+
+        self.assertEqual(active_model.model_name, "gpt-5.5-vision")
+        self.assertEqual(active_model.model_vendors, "CLIProxyAPI")
+        self.assertTrue(active_model.supports_multimodal)
+        self.assertTrue(active_model.used_multimodal_fallback)
+
+    def test_plugin_keeps_main_model_when_no_image_exists(self) -> None:
+        """主模型不支持多模态但本轮无图片时仍使用主模型。"""
+        plugin = object.__new__(AIGroupChatPlugin)
+        plugin.config = build_config(output_reasoning_content=False)
+
+        active_model = plugin.select_active_model(contains_image=False)
+
+        self.assertEqual(active_model.model_name, "gpt-5.5")
+        self.assertFalse(active_model.supports_multimodal)
+        self.assertFalse(active_model.used_multimodal_fallback)
+
+    def test_plugin_keeps_multimodal_main_model_when_image_exists(self) -> None:
+        """主模型支持多模态时不切换备用模型。"""
+        plugin = object.__new__(AIGroupChatPlugin)
+        plugin.config = build_config(
+            output_reasoning_content=False,
+            supports_multimodal=True,
+        )
+
+        active_model = plugin.select_active_model(contains_image=True)
+
+        self.assertEqual(active_model.model_name, "gpt-5.5")
+        self.assertTrue(active_model.supports_multimodal)
+        self.assertFalse(active_model.used_multimodal_fallback)
 
     async def test_reasoning_output_is_visible_but_not_persisted(self) -> None:
         """开启思维链展示时，长期上下文只保存正式回复。"""
@@ -680,6 +760,35 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(chat_handler.messages_lst[-1].text, "不用回复")
 
+    async def test_formal_requests_use_active_model(self) -> None:
+        """正式请求使用本轮 active model。"""
+        fake_llm = FakeRoutingLLM()
+        fake_context = FakeContext(llm=fake_llm)
+        config = build_config(output_reasoning_content=False)
+        tool_loop = GroupChatToolLoop(
+            config=config,
+            context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[
+                ChatMessage(role="user", text="图片消息", image=[b"image-bytes"])
+            ],
+            active_model=ActiveModelConfig(
+                model_name="gpt-5.5-vision",
+                model_vendors="vision-vendor",
+                supports_multimodal=True,
+                used_multimodal_fallback=True,
+            ),
+        )
+
+        self.assertEqual(fake_llm.formal_model_calls, [("vision-vendor", "gpt-5.5-vision")])
+        self.assertEqual(fake_llm.received_messages[0][1].image, [b"image-bytes"])
+
     async def test_deepseek_v4_depth_zero_prompt_is_added_to_each_formal_request(
         self,
     ) -> None:
@@ -782,6 +891,48 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(third_request[-2].tool_call_id, "call-2")
             self.assertIn("<角色沉浸式扮演需求>", third_request[-1].text or "")
 
+    async def test_active_deepseek_v4_prompt_skips_extra_when_system_has_it(
+        self,
+    ) -> None:
+        """备用 DeepSeek V4 请求在 system 已含通用要求时只注入角色沉浸提示。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_llm = FakeRoutingLLM()
+            fake_context = FakeContext(llm=fake_llm)
+            config = build_config(
+                output_reasoning_content=False,
+                model_name="gpt-5.5",
+            )
+            configure_deepseek_v4_prompts(
+                config=config,
+                prompt_root=Path(temp_dir),
+            )
+            tool_loop = GroupChatToolLoop(
+                config=config,
+                context=cast(Context, fake_context),
+                debug_dumper=AIGroupChatDebugDumper(config=config),
+            )
+            chat_handler = ContextHandler(
+                system_prompt="系统提示词\n群聊动作偏好：需要引用或艾特时必须说完整的话。",
+                max_context_tokens=1000000,
+            )
+
+            await tool_loop.run(
+                msg=build_message(),
+                chat_handler=chat_handler,
+                turn_messages=[ChatMessage(role="user", text="用户消息")],
+                active_model=ActiveModelConfig(
+                    model_name="deepseek-v4-pro",
+                    model_vendors="deepseek",
+                    supports_multimodal=True,
+                    used_multimodal_fallback=True,
+                ),
+            )
+
+            prompt_text = fake_llm.received_messages[0][-1].text or ""
+            self.assertNotIn("<其他需求>", prompt_text)
+            self.assertIn("<角色沉浸式扮演需求>", prompt_text)
+            self.assertIn("【角色沉浸要求】", prompt_text)
+
     async def test_context_compression_excludes_current_message_then_rebuilds(
         self,
     ) -> None:
@@ -843,3 +994,63 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(chat_handler.messages_lst), 3)
             self.assertEqual(chat_handler.messages_lst[1].text, rebuilt_user_text)
             self.assertEqual(chat_handler.messages_lst[2].text, "压缩后回复")
+
+    async def test_context_compression_uses_main_model_before_active_model(
+        self,
+    ) -> None:
+        """上下文压缩使用主模型，压缩后的正式请求使用 active model。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_llm = FakeCompressionLLM()
+            fake_context = FakeContext(llm=fake_llm)
+            config = build_config(
+                output_reasoning_content=False,
+                model_name="deepseek-v4-pro",
+                model_vendors="main-vendor",
+                context_compression_notice="我先整理一下记忆喵~",
+            )
+            configure_deepseek_v4_prompts(
+                config=config,
+                prompt_root=Path(temp_dir),
+            )
+            tool_loop = GroupChatToolLoop(
+                config=config,
+                context=cast(Context, fake_context),
+                debug_dumper=AIGroupChatDebugDumper(config=config),
+            )
+            chat_handler = ContextHandler(
+                system_prompt="系统提示词",
+                max_context_tokens=8000,
+            )
+            chat_handler.build_chatmessage(
+                message_lst=[
+                    ChatMessage(role="user", text="历史消息一" * 100),
+                    ChatMessage(role="assistant", text="历史回复一" * 100),
+                ]
+            )
+
+            await tool_loop.run(
+                msg=build_message(),
+                chat_handler=chat_handler,
+                turn_messages=[
+                    ChatMessage(role="user", text="当前图片", image=[b"image-bytes"])
+                ],
+                active_model=ActiveModelConfig(
+                    model_name="gpt-5.5-vision",
+                    model_vendors="vision-vendor",
+                    supports_multimodal=True,
+                    used_multimodal_fallback=True,
+                ),
+            )
+
+            self.assertEqual(
+                fake_llm.compression_model_calls,
+                [("main-vendor", "deepseek-v4-pro")],
+            )
+            self.assertEqual(
+                fake_llm.formal_model_calls,
+                [("vision-vendor", "gpt-5.5-vision")],
+            )
+            final_messages = fake_llm.received_messages[0]
+            self.assertEqual(final_messages[1].image, [b"image-bytes"])
+            self.assertIn("<其他需求>", final_messages[-1].text or "")
+            self.assertNotIn("<角色沉浸式扮演需求>", final_messages[-1].text or "")

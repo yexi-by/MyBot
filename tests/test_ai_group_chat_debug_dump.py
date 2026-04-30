@@ -16,6 +16,8 @@ def build_config(*, enabled: bool) -> AIGroupChatConfig:
     return AIGroupChatConfig(
         model_name="gpt-5.5",
         model_vendors="CLIProxyAPI",
+        multimodal_fallback_model_name="gpt-5.5-vision",
+        multimodal_fallback_model_vendors="CLIProxyAPI",
         debug_dump_messages=enabled,
         group_config=[],
     )

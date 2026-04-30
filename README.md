@@ -94,6 +94,17 @@ env = { EXAMPLE_API_KEY = "CHANGE_ME" }
 disabled = false
 ```
 
+AI 群聊插件的主模型不支持图片输入时，需要配置多模态备用模型。当前消息或引用消息包含图片时，本轮正式回复请求会切到备用模型：
+
+```toml
+[ai_group_chat]
+model_name = "deepseek-v4-pro"
+model_vendors = "deepseek"
+supports_multimodal = false
+multimodal_fallback_model_name = "gpt-5.5"
+multimodal_fallback_model_vendors = "openai"
+```
+
 ## 运行边界
 
 - `app/api/` 负责 NapCat Action 调用封装，不放插件业务逻辑。
