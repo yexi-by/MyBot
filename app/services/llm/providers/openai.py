@@ -1,4 +1,4 @@
-"""OpenAI 兼容 LLM 服务实现。"""
+"""OpenAI 协议 LLM 服务实现。"""
 
 import base64
 import json
@@ -39,7 +39,7 @@ REASONING_TEXT_KEYS: Final[tuple[str, ...]] = (
     "output_text",
 )
 class OpenAIService(LLMProvider):
-    """OpenAI 兼容服务实现。"""
+    """通过 OpenAI Chat Completions 和 Images 协议访问模型服务。"""
 
     def __init__(self, client: AsyncOpenAI) -> None:
         """保存 OpenAI 异步客户端。"""
@@ -146,7 +146,7 @@ class OpenAIService(LLMProvider):
     def _extract_reasoning_content(
         self, message: ChatCompletionMessage
     ) -> str | None:
-        """提取 OpenAI 兼容服务显式返回的可展示思考内容。"""
+        """提取模型服务显式返回的可展示思考内容。"""
         candidates: list[object] = []
         raw_extra = cast(object, message.model_extra)
         if isinstance(raw_extra, dict):
@@ -182,7 +182,7 @@ class OpenAIService(LLMProvider):
             return None
         if isinstance(value, list):
             text_parts: list[str] = []
-            # 第三方兼容接口的 reasoning 明细数组没有稳定类型，入口处收窄为 object 列表逐项解析。
+            # reasoning 明细数组来自服务端扩展字段，入口处收窄为 object 列表逐项解析。
             items = cast(list[object], value)
             for item in items:
                 item_text = self._extract_reasoning_text(item)
@@ -214,7 +214,7 @@ class OpenAIService(LLMProvider):
         )
         content = response.choices[0].message.content
         if content is None:
-            raise ValueError("OpenAI 兼容服务返回了空文本")
+            raise ValueError("OpenAI 协议服务返回了空文本")
         return content
 
     @override
@@ -279,7 +279,7 @@ class OpenAIService(LLMProvider):
         message: ChatMessage,
         model: str,
     ) -> str:
-        """使用标准 OpenAI 兼容图片接口生成图片，仅传递接口必需参数。"""
+        """使用 OpenAI Images 协议生成或编辑图片。"""
         if not message.text:
             raise ValueError("提示词为空请重新输入")
 

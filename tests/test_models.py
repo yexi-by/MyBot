@@ -163,7 +163,7 @@ class StrictModelBoundaryTest(unittest.TestCase):
         self.assertEqual(event.message[0].data.text, "纯文本消息")
 
     def test_unknown_segment_does_not_drop_whole_message(self) -> None:
-        """未知消息段会保留为 UnknownSegment，不丢弃整条群消息。"""
+        """未知消息段解析为 UnknownSegment，整条群消息不中断。"""
         event = EventTypeChecker().get_event(
             {
                 "time": 1710000000,

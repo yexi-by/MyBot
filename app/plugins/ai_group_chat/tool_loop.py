@@ -217,7 +217,7 @@ class GroupChatToolLoop:
         turn_messages: list[ChatMessage],
         tools: list[LLMToolDefinition],
     ) -> PreparedTurnContext:
-        """在请求模型前按 token 预算决定是否压缩旧上下文。"""
+        """在请求模型前按 token 预算决定是否压缩历史上下文。"""
         candidate_messages = [*chat_handler.messages_lst, *turn_messages]
         candidate_request_messages = self._build_llm_request_messages(
             working_messages=candidate_messages
@@ -305,7 +305,7 @@ class GroupChatToolLoop:
         chat_handler: ContextHandler,
         budget: TokenBudgetEstimate,
     ) -> str:
-        """用临时 LLM 请求压缩已有正式上下文，不包含当前新消息。"""
+        """用压缩专用 LLM 请求整理历史上下文，不包含本轮新消息。"""
         history_messages = chat_handler.messages_lst[1:]
         compression_messages, compression_input = (
             self.context_compressor.build_compression_messages(
@@ -317,12 +317,12 @@ class GroupChatToolLoop:
             level="WARNING",
             event="ai_group_chat.context_compression.triggered",
             category="plugin",
-            message="AI 群聊上下文超过预算，开始压缩旧上下文",
+            message="AI 群聊上下文超过预算，开始压缩历史上下文",
             group_id=msg.group_id,
             message_id=msg.message_id,
             estimated_tokens=budget.estimated_tokens,
             max_context_tokens=budget.max_context_tokens,
-            old_history_messages_count=len(history_messages),
+            history_messages_count=len(history_messages),
             dropped_image_count=compression_input.dropped_image_count,
         )
         summary = await self.context.llm.get_ai_text_response(
@@ -337,7 +337,7 @@ class GroupChatToolLoop:
             level="DEBUG",
             event="ai_group_chat.context_compression.finished",
             category="plugin",
-            message="AI 群聊旧上下文压缩完成",
+            message="AI 群聊历史上下文压缩完成",
             group_id=msg.group_id,
             message_id=msg.message_id,
             summary_chars=len(normalized_summary),

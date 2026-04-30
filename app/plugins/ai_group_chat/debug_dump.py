@@ -290,7 +290,7 @@ class AIGroupChatDebugDumper:
     def _format_optional_text(
         self, *, value: str | None, language: str, empty_text: str
     ) -> list[str]:
-        """格式化可选文本，保留原始换行。"""
+        """格式化可选文本，并保持原始换行。"""
         if value is None or value == "":
             return [empty_text]
         return self._fenced_block(language=language, value=value)

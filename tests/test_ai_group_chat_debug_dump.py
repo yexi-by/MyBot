@@ -144,8 +144,8 @@ class AIGroupChatDebugDumperTest(unittest.IsolatedAsyncioTestCase):
                 title="压缩前长期上下文",
                 messages=[
                     ChatMessage(role="system", text="系统提示词"),
-                    ChatMessage(role="user", text="旧消息"),
-                    ChatMessage(role="assistant", text="旧回复"),
+                    ChatMessage(role="user", text="历史消息"),
+                    ChatMessage(role="assistant", text="历史回复"),
                 ],
             )
             await dumper.append_context_snapshot(
@@ -161,7 +161,7 @@ class AIGroupChatDebugDumperTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("长期上下文重建 #2", content)
             self.assertIn("context_reset: `True`", content)
             self.assertIn("历史摘要 + 当前消息", content)
-            self.assertEqual(content.count("旧消息"), 1)
+            self.assertEqual(content.count("历史消息"), 1)
 
     async def test_runtime_deleted_debug_directory_is_recreated(self) -> None:
         """运行中删除调试目录后，下一次写入会自动重建而不打断流程。"""

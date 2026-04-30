@@ -407,7 +407,7 @@ class FakeCompressionLLM:
         """记录压缩请求并返回固定摘要。"""
         _ = (model_vendors, model_name)
         self.compression_messages = messages[:]
-        return "旧上下文摘要：用户之前在讨论上下文压缩。"
+        return "历史上下文摘要：用户在讨论上下文压缩。"
 
     async def get_ai_response_with_tools(
         self,
@@ -509,7 +509,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(chat_handler.messages_lst[-1].reasoning_content)
 
     async def test_reasoning_can_be_passed_back_as_structured_field(self) -> None:
-        """开启思维链回传时，长期上下文保留结构化字段但正文仍然干净。"""
+        """开启思维链回传时，长期上下文写入结构化字段且正文干净。"""
         fake_context = FakeContext()
         config = build_config(
             output_reasoning_content=False,
@@ -571,7 +571,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chat_handler.messages_lst[3].text, "工具后回复")
 
     async def test_content_directives_are_sent_with_message_segments(self) -> None:
-        """content 中的 `<Reply>` / `<At>` 会转换成消息段，长期上下文保留原文。"""
+        """content 中的 `<Reply>` / `<At>` 会转换成消息段，长期上下文写入原文。"""
         fake_context = FakeContext(llm=FakeMarkedContentLLM())
         config = build_config(output_reasoning_content=False)
         tool_loop = GroupChatToolLoop(
@@ -596,7 +596,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_invalid_content_directive_returns_error_and_retries(self) -> None:
-        """非法 content 标记不会发群，会追加临时纠错消息让模型重试。"""
+        """非法 content 标记不会发群，会追加纠错消息让模型重试。"""
         fake_llm = FakeInvalidDirectiveThenReplyLLM()
         fake_context = FakeContext(llm=fake_llm)
         config = build_config(output_reasoning_content=False)
@@ -683,7 +683,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
     async def test_deepseek_v4_depth_zero_prompt_is_added_to_each_formal_request(
         self,
     ) -> None:
-        """DeepSeek V4 正式请求每次都追加临时 Depth 0 user prompt。"""
+        """DeepSeek V4 正式请求每次都追加 Depth 0 user prompt。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             fake_llm = FakeToolCallLLM()
             fake_context = FakeContext(
@@ -809,8 +809,8 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             )
             chat_handler.build_chatmessage(
                 message_lst=[
-                    ChatMessage(role="user", text="旧消息一" * 100),
-                    ChatMessage(role="assistant", text="旧回复一" * 100),
+                    ChatMessage(role="user", text="历史消息一" * 100),
+                    ChatMessage(role="assistant", text="历史回复一" * 100),
                 ]
             )
 
@@ -821,7 +821,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             )
 
             compression_user_text = fake_llm.compression_messages[1].text or ""
-            self.assertIn("旧消息一", compression_user_text)
+            self.assertIn("历史消息一", compression_user_text)
             self.assertNotIn("当前新消息", compression_user_text)
             self.assertNotIn("<角色沉浸式扮演需求>", compression_user_text)
             self.assertEqual(
@@ -835,7 +835,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             )
             rebuilt_user_text = final_messages[1].text or ""
             depth_zero_text = final_messages[2].text or ""
-            self.assertIn("旧上下文摘要", rebuilt_user_text)
+            self.assertIn("历史上下文摘要", rebuilt_user_text)
             self.assertIn("当前新消息", rebuilt_user_text)
             self.assertNotIn("【角色沉浸要求】", rebuilt_user_text)
             self.assertIn("<其他需求>", depth_zero_text)

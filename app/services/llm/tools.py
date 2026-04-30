@@ -59,7 +59,7 @@ class LLMToolRegistry(LLMToolExecutor):
         )
 
     def _build_strict_parameters_schema(self, schema: JsonObject) -> JsonObject:
-        """将 Pydantic 参数 schema 转成 OpenAI strict function 兼容格式。"""
+        """将 Pydantic 参数 schema 转成 OpenAI strict function 要求的格式。"""
         definitions = self._collect_schema_definitions(schema=schema)
         normalized_schema = self._normalize_schema_node(
             value=schema,
@@ -115,7 +115,7 @@ class LLMToolRegistry(LLMToolExecutor):
     def _resolve_schema_reference(
         self, *, value: JsonObject, definitions: dict[str, JsonObject]
     ) -> JsonObject:
-        """展开 Pydantic 本地 `$ref`，避免 OpenAI strict schema 拒绝旁路关键字。"""
+        """展开 Pydantic 本地 `$ref`，让 strict schema 仅包含可提交字段。"""
         raw_ref = value.get("$ref")
         if not isinstance(raw_ref, str) or not raw_ref.startswith("#/$defs/"):
             return value

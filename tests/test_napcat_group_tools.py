@@ -135,7 +135,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             _ = executor.build_message_segments_from_content("<At>all</At>\n测试")
 
     async def test_executor_does_not_expose_message_modifier_tools(self) -> None:
-        """本地群工具集不再暴露艾特、引用和主动结束这类动作工具。"""
+        """本地群工具集仅暴露信息工具，消息修饰由 content 标记承担。"""
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
             database=FakeDatabase(),

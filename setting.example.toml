@@ -24,7 +24,7 @@ media_path = "data"
 proxy = ""
 timeout_seconds = 30
 
-# 统一日志配置。终端日志偏简洁，文件日志和结构化日志保留排障上下文。
+# 统一日志配置。终端输出面向扫读，文件日志记录复盘所需的结构化上下文。
 [logging]
 directory = "logs"
 console_level = "INFO"
@@ -34,25 +34,25 @@ retention = "30 days"
 compression = "gz"
 
 [mcp]
-# 是否启用 MCP 工具加载。开发初期可以先保持 false。
+# 是否启用 MCP 工具加载。未配置外部工具时保持 false。
 enabled = false
 
 [mcp.mcpServers.node_stdio_example]
-# Node MCP stdio 示例；部署时替换为真实 MCP server 包名和环境变量。
+# Node MCP stdio 示例，按部署环境填写 server 包名和环境变量。
 command = "npx"
 args = ["-y", "your-node-mcp-server-package"]
 env = { EXAMPLE_API_KEY = "CHANGE_ME" }
 disabled = true
 
 [mcp.mcpServers.python_stdio_example]
-# Python MCP stdio 示例；部署时替换为真实 uvx 包名和参数。
+# Python MCP stdio 示例，按部署环境填写 uvx 包名和参数。
 command = "uvx"
 args = ["your-python-mcp-server-package"]
 env = { EXAMPLE_API_KEY = "CHANGE_ME" }
 disabled = true
 
 [llm]
-# LLM 服务只保留 OpenAI 兼容协议面，model_vendors 是插件里引用的供应商别名。
+# LLM 服务通过 OpenAI Chat Completions 协议接入，model_vendors 是插件里引用的供应商别名。
 
 [[llm.providers]]
 api_key = "sk-CHANGE_ME"

@@ -84,7 +84,7 @@ class NetworkConfig(StrictModel):
 
 
 class LoggingConfig(StrictModel):
-    """日志输出与保留策略配置。"""
+    """日志输出与归档策略配置。"""
 
     directory: str = "logs"
     console_level: LogLevelName = "INFO"

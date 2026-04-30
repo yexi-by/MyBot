@@ -1,4 +1,4 @@
-"""MCP 工具加载与调用适配。"""
+"""MCP 工具加载与 LLM 工具暴露。"""
 
 from contextlib import AsyncExitStack
 from typing import cast, override
@@ -24,14 +24,14 @@ class MCPServerConfig(StrictModel):
 
 
 class MCPConfig(StrictModel):
-    """MCP 总配置，兼容常见 mcpServers 配置结构。"""
+    """MCP 总配置，读取 mcpServers 结构。"""
 
     enabled: bool = False
     mcpServers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
 class MCPToolManager(LLMToolExecutor):
-    """将 MCP server 暴露的工具适配为 LLM 工具。"""
+    """将 MCP server 工具暴露为 LLM 可调用工具。"""
 
     def __init__(self, config: MCPConfig) -> None:
         """保存 MCP 配置。"""
@@ -116,7 +116,7 @@ class MCPToolManager(LLMToolExecutor):
             self._register_mcp_tool(server_name=server_name, tool=tool)
 
     def _register_mcp_tool(self, *, server_name: str, tool: Tool) -> None:
-        """把 MCP 工具转换成 OpenAI 兼容工具定义。"""
+        """把 MCP 工具转换成内部 LLM 工具定义。"""
         exposed_name = f"mcp__{server_name}__{tool.name}"
         if exposed_name in self._tool_map:
             raise ValueError(f"MCP 工具名重复: {exposed_name}")

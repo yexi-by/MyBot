@@ -44,5 +44,5 @@ class LLMToolRegistryTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("default", optional_schema)
 
     def test_tool_result_to_text_keeps_string_result(self) -> None:
-        """字符串工具结果不再额外 JSON 编码。"""
+        """字符串工具结果直接作为 tool message 文本。"""
         self.assertEqual(tool_result_to_text("ok"), "ok")

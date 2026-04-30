@@ -1,4 +1,4 @@
-"""OpenAI 兼容图片接口请求参数测试。"""
+"""OpenAI Images 协议请求参数测试。"""
 
 import base64
 import unittest

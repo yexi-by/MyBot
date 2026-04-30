@@ -280,7 +280,7 @@ class GroupChatMessageBuilder:
         return ROLE_LABELS.get(role, role)
 
     def _format_message_text(self, *, msg: GroupMessage) -> str:
-        """格式化消息正文，过滤对机器人的艾特并保留图片提示。"""
+        """格式化消息正文，过滤对机器人的艾特并展示图片提示。"""
         text = self._extract_plain_text(msg=msg)
         has_image = any(isinstance(segment, Image) for segment in msg.message)
         if text and has_image:

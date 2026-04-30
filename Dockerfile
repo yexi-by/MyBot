@@ -2,8 +2,8 @@ FROM python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# 镜像只提供项目运行时和常见 MCP stdio 启动器；具体 MCP server 由部署机配置决定。
-# Node 使用 NodeSource current，Docker 使用官方 CLI，避免 Debian 仓库里的旧版本卡住新 MCP。
+# 镜像提供项目运行时和常见 MCP stdio 启动器；具体 MCP server 由部署配置决定。
+# Node 与 Docker CLI 来自上游官方源，保证 stdio 工具链具备完整命令能力。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \

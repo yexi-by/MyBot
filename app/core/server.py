@@ -73,12 +73,11 @@ class NapCatServer:
             port=self.settings.server.port,
             websocket_path_prefix=self.settings.server.websocket_path_prefix,
         )
-        # 因为dishka是惰性加载的,所以在首次运行的时候需要先把全局对象给预热提前加载
-        # 否则大概率发生*会话级*实例创建的时候缺少全局依赖导致创建失败的现象
+        # Dishka 按需创建依赖；启动阶段先解析全局单例，保证后续会话级依赖可以直接复用。
         _ = await self.container.get(RedisDatabaseManager)
         mcp_tool_manager = await self.container.get(MCPToolManager)
         await mcp_tool_manager.start()
-        # 并发预热组件
+        # 预热网络客户端和 LLM 路由，启动日志能覆盖关键运行依赖。
         _ = await asyncio.gather(
             self.container.get(DirectHttpx),
             self.container.get(ProxyHttpx | None),
@@ -114,7 +113,7 @@ class NapCatServer:
         headers = websocket.headers
         auth_header = headers.get("authorization", "")
         expected_header = "Bearer " + token
-        if not secrets.compare_digest(auth_header, expected_header):  # 防时序攻击
+        if not secrets.compare_digest(auth_header, expected_header):  # 减少 Token 比较侧信道。
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             raise ValueError("NapCat WebSocket Token 校验失败")
         await websocket.accept()
@@ -170,8 +169,7 @@ class NapCatServer:
                                 event_model=type(event).__name__,
                             )
                         bot.get_self_qq_id(msg=event)
-                        # 因为dispatch_event和add_to_queue对event进行并发处理可能会有不可观测的逻辑错误和竞争行为,
-                        # 这里对event进行深拷贝,防止隐性bug
+                        # 分发侧允许插件读取和加工事件副本，入库侧记录 NapCat 原始事件语义。
                         copy_event = copy.deepcopy(event)
                         task = asyncio.create_task(
                             dispatcher.dispatch_event(event=copy_event)

@@ -100,7 +100,7 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
         self.assertNotIn("message_id", text)
 
     def test_user_message_never_contains_deepseek_depth_zero_prompt(self) -> None:
-        """真实用户消息只描述当前群消息，不携带 DSV4 临时提示词。"""
+        """真实用户消息只描述当前群消息，不携带 DSV4 Depth 0 提示词。"""
         builder = GroupChatMessageBuilder(
             config=build_config(),
             database=cast(RedisDatabaseManager, EmptyDatabase()),

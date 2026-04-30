@@ -10,7 +10,7 @@ from .config import AIGroupChatConfig, load_extra_requirements
 
 @dataclass(frozen=True)
 class DeepSeekV4PromptPack:
-    """保存 DeepSeek V4 每次正式请求都要临时追加的提示词。"""
+    """保存 DeepSeek V4 正式请求随附的 Depth 0 提示词。"""
 
     extra_requirements: str
     roleplay_instruct: str

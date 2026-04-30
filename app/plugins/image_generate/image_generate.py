@@ -1,4 +1,4 @@
-"""基于 OpenAI 兼容图片接口的群聊生图插件。"""
+"""基于 OpenAI Images 协议的群聊生图插件。"""
 
 from pathlib import Path
 from typing import ClassVar, Final, override
