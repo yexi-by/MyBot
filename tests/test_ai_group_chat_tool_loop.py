@@ -788,6 +788,45 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(fake_llm.formal_model_calls, [("vision-vendor", "gpt-5.5-vision")])
         self.assertEqual(fake_llm.received_messages[0][1].image, [b"image-bytes"])
+        self.assertIsNone(chat_handler.messages_lst[1].image)
+
+    async def test_history_images_are_not_replayed_to_next_turn(self) -> None:
+        """历史上下文中的图片字节不会跨轮次进入普通模型请求。"""
+        fake_llm = FakeRoutingLLM()
+        fake_context = FakeContext(llm=fake_llm)
+        config = build_config(output_reasoning_content=False)
+        tool_loop = GroupChatToolLoop(
+            config=config,
+            context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+        chat_handler.build_chatmessage(
+            message_lst=[
+                ChatMessage(role="user", text="上一轮图片", image=[b"old-image"]),
+                ChatMessage(role="assistant", text="上一轮回复"),
+            ]
+        )
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="这一轮没有图片")],
+            active_model=ActiveModelConfig(
+                model_name="gpt-5.5",
+                model_vendors="text-vendor",
+                supports_multimodal=False,
+            ),
+        )
+
+        first_request_messages = fake_llm.received_messages[0]
+        self.assertEqual(fake_llm.formal_model_calls, [("text-vendor", "gpt-5.5")])
+        self.assertEqual(
+            [len(message.image or []) for message in first_request_messages],
+            [0, 0, 0, 0],
+        )
+        self.assertEqual(chat_handler.messages_lst[1].text, "上一轮图片")
+        self.assertIsNone(chat_handler.messages_lst[1].image)
 
     async def test_deepseek_v4_depth_zero_prompt_is_added_to_each_formal_request(
         self,

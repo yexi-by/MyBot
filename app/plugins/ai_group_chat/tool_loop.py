@@ -262,7 +262,22 @@ class GroupChatToolLoop:
         prompt_injection: TurnPromptInjection,
     ) -> PreparedTurnContext:
         """在请求模型前按 token 预算决定是否压缩历史上下文。"""
-        candidate_messages = [*chat_handler.messages_lst, *turn_messages]
+        stored_messages = chat_handler.messages_lst
+        stripped_history_image_count = self._count_images(messages=stored_messages)
+        history_messages = self._strip_history_images(messages=stored_messages)
+        if stripped_history_image_count > 0:
+            chat_handler.replace_history(messages=history_messages[1:])
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.context.history_images_stripped",
+                category="plugin",
+                message="AI 群聊历史上下文已移除跨轮次图片字节",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                stripped_image_count=stripped_history_image_count,
+                history_messages_count=len(history_messages),
+            )
+        candidate_messages = [*history_messages, *turn_messages]
         candidate_request_messages = self._build_llm_request_messages(
             working_messages=candidate_messages,
             prompt_injection=prompt_injection,
@@ -729,7 +744,9 @@ class GroupChatToolLoop:
         replace_existing_history: bool,
     ) -> None:
         """把本轮用户输入和最终回复写入群上下文。"""
-        history_messages = turn_messages[:]
+        stripped_turn_image_count = self._count_images(messages=turn_messages)
+        sanitized_turn_messages = self._strip_history_images(messages=turn_messages)
+        history_messages = sanitized_turn_messages[:]
         history_messages.extend(sent_content_messages)
         if self.config.persist_tool_results:
             history_messages.extend(tool_history_messages)
@@ -747,6 +764,7 @@ class GroupChatToolLoop:
             category="plugin",
             message="AI 群聊本轮消息写入长期上下文",
             turn_messages_count=len(turn_messages),
+            stripped_turn_image_count=stripped_turn_image_count,
             sent_content_messages_count=len(sent_content_messages),
             tool_history_messages_count=len(tool_history_messages),
             persisted_messages_count=len(history_messages),
@@ -758,6 +776,32 @@ class GroupChatToolLoop:
         if replace_existing_history:
             chat_handler.replace_history(messages=[])
         chat_handler.build_chatmessage(message_lst=history_messages)
+
+    def _strip_history_images(self, *, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """生成不含图片字节的历史消息，避免图片跨轮次进入普通模型请求。"""
+        return [
+            self._strip_message_images(message=message)
+            for message in messages
+        ]
+
+    def _strip_message_images(self, *, message: ChatMessage) -> ChatMessage:
+        """复制聊天消息并移除只应服务于本轮请求的图片字节。"""
+        if not message.image:
+            return message
+        text = message.text
+        if text is None:
+            text = "（图片内容已用于当轮多模态请求，长期上下文不保存图片字节）"
+        return ChatMessage(
+            role=message.role,
+            text=text,
+            reasoning_content=message.reasoning_content,
+            tool_calls=message.tool_calls,
+            tool_call_id=message.tool_call_id,
+        )
+
+    def _count_images(self, *, messages: list[ChatMessage]) -> int:
+        """统计消息列表中仍携带的图片字节数量。"""
+        return sum(len(message.image or []) for message in messages)
 
     def _normalize_content(self, content: str | None) -> str | None:
         """清理模型文本输出，空白内容视为无回复。"""
