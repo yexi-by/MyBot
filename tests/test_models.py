@@ -8,8 +8,11 @@ from app.core.event_parser import EventTypeChecker
 from app.models import (
     GroupMessage,
     Image,
+    Json,
+    LightApp,
     NotifyEvent,
     Sender,
+    Share,
     StrictModel,
     Text,
     UnknownSegment,
@@ -185,6 +188,56 @@ class StrictModelBoundaryTest(unittest.TestCase):
         self.assertIsInstance(event.message[0], UnknownSegment)
         assert isinstance(event.message[0], UnknownSegment)
         self.assertEqual(event.message[0].type, "new_upstream_type")
+
+    def test_card_segments_parse_to_dedicated_models(self) -> None:
+        """链接分享、小程序卡片和 JSON 卡片会解析为对应消息段。"""
+        event = EventTypeChecker().get_event(
+            {
+                "time": 1710000000,
+                "self_id": 742654932,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "user_id": 2172959822,
+                "message_id": 123456,
+                "group_id": 939506743,
+                "message": [
+                    {
+                        "type": "share",
+                        "data": {
+                            "url": "https://example.com/a",
+                            "title": "链接标题",
+                            "content": "链接描述",
+                        },
+                    },
+                    {
+                        "type": "lightapp",
+                        "data": {
+                            "title": "小程序标题",
+                            "desc": "小程序描述",
+                            "url": "https://example.com/app",
+                        },
+                    },
+                    {
+                        "type": "json",
+                        "data": {
+                            "data": {
+                                "title": "JSON 标题",
+                                "url": "https://example.com/json",
+                            }
+                        },
+                    },
+                ],
+                "raw_message": "[卡片消息]",
+                "sender": {"user_id": 2172959822, "nickname": "夜袭"},
+                "message_format": "array",
+            }
+        )
+        self.assertIsInstance(event, GroupMessage)
+        assert isinstance(event, GroupMessage)
+        self.assertIsInstance(event.message[0], Share)
+        self.assertIsInstance(event.message[1], LightApp)
+        self.assertIsInstance(event.message[2], Json)
 
     def test_notify_raw_info_accepts_non_object_json(self) -> None:
         """notify raw_info 可接受上游任意 JSON 结构。"""

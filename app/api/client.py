@@ -53,6 +53,7 @@ class BOTClient(
         self.websocket: WebSocket = websocket
         self.database: RedisDatabaseManager = database
         self.echo_dict: dict[str, asyncio.Future[Response]] = {}
+        self.stream_dict: dict[str, asyncio.Queue[Response]] = {}
         self.boot_id: NapCatId = ""
         self.timeout: int = 120
 

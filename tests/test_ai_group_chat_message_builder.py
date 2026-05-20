@@ -9,7 +9,22 @@ from typing import cast
 import httpx
 
 from app.database import RedisDatabaseManager
-from app.models import GroupMessage, Image, MessageSegment, Reply, Sender, Text
+from app.models import (
+    File,
+    Forward,
+    GroupMessage,
+    Image,
+    Json,
+    LightApp,
+    MFace,
+    Markdown,
+    MessageSegment,
+    Reply,
+    Sender,
+    Share,
+    Text,
+    UnknownSegment,
+)
 from app.plugins.ai_group_chat.config import AIGroupChatConfig, GroupChatConfig
 from app.plugins.ai_group_chat.message_builder import GroupChatMessageBuilder
 
@@ -212,3 +227,123 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
             self.assertEqual(built_messages.loaded_image_count, 2)
             self.assertEqual(chat_message.image, [b"current-image", b"reply-image"])
             self.assertIn("图片已随本条输入提供", chat_message.text or "")
+
+    def test_supported_non_text_segments_are_formatted_as_readable_text(self) -> None:
+        """卡片、文件、商城表情和 Markdown 会进入 LLM 可读文本。"""
+        builder = GroupChatMessageBuilder(
+            config=build_config(),
+            database=cast(RedisDatabaseManager, EmptyDatabase()),
+            http_client=cast(httpx.AsyncClient, object()),
+        )
+        msg = build_message(
+            message=[
+                Share.new(
+                    "https://example.com/share",
+                    title="链接标题",
+                    content="链接描述",
+                ),
+                Forward.new(
+                    "forward-1",
+                    content=[{"type": "text", "data": {"text": "转发正文"}}],
+                ),
+                Json.new(
+                    {
+                        "title": "JSON 标题",
+                        "desc": "JSON 描述",
+                        "url": "https://example.com/json",
+                    }
+                ),
+                MFace.new("emoji-1", summary="表情摘要", url="https://example.com/e"),
+                File.new("report.pdf", name="报告.pdf", file_id="file-1", file_size=2048),
+                Markdown.new("# 标题\n正文"),
+                LightApp.new(
+                    {
+                        "title": "小程序标题",
+                        "desc": "小程序描述",
+                        "url": "https://example.com/app",
+                    }
+                ),
+            ],
+            raw_message="[复杂消息]",
+        )
+
+        chat_message = asyncio.run(builder.build_user_message(msg=msg))
+        text = chat_message.text or ""
+
+        self.assertIn("链接分享", text)
+        self.assertIn("链接标题", text)
+        self.assertIn("合并转发消息，ID: forward-1", text)
+        self.assertIn("转发正文", text)
+        self.assertIn("JSON 卡片", text)
+        self.assertIn("JSON 标题", text)
+        self.assertIn("商城表情", text)
+        self.assertIn("表情摘要", text)
+        self.assertIn("文件消息", text)
+        self.assertIn("报告.pdf", text)
+        self.assertIn("2.0 KB", text)
+        self.assertIn("Markdown 消息", text)
+        self.assertIn("# 标题", text)
+        self.assertIn("小程序卡片", text)
+        self.assertIn("小程序标题", text)
+
+    def test_forward_without_content_keeps_forward_id(self) -> None:
+        """没有内嵌内容的合并转发会保留 ID 提示。"""
+        builder = GroupChatMessageBuilder(
+            config=build_config(),
+            database=cast(RedisDatabaseManager, EmptyDatabase()),
+            http_client=cast(httpx.AsyncClient, object()),
+        )
+        msg = build_message(
+            message=[Forward.new("forward-empty")],
+            raw_message="[合并转发]",
+        )
+
+        chat_message = asyncio.run(builder.build_user_message(msg=msg))
+        text = chat_message.text or ""
+
+        self.assertIn("合并转发消息，ID: forward-empty", text)
+        self.assertIn("未包含可展开内容", text)
+
+    def test_forward_content_limit_marks_omitted_items(self) -> None:
+        """合并转发超过展开上限时会标明已省略。"""
+        builder = GroupChatMessageBuilder(
+            config=build_config(),
+            database=cast(RedisDatabaseManager, EmptyDatabase()),
+            http_client=cast(httpx.AsyncClient, object()),
+        )
+        forward_items = [
+            {
+                "sender": {"nickname": f"用户{index}"},
+                "message": [{"type": "text", "data": {"text": f"第{index}条"}}],
+            }
+            for index in range(1, 11)
+        ]
+        msg = build_message(
+            message=[Forward.new("forward-many", content=forward_items)],
+            raw_message="[合并转发]",
+        )
+
+        chat_message = asyncio.run(builder.build_user_message(msg=msg))
+        text = chat_message.text or ""
+
+        self.assertIn("第8条", text)
+        self.assertNotIn("第9条", text)
+        self.assertIn("其余 2 条合并转发内容已省略", text)
+
+    def test_unknown_segment_is_visible_to_model(self) -> None:
+        """未支持消息段会以占位摘要进入 LLM 输入。"""
+        builder = GroupChatMessageBuilder(
+            config=build_config(),
+            database=cast(RedisDatabaseManager, EmptyDatabase()),
+            http_client=cast(httpx.AsyncClient, object()),
+        )
+        msg = build_message(
+            message=[UnknownSegment(type="custom_type", data={"value": "保留"})],
+            raw_message="[未知消息段]",
+        )
+
+        chat_message = asyncio.run(builder.build_user_message(msg=msg))
+        text = chat_message.text or ""
+
+        self.assertIn("暂不支持的消息段: custom_type", text)
+        self.assertIn("保留", text)

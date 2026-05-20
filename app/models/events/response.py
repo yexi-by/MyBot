@@ -15,3 +15,10 @@ class Response(NapCatModel):
     echo: str | None = None
     wording: str = ""
     stream: Literal["stream-action", "normal-action"] | None = None
+
+
+class StreamTransferResult(NapCatModel):
+    """NapCat Stream Action 的聚合响应。"""
+
+    packets: list[Response]
+    final_response: Response

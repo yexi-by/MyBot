@@ -1,6 +1,14 @@
 """NapCat 文件相关 Action。"""
 
-from app.models import NapCatId, Response
+import asyncio
+import base64 as base64_lib
+import hashlib
+import uuid
+from pathlib import Path
+
+import aiofiles
+
+from app.models import NapCatId, Response, StreamTransferResult
 
 from .base import BaseMixin
 
@@ -15,6 +23,7 @@ class FileMixin(BaseMixin):
         name: str,
         folder: str | None = None,
         folder_id: str | None = None,
+        upload_file: bool = True,
     ) -> None:
         """上传群文件。"""
         await self._send_action(
@@ -25,16 +34,19 @@ class FileMixin(BaseMixin):
                 name=name,
                 folder=folder,
                 folder_id=folder_id,
+                upload_file=upload_file,
             ),
         )
 
     async def upload_private_file(
-        self, user_id: NapCatId, file: str, name: str
+        self, user_id: NapCatId, file: str, name: str, upload_file: bool = True
     ) -> None:
         """上传私聊文件。"""
         await self._send_action(
             "upload_private_file",
-            self._build_params(user_id=user_id, file=file, name=name),
+            self._build_params(
+                user_id=user_id, file=file, name=name, upload_file=upload_file
+            ),
         )
 
     async def get_group_root_files(
@@ -156,7 +168,6 @@ class FileMixin(BaseMixin):
         base64: str | None = None,
         name: str | None = None,
         headers: str | list[str] | None = None,
-        thread_cnt: int | None = None,
     ) -> Response:
         """下载文件到缓存目录。"""
         return await self._call_action(
@@ -166,7 +177,6 @@ class FileMixin(BaseMixin):
                 base64=base64,
                 name=name,
                 headers=headers,
-                thread_cnt=thread_cnt,
             ),
         )
 
@@ -180,3 +190,156 @@ class FileMixin(BaseMixin):
     async def clean_cache(self) -> Response:
         """清空缓存。"""
         return await self._call_action("clean_cache")
+
+    async def clean_stream_temp_file(self) -> Response:
+        """清理 Stream API 临时文件。"""
+        return await self._call_action("clean_stream_temp_file")
+
+    async def test_download_stream(
+        self, error: bool = False
+    ) -> StreamTransferResult:
+        """测试 NapCat 下载流响应聚合。"""
+        return await self._call_stream_action(
+            "test_download_stream", self._build_params(error=error)
+        )
+
+    async def download_file_stream(
+        self,
+        file: str | None = None,
+        file_id: str | None = None,
+        chunk_size: int = 64 * 1024,
+    ) -> StreamTransferResult:
+        """通过 Stream API 下载普通文件。"""
+        return await self._call_stream_action(
+            "download_file_stream",
+            self._build_params(
+                file=file, file_id=file_id, chunk_size=chunk_size
+            ),
+        )
+
+    async def download_file_image_stream(
+        self,
+        file: str | None = None,
+        file_id: str | None = None,
+        chunk_size: int = 64 * 1024,
+    ) -> StreamTransferResult:
+        """通过 Stream API 下载图片文件。"""
+        return await self._call_stream_action(
+            "download_file_image_stream",
+            self._build_params(
+                file=file, file_id=file_id, chunk_size=chunk_size
+            ),
+        )
+
+    async def download_file_record_stream(
+        self,
+        file: str | None = None,
+        file_id: str | None = None,
+        out_format: str | None = None,
+        chunk_size: int = 64 * 1024,
+    ) -> StreamTransferResult:
+        """通过 Stream API 下载语音文件。"""
+        return await self._call_stream_action(
+            "download_file_record_stream",
+            self._build_params(
+                file=file,
+                file_id=file_id,
+                out_format=out_format,
+                chunk_size=chunk_size,
+            ),
+        )
+
+    async def upload_file_stream(
+        self,
+        stream_id: str,
+        *,
+        chunk_data: str | None = None,
+        chunk_index: int | None = None,
+        total_chunks: int | None = None,
+        file_size: int | None = None,
+        expected_sha256: str | None = None,
+        is_complete: bool | None = None,
+        filename: str | None = None,
+        reset: bool | None = None,
+        verify_only: bool | None = None,
+        file_retention: int = 300000,
+    ) -> Response:
+        """上传 Stream API 文件分片或完成信号。"""
+        return await self._call_action(
+            "upload_file_stream",
+            self._build_params(
+                stream_id=stream_id,
+                chunk_data=chunk_data,
+                chunk_index=chunk_index,
+                total_chunks=total_chunks,
+                file_size=file_size,
+                expected_sha256=expected_sha256,
+                is_complete=is_complete,
+                filename=filename,
+                reset=reset,
+                verify_only=verify_only,
+                file_retention=file_retention,
+            ),
+        )
+
+    async def upload_local_file_stream(
+        self,
+        path: Path,
+        chunk_size: int = 64 * 1024,
+        file_retention: int = 300000,
+    ) -> Response:
+        """读取本地文件并通过 Stream API 分片上传。"""
+        if chunk_size <= 0:
+            raise ValueError("Stream 上传分片大小必须大于 0")
+        if file_retention <= 0:
+            raise ValueError("Stream 上传文件保留时间必须大于 0")
+        if not await asyncio.to_thread(path.is_file):
+            raise ValueError(f"Stream 上传文件不存在: {path}")
+
+        file_size, expected_sha256 = await self._calculate_stream_file_digest(
+            path=path, chunk_size=chunk_size
+        )
+        if file_size == 0:
+            raise ValueError("Stream 上传文件不能为空")
+
+        stream_id = str(uuid.uuid4())
+        total_chunks = (file_size + chunk_size - 1) // chunk_size
+        chunk_index = 0
+        async with aiofiles.open(path, mode="rb") as file:
+            while True:
+                raw_chunk = await file.read(chunk_size)
+                if raw_chunk == b"":
+                    break
+                chunk_data = base64_lib.b64encode(raw_chunk).decode("ascii")
+                _ = await self.upload_file_stream(
+                    stream_id=stream_id,
+                    chunk_data=chunk_data,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                    file_size=file_size,
+                    expected_sha256=expected_sha256,
+                    filename=path.name,
+                    file_retention=file_retention,
+                )
+                chunk_index += 1
+
+        return await self.upload_file_stream(
+            stream_id=stream_id,
+            is_complete=True,
+            file_retention=file_retention,
+        )
+
+    async def _calculate_stream_file_digest(
+        self, *, path: Path, chunk_size: int
+    ) -> tuple[int, str]:
+        """异步计算 Stream 上传文件大小与 SHA256。"""
+        digest = hashlib.sha256()
+        file_size = 0
+        async with aiofiles.open(path, mode="rb") as file:
+            while True:
+                raw_chunk = await file.read(chunk_size)
+                if raw_chunk == b"":
+                    break
+                file_size += len(raw_chunk)
+                digest.update(raw_chunk)
+        return file_size, digest.hexdigest()

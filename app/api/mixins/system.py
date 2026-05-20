@@ -44,16 +44,13 @@ class SystemMixin(BaseMixin):
 
     async def set_input_status(
         self,
-        event_type: str,
-        group_id: NapCatId | None = None,
-        user_id: NapCatId | None = None,
+        user_id: NapCatId,
+        event_type: int,
     ) -> None:
         """设置输入状态。"""
         await self._send_action(
             "set_input_status",
-            self._build_params(
-                group_id=group_id, user_id=user_id, eventType=event_type
-            ),
+            self._build_params(user_id=user_id, event_type=event_type),
         )
 
     async def get_cookies(self, domain: str) -> Response:
@@ -85,7 +82,7 @@ class SystemMixin(BaseMixin):
         return await self._call_action("get_clientkey")
 
     async def get_ai_record(
-        self, character: str, text: str, group_id: NapCatId | None = None
+        self, character: str, text: str, group_id: NapCatId
     ) -> Response:
         """获取 AI 语音。"""
         return await self._call_action(

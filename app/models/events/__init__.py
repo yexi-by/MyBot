@@ -34,7 +34,7 @@ from .notice_event import (
     ProfileLikeEvent,
 )
 from .request_event import FriendRequestEvent, GroupRequestEvent, Request, RequestEvent
-from .response import Response
+from .response import Response, StreamTransferResult
 
 type BotEvent = Annotated[
     MessageEvent | MetaEvent | NoticeEvent | RequestEvent,
@@ -85,4 +85,5 @@ __all__ = [
     "RequestEvent",
     "Response",
     "Sender",
+    "StreamTransferResult",
 ]

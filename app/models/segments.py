@@ -106,6 +106,15 @@ class JsonData(NapCatModel):
     data: JsonValue
 
 
+class ShareData(NapCatModel):
+    """链接分享消息数据。"""
+
+    url: str | None = None
+    title: str | None = None
+    content: str | None = None
+    image: str | None = None
+
+
 class ForwardData(NapCatModel):
     """合并转发消息数据。"""
 
@@ -187,6 +196,18 @@ class MiniAppData(NapCatModel):
     content: JsonValue
 
 
+class LightAppData(NapCatModel):
+    """小程序卡片消息数据。"""
+
+    content: JsonValue = None
+    data: JsonValue = None
+    title: str | None = None
+    desc: str | None = None
+    description: str | None = None
+    url: str | None = None
+    app: str | None = None
+
+
 class Text(BaseSegment[TextData]):
     """文本消息段。"""
 
@@ -262,6 +283,13 @@ class Json(BaseSegment[JsonData]):
     _arg_key: ClassVar[str | None] = "data"
 
 
+class Share(BaseSegment[ShareData]):
+    """链接分享消息段。"""
+
+    type: Literal["share"] = "share"
+    _arg_key: ClassVar[str | None] = "url"
+
+
 class Forward(BaseSegment[ForwardData]):
     """合并转发消息段。"""
 
@@ -327,6 +355,13 @@ class MiniApp(BaseSegment[MiniAppData]):
     _arg_key: ClassVar[str | None] = "content"
 
 
+class LightApp(BaseSegment[LightAppData]):
+    """小程序卡片消息段。"""
+
+    type: Literal["lightapp"] = "lightapp"
+    _arg_key: ClassVar[str | None] = "content"
+
+
 class UnknownSegment(NapCatModel):
     """未显式建模的 NapCat 消息段。"""
 
@@ -346,6 +381,7 @@ type MessageSegment = (
     | Video
     | File
     | Json
+    | Share
     | Forward
     | Node
     | Music
@@ -356,5 +392,6 @@ type MessageSegment = (
     | Location
     | Xml
     | MiniApp
+    | LightApp
     | UnknownSegment
 )

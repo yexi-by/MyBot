@@ -56,10 +56,13 @@ class AccountMixin(BaseMixin):
             self._build_params(flag=flag, approve=approve, remark=remark),
         )
 
-    async def get_stranger_info(self, user_id: NapCatId) -> Response:
+    async def get_stranger_info(
+        self, user_id: NapCatId, no_cache: bool = False
+    ) -> Response:
         """获取陌生人信息。"""
         return await self._call_action(
-            "get_stranger_info", self._build_params(user_id=user_id)
+            "get_stranger_info",
+            self._build_params(user_id=user_id, no_cache=no_cache),
         )
 
     async def get_friend_list(self, no_cache: bool = False) -> Response:
@@ -108,13 +111,13 @@ class AccountMixin(BaseMixin):
         self,
         group_id: NapCatId | None = None,
         user_id: NapCatId | None = None,
-        phone_number: str | None = None,
+        phone_number: str = "",
     ) -> Response:
         """获取推荐好友或群聊卡片。"""
         return await self._call_action(
             "ArkSharePeer",
             self._build_params(
-                group_id=group_id, user_id=user_id, phoneNumber=phone_number
+                group_id=group_id, user_id=user_id, phone_number=phone_number
             ),
         )
 

@@ -265,8 +265,7 @@ class GroupMixin(BaseMixin):
         self,
         group_id: NapCatId,
         user_id: NapCatId,
-        special_title: str | None = None,
-        duration: int = -1,
+        special_title: str = "",
     ) -> None:
         """设置群头衔。"""
         await self._send_action(
@@ -275,13 +274,14 @@ class GroupMixin(BaseMixin):
                 group_id=group_id,
                 user_id=user_id,
                 special_title=special_title,
-                duration=duration,
             ),
         )
 
-    async def get_group_system_msg(self) -> Response:
+    async def get_group_system_msg(self, count: int = 50) -> Response:
         """获取群系统消息。"""
-        return await self._call_action("get_group_system_msg")
+        return await self._call_action(
+            "get_group_system_msg", self._build_params(count=count)
+        )
 
     async def set_group_remark(self, group_id: NapCatId, remark: str) -> None:
         """设置群备注。"""
@@ -295,11 +295,9 @@ class GroupMixin(BaseMixin):
             "get_group_info_ex", self._build_params(group_id=group_id)
         )
 
-    async def get_group_ignored_notifies(self, group_id: NapCatId) -> Response:
+    async def get_group_ignored_notifies(self) -> Response:
         """获取群过滤系统消息。"""
-        return await self._call_action(
-            "get_group_ignored_notifies", self._build_params(group_id=group_id)
-        )
+        return await self._call_action("get_group_ignored_notifies")
 
     async def set_group_kick_members(
         self,
@@ -312,7 +310,7 @@ class GroupMixin(BaseMixin):
             "set_group_kick_members",
             self._build_params(
                 group_id=group_id,
-                user_ids=user_ids,
+                user_id=user_ids,
                 reject_add_request=reject_add_request,
             ),
         )

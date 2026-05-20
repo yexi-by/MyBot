@@ -227,9 +227,10 @@ class MessageMixin(BaseMixin):
     async def fetch_emoji_like(
         self,
         message_id: NapCatId,
-        emoji_id: str,
-        emoji_type: str,
-        count: int | None = None,
+        emoji_id: NapCatId,
+        emoji_type: NapCatId,
+        count: int = 20,
+        cookie: str = "",
     ) -> Response:
         """获取消息表情回应详情。"""
         return await self._call_action(
@@ -239,6 +240,7 @@ class MessageMixin(BaseMixin):
                 emojiId=emoji_id,
                 emojiType=emoji_type,
                 count=count,
+                cookie=cookie,
             ),
         )
 
@@ -248,6 +250,9 @@ class MessageMixin(BaseMixin):
         message_seq: NapCatId | None = None,
         count: int = 20,
         reverse_order: bool = False,
+        disable_get_url: bool = False,
+        parse_mult_msg: bool = True,
+        quick_reply: bool = False,
     ) -> Response:
         """获取群历史消息。"""
         return await self._call_action(
@@ -256,7 +261,11 @@ class MessageMixin(BaseMixin):
                 group_id=group_id,
                 message_seq=message_seq,
                 count=count,
+                reverse_order=reverse_order,
                 reverseOrder=reverse_order,
+                disable_get_url=disable_get_url,
+                parse_mult_msg=parse_mult_msg,
+                quick_reply=quick_reply,
             ),
         )
 
@@ -266,6 +275,9 @@ class MessageMixin(BaseMixin):
         message_seq: NapCatId | None = None,
         count: int = 20,
         reverse_order: bool = False,
+        disable_get_url: bool = False,
+        parse_mult_msg: bool = True,
+        quick_reply: bool = False,
     ) -> Response:
         """获取好友历史消息。"""
         return await self._call_action(
@@ -274,7 +286,11 @@ class MessageMixin(BaseMixin):
                 user_id=user_id,
                 message_seq=message_seq,
                 count=count,
+                reverse_order=reverse_order,
                 reverseOrder=reverse_order,
+                disable_get_url=disable_get_url,
+                parse_mult_msg=parse_mult_msg,
+                quick_reply=quick_reply,
             ),
         )
 
