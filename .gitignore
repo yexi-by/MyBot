@@ -13,6 +13,7 @@ venv/
 env/
 
 # 真实配置、密钥与个人隐私
+AGENTS.md
 setting.toml
 setting.local.toml
 *.secret.toml
