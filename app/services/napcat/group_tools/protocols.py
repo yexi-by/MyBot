@@ -48,6 +48,10 @@ class NapCatGroupToolBot(Protocol):
         """获取群文件下载链接。"""
         ...
 
+    async def get_forward_msg(self, message_id: NapCatId) -> Response:
+        """获取合并转发消息详情。"""
+        ...
+
 
 class NapCatGroupHistoryDatabase(Protocol):
     """描述群聊历史工具读取 Redis 缓存所需的最小数据库能力。"""

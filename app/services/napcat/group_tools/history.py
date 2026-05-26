@@ -2,7 +2,8 @@
 
 from datetime import datetime, timedelta
 
-from app.models import GroupMessage, Image, JsonObject, JsonValue, Text, to_json_value
+from app.models import GroupMessage, Image, JsonObject, JsonValue, to_json_value
+from app.services.napcat.message_formatter import NapCatMessageTextFormatter
 from app.services.llm.tools import LLMToolRegistry
 
 from .arguments import (
@@ -22,6 +23,7 @@ class GroupHistoryToolset:
         """绑定当前群事件与消息数据库。"""
         self.database: NapCatGroupHistoryDatabase = database
         self.event: GroupMessage = event
+        self.message_formatter: NapCatMessageTextFormatter = NapCatMessageTextFormatter()
 
     def register_tools(self, registry: LLMToolRegistry) -> None:
         """向工具注册表登记群历史消息工具。"""
@@ -144,7 +146,11 @@ class GroupHistoryToolset:
             "user_id": to_json_value(message.user_id),
             "member_name": self._resolve_member_name(message=message),
             "role": message.sender.role,
-            "text": self._extract_text(message=message),
+            "text": self.message_formatter.format_segments(
+                segments=message.message,
+                images_attached=False,
+            ),
+            "segment_types": [segment.type for segment in message.message],
             "has_image": any(isinstance(segment, Image) for segment in message.message),
         }
 
@@ -161,10 +167,3 @@ class GroupHistoryToolset:
         if message.sender.nickname:
             return message.sender.nickname
         return "未知群员"
-
-    def _extract_text(self, message: GroupMessage) -> str:
-        """提取群消息中的纯文本。"""
-        text_parts = [
-            segment.data.text for segment in message.message if isinstance(segment, Text)
-        ]
-        return "".join(text_parts).strip()

@@ -3,7 +3,21 @@
 import unittest
 from typing import cast
 
-from app.models import GroupMessage, MessageSegment, NapCatId, Response, Sender, Text
+from app.models import (
+    At,
+    File,
+    Forward,
+    GroupMessage,
+    JsonObject,
+    JsonValue,
+    Image,
+    MessageSegment,
+    NapCatId,
+    Response,
+    Sender,
+    Share,
+    Text,
+)
 from app.services.napcat.group_tools import (
     GetGroupHistoryMessagesArgs,
     NapCatGroupToolExecutor,
@@ -12,8 +26,21 @@ from app.services.napcat.group_tools import (
 from app.services.napcat.group_tools.protocols import CachedNapCatMessage
 
 
-def build_group_message(*, text: str = "hello") -> GroupMessage:
+def build_group_message(
+    *,
+    text: str = "hello",
+    message: list[MessageSegment] | None = None,
+    raw_message: str | None = None,
+) -> GroupMessage:
     """构造测试用群消息。"""
+    message_segments: list[MessageSegment]
+    if message is None:
+        message_segments = [Text.new(text)]
+    else:
+        message_segments = message
+    raw_message_text = raw_message
+    if raw_message_text is None:
+        raw_message_text = text
     return GroupMessage(
         time=1_777_132_900,
         self_id="10000",
@@ -24,8 +51,8 @@ def build_group_message(*, text: str = "hello") -> GroupMessage:
         message_id="30000",
         group_id="40000",
         group_name="测试群",
-        message=[Text.new(text)],
-        raw_message=text,
+        message=message_segments,
+        raw_message=raw_message_text,
         sender=Sender(user_id="20000", nickname="夜袭", role="member"),
     )
 
@@ -33,9 +60,13 @@ def build_group_message(*, text: str = "hello") -> GroupMessage:
 class FakeBot:
     """测试用 NapCat Bot。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, forward_responses: dict[NapCatId, Response] | None = None
+    ) -> None:
         """初始化发送记录。"""
         self.sent_count = 0
+        self.forward_responses = forward_responses or {}
+        self.forward_calls: list[NapCatId] = []
 
     async def send_msg(
         self,
@@ -71,6 +102,14 @@ class FakeBot:
         _ = (group_id, file_id)
         return Response(status="ok", retcode=0, data={"url": "https://example.com/a"})
 
+    async def get_forward_msg(self, message_id: NapCatId) -> Response:
+        """返回预置合并转发详情。"""
+        self.forward_calls.append(message_id)
+        response = self.forward_responses.get(message_id)
+        if response is not None:
+            return response
+        return Response(status="failed", retcode=404, message="合并转发不存在")
+
 
 class FakeDatabase:
     """测试用 Redis 历史消息数据库。"""
@@ -99,6 +138,39 @@ class FakeDatabase:
             min_time,
         )
         return None
+
+
+class HistoryDatabase:
+    """返回指定群消息列表的测试数据库。"""
+
+    def __init__(self, messages: list[CachedNapCatMessage]) -> None:
+        """保存待返回的历史消息。"""
+        self.messages: list[CachedNapCatMessage] = messages
+
+    async def search_messages(
+        self,
+        *,
+        self_id: str,
+        message_id: str | None = None,
+        root: str | None = None,
+        limit_tuple: tuple[int, int] | None = None,
+        group_id: str | None = None,
+        user_id: str | None = None,
+        max_time: int | None = None,
+        min_time: int | None = None,
+    ) -> CachedNapCatMessage | list[CachedNapCatMessage] | None:
+        """返回预置历史消息。"""
+        _ = (
+            self_id,
+            message_id,
+            root,
+            limit_tuple,
+            group_id,
+            user_id,
+            max_time,
+            min_time,
+        )
+        return self.messages
 
 
 class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
@@ -147,6 +219,26 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("qq__mention_user", tool_names)
         self.assertNotIn("qq__reply_current_message", tool_names)
         self.assertNotIn("qq__finish_conversation", tool_names)
+        self.assertIn("qq__get_forward_message", tool_names)
+
+    async def test_forward_tool_schema_only_exposes_message_id(self) -> None:
+        """合并转发工具只向模型暴露 message_id 参数。"""
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, FakeBot()),
+            database=FakeDatabase(),
+            event=build_group_message(),
+        )
+
+        tool = next(
+            item
+            for item in executor.list_tools()
+            if item.name == "qq__get_forward_message"
+        )
+
+        properties = tool.parameters["properties"]
+        self.assertIsInstance(properties, dict)
+        property_map = cast(JsonObject, properties)
+        self.assertEqual(set(property_map.keys()), {"message_id"})
 
     def test_history_duration_requires_minutes(self) -> None:
         """按分钟查询历史时必须明确分钟数。"""
@@ -154,3 +246,327 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             GetGroupHistoryMessagesArgs.model_validate(
                 {"query_mode": "recent_duration"}
             )
+
+    async def test_history_messages_include_readable_non_text_segments(self) -> None:
+        """历史查询会把艾特、图片、文件和卡片转成模型可读文本。"""
+        history_message = build_group_message(
+            message=[
+                At.new("12345", name="小明"),
+                Text.new("看这个"),
+                Image.new(
+                    "image-cache.jpg",
+                    summary="[图片]",
+                    url="https://example.com/image.jpg",
+                    file_size=4096,
+                ),
+                File.new(
+                    "report.pdf",
+                    name="报告.pdf",
+                    file_id="file-1",
+                    file_size=2048,
+                ),
+                Share.new(
+                    "https://example.com/share",
+                    title="链接标题",
+                    content="链接描述",
+                ),
+            ],
+            raw_message="@小明 看这个[图片][文件][分享]",
+        )
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, FakeBot()),
+            database=HistoryDatabase([history_message]),
+            event=build_group_message(),
+        )
+
+        result = await executor.call_tool(
+            "qq__get_group_history_messages",
+            {"query_mode": "recent_count", "limit": 1},
+        )
+
+        self.assertIsInstance(result, dict)
+        result_object = cast(JsonObject, result)
+        messages_value = result_object["messages"]
+        self.assertIsInstance(messages_value, list)
+        messages = cast(list[JsonValue], messages_value)
+        self.assertEqual(len(messages), 1)
+        first_message_value = messages[0]
+        self.assertIsInstance(first_message_value, dict)
+        first_message = cast(JsonObject, first_message_value)
+        text_value = first_message["text"]
+        self.assertIsInstance(text_value, str)
+        text = cast(str, text_value)
+        self.assertIn("艾特: 小明 (12345)", text)
+        self.assertIn("看这个", text)
+        self.assertIn("图片消息", text)
+        self.assertIn("未附带图片内容", text)
+        self.assertIn("报告.pdf", text)
+        self.assertIn("链接标题", text)
+        segment_types = first_message["segment_types"]
+        self.assertEqual(
+            segment_types,
+            ["at", "text", "image", "file", "share"],
+        )
+
+    async def test_forward_tool_returns_complete_structured_messages(self) -> None:
+        """合并转发工具返回完整结构、原始消息段和辅助可读文本。"""
+        bot = FakeBot(
+            forward_responses={
+                "root-forward": Response(
+                    status="ok",
+                    retcode=0,
+                    data={
+                        "messages": [
+                            {
+                                "sender": {"nickname": "小明", "user_id": "12345"},
+                                "time": 1_777_132_800,
+                                "message_id": "forward-msg-1",
+                                "message": [
+                                    {"type": "text", "data": {"text": "看文件"}},
+                                    {
+                                        "type": "file",
+                                        "data": {
+                                            "file": "report.pdf",
+                                            "name": "报告.pdf",
+                                            "file_id": "file-1",
+                                            "file_size": 2048,
+                                        },
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                )
+            }
+        )
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            database=FakeDatabase(),
+            event=build_group_message(),
+        )
+
+        result = await executor.call_tool(
+            "qq__get_forward_message",
+            {"message_id": "root-forward"},
+        )
+
+        result_object = require_json_object(result)
+        self.assertIs(result_object["ok"], True)
+        self.assertIs(result_object["complete"], True)
+        self.assertIn("看文件", require_string(result_object["readable_text"]))
+        messages = require_json_list(result_object["messages"])
+        first_message = require_json_object(messages[0])
+        self.assertEqual(first_message["segment_types"], ["text", "file"])
+        self.assertIn("报告.pdf", require_string(first_message["text"]))
+        segments = require_json_list(first_message["segments"])
+        self.assertEqual(require_json_object(segments[1])["type"], "file")
+
+    async def test_forward_tool_recursively_fetches_nested_forward_id(self) -> None:
+        """只有 ID 的嵌套合并转发会继续调用 NapCat 读取。"""
+        bot = FakeBot(
+            forward_responses={
+                "root-forward": Response(
+                    status="ok",
+                    retcode=0,
+                    data={
+                        "messages": [
+                            {
+                                "sender": {"nickname": "外层"},
+                                "message": [
+                                    {"type": "forward", "data": {"id": "nested-forward"}}
+                                ],
+                            }
+                        ]
+                    },
+                ),
+                "nested-forward": Response(
+                    status="ok",
+                    retcode=0,
+                    data={
+                        "messages": [
+                            {
+                                "sender": {"nickname": "内层"},
+                                "message": [
+                                    {"type": "text", "data": {"text": "嵌套正文"}}
+                                ],
+                            }
+                        ]
+                    },
+                ),
+            }
+        )
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            database=FakeDatabase(),
+            event=build_group_message(),
+        )
+
+        result = await executor.call_tool(
+            "qq__get_forward_message",
+            {"message_id": "root-forward"},
+        )
+
+        result_object = require_json_object(result)
+        self.assertEqual(bot.forward_calls, ["root-forward", "nested-forward"])
+        self.assertIs(result_object["complete"], True)
+        messages = require_json_list(result_object["messages"])
+        first_message = require_json_object(messages[0])
+        nested_forwards = require_json_list(first_message["nested_forwards"])
+        nested = require_json_object(nested_forwards[0])
+        self.assertEqual(nested["message_id"], "nested-forward")
+        self.assertIn("嵌套正文", require_string(nested["readable_text"]))
+
+    async def test_forward_tool_uses_embedded_nested_content_without_fetch(self) -> None:
+        """已内嵌的嵌套合并转发内容不会额外请求 NapCat。"""
+        bot = FakeBot(
+            forward_responses={
+                "root-forward": Response(
+                    status="ok",
+                    retcode=0,
+                    data={
+                        "messages": [
+                            {
+                                "message": [
+                                    {
+                                        "type": "forward",
+                                        "data": {
+                                            "id": "embedded-forward",
+                                            "content": [
+                                                {
+                                                    "sender": {"nickname": "内嵌"},
+                                                    "message": [
+                                                        {
+                                                            "type": "text",
+                                                            "data": {"text": "内嵌正文"},
+                                                        }
+                                                    ],
+                                                }
+                                            ],
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                )
+            }
+        )
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            database=FakeDatabase(),
+            event=build_group_message(),
+        )
+
+        result = await executor.call_tool(
+            "qq__get_forward_message",
+            {"message_id": "root-forward"},
+        )
+
+        result_object = require_json_object(result)
+        self.assertEqual(bot.forward_calls, ["root-forward"])
+        messages = require_json_list(result_object["messages"])
+        nested_forwards = require_json_list(
+            require_json_object(messages[0])["nested_forwards"]
+        )
+        nested = require_json_object(nested_forwards[0])
+        self.assertEqual(nested["message_id"], "embedded-forward")
+        self.assertIn("内嵌正文", require_string(nested["readable_text"]))
+
+    async def test_forward_tool_stops_recursive_forward_cycle(self) -> None:
+        """循环嵌套会停止递归并返回不完整标记。"""
+        bot = FakeBot(
+            forward_responses={
+                "loop-forward": Response(
+                    status="ok",
+                    retcode=0,
+                    data={
+                        "messages": [
+                            {
+                                "message": [
+                                    {"type": "forward", "data": {"id": "loop-forward"}}
+                                ]
+                            }
+                        ]
+                    },
+                )
+            }
+        )
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            database=FakeDatabase(),
+            event=build_group_message(),
+        )
+
+        result = await executor.call_tool(
+            "qq__get_forward_message",
+            {"message_id": "loop-forward"},
+        )
+
+        result_object = require_json_object(result)
+        self.assertIs(result_object["complete"], False)
+        errors = require_json_list(result_object["errors"])
+        first_error = require_json_object(errors[0])
+        self.assertEqual(first_error["error_type"], "ForwardCycle")
+
+    async def test_forward_tool_returns_model_visible_root_error(self) -> None:
+        """根合并转发读取失败时返回结构化可恢复错误。"""
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, FakeBot()),
+            database=FakeDatabase(),
+            event=build_group_message(),
+        )
+
+        result = await executor.call_tool(
+            "qq__get_forward_message",
+            {"message_id": "missing-forward"},
+        )
+
+        result_object = require_json_object(result)
+        self.assertIs(result_object["ok"], False)
+        self.assertIs(result_object["is_error"], True)
+        self.assertEqual(result_object["error_type"], "NapCatActionFailed")
+
+    async def test_formatter_tells_model_to_call_forward_tool(self) -> None:
+        """只有 ID 的合并转发提示模型主动调用工具。"""
+        message = build_group_message(
+            message=[Forward.new("forward-empty")],
+            raw_message="[合并转发]",
+        )
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, FakeBot()),
+            database=HistoryDatabase([message]),
+            event=message,
+        )
+
+        result = await executor.call_tool(
+            "qq__get_group_history_messages",
+            {"query_mode": "recent_count", "limit": 1},
+        )
+
+        result_object = require_json_object(result)
+        messages = require_json_list(result_object["messages"])
+        first_message = require_json_object(messages[0])
+        text = require_string(first_message["text"])
+        self.assertIn("qq__get_forward_message", text)
+        self.assertIn('message_id="forward-empty"', text)
+
+
+def require_json_object(value: object) -> JsonObject:
+    """把测试值收窄为 JSON 对象。"""
+    if not isinstance(value, dict):
+        raise AssertionError("测试值必须是 JSON 对象")
+    return cast(JsonObject, value)
+
+
+def require_json_list(value: object) -> list[JsonValue]:
+    """把测试值收窄为 JSON 数组。"""
+    if not isinstance(value, list):
+        raise AssertionError("测试值必须是 JSON 数组")
+    return cast(list[JsonValue], value)
+
+
+def require_string(value: object) -> str:
+    """把测试值收窄为字符串。"""
+    if not isinstance(value, str):
+        raise AssertionError("测试值必须是字符串")
+    return value

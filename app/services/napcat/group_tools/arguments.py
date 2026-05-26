@@ -57,6 +57,14 @@ class GetGroupFileUrlArgs(StrictModel):
     file_id: str = Field(description="群文件 ID。通常先查询群文件列表后再填写。")
 
 
+class GetForwardMessageArgs(StrictModel):
+    """获取合并转发消息详情的工具参数。"""
+
+    message_id: str = Field(
+        description="合并转发消息 ID，通常来自消息中的 forward 段 ID。"
+    )
+
+
 class GetGroupHistoryMessagesArgs(StrictModel):
     """获取当前群聊天记录的工具参数。"""
 

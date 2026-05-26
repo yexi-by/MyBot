@@ -303,6 +303,8 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
 
         self.assertIn("合并转发消息，ID: forward-empty", text)
         self.assertIn("未包含可展开内容", text)
+        self.assertIn("qq__get_forward_message", text)
+        self.assertIn('message_id="forward-empty"', text)
 
     def test_forward_content_limit_marks_omitted_items(self) -> None:
         """合并转发超过展开上限时会标明已省略。"""

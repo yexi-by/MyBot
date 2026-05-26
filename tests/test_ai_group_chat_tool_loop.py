@@ -995,7 +995,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             )
             chat_handler = ContextHandler(
                 system_prompt="系统提示词",
-                max_context_tokens=6000,
+                max_context_tokens=7000,
             )
             chat_handler.build_chatmessage(
                 message_lst=[

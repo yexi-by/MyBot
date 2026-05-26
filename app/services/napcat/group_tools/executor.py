@@ -13,6 +13,7 @@ from app.services.llm.schemas import LLMToolDefinition, LLMToolExecutor
 from app.services.llm.tools import LLMToolRegistry
 
 from .files import GroupFileToolset
+from .forward import GroupForwardToolset
 from .history import GroupHistoryToolset
 from .modifiers import GroupMessageDirectiveParser
 from .protocols import NapCatGroupHistoryDatabase, NapCatGroupToolBot
@@ -36,6 +37,10 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
             allow_mention_all=allow_mention_all,
         )
         self._files: GroupFileToolset = GroupFileToolset(bot=bot, event=event)
+        self._forward: GroupForwardToolset = GroupForwardToolset(
+            bot=bot,
+            event=event,
+        )
         self._history: GroupHistoryToolset = GroupHistoryToolset(
             database=database,
             event=event,
@@ -63,4 +68,5 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
     def _register_tools(self) -> None:
         """注册当前群聊工具定义。"""
         self._files.register_tools(self._registry)
+        self._forward.register_tools(self._registry)
         self._history.register_tools(self._registry)
