@@ -91,10 +91,15 @@ class MyProvider(Provider):
 
     @provide(scope=Scope.SESSION)
     def get_bot_client(
-        self, websocket: WebSocket, database: RedisDatabaseManager
+        self, websocket: WebSocket, database: RedisDatabaseManager, settings: Settings
     ) -> BOTClient:
         """创建当前 WebSocket 会话的机器人客户端。"""
-        return BOTClient(websocket=websocket, database=database)
+        return BOTClient(
+            websocket=websocket,
+            database=database,
+            send_retry_count=settings.napcat.send_retry_count,
+            send_retry_delay=settings.napcat.send_retry_delay,
+        )
 
     @provide(scope=Scope.SESSION)
     def get_plugin_controller(

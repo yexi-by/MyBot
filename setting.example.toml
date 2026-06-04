@@ -14,6 +14,9 @@ log_level = "info"
 # NapCat WebSocket Client 的 Token；服务端会按 Bearer Token 校验。
 [napcat]
 websocket_token = "CHANGE_ME_NAPCAT_TOKEN"
+# NapCat send_msg 发送失败时的总尝试次数与初始退避秒数。
+send_retry_count = 3
+send_retry_delay = 1
 
 # 图片、视频等媒体缓存目录；Docker 部署默认挂载到 /app/data。
 [storage]

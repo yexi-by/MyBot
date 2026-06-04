@@ -48,6 +48,8 @@ class NapCatConfig(StrictModel):
     """NapCat 反向 WebSocket 连接配置。"""
 
     websocket_token: str = Field(min_length=1)
+    send_retry_count: int = Field(default=3, ge=1)
+    send_retry_delay: int = Field(default=1, ge=0)
 
 
 class StorageConfig(StrictModel):

@@ -43,12 +43,20 @@ class BOTClient(
         - SystemMixin: 系统相关 API（版本、cookies、密钥等）
     """
 
-    def __init__(self, websocket: WebSocket, database: RedisDatabaseManager) -> None:
+    def __init__(
+        self,
+        websocket: WebSocket,
+        database: RedisDatabaseManager,
+        send_retry_count: int = 3,
+        send_retry_delay: int = 1,
+    ) -> None:
         """初始化 BOTClient
 
         Args:
             websocket: WebSocket 连接实例
             database: Redis 数据库管理器实例
+            send_retry_count: NapCat send_msg 发送总尝试次数
+            send_retry_delay: NapCat send_msg 发送初始退避秒数
         """
         self.websocket: WebSocket = websocket
         self.database: RedisDatabaseManager = database
@@ -56,6 +64,8 @@ class BOTClient(
         self.stream_dict: dict[str, asyncio.Queue[Response]] = {}
         self.boot_id: NapCatId = ""
         self.timeout: int = 120
+        self.send_retry_count: int = send_retry_count
+        self.send_retry_delay: int = send_retry_delay
 
     def get_self_qq_id(self, msg: AllEvent) -> None:
         """从 NapCat 事件中刷新机器人自身 QQ 号。"""

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from app.api.mixins.message import NapCatSendMessageError
 from app.models import GroupMessage, JsonObject, JsonValue
 from app.plugins.base import Context
 from app.services import (
@@ -33,6 +34,15 @@ class ReplyContent:
     visible_content: str | None
     memory_content: str | None
     memory_reasoning_content: str | None
+
+
+@dataclass(frozen=True)
+class ReplySendResult:
+    """描述群聊回复正文的发送结果。"""
+
+    content_sent: bool
+    should_retry_model: bool = False
+    failure_status_message: ChatMessage | None = None
 
 
 @dataclass(frozen=True)
@@ -195,7 +205,7 @@ class GroupChatToolLoop:
             )
             content_sent = False
             if reply_content.visible_content is not None:
-                content_sent = await self._send_reply_content(
+                send_result = await self._send_reply_content(
                     msg=msg,
                     napcat_executor=napcat_executor,
                     working_messages=working_messages,
@@ -205,8 +215,21 @@ class GroupChatToolLoop:
                     event_name="ai_group_chat.reply.sent",
                     log_message="模型返回正文，已解析 content 标记并发送群消息",
                 )
-                if not content_sent:
+                if send_result.should_retry_model:
                     continue
+                if send_result.failure_status_message is not None:
+                    await self._finish_turn(
+                        msg=msg,
+                        chat_handler=chat_handler,
+                        turn_messages=turn_messages,
+                        sent_content_messages=sent_content_messages,
+                        tool_history_messages=tool_history_messages,
+                        replace_existing_history=replace_existing_history,
+                        title="群消息发送失败后的长期上下文",
+                        failure_status_message=send_result.failure_status_message,
+                    )
+                    return
+                content_sent = send_result.content_sent
 
             if response.tool_calls:
                 await self._handle_tool_response(
@@ -557,6 +580,7 @@ class GroupChatToolLoop:
         tool_history_messages: list[ChatMessage],
         replace_existing_history: bool,
         title: str,
+        failure_status_message: ChatMessage | None = None,
     ) -> None:
         """把本次群聊处理落入长期上下文并写入调试快照。"""
         self._persist_turn(
@@ -567,6 +591,7 @@ class GroupChatToolLoop:
             assistant_content=None,
             assistant_reasoning_content=None,
             replace_existing_history=replace_existing_history,
+            failure_status_message=failure_status_message,
         )
         await self.debug_dumper.append_context_snapshot(
             group_id=msg.group_id,
@@ -585,10 +610,10 @@ class GroupChatToolLoop:
         round_index: int,
         event_name: str,
         log_message: str,
-    ) -> bool:
+    ) -> ReplySendResult:
         """只要模型返回正文，就立即发送，并把正文记入长期上下文候选。"""
         if reply_content.visible_content is None:
-            return False
+            return ReplySendResult(content_sent=False)
         try:
             _ = await napcat_executor.send_content(reply_content.visible_content)
         except ValueError as exc:
@@ -613,7 +638,27 @@ class GroupChatToolLoop:
                 error=str(exc),
                 content_chars=len(reply_content.visible_content),
             )
-            return False
+            return ReplySendResult(content_sent=False, should_retry_model=True)
+        except NapCatSendMessageError as exc:
+            failure_status_message = self._build_send_failure_status_message(
+                error=exc
+            )
+            log_event(
+                level="ERROR",
+                event="ai_group_chat.reply.send_failed",
+                category="plugin",
+                message="模型回复发送到群聊失败，已结束本轮并写入运行状态上下文",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                round_index=round_index,
+                error_type=type(exc).__name__,
+                error=str(exc),
+                content_chars=len(reply_content.visible_content),
+            )
+            return ReplySendResult(
+                content_sent=False,
+                failure_status_message=failure_status_message,
+            )
         if reply_content.memory_content is not None:
             sent_content_messages.append(
                 ChatMessage(
@@ -633,7 +678,19 @@ class GroupChatToolLoop:
             memory_content_chars=len(reply_content.memory_content or ""),
             memory_reasoning_chars=len(reply_content.memory_reasoning_content or ""),
         )
-        return True
+        return ReplySendResult(content_sent=True)
+
+    def _build_send_failure_status_message(
+        self, *, error: NapCatSendMessageError
+    ) -> ChatMessage:
+        """构造发送失败时写入长期上下文的运行状态消息。"""
+        return ChatMessage(
+            role="system",
+            text=(
+                "运行状态：上一条 AI 群聊回复没有发送到群内。"
+                f"发送层错误：{error}"
+            ),
+        )
 
     def _append_tool_call_response(
         self,
@@ -742,11 +799,14 @@ class GroupChatToolLoop:
         assistant_content: str | None,
         assistant_reasoning_content: str | None,
         replace_existing_history: bool,
+        failure_status_message: ChatMessage | None = None,
     ) -> None:
         """把本轮用户输入和最终回复写入群上下文。"""
         stripped_turn_image_count = self._count_images(messages=turn_messages)
         sanitized_turn_messages = self._strip_history_images(messages=turn_messages)
         history_messages = sanitized_turn_messages[:]
+        if failure_status_message is not None:
+            history_messages.append(failure_status_message)
         history_messages.extend(sent_content_messages)
         if self.config.persist_tool_results:
             history_messages.extend(tool_history_messages)

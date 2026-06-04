@@ -17,10 +17,47 @@ from app.models import (
     Text,
     Video,
 )
-from app.models.common import JsonObject
+from app.models.common import JsonObject, JsonValue
 from app.utils.log import log_event
+from app.utils.retry_utils import create_retry_manager
 
 from .base import BaseMixin
+
+
+class NapCatSendMessageError(RuntimeError):
+    """NapCat send_msg 返回失败或超时时抛出的显式异常。"""
+
+    def __init__(self, message: str, *, response: Response | None = None) -> None:
+        """保存错误摘要与可选 NapCat 响应。"""
+        super().__init__(message)
+        self.response: Response | None = response
+
+    @classmethod
+    def from_response(cls, *, response: Response) -> "NapCatSendMessageError":
+        """根据 NapCat 失败响应构造异常。"""
+        return cls(
+            "NapCat 发送消息失败: "
+            f"status={response.status!r} "
+            f"retcode={response.retcode} "
+            f"message={response.message!r} "
+            f"wording={response.wording!r} "
+            f"data={_summarize_response_data(response.data)}",
+            response=response,
+        )
+
+    @classmethod
+    def from_timeout(cls, *, error: TimeoutError) -> "NapCatSendMessageError":
+        """根据等待 NapCat 回包超时构造异常。"""
+        return cls(f"NapCat 发送消息失败: {error}")
+
+
+def _summarize_response_data(data: JsonValue) -> str:
+    """把 NapCat 响应 data 压缩成适合日志与异常的短文本。"""
+    summary = repr(data)
+    max_length = 500
+    if len(summary) <= max_length:
+        return summary
+    return f"{summary[:max_length]}..."
 
 
 class MessageMixin(BaseMixin):
@@ -138,7 +175,7 @@ class MessageMixin(BaseMixin):
             params = self._build_params(
                 message_type="group", group_id=group_id, message=message_segment
             )
-        response = await self._call_action("send_msg", params)
+        response = await self._call_send_msg_with_retry(params=params)
         await self._store_sent_message(
             response=response,
             group_id=group_id,
@@ -146,6 +183,24 @@ class MessageMixin(BaseMixin):
             message_segment=message_segment,
         )
         return response
+
+    async def _call_send_msg_with_retry(self, *, params: JsonObject) -> Response:
+        """调用 NapCat send_msg，并对可恢复发送失败执行配置化重试。"""
+        retrier = create_retry_manager(
+            error_types=(NapCatSendMessageError,),
+            retry_count=self.send_retry_count,
+            retry_delay=self.send_retry_delay,
+        )
+        async for attempt in retrier:
+            with attempt:
+                try:
+                    response = await self._call_action("send_msg", params)
+                except TimeoutError as exc:
+                    raise NapCatSendMessageError.from_timeout(error=exc) from exc
+                if response.status != "ok" or response.retcode != 0:
+                    raise NapCatSendMessageError.from_response(response=response)
+                return response
+        raise RuntimeError("NapCat send_msg 重试流程异常结束")
 
     async def _store_sent_message(
         self,

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from typing import Protocol, cast
 
+from app.api.mixins.message import NapCatSendMessageError
 from app.models import GroupMessage, JsonObject, MessageSegment, Response, Sender, Text
 from app.plugins.ai_group_chat.ai_group_chat import AIGroupChatPlugin
 from app.plugins.ai_group_chat.config import AIGroupChatConfig
@@ -90,6 +91,21 @@ class FakeBot:
             segment.data.text for segment in message_segment if isinstance(segment, Text)
         ]
         return "".join(text_parts)
+
+
+class FakeSendFailureBot(FakeBot):
+    """测试用 Bot，模拟 NapCat 发送层最终失败。"""
+
+    async def send_msg(
+        self,
+        *,
+        group_id: str,
+        text: str | None = None,
+        message_segment: list[MessageSegment] | None = None,
+    ) -> Response:
+        """模拟发送重试耗尽后的显式异常。"""
+        _ = (group_id, text, message_segment)
+        raise NapCatSendMessageError("NapCat 发送消息失败: send timeout")
 
 
 class FakeContext:
@@ -733,6 +749,41 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_context.bot.sent_texts, ["第一句"])
         self.assertEqual(len(fake_llm.received_messages), 1)
         self.assertEqual(chat_handler.messages_lst[-1].text, "第一句")
+
+    async def test_send_failure_persists_system_status_without_assistant_content(
+        self,
+    ) -> None:
+        """发送层失败时不把未发出的正文当成 assistant 历史。"""
+        fake_llm = FakeNoToolLLM()
+        fake_context = FakeContext(llm=fake_llm)
+        fake_context.bot = FakeSendFailureBot()
+        config = build_config(output_reasoning_content=False)
+        tool_loop = GroupChatToolLoop(
+            config=config,
+            context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="继续说")],
+        )
+
+        self.assertEqual(len(fake_llm.received_messages), 1)
+        self.assertEqual(
+            [message.role for message in chat_handler.messages_lst],
+            ["system", "user", "system"],
+        )
+        self.assertEqual(chat_handler.messages_lst[1].text, "继续说")
+        failure_status = chat_handler.messages_lst[-1].text or ""
+        self.assertIn("没有发送到群内", failure_status)
+        self.assertIn("NapCat 发送消息失败", failure_status)
+        self.assertNotIn(
+            "第一句",
+            [message.text for message in chat_handler.messages_lst],
+        )
 
     async def test_empty_content_without_tools_finishes_silently(self) -> None:
         """无工具且无正文时不发送群消息，但当前用户消息仍进入长期上下文。"""

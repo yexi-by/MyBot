@@ -9,7 +9,7 @@ from typing import cast
 import httpx
 from redis.asyncio import Redis
 
-from app.api.mixins.message import MessageMixin
+from app.api.mixins.message import MessageMixin, NapCatSendMessageError
 from app.database import RedisDatabaseManager
 from app.models import GroupMessage, Image, MessageSegment, NapCatId, Response
 from app.models.common import JsonObject
@@ -102,18 +102,30 @@ class RecordingDatabase:
 class FakeMessageClient(MessageMixin):
     """测试用消息客户端。"""
 
-    def __init__(self, database: RecordingDatabase) -> None:
+    def __init__(
+        self,
+        database: RecordingDatabase,
+        responses: list[Response | Exception] | None = None,
+    ) -> None:
         """初始化假客户端。"""
         self.database = cast(RedisDatabaseManager, database)
         self.boot_id = "10000"
         self.sent_actions: list[tuple[str, JsonObject | None]] = []
+        self.responses = responses or [
+            Response(status="ok", retcode=0, data={"message_id": 90000})
+        ]
+        self.send_retry_count = 3
+        self.send_retry_delay = 0
 
     async def _call_action(
         self, action: str, params: JsonObject | None = None
     ) -> Response:
-        """模拟 NapCat 返回发送成功的消息 ID。"""
+        """按预置序列模拟 NapCat 响应。"""
         self.sent_actions.append((action, params))
-        return Response(status="ok", retcode=0, data={"message_id": 90000})
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
@@ -134,6 +146,59 @@ class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.group_id, "40000")
         self.assertIsNone(record.user_id)
         self.assertEqual([segment.type for segment in record.message_segments], ["text"])
+
+    async def test_message_mixin_retries_failed_send_then_records_success(
+        self,
+    ) -> None:
+        """send_msg 首次失败后重试，成功时只保存一次出站消息。"""
+        database = RecordingDatabase()
+        client = FakeMessageClient(
+            database=database,
+            responses=[
+                Response(status="failed", retcode=1200, message="send timeout"),
+                Response(status="ok", retcode=0, data={"message_id": 90001}),
+            ],
+        )
+
+        response = await client.send_msg(group_id="40000", text="你好")
+
+        self.assertEqual(response.status, "ok")
+        self.assertEqual(len(client.sent_actions), 2)
+        self.assertEqual(len(database.records), 1)
+        self.assertEqual(database.records[0].message_id, "90001")
+
+    async def test_message_mixin_raises_after_send_retries_exhausted(self) -> None:
+        """send_msg 连续失败时抛出显式发送异常，不保存出站消息。"""
+        database = RecordingDatabase()
+        client = FakeMessageClient(
+            database=database,
+            responses=[
+                Response(status="failed", retcode=1200, message="send timeout"),
+                TimeoutError("等待 NapCat 响应超时"),
+            ],
+        )
+        client.send_retry_count = 2
+
+        with self.assertRaises(NapCatSendMessageError) as raised:
+            _ = await client.send_msg(group_id="40000", text="你好")
+
+        self.assertIn("NapCat 发送消息失败", str(raised.exception))
+        self.assertEqual(len(client.sent_actions), 2)
+        self.assertEqual(database.records, [])
+
+    async def test_message_mixin_does_not_retry_missing_message_id(self) -> None:
+        """发送成功但缺少 message_id 时不重试，避免实际已发送消息重复出现。"""
+        database = RecordingDatabase()
+        client = FakeMessageClient(
+            database=database,
+            responses=[Response(status="ok", retcode=0, data={})],
+        )
+
+        response = await client.send_msg(group_id="40000", text="你好")
+
+        self.assertEqual(response.status, "ok")
+        self.assertEqual(len(client.sent_actions), 1)
+        self.assertEqual(database.records, [])
 
     async def test_database_stores_outgoing_base64_image_as_cached_group_message(
         self,
