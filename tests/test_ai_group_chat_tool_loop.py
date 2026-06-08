@@ -893,7 +893,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
                 ]
             },
         )
-        fake_context.bot.image_responses["img-a"] = Response(
+        fake_context.bot.image_responses["a.jpg"] = Response(
             status="ok",
             retcode=0,
             data={"file": "a.jpg", "base64": "dG9vbC1pbWFnZQ=="},
@@ -923,7 +923,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(fake_context.bot.forward_calls, ["root-forward", "root-forward"])
-        self.assertEqual(fake_context.bot.image_calls, [("img-a", "a.jpg")])
+        self.assertEqual(fake_context.bot.image_calls, [(None, "a.jpg")])
         self.assertEqual(fake_llm.summary_model_calls, [("vision-vendor", "vision-model")])
         self.assertEqual(fake_llm.summary_messages[1].image, [b"tool-image"])
         second_request_text = "\n".join(

@@ -26,6 +26,7 @@ from app.services.llm.tools import (
     LLMToolImageArtifact,
     LLMToolRegistry,
 )
+from app.utils.log import log_event
 
 from .arguments import GetForwardMessageImagesArgs
 from .protocols import NapCatGroupToolBot
@@ -40,6 +41,7 @@ class ForwardImageTarget:
     image_index: int
     file: str | None
     file_id: str | None
+    path: str | None
     url: str | None
     summary: str | None
 
@@ -109,12 +111,23 @@ class GroupForwardImageToolset:
             message_id=args.message_id,
             raw_messages=root_messages,
         )
+        self._log_collected_targets(
+            message_id=args.message_id,
+            mode=args.mode,
+            targets=all_targets,
+        )
         selected_targets = self._select_targets(args=args, targets=all_targets)
         limited_targets, truncated = self._limit_targets(
             args=args,
             targets=selected_targets,
         )
         fetch_results = await self._fetch_targets(targets=limited_targets)
+        self._log_fetch_results(
+            message_id=args.message_id,
+            mode=args.mode,
+            results=fetch_results,
+            truncated=truncated,
+        )
         images = [result.metadata for result in fetch_results if result.error is None]
         errors: list[JsonObject] = []
         for result in fetch_results:
@@ -179,6 +192,7 @@ class GroupForwardImageToolset:
                             image_index=image_index,
                             file=segment.data.file,
                             file_id=segment.data.file_id,
+                            path=segment.data.path,
                             url=segment.data.url,
                             summary=segment.data.summary,
                         )
@@ -216,6 +230,7 @@ class GroupForwardImageToolset:
                 image_index=target.image_index,
                 file=target.file,
                 file_id=target.file_id,
+                path=target.path,
                 url=target.url,
                 summary=target.summary,
             )
@@ -298,19 +313,53 @@ class GroupForwardImageToolset:
         self, *, target: ForwardImageTarget
     ) -> ForwardImageFetchResult:
         """读取单张图片并整理为附件和元信息。"""
-        metadata = self._build_image_metadata(target=target)
+        metadata = self._build_image_metadata(target=target, source=None)
+        direct_error: JsonObject | None = None
+        try:
+            direct_image = await self._load_direct_image_bytes(target=target)
+        except Exception as exc:
+            direct_error = self._build_image_error(
+                target=target,
+                error_type=type(exc).__name__,
+                error=f"直接读取图片失败: {exc}",
+            )
+        else:
+            if direct_image is not None:
+                image_bytes, source = direct_image
+                return ForwardImageFetchResult(
+                    target=target,
+                    image_bytes=image_bytes,
+                    metadata=self._build_image_metadata(
+                        target=target,
+                        source=source,
+                    ),
+                    error=None,
+                )
         if target.file is None and target.file_id is None:
+            return ForwardImageFetchResult(
+                target=target,
+                image_bytes=None,
+                metadata=metadata,
+                error=direct_error
+                or self._build_image_error(
+                    target=target,
+                    error_type="MissingImageIdentifier",
+                    error="图片段缺少 file 和 file_id",
+                ),
+            )
+        try:
+            response = await self._refresh_image_info(target=target)
+        except Exception as exc:
             return ForwardImageFetchResult(
                 target=target,
                 image_bytes=None,
                 metadata=metadata,
                 error=self._build_image_error(
                     target=target,
-                    error_type="MissingImageIdentifier",
-                    error="图片段缺少 file 和 file_id",
+                    error_type=type(exc).__name__,
+                    error=f"NapCat 刷新图片信息失败: {exc}",
                 ),
             )
-        response = await self.bot.get_image(file_id=target.file_id, file=target.file)
         if response.status != "ok" or response.retcode != 0:
             return ForwardImageFetchResult(
                 target=target,
@@ -322,7 +371,19 @@ class GroupForwardImageToolset:
                     error=response.message or response.wording or "NapCat 返回失败",
                 ),
             )
-        image_bytes = await self._load_image_bytes(response=response, target=target)
+        try:
+            image_bytes = await self._load_image_bytes(response=response, target=target)
+        except Exception as exc:
+            return ForwardImageFetchResult(
+                target=target,
+                image_bytes=None,
+                metadata=metadata,
+                error=self._build_image_error(
+                    target=target,
+                    error_type=type(exc).__name__,
+                    error=f"读取 NapCat 图片响应失败: {exc}",
+                ),
+            )
         if image_bytes is None:
             return ForwardImageFetchResult(
                 target=target,
@@ -337,9 +398,31 @@ class GroupForwardImageToolset:
         return ForwardImageFetchResult(
             target=target,
             image_bytes=image_bytes,
-            metadata=metadata,
+            metadata=self._build_image_metadata(
+                target=target,
+                source="napcat_refresh",
+            ),
             error=None,
         )
+
+    async def _load_direct_image_bytes(
+        self, *, target: ForwardImageTarget
+    ) -> tuple[bytes, str] | None:
+        """优先从合并转发图片段自身携带的本地路径或 URL 读取图片。"""
+        if target.path is not None:
+            path = Path(target.path)
+            if path.is_file():
+                async with aiofiles.open(path, mode="rb") as file:
+                    return await file.read(), "direct_path"
+        if target.url is not None and self.http_client is not None:
+            return await self._download_url(url=target.url), "direct_url"
+        return None
+
+    async def _refresh_image_info(self, *, target: ForwardImageTarget) -> Response:
+        """通过 NapCat 刷新图片信息，作为直接下载不可用时的后备路径。"""
+        if target.file is not None:
+            return await self.bot.get_image(file=target.file)
+        return await self.bot.get_image(file_id=target.file_id)
 
     async def _load_image_bytes(
         self, *, response: Response, target: ForwardImageTarget
@@ -363,13 +446,19 @@ class GroupForwardImageToolset:
         if not isinstance(url, str):
             url = target.url
         if isinstance(url, str) and self.http_client is not None:
-            response_stream = await self.http_client.get(
-                url,
-                timeout=self.download_timeout_seconds,
-            )
-            response_stream.raise_for_status()
-            return response_stream.content
+            return await self._download_url(url=url)
         return None
+
+    async def _download_url(self, *, url: str) -> bytes:
+        """通过本地 HTTP 客户端下载图片字节。"""
+        if self.http_client is None:
+            raise RuntimeError("合并转发图片 URL 下载需要配置 HTTP 客户端")
+        response = await self.http_client.get(
+            url,
+            timeout=self.download_timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.content
 
     def _build_artifact(self, *, result: ForwardImageFetchResult) -> LLMToolImageArtifact:
         """把成功读取的图片整理为模型内部附件。"""
@@ -383,7 +472,9 @@ class GroupForwardImageToolset:
             metadata=result.metadata,
         )
 
-    def _build_image_metadata(self, *, target: ForwardImageTarget) -> JsonObject:
+    def _build_image_metadata(
+        self, *, target: ForwardImageTarget, source: str | None
+    ) -> JsonObject:
         """生成模型可读的图片元信息。"""
         return {
             "message_id": to_json_value(target.message_id),
@@ -391,9 +482,92 @@ class GroupForwardImageToolset:
             "image_index": target.image_index,
             "file": target.file,
             "file_id": target.file_id,
+            "path": target.path,
             "url": target.url,
             "summary": target.summary,
+            "source": source,
         }
+
+    def _log_collected_targets(
+        self,
+        *,
+        message_id: NapCatId,
+        mode: str,
+        targets: list[ForwardImageTarget],
+    ) -> None:
+        """记录合并转发图片段字段，便于排查图片 URL 是否存在。"""
+        log_event(
+            level="DEBUG",
+            event="napcat.group_tools.forward_images.targets_collected",
+            category="napcat_tools",
+            message="已收集合并转发图片段字段",
+            group_id=to_json_value(self.event.group_id),
+            message_id=to_json_value(message_id),
+            mode=mode,
+            image_count=len(targets),
+            images=[
+                {
+                    "message_id": to_json_value(target.message_id),
+                    "message_index": target.message_index,
+                    "image_index": target.image_index,
+                    "file": target.file,
+                    "file_id": target.file_id,
+                    "path": target.path,
+                    "url": target.url,
+                    "summary": target.summary,
+                    "has_url": target.url is not None and target.url.strip() != "",
+                }
+                for target in targets
+            ],
+        )
+
+    def _log_fetch_results(
+        self,
+        *,
+        message_id: NapCatId,
+        mode: str,
+        results: list[ForwardImageFetchResult],
+        truncated: bool,
+    ) -> None:
+        """记录合并转发图片读取结果，便于线上按来源定位问题。"""
+        log_event(
+            level="DEBUG",
+            event="napcat.group_tools.forward_images.fetch_finished",
+            category="napcat_tools",
+            message="合并转发图片读取完成",
+            group_id=to_json_value(self.event.group_id),
+            message_id=to_json_value(message_id),
+            mode=mode,
+            requested_count=len(results),
+            returned_count=sum(1 for result in results if result.error is None),
+            errors_count=sum(1 for result in results if result.error is not None),
+            truncated=truncated,
+            images=[
+                {
+                    "message_id": to_json_value(result.target.message_id),
+                    "message_index": result.target.message_index,
+                    "image_index": result.target.image_index,
+                    "file": result.target.file,
+                    "file_id": result.target.file_id,
+                    "path": result.target.path,
+                    "url": result.target.url,
+                    "summary": result.target.summary,
+                    "source": result.metadata.get("source"),
+                    "ok": result.error is None,
+                    "error_type": (
+                        result.error.get("error_type")
+                        if result.error is not None
+                        else None
+                    ),
+                    "error": (
+                        result.error.get("error")
+                        if result.error is not None
+                        else None
+                    ),
+                }
+                for result in results
+            ],
+        )
 
     def _build_image_error(
         self, *, target: ForwardImageTarget, error_type: str, error: str

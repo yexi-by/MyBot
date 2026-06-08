@@ -3,6 +3,8 @@
 import unittest
 from typing import cast
 
+import httpx
+
 from app.models import (
     At,
     File,
@@ -524,12 +526,12 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
                 )
             },
             image_responses={
-                "img-a": Response(
+                "a.jpg": Response(
                     status="ok",
                     retcode=0,
                     data={"file": "a.jpg", "base64": IMAGE_A_BASE64},
                 ),
-                "img-b": Response(
+                "b.jpg": Response(
                     status="ok",
                     retcode=0,
                     data={"file": "b.jpg", "base64": IMAGE_B_BASE64},
@@ -556,7 +558,67 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.image_artifacts), 2)
         self.assertEqual(result.image_artifacts[0].image_bytes, b"image-a")
         self.assertEqual(result.image_artifacts[1].image_bytes, b"image-b")
-        self.assertEqual(bot.image_calls, [("img-a", "a.jpg"), ("img-b", "b.jpg")])
+        images = require_json_list(result_object["images"])
+        first_image = require_json_object(images[0])
+        self.assertEqual(first_image["source"], "napcat_refresh")
+        self.assertEqual(bot.image_calls, [(None, "a.jpg"), (None, "b.jpg")])
+
+    async def test_forward_image_tool_prefers_segment_url_download(self) -> None:
+        """图片段带 URL 时直接下载，不先调用 NapCat 获取图片。"""
+        requested_urls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested_urls.append(str(request.url))
+            return httpx.Response(200, content=b"url-image")
+
+        bot = FakeBot(
+            forward_responses={
+                "root-forward": Response(
+                    status="ok",
+                    retcode=0,
+                    data={
+                        "messages": [
+                            {
+                                "message": [
+                                    {
+                                        "type": "image",
+                                        "data": {
+                                            "file": "a.jpg",
+                                            "file_id": "img-a",
+                                            "url": "https://media.example/a.jpg",
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                )
+            },
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http_client:
+            executor = NapCatGroupToolExecutor(
+                bot=cast(NapCatGroupToolBot, bot),
+                database=FakeDatabase(),
+                event=build_group_message(),
+                http_client=http_client,
+            )
+
+            result = await executor.call_tool_with_artifacts(
+                "qq__get_forward_message_images",
+                {"message_id": "root-forward", "mode": "all"},
+            )
+
+        result_object = require_json_object(result.result)
+        self.assertEqual(result_object["returned_count"], 1)
+        self.assertEqual(len(result.image_artifacts), 1)
+        self.assertEqual(result.image_artifacts[0].image_bytes, b"url-image")
+        images = require_json_list(result_object["images"])
+        first_image = require_json_object(images[0])
+        self.assertEqual(first_image["source"], "direct_url")
+        self.assertEqual(requested_urls, ["https://media.example/a.jpg"])
+        self.assertEqual(bot.image_calls, [])
 
     async def test_forward_image_tool_limits_all_mode_by_configuration(self) -> None:
         """all 模式会按配置截断，避免一次读取过多图片。"""
@@ -577,7 +639,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
                     ]
                 }
             )
-            image_responses[file_id] = Response(
+            image_responses[f"{file_id}.jpg"] = Response(
                 status="ok",
                 retcode=0,
                 data={"file": f"{file_id}.jpg", "base64": IMAGE_A_BASE64},
@@ -640,7 +702,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
                 )
             },
             image_responses={
-                "img-a": Response(
+                "a.jpg": Response(
                     status="ok",
                     retcode=0,
                     data={"file": "a.jpg", "base64": IMAGE_A_BASE64},
