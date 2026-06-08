@@ -71,6 +71,10 @@ class FakeBot:
         """初始化发送记录。"""
         self.sent_texts: list[str] = []
         self.sent_segment_types: list[list[str]] = []
+        self.forward_responses: dict[str, Response] = {}
+        self.image_responses: dict[str, Response] = {}
+        self.forward_calls: list[str] = []
+        self.image_calls: list[tuple[str | None, str | None]] = []
 
     async def send_msg(
         self,
@@ -90,6 +94,23 @@ class FakeBot:
         if text is not None:
             self.sent_texts.append(text)
         return Response(status="ok", retcode=0)
+
+    async def get_forward_msg(self, *, message_id: str) -> Response:
+        """返回预置合并转发响应。"""
+        self.forward_calls.append(message_id)
+        if message_id in self.forward_responses:
+            return self.forward_responses[message_id]
+        return Response(status="failed", retcode=404, message="合并转发不存在")
+
+    async def get_image(
+        self, *, file_id: str | None = None, file: str | None = None
+    ) -> Response:
+        """返回预置图片响应。"""
+        self.image_calls.append((file_id, file))
+        key = file_id if file_id is not None else file
+        if key is not None and key in self.image_responses:
+            return self.image_responses[key]
+        return Response(status="failed", retcode=404, message="图片不存在")
 
     def _extract_text(self, *, message_segment: list[MessageSegment]) -> str:
         """从消息段里提取文本，便于断言发送内容。"""
@@ -573,6 +594,36 @@ class FakeToolImageLLM:
         return LLMResponse(content="看完图片了")
 
 
+class FakeForwardOnlyImageLLM(FakeToolImageLLM):
+    """测试用 LLM，只主动读取合并转发，不主动调用图片工具。"""
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """第一轮只调用合并转发工具，第二轮基于自动图片观察回复。"""
+        _ = (tools, tool_choice, parallel_tool_calls)
+        self.formal_model_calls.append((model_vendors, model_name))
+        self.received_messages.append(messages[:])
+        if len(self.received_messages) == 1:
+            return LLMResponse(
+                content="我先拆一下合并转发",
+                tool_calls=[
+                    LLMToolCall(
+                        id="call-forward",
+                        name="qq__get_forward_message",
+                        arguments={"message_id": "root-forward"},
+                    )
+                ],
+            )
+        return LLMResponse(content="看完合并转发图片了")
+
+
 def build_config(
     *,
     output_reasoning_content: bool,
@@ -815,6 +866,70 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("图片观察结果：画面里有白底黑字。", second_request_text)
         persisted_text = "\n".join(message.text or "" for message in chat_handler.messages_lst)
         self.assertNotIn("图片观察结果：画面里有白底黑字。", persisted_text)
+
+    async def test_forward_tool_auto_fetches_images_for_text_model(self) -> None:
+        """模型只读取合并转发时，系统会自动补取其中图片并生成视觉摘要。"""
+        fake_llm = FakeForwardOnlyImageLLM()
+        fake_context = FakeContext(llm=fake_llm)
+        fake_context.bot.forward_responses["root-forward"] = Response(
+            status="ok",
+            retcode=0,
+            data={
+                "messages": [
+                    {
+                        "sender": {"nickname": "小明"},
+                        "message": [
+                            {"type": "text", "data": {"text": "看图"}},
+                            {
+                                "type": "image",
+                                "data": {
+                                    "file": "a.jpg",
+                                    "file_id": "img-a",
+                                    "summary": "[图片A]",
+                                },
+                            },
+                        ],
+                    }
+                ]
+            },
+        )
+        fake_context.bot.image_responses["img-a"] = Response(
+            status="ok",
+            retcode=0,
+            data={"file": "a.jpg", "base64": "dG9vbC1pbWFnZQ=="},
+        )
+        config = build_config(
+            output_reasoning_content=False,
+            model_vendors="main-vendor",
+        )
+        config.multimodal_fallback_model_name = "vision-model"
+        config.multimodal_fallback_model_vendors = "vision-vendor"
+        tool_loop = GroupChatToolLoop(
+            config=config,
+            context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="评价这个合并转发")],
+            active_model=ActiveModelConfig(
+                model_name="main-model",
+                model_vendors="main-vendor",
+                supports_multimodal=False,
+            ),
+        )
+
+        self.assertEqual(fake_context.bot.forward_calls, ["root-forward", "root-forward"])
+        self.assertEqual(fake_context.bot.image_calls, [("img-a", "a.jpg")])
+        self.assertEqual(fake_llm.summary_model_calls, [("vision-vendor", "vision-model")])
+        self.assertEqual(fake_llm.summary_messages[1].image, [b"tool-image"])
+        second_request_text = "\n".join(
+            message.text or "" for message in fake_llm.received_messages[1]
+        )
+        self.assertIn("图片观察结果：画面里有白底黑字。", second_request_text)
 
     async def test_tool_image_is_passed_directly_when_active_model_is_multimodal(
         self,

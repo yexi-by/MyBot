@@ -8,6 +8,7 @@ from pydantic import TypeAdapter, ValidationError
 from app.models import (
     Forward,
     GroupMessage,
+    Image,
     JsonObject,
     JsonValue,
     MessageSegment,
@@ -70,14 +71,29 @@ class GroupForwardToolset:
         )
         if result.root_failed:
             return self._build_root_error_result(args=args, result=result)
+        image_count = self._count_forward_images(messages=result.messages)
+        readable_text = result.readable_text
+        image_access: JsonObject | None = None
+        if image_count > 0:
+            image_access = self._build_image_access_hint(
+                message_id=result.message_id,
+                image_count=image_count,
+            )
+            readable_text = self._append_image_access_text(
+                readable_text=readable_text,
+                message_id=result.message_id,
+                image_count=image_count,
+            )
         return {
             "ok": True,
             "action": "get_forward_message",
             "group_id": to_json_value(self.event.group_id),
             "message_id": to_json_value(result.message_id),
             "complete": result.complete,
+            "image_count": image_count,
+            "image_access": image_access,
             "messages": to_json_value(result.messages),
-            "readable_text": result.readable_text,
+            "readable_text": readable_text,
             "errors": to_json_value(result.errors),
         }
 
@@ -285,6 +301,7 @@ class GroupForwardToolset:
                 segments=segments,
                 active_forward_ids=active_forward_ids,
             )
+        image_count = self._count_image_segments(segments=segments)
         message: JsonObject = {
             "index": index,
             "raw": to_json_value(raw_message),
@@ -297,6 +314,7 @@ class GroupForwardToolset:
             "content": to_json_value(content),
             "segments": self._dump_segments(content=content, segments=segments),
             "segment_types": [segment.type for segment in segments or []],
+            "image_count": image_count,
             "text": self._format_content_text(content=content, segments=segments),
             "nested_forwards": to_json_value(nested_forwards),
         }
@@ -410,6 +428,68 @@ class GroupForwardToolset:
         if content is None:
             return "（无文本内容）"
         return json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+
+    def _count_image_segments(self, *, segments: list[MessageSegment] | None) -> int:
+        """统计一条合并转发消息中的图片段数量。"""
+        if segments is None:
+            return 0
+        return sum(1 for segment in segments if isinstance(segment, Image))
+
+    def _count_forward_images(self, *, messages: list[JsonObject]) -> int:
+        """统计合并转发树中已发现的图片数量。"""
+        image_count = 0
+        for message in messages:
+            raw_image_count = message.get("image_count")
+            if isinstance(raw_image_count, int):
+                image_count += raw_image_count
+            nested_forwards = message.get("nested_forwards")
+            if not isinstance(nested_forwards, list):
+                continue
+            for nested_forward in nested_forwards:
+                if not isinstance(nested_forward, dict):
+                    continue
+                nested_messages = nested_forward.get("messages")
+                if not isinstance(nested_messages, list):
+                    continue
+                nested_message_objects = [
+                    item for item in nested_messages if isinstance(item, dict)
+                ]
+                image_count += self._count_forward_images(
+                    messages=nested_message_objects
+                )
+        return image_count
+
+    def _build_image_access_hint(
+        self, *, message_id: NapCatId, image_count: int
+    ) -> JsonObject:
+        """生成合并转发图片内容的后续读取提示。"""
+        return {
+            "available": True,
+            "image_count": image_count,
+            "tool_name": "qq__get_forward_message_images",
+            "recommended_arguments": {
+                "message_id": to_json_value(message_id),
+                "mode": "all",
+            },
+            "message": (
+                "当前合并转发结果只包含图片元信息，未包含图片内容。"
+                "如需查看或评价这些图片，应继续调用 qq__get_forward_message_images。"
+            ),
+        }
+
+    def _append_image_access_text(
+        self, *, readable_text: str, message_id: NapCatId, image_count: int
+    ) -> str:
+        """在可读文本末尾补充图片读取方式，帮助模型主动继续调用工具。"""
+        hint = (
+            f"（本合并转发包含 {image_count} 张图片；当前结果只包含图片元信息，"
+            "未包含图片内容。需要查看或评价图片时，应继续调用 "
+            "qq__get_forward_message_images，"
+            f"参数 message_id=\"{message_id}\", mode=\"all\"。）"
+        )
+        if readable_text == "":
+            return hint
+        return f"{readable_text}\n{hint}"
 
     def _extract_sender(self, *, payload: JsonObject | None) -> JsonValue:
         """提取发送者信息。"""

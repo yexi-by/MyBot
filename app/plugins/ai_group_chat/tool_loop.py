@@ -24,6 +24,10 @@ from .config import (
 from .context_compressor import GroupChatContextCompressor
 from .debug_dump import AIGroupChatDebugDumper
 from .deepseek_v4_prompt import DeepSeekV4PromptPack, load_deepseek_v4_prompt_pack
+from .forward_image_auto_fetch import (
+    FORWARD_MESSAGE_IMAGES_TOOL_NAME,
+    ForwardImageAutoFetcher,
+)
 from .token_budget import ConservativeTokenEstimator, TokenBudgetEstimate
 from .visual_observer import ToolImageObserver
 
@@ -93,6 +97,9 @@ class GroupChatToolLoop:
         )
         self.context_compressor: GroupChatContextCompressor = (
             GroupChatContextCompressor()
+        )
+        self.forward_image_auto_fetcher: ForwardImageAutoFetcher = (
+            ForwardImageAutoFetcher(config=config)
         )
         self.tool_image_observer: ToolImageObserver = ToolImageObserver(
             config=config,
@@ -752,6 +759,10 @@ class GroupChatToolLoop:
         history_messages: list[ChatMessage] = []
         has_error = False
         image_artifacts: list[LLMToolImageArtifact] = []
+        explicit_forward_image_call = any(
+            tool_call.name == FORWARD_MESSAGE_IMAGES_TOOL_NAME
+            for tool_call in tool_calls
+        )
         for tool_call in tool_calls:
             log_event(
                 level="DEBUG",
@@ -766,6 +777,8 @@ class GroupChatToolLoop:
             tool_message, is_error, tool_image_artifacts = await self._call_tool_for_model(
                 tool_call=tool_call,
                 tool_executor=tool_executor,
+                group_id=group_id,
+                explicit_forward_image_call=explicit_forward_image_call,
             )
             working_messages.append(tool_message)
             history_messages.append(tool_message)
@@ -798,6 +811,8 @@ class GroupChatToolLoop:
         *,
         tool_call: LLMToolCall,
         tool_executor: CompositeToolExecutor,
+        group_id: str,
+        explicit_forward_image_call: bool,
     ) -> tuple[ChatMessage, bool, list[LLMToolImageArtifact]]:
         """调用工具并把成功或失败结果都整理为模型可读的 tool 消息。"""
         result: JsonValue
@@ -809,6 +824,21 @@ class GroupChatToolLoop:
             )
             result = execution_result.result
             image_artifacts = execution_result.image_artifacts
+            if self.forward_image_auto_fetcher.should_fetch(
+                tool_call=tool_call,
+                result=result,
+                explicit_forward_image_call=explicit_forward_image_call,
+            ):
+                auto_image_result = await self.forward_image_auto_fetcher.fetch(
+                    forward_result=result,
+                    tool_executor=tool_executor,
+                    group_id=group_id,
+                )
+                result = self.forward_image_auto_fetcher.merge_result(
+                    forward_result=result,
+                    image_result=auto_image_result.result,
+                )
+                image_artifacts.extend(auto_image_result.image_artifacts)
         except Exception as exc:
             error_result: JsonObject = {
                 "ok": False,
