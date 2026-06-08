@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from typing import Protocol, cast
 
+import httpx
+
 from app.api.mixins.message import NapCatSendMessageError
 from app.models import GroupMessage, JsonObject, MessageSegment, Response, Sender, Text
 from app.plugins.ai_group_chat.ai_group_chat import AIGroupChatPlugin
@@ -19,6 +21,7 @@ from app.services.llm.schemas import (
     LLMToolChoice,
     LLMToolDefinition,
 )
+from app.services.llm.tools import LLMToolExecutionResult, LLMToolImageArtifact
 
 
 class FakeLLMProtocol(Protocol):
@@ -120,6 +123,7 @@ class FakeContext:
         """初始化测试依赖。"""
         self.bot: FakeBot = FakeBot()
         self.database: FakeDatabase = FakeDatabase()
+        self.direct_httpx: httpx.AsyncClient = cast(httpx.AsyncClient, object())
         self.llm: FakeLLMProtocol = llm if llm is not None else FakeLLM()
         self.mcp_tool_manager: FakeMCPToolManagerProtocol = (
             mcp_tool_manager
@@ -194,6 +198,46 @@ class FakeInfoToolManager:
         """返回固定工具结果。"""
         _ = (name, arguments)
         return {"ok": True, "value": "查到了"}
+
+
+class FakeImageToolManager:
+    """测试用图片工具管理器，返回一张工具图片附件。"""
+
+    def list_tools(self) -> list[LLMToolDefinition]:
+        """返回测试图片工具定义。"""
+        return [
+            LLMToolDefinition(
+                name="test__image_lookup",
+                description="查询测试图片。",
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            )
+        ]
+
+    async def call_tool(self, name: str, arguments: JsonObject) -> JsonObject:
+        """兼容普通工具协议。"""
+        _ = (name, arguments)
+        return {"ok": True, "returned_count": 1}
+
+    async def call_tool_with_artifacts(
+        self, name: str, arguments: JsonObject
+    ) -> LLMToolExecutionResult:
+        """返回带图片附件的工具结果。"""
+        _ = (name, arguments)
+        return LLMToolExecutionResult(
+            result={"ok": True, "returned_count": 1},
+            image_artifacts=[
+                LLMToolImageArtifact(
+                    label="测试图片",
+                    image_bytes=b"tool-image",
+                    metadata={"message_index": 1, "image_index": 1},
+                )
+            ],
+        )
 
 
 class FakeToolCallLLM:
@@ -478,6 +522,54 @@ class FakeRoutingLLM:
         return LLMResponse(content="路由回复")
 
 
+class FakeToolImageLLM:
+    """测试用 LLM，先请求图片工具，再基于图片观察结果回复。"""
+
+    def __init__(self) -> None:
+        """初始化请求记录。"""
+        self.received_messages: list[list[ChatMessage]] = []
+        self.formal_model_calls: list[tuple[str, str]] = []
+        self.summary_messages: list[ChatMessage] = []
+        self.summary_model_calls: list[tuple[str, str]] = []
+
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+    ) -> str:
+        """记录独立图片摘要请求并返回固定观察结果。"""
+        self.summary_model_calls.append((model_vendors, model_name))
+        self.summary_messages = messages[:]
+        return "图片观察结果：画面里有白底黑字。"
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """第一轮调用图片工具，第二轮输出最终正文。"""
+        _ = (tools, tool_choice, parallel_tool_calls)
+        self.formal_model_calls.append((model_vendors, model_name))
+        self.received_messages.append(messages[:])
+        if len(self.received_messages) == 1:
+            return LLMResponse(
+                content="我先看一下图片",
+                tool_calls=[
+                    LLMToolCall(
+                        id="call-image",
+                        name="test__image_lookup",
+                        arguments={},
+                    )
+                ],
+            )
+        return LLMResponse(content="看完图片了")
+
+
 def build_config(
     *,
     output_reasoning_content: bool,
@@ -665,6 +757,101 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_context.bot.sent_texts, ["我先查一下", "工具后回复"])
         self.assertEqual(chat_handler.messages_lst[2].text, "我先查一下")
         self.assertEqual(chat_handler.messages_lst[3].text, "工具后回复")
+
+    async def test_tool_image_uses_isolated_vision_summary_for_text_model(self) -> None:
+        """主模型不支持多模态时，工具图片用独立备用视觉请求生成摘要。"""
+        fake_llm = FakeToolImageLLM()
+        fake_context = FakeContext(
+            llm=fake_llm,
+            mcp_tool_manager=FakeImageToolManager(),
+        )
+        config = build_config(
+            output_reasoning_content=False,
+            model_vendors="main-vendor",
+        )
+        config.multimodal_fallback_model_name = "vision-model"
+        config.multimodal_fallback_model_vendors = "vision-vendor"
+        config.tool_image_observation_system_prompt = "只执行独立图片观察任务。"
+        config.tool_image_observation_user_prompt = "请描述本批图片。"
+        config.persist_tool_image_observations = False
+        tool_loop = GroupChatToolLoop(
+            config=config,
+            context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
+        )
+        chat_handler = ContextHandler(
+            system_prompt="群聊系统提示词不能进入视觉摘要",
+            max_context_tokens=1000000,
+        )
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="当前用户正文不能进入视觉摘要")],
+            active_model=ActiveModelConfig(
+                model_name="main-model",
+                model_vendors="main-vendor",
+                supports_multimodal=False,
+            ),
+        )
+
+        self.assertEqual(fake_llm.summary_model_calls, [("vision-vendor", "vision-model")])
+        self.assertEqual(len(fake_llm.summary_messages), 2)
+        summary_system = fake_llm.summary_messages[0]
+        summary_user = fake_llm.summary_messages[1]
+        self.assertEqual(summary_system.role, "system")
+        self.assertEqual(summary_system.text, "只执行独立图片观察任务。")
+        self.assertNotIn("群聊系统提示词", summary_system.text or "")
+        self.assertEqual(summary_user.role, "user")
+        self.assertIn("请描述本批图片。", summary_user.text or "")
+        self.assertNotIn("当前用户正文", summary_user.text or "")
+        self.assertEqual(summary_user.image, [b"tool-image"])
+        second_request_text = "\n".join(
+            message.text or "" for message in fake_llm.received_messages[1]
+        )
+        self.assertIn("图片观察结果：画面里有白底黑字。", second_request_text)
+        persisted_text = "\n".join(message.text or "" for message in chat_handler.messages_lst)
+        self.assertNotIn("图片观察结果：画面里有白底黑字。", persisted_text)
+
+    async def test_tool_image_is_passed_directly_when_active_model_is_multimodal(
+        self,
+    ) -> None:
+        """active model 支持多模态时，工具图片直接进入下一轮正式请求。"""
+        fake_llm = FakeToolImageLLM()
+        fake_context = FakeContext(
+            llm=fake_llm,
+            mcp_tool_manager=FakeImageToolManager(),
+        )
+        config = build_config(
+            output_reasoning_content=False,
+            model_vendors="vision-vendor",
+            supports_multimodal=True,
+        )
+        tool_loop = GroupChatToolLoop(
+            config=config,
+            context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="需要看图")],
+            active_model=ActiveModelConfig(
+                model_name="vision-model",
+                model_vendors="vision-vendor",
+                supports_multimodal=True,
+            ),
+        )
+
+        self.assertEqual(fake_llm.summary_model_calls, [])
+        second_request_images = [
+            message.image
+            for message in fake_llm.received_messages[1]
+            if message.image is not None
+        ]
+        self.assertEqual(second_request_images, [[b"tool-image"]])
 
     async def test_content_directives_are_sent_with_message_segments(self) -> None:
         """content 中的 `<Reply>` / `<At>` 会转换成消息段，长期上下文写入原文。"""
@@ -1046,7 +1233,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             )
             chat_handler = ContextHandler(
                 system_prompt="系统提示词",
-                max_context_tokens=7000,
+                max_context_tokens=9000,
             )
             chat_handler.build_chatmessage(
                 message_lst=[
@@ -1109,7 +1296,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             )
             chat_handler = ContextHandler(
                 system_prompt="系统提示词",
-                max_context_tokens=8000,
+                max_context_tokens=10000,
             )
             chat_handler.build_chatmessage(
                 message_lst=[

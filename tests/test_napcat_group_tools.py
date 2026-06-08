@@ -19,6 +19,7 @@ from app.models import (
     Text,
 )
 from app.services.napcat.group_tools import (
+    GetForwardMessageImagesArgs,
     GetGroupHistoryMessagesArgs,
     NapCatGroupToolExecutor,
     NapCatGroupToolBot,
@@ -57,16 +58,24 @@ def build_group_message(
     )
 
 
+IMAGE_A_BASE64 = "aW1hZ2UtYQ=="
+IMAGE_B_BASE64 = "aW1hZ2UtYg=="
+
+
 class FakeBot:
     """测试用 NapCat Bot。"""
 
     def __init__(
-        self, forward_responses: dict[NapCatId, Response] | None = None
+        self,
+        forward_responses: dict[NapCatId, Response] | None = None,
+        image_responses: dict[str, Response] | None = None,
     ) -> None:
         """初始化发送记录。"""
         self.sent_count = 0
         self.forward_responses = forward_responses or {}
         self.forward_calls: list[NapCatId] = []
+        self.image_responses = image_responses or {}
+        self.image_calls: list[tuple[str | None, str | None]] = []
 
     async def send_msg(
         self,
@@ -109,6 +118,16 @@ class FakeBot:
         if response is not None:
             return response
         return Response(status="failed", retcode=404, message="合并转发不存在")
+
+    async def get_image(
+        self, file_id: str | None = None, file: str | None = None
+    ) -> Response:
+        """返回预置图片信息。"""
+        self.image_calls.append((file_id, file))
+        key = file_id if file_id is not None else file
+        if key is not None and key in self.image_responses:
+            return self.image_responses[key]
+        return Response(status="failed", retcode=404, message="图片不存在")
 
 
 class FakeDatabase:
@@ -247,6 +266,46 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
                 {"query_mode": "recent_duration"}
             )
 
+    def test_forward_image_args_require_indices_by_mode(self) -> None:
+        """不同合并转发图片选择模式需要明确的定位参数。"""
+        single = GetForwardMessageImagesArgs.model_validate(
+            {
+                "message_id": "root-forward",
+                "mode": "single",
+                "message_index": 1,
+                "image_index": 1,
+            }
+        )
+        self.assertEqual(single.mode, "single")
+
+        message = GetForwardMessageImagesArgs.model_validate(
+            {
+                "message_id": "root-forward",
+                "mode": "message",
+                "message_index": 2,
+            }
+        )
+        self.assertEqual(message.mode, "message")
+
+        all_images = GetForwardMessageImagesArgs.model_validate(
+            {"message_id": "root-forward", "mode": "all"}
+        )
+        self.assertEqual(all_images.mode, "all")
+
+        with self.assertRaises(ValueError):
+            _ = GetForwardMessageImagesArgs.model_validate(
+                {"message_id": "root-forward", "mode": "single"}
+            )
+
+        with self.assertRaises(ValueError):
+            _ = GetForwardMessageImagesArgs.model_validate(
+                {
+                    "message_id": "root-forward",
+                    "mode": "all",
+                    "message_index": 1,
+                }
+            )
+
     async def test_history_messages_include_readable_non_text_segments(self) -> None:
         """历史查询会把艾特、图片、文件和卡片转成模型可读文本。"""
         history_message = build_group_message(
@@ -360,6 +419,188 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("报告.pdf", require_string(first_message["text"]))
         segments = require_json_list(first_message["segments"])
         self.assertEqual(require_json_object(segments[1])["type"], "file")
+
+    async def test_forward_image_tool_fetches_all_images_with_artifacts(self) -> None:
+        """合并转发图片工具按 all 模式批量返回图片附件。"""
+        bot = FakeBot(
+            forward_responses={
+                "root-forward": Response(
+                    status="ok",
+                    retcode=0,
+                    data={
+                        "messages": [
+                            {
+                                "sender": {"nickname": "小明"},
+                                "message": [
+                                    {
+                                        "type": "image",
+                                        "data": {
+                                            "file": "a.jpg",
+                                            "file_id": "img-a",
+                                            "summary": "[图片A]",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "sender": {"nickname": "小红"},
+                                "message": [
+                                    {
+                                        "type": "image",
+                                        "data": {
+                                            "file": "b.jpg",
+                                            "file_id": "img-b",
+                                            "summary": "[图片B]",
+                                        },
+                                    }
+                                ],
+                            },
+                        ]
+                    },
+                )
+            },
+            image_responses={
+                "img-a": Response(
+                    status="ok",
+                    retcode=0,
+                    data={"file": "a.jpg", "base64": IMAGE_A_BASE64},
+                ),
+                "img-b": Response(
+                    status="ok",
+                    retcode=0,
+                    data={"file": "b.jpg", "base64": IMAGE_B_BASE64},
+                ),
+            },
+        )
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            database=FakeDatabase(),
+            event=build_group_message(),
+        )
+
+        result = await executor.call_tool_with_artifacts(
+            "qq__get_forward_message_images",
+            {"message_id": "root-forward", "mode": "all"},
+        )
+
+        result_object = require_json_object(result.result)
+        self.assertIs(result_object["ok"], True)
+        self.assertEqual(result_object["action"], "get_forward_message_images")
+        self.assertEqual(result_object["total_images"], 2)
+        self.assertEqual(result_object["returned_count"], 2)
+        self.assertIs(result_object["truncated"], False)
+        self.assertEqual(len(result.image_artifacts), 2)
+        self.assertEqual(result.image_artifacts[0].image_bytes, b"image-a")
+        self.assertEqual(result.image_artifacts[1].image_bytes, b"image-b")
+        self.assertEqual(bot.image_calls, [("img-a", "a.jpg"), ("img-b", "b.jpg")])
+
+    async def test_forward_image_tool_limits_all_mode_by_configuration(self) -> None:
+        """all 模式会按配置截断，避免一次读取过多图片。"""
+        messages: list[JsonValue] = []
+        image_responses: dict[str, Response] = {}
+        for index in range(1, 6):
+            file_id = f"img-{index}"
+            messages.append(
+                {
+                    "message": [
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": f"{file_id}.jpg",
+                                "file_id": file_id,
+                            },
+                        }
+                    ]
+                }
+            )
+            image_responses[file_id] = Response(
+                status="ok",
+                retcode=0,
+                data={"file": f"{file_id}.jpg", "base64": IMAGE_A_BASE64},
+            )
+        bot = FakeBot(
+            forward_responses={
+                "root-forward": Response(
+                    status="ok",
+                    retcode=0,
+                    data={"messages": messages},
+                )
+            },
+            image_responses=image_responses,
+        )
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            database=FakeDatabase(),
+            event=build_group_message(),
+            forward_image_max_all_images=3,
+        )
+
+        result = await executor.call_tool_with_artifacts(
+            "qq__get_forward_message_images",
+            {"message_id": "root-forward", "mode": "all"},
+        )
+
+        result_object = require_json_object(result.result)
+        self.assertEqual(result_object["total_images"], 5)
+        self.assertEqual(result_object["returned_count"], 3)
+        self.assertIs(result_object["truncated"], True)
+        self.assertEqual(len(result.image_artifacts), 3)
+
+    async def test_forward_image_tool_returns_partial_errors(self) -> None:
+        """部分图片读取失败时，成功图片仍作为附件返回。"""
+        bot = FakeBot(
+            forward_responses={
+                "root-forward": Response(
+                    status="ok",
+                    retcode=0,
+                    data={
+                        "messages": [
+                            {
+                                "message": [
+                                    {
+                                        "type": "image",
+                                        "data": {"file": "a.jpg", "file_id": "img-a"},
+                                    }
+                                ]
+                            },
+                            {
+                                "message": [
+                                    {
+                                        "type": "image",
+                                        "data": {"file": "missing.jpg", "file_id": "missing"},
+                                    }
+                                ]
+                            },
+                        ]
+                    },
+                )
+            },
+            image_responses={
+                "img-a": Response(
+                    status="ok",
+                    retcode=0,
+                    data={"file": "a.jpg", "base64": IMAGE_A_BASE64},
+                )
+            },
+        )
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            database=FakeDatabase(),
+            event=build_group_message(),
+        )
+
+        result = await executor.call_tool_with_artifacts(
+            "qq__get_forward_message_images",
+            {"message_id": "root-forward", "mode": "all"},
+        )
+
+        result_object = require_json_object(result.result)
+        self.assertIs(result_object["ok"], True)
+        self.assertEqual(result_object["returned_count"], 1)
+        self.assertEqual(len(result.image_artifacts), 1)
+        errors = require_json_list(result_object["errors"])
+        first_error = require_json_object(errors[0])
+        self.assertEqual(first_error["error_type"], "NapCatActionFailed")
 
     async def test_forward_tool_recursively_fetches_nested_forward_id(self) -> None:
         """只有 ID 的嵌套合并转发会继续调用 NapCat 读取。"""

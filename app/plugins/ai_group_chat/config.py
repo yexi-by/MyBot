@@ -1,6 +1,7 @@
 """AI 群聊插件配置模型和提示词加载。"""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -42,25 +43,60 @@ class AIGroupChatConfig(StrictModel):
     )
     allow_mention_all: bool = False
     persist_tool_results: bool = False
+    forward_image_tool_enabled: bool = True
+    forward_image_max_images_per_call: int = Field(default=6, ge=1, le=20)
+    forward_image_max_all_images: int = Field(default=12, ge=1, le=50)
+    forward_image_fetch_concurrency: int = Field(default=4, ge=1, le=10)
+    forward_image_download_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    tool_image_delivery_mode: Literal["auto", "metadata_only", "vision_summary"] = "auto"
+    tool_image_summary_max_images: int = Field(default=6, ge=1, le=20)
+    persist_tool_image_observations: bool = False
+    tool_image_observation_system_prompt_path: str | None = None
+    tool_image_observation_user_prompt_path: str | None = None
+    tool_image_observation_system_prompt: str = (
+        "你是一个独立的图片观察任务。只根据本次请求附带的图片和图片元信息描述可见内容。"
+        "不要使用任何外部上下文、角色设定、长期记忆、当前对话内容或其他图片摘要。"
+        "不要替任何人回复消息。"
+    )
+    tool_image_observation_user_prompt: str = (
+        "请客观描述这些图片中可见的信息。"
+        "只描述能看见的内容，不猜测来源、身份或图片外的上下文。"
+    )
     group_config: list[GroupChatConfig]
 
     @model_validator(mode="after")
-    def check_multimodal_fallback(self) -> "AIGroupChatConfig":
-        """校验非多模态主模型必须配置备用多模态模型。"""
+    def check_multimodal_fallback_and_prompts(self) -> "AIGroupChatConfig":
+        """校验多模态备用模型和视觉摘要提示词边界。"""
         if self.supports_multimodal:
+            self._check_observation_prompts()
             return self
-        if self._has_text(self.multimodal_fallback_model_name) and self._has_text(
-            self.multimodal_fallback_model_vendors
+        if not (
+            self._has_text(self.multimodal_fallback_model_name)
+            and self._has_text(self.multimodal_fallback_model_vendors)
         ):
-            return self
-        raise ValueError(
-            "主模型不支持多模态时必须配置 multimodal_fallback_model_name "
-            "和 multimodal_fallback_model_vendors"
-        )
+            raise ValueError(
+                "主模型不支持多模态时必须配置 multimodal_fallback_model_name "
+                "和 multimodal_fallback_model_vendors"
+            )
+        self._check_observation_prompts()
+        return self
 
     def _has_text(self, value: str | None) -> bool:
         """判断可选配置字符串是否填写了有效内容。"""
         return value is not None and value.strip() != ""
+
+    def _check_observation_prompts(self) -> None:
+        """未配置提示词文件时，内联视觉摘要提示词不能为空。"""
+        has_system_prompt_source = self._has_text(
+            self.tool_image_observation_system_prompt_path
+        ) or self._has_text(self.tool_image_observation_system_prompt)
+        has_user_prompt_source = self._has_text(
+            self.tool_image_observation_user_prompt_path
+        ) or self._has_text(self.tool_image_observation_user_prompt)
+        if not has_system_prompt_source:
+            raise ValueError("tool_image_observation_system_prompt 不能为空")
+        if not has_user_prompt_source:
+            raise ValueError("tool_image_observation_user_prompt 不能为空")
 
 
 def load_ai_group_chat_config() -> AIGroupChatConfig:

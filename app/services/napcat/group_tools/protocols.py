@@ -52,6 +52,12 @@ class NapCatGroupToolBot(Protocol):
         """获取合并转发消息详情。"""
         ...
 
+    async def get_image(
+        self, file_id: str | None = None, file: str | None = None
+    ) -> Response:
+        """获取图片文件信息。"""
+        ...
+
 
 class NapCatGroupHistoryDatabase(Protocol):
     """描述群聊历史工具读取 Redis 缓存所需的最小数据库能力。"""

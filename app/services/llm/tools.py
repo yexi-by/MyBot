@@ -2,8 +2,8 @@
 
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from typing import cast, override
+from dataclasses import dataclass, field
+from typing import Protocol, cast, override, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -11,7 +11,40 @@ from app.models import JsonObject, JsonValue, to_json_value
 
 from .schemas import ChatMessage, LLMToolDefinition, LLMToolExecutor
 
-type ToolHandler = Callable[[JsonObject], Awaitable[JsonValue]]
+
+@dataclass(frozen=True)
+class LLMToolImageArtifact:
+    """工具调用产生的模型可见图片附件。"""
+
+    label: str
+    image_bytes: bytes
+    metadata: JsonObject
+
+
+@dataclass(frozen=True)
+class LLMToolExecutionResult:
+    """工具 JSON 结果和内部二进制附件。"""
+
+    result: JsonValue
+    image_artifacts: list[LLMToolImageArtifact] = field(default_factory=list)
+
+
+type ToolHandler = Callable[[JsonObject], Awaitable[JsonValue | LLMToolExecutionResult]]
+
+
+@runtime_checkable
+class LLMToolArtifactExecutor(Protocol):
+    """描述支持二进制附件旁路的工具执行器。"""
+
+    def list_tools(self) -> list[LLMToolDefinition]:
+        """返回当前可用工具定义。"""
+        ...
+
+    async def call_tool_with_artifacts(
+        self, name: str, arguments: JsonObject
+    ) -> LLMToolExecutionResult:
+        """调用工具并返回 JSON 结果与内部附件。"""
+        ...
 
 
 @dataclass
@@ -138,12 +171,24 @@ class LLMToolRegistry(LLMToolExecutor):
     @override
     async def call_tool(self, name: str, arguments: JsonObject) -> JsonValue:
         """调用指定本地工具。"""
+        execution_result = await self.call_tool_with_artifacts(
+            name=name,
+            arguments=arguments,
+        )
+        return execution_result.result
+
+    async def call_tool_with_artifacts(
+        self, name: str, arguments: JsonObject
+    ) -> LLMToolExecutionResult:
+        """调用指定本地工具，并保留内部附件。"""
         tool = self._tools.get(name)
         if tool is None:
             raise KeyError(f"未知 LLM 工具: {name}")
         validated_arguments = self._validate_tool_arguments(tool, arguments)
         result = await tool.handler(validated_arguments)
-        return result
+        if isinstance(result, LLMToolExecutionResult):
+            return result
+        return LLMToolExecutionResult(result=result)
 
     def _validate_tool_arguments(
         self, tool: RegisteredLLMTool, arguments: JsonObject
@@ -179,10 +224,26 @@ class CompositeToolExecutor(LLMToolExecutor):
     @override
     async def call_tool(self, name: str, arguments: JsonObject) -> JsonValue:
         """按执行器顺序查找并调用工具。"""
+        execution_result = await self.call_tool_with_artifacts(
+            name=name,
+            arguments=arguments,
+        )
+        return execution_result.result
+
+    async def call_tool_with_artifacts(
+        self, name: str, arguments: JsonObject
+    ) -> LLMToolExecutionResult:
+        """按执行器顺序查找并调用工具，保留内部附件。"""
         for executor in self._executors:
             tool_names = {tool.name for tool in executor.list_tools()}
             if name in tool_names:
-                return await executor.call_tool(name=name, arguments=arguments)
+                if isinstance(executor, LLMToolArtifactExecutor):
+                    return await executor.call_tool_with_artifacts(
+                        name=name,
+                        arguments=arguments,
+                    )
+                result = await executor.call_tool(name=name, arguments=arguments)
+                return LLMToolExecutionResult(result=result)
         raise KeyError(f"未知 LLM 工具: {name}")
 
 

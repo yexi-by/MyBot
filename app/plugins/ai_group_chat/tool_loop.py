@@ -12,7 +12,7 @@ from app.services import (
     NapCatGroupToolExecutor,
 )
 from app.services.llm.schemas import LLMResponse, LLMToolCall, LLMToolDefinition
-from app.services.llm.tools import build_tool_result_message
+from app.services.llm.tools import LLMToolImageArtifact, build_tool_result_message
 from app.utils.log import log_event
 
 from .config import (
@@ -25,6 +25,7 @@ from .context_compressor import GroupChatContextCompressor
 from .debug_dump import AIGroupChatDebugDumper
 from .deepseek_v4_prompt import DeepSeekV4PromptPack, load_deepseek_v4_prompt_pack
 from .token_budget import ConservativeTokenEstimator, TokenBudgetEstimate
+from .visual_observer import ToolImageObserver
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,10 @@ class GroupChatToolLoop:
         self.context_compressor: GroupChatContextCompressor = (
             GroupChatContextCompressor()
         )
+        self.tool_image_observer: ToolImageObserver = ToolImageObserver(
+            config=config,
+            context=context,
+        )
 
     async def run(
         self,
@@ -114,12 +119,23 @@ class GroupChatToolLoop:
             system_prompt=chat_handler.system_prompt,
         )
         tool_history_messages: list[ChatMessage] = []
+        tool_image_history_messages: list[ChatMessage] = []
         sent_content_messages: list[ChatMessage] = []
         napcat_executor = NapCatGroupToolExecutor(
             bot=self.context.bot,
             database=self.context.database,
             event=msg,
             allow_mention_all=self.config.allow_mention_all,
+            forward_image_tool_enabled=self.config.forward_image_tool_enabled,
+            forward_image_max_images_per_call=(
+                self.config.forward_image_max_images_per_call
+            ),
+            forward_image_max_all_images=self.config.forward_image_max_all_images,
+            forward_image_fetch_concurrency=self.config.forward_image_fetch_concurrency,
+            forward_image_download_timeout_seconds=(
+                self.config.forward_image_download_timeout_seconds
+            ),
+            http_client=self.context.direct_httpx,
         )
         tool_executor = CompositeToolExecutor(
             [napcat_executor, self.context.mcp_tool_manager]
@@ -224,6 +240,7 @@ class GroupChatToolLoop:
                         turn_messages=turn_messages,
                         sent_content_messages=sent_content_messages,
                         tool_history_messages=tool_history_messages,
+                        tool_image_history_messages=tool_image_history_messages,
                         replace_existing_history=replace_existing_history,
                         title="群消息发送失败后的长期上下文",
                         failure_status_message=send_result.failure_status_message,
@@ -238,7 +255,9 @@ class GroupChatToolLoop:
                     response=response,
                     tool_executor=tool_executor,
                     tool_history_messages=tool_history_messages,
+                    tool_image_history_messages=tool_image_history_messages,
                     round_index=round_index,
+                    active_model=active_model,
                 )
                 continue
 
@@ -249,6 +268,7 @@ class GroupChatToolLoop:
                     turn_messages=turn_messages,
                     sent_content_messages=sent_content_messages,
                     tool_history_messages=tool_history_messages,
+                    tool_image_history_messages=tool_image_history_messages,
                     replace_existing_history=replace_existing_history,
                     title="无工具调用自动结束后的长期上下文",
                 )
@@ -269,6 +289,7 @@ class GroupChatToolLoop:
                 turn_messages=turn_messages,
                 sent_content_messages=sent_content_messages,
                 tool_history_messages=tool_history_messages,
+                tool_image_history_messages=tool_image_history_messages,
                 replace_existing_history=replace_existing_history,
                 title="空响应自动结束后的长期上下文",
             )
@@ -542,7 +563,9 @@ class GroupChatToolLoop:
         response: LLMResponse,
         tool_executor: CompositeToolExecutor,
         tool_history_messages: list[ChatMessage],
+        tool_image_history_messages: list[ChatMessage],
         round_index: int,
+        active_model: ActiveModelConfig,
     ) -> None:
         """处理模型请求的信息工具调用，并把工具结果写回本轮工作上下文。"""
         log_event(
@@ -567,6 +590,8 @@ class GroupChatToolLoop:
             tool_calls=response.tool_calls,
             tool_executor=tool_executor,
             group_id=msg.group_id,
+            active_model=active_model,
+            tool_image_history_messages=tool_image_history_messages,
         )
         tool_history_messages.extend(tool_result_history)
 
@@ -578,6 +603,7 @@ class GroupChatToolLoop:
         turn_messages: list[ChatMessage],
         sent_content_messages: list[ChatMessage],
         tool_history_messages: list[ChatMessage],
+        tool_image_history_messages: list[ChatMessage],
         replace_existing_history: bool,
         title: str,
         failure_status_message: ChatMessage | None = None,
@@ -588,6 +614,7 @@ class GroupChatToolLoop:
             turn_messages=turn_messages,
             sent_content_messages=sent_content_messages,
             tool_history_messages=tool_history_messages,
+            tool_image_history_messages=tool_image_history_messages,
             assistant_content=None,
             assistant_reasoning_content=None,
             replace_existing_history=replace_existing_history,
@@ -718,10 +745,13 @@ class GroupChatToolLoop:
         tool_calls: list[LLMToolCall],
         tool_executor: CompositeToolExecutor,
         group_id: str,
+        active_model: ActiveModelConfig,
+        tool_image_history_messages: list[ChatMessage],
     ) -> tuple[list[ChatMessage], bool]:
         """执行工具调用，并只返回 tool 结果消息。"""
         history_messages: list[ChatMessage] = []
         has_error = False
+        image_artifacts: list[LLMToolImageArtifact] = []
         for tool_call in tool_calls:
             log_event(
                 level="DEBUG",
@@ -733,12 +763,13 @@ class GroupChatToolLoop:
                 tool_name=tool_call.name,
                 arguments=tool_call.arguments,
             )
-            tool_message, is_error = await self._call_tool_for_model(
+            tool_message, is_error, tool_image_artifacts = await self._call_tool_for_model(
                 tool_call=tool_call,
                 tool_executor=tool_executor,
             )
             working_messages.append(tool_message)
             history_messages.append(tool_message)
+            image_artifacts.extend(tool_image_artifacts)
             log_event(
                 level="DEBUG",
                 event="ai_group_chat.tool_call.finished",
@@ -752,6 +783,14 @@ class GroupChatToolLoop:
             )
             if is_error:
                 has_error = True
+        if image_artifacts:
+            observation = await self.tool_image_observer.observe(
+                artifacts=image_artifacts,
+                active_model=active_model,
+                source_tool_name=", ".join(tool_call.name for tool_call in tool_calls),
+            )
+            working_messages.extend(observation.working_messages)
+            tool_image_history_messages.extend(observation.history_messages)
         return history_messages, has_error
 
     async def _call_tool_for_model(
@@ -759,14 +798,17 @@ class GroupChatToolLoop:
         *,
         tool_call: LLMToolCall,
         tool_executor: CompositeToolExecutor,
-    ) -> tuple[ChatMessage, bool]:
+    ) -> tuple[ChatMessage, bool, list[LLMToolImageArtifact]]:
         """调用工具并把成功或失败结果都整理为模型可读的 tool 消息。"""
         result: JsonValue
+        image_artifacts: list[LLMToolImageArtifact] = []
         try:
-            result = await tool_executor.call_tool(
+            execution_result = await tool_executor.call_tool_with_artifacts(
                 name=tool_call.name,
                 arguments=tool_call.arguments,
             )
+            result = execution_result.result
+            image_artifacts = execution_result.image_artifacts
         except Exception as exc:
             error_result: JsonObject = {
                 "ok": False,
@@ -777,6 +819,7 @@ class GroupChatToolLoop:
         return (
             build_tool_result_message(tool_call_id=tool_call.id, result=result),
             self._is_tool_error_result(result=result),
+            image_artifacts,
         )
 
     def _is_tool_error_result(self, *, result: JsonValue) -> bool:
@@ -796,6 +839,7 @@ class GroupChatToolLoop:
         turn_messages: list[ChatMessage],
         sent_content_messages: list[ChatMessage],
         tool_history_messages: list[ChatMessage],
+        tool_image_history_messages: list[ChatMessage],
         assistant_content: str | None,
         assistant_reasoning_content: str | None,
         replace_existing_history: bool,
@@ -810,6 +854,8 @@ class GroupChatToolLoop:
         history_messages.extend(sent_content_messages)
         if self.config.persist_tool_results:
             history_messages.extend(tool_history_messages)
+        if self.config.persist_tool_image_observations:
+            history_messages.extend(tool_image_history_messages)
         if assistant_content is not None:
             history_messages.append(
                 ChatMessage(
@@ -827,8 +873,10 @@ class GroupChatToolLoop:
             stripped_turn_image_count=stripped_turn_image_count,
             sent_content_messages_count=len(sent_content_messages),
             tool_history_messages_count=len(tool_history_messages),
+            tool_image_history_messages_count=len(tool_image_history_messages),
             persisted_messages_count=len(history_messages),
             persist_tool_results=self.config.persist_tool_results,
+            persist_tool_image_observations=self.config.persist_tool_image_observations,
             replace_existing_history=replace_existing_history,
             assistant_content_chars=len(assistant_content or ""),
             assistant_reasoning_chars=len(assistant_reasoning_content or ""),

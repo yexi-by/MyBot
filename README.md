@@ -105,6 +105,24 @@ multimodal_fallback_model_name = "gpt-5.5"
 multimodal_fallback_model_vendors = "openai"
 ```
 
+合并转发里的图片可以通过本地工具批量读取。图片工具结果默认只服务于本轮回复，不进入长期上下文；如果需要让后续对话记住图片观察摘要，可以显式打开 `persist_tool_image_observations`。
+
+```toml
+[ai_group_chat]
+forward_image_tool_enabled = true
+forward_image_max_images_per_call = 6
+forward_image_max_all_images = 12
+forward_image_fetch_concurrency = 4
+forward_image_download_timeout_seconds = 15.0
+tool_image_delivery_mode = "auto"
+tool_image_summary_max_images = 6
+persist_tool_image_observations = false
+tool_image_observation_system_prompt_path = "plugins_config/ai_group_chat/prompts/vision/system.md"
+tool_image_observation_user_prompt_path = "plugins_config/ai_group_chat/prompts/vision/user.md"
+```
+
+视觉摘要请求是独立请求，不复用群聊 system prompt、长期上下文、当前用户正文或工具历史。`tool_image_observation_system_prompt_path` 用于定义纯图片观察边界，`tool_image_observation_user_prompt_path` 用于定义观察任务和输出粒度；路径为空时使用配置内置默认提示词。
+
 ## 运行边界
 
 - `app/api/` 负责 NapCat Action 调用封装，不放插件业务逻辑。

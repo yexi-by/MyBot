@@ -12,6 +12,7 @@ MAX_HISTORY_LIMIT: int = 100
 BEIJING_TIMEZONE: timezone = timezone(timedelta(hours=8))
 HISTORY_TIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
 type HistoryQueryMode = Literal["recent_count", "recent_duration", "date_range"]
+type ForwardImageQueryMode = Literal["single", "message", "all"]
 
 
 class ListGroupRootFilesArgs(StrictModel):
@@ -63,6 +64,52 @@ class GetForwardMessageArgs(StrictModel):
     message_id: str = Field(
         description="合并转发消息 ID，通常来自消息中的 forward 段 ID。"
     )
+
+
+class GetForwardMessageImagesArgs(StrictModel):
+    """获取合并转发图片的工具参数。"""
+
+    message_id: str = Field(description="当前群收到的合并转发消息 ID。")
+    mode: ForwardImageQueryMode = Field(
+        default="single",
+        description=(
+            "图片选择模式。single 表示读取单张图片；message 表示读取某条消息内全部图片；"
+            "all 表示读取整个合并转发内的图片。"
+        ),
+    )
+    message_index: int | None = Field(
+        default=None,
+        ge=1,
+        description="single/message 模式使用：合并转发内第几条消息，从 1 开始。",
+    )
+    image_index: int | None = Field(
+        default=None,
+        ge=1,
+        description="single 模式使用：目标消息内第几张图片，从 1 开始。",
+    )
+    max_images: int | None = Field(
+        default=None,
+        ge=1,
+        le=50,
+        description="本次最多读取的图片数量；为空时使用插件配置上限。",
+    )
+
+    @model_validator(mode="after")
+    def check_image_query_arguments(self) -> "GetForwardMessageImagesArgs":
+        """校验图片选择模式和定位参数的一致性。"""
+        if self.mode == "single":
+            if self.message_index is None or self.image_index is None:
+                raise ValueError("single 模式必须填写 message_index 和 image_index")
+            return self
+        if self.mode == "message":
+            if self.message_index is None:
+                raise ValueError("message 模式必须填写 message_index")
+            if self.image_index is not None:
+                raise ValueError("message 模式不能填写 image_index")
+            return self
+        if self.message_index is not None or self.image_index is not None:
+            raise ValueError("all 模式不能填写 message_index 或 image_index")
+        return self
 
 
 class GetGroupHistoryMessagesArgs(StrictModel):
