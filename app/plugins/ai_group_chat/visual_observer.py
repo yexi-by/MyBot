@@ -144,39 +144,33 @@ class ToolImageObserver:
 
     def _resolve_observation_system_prompt(self) -> str:
         """读取视觉摘要 system prompt。"""
-        return self._resolve_prompt(
+        return self._resolve_prompt_file(
             path_value=self.config.tool_image_observation_system_prompt_path,
-            inline_value=self.config.tool_image_observation_system_prompt,
-            field_name="tool_image_observation_system_prompt",
+            field_name="tool_image_observation_system_prompt_path",
         )
 
     def _resolve_observation_user_prompt(self) -> str:
         """读取视觉摘要 user prompt。"""
-        return self._resolve_prompt(
+        return self._resolve_prompt_file(
             path_value=self.config.tool_image_observation_user_prompt_path,
-            inline_value=self.config.tool_image_observation_user_prompt,
-            field_name="tool_image_observation_user_prompt",
+            field_name="tool_image_observation_user_prompt_path",
         )
 
-    def _resolve_prompt(
+    def _resolve_prompt_file(
         self,
         *,
         path_value: str | None,
-        inline_value: str,
         field_name: str,
     ) -> str:
-        """按文件路径优先级解析提示词。"""
-        if path_value is not None and path_value.strip() != "":
-            path = Path(path_value)
-            if not path.is_file():
-                raise FileNotFoundError(f"{field_name}_path 不存在: {path}")
-            content = path.read_text(encoding="utf-8").strip()
-            if content == "":
-                raise ValueError(f"{field_name}_path 为空: {path}")
-            return content
-        content = inline_value.strip()
+        """解析显式配置的提示词文件。"""
+        if path_value is None or path_value.strip() == "":
+            raise ValueError(f"{field_name} 必须配置为提示词文件路径")
+        path = Path(path_value)
+        if not path.is_file():
+            raise FileNotFoundError(f"{field_name} 不存在: {path}")
+        content = path.read_text(encoding="utf-8").strip()
         if content == "":
-            raise ValueError(f"{field_name} 不能为空")
+            raise ValueError(f"{field_name} 为空: {path}")
         return content
 
     def _build_metadata_text(

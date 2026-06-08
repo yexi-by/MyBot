@@ -23,6 +23,9 @@ from app.services.llm.schemas import (
 )
 from app.services.llm.tools import LLMToolExecutionResult, LLMToolImageArtifact
 
+VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
+VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
+
 
 class FakeLLMProtocol(Protocol):
     """描述测试用 LLM 需要提供的异步响应接口。"""
@@ -589,6 +592,8 @@ def build_config(
         output_reasoning_content=output_reasoning_content,
         pass_back_reasoning_content=pass_back_reasoning_content,
         context_compression_notice=context_compression_notice,
+        tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
+        tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
         group_config=[],
     )
 
@@ -771,8 +776,6 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
         config.multimodal_fallback_model_name = "vision-model"
         config.multimodal_fallback_model_vendors = "vision-vendor"
-        config.tool_image_observation_system_prompt = "只执行独立图片观察任务。"
-        config.tool_image_observation_user_prompt = "请描述本批图片。"
         config.persist_tool_image_observations = False
         tool_loop = GroupChatToolLoop(
             config=config,
@@ -800,10 +803,10 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         summary_system = fake_llm.summary_messages[0]
         summary_user = fake_llm.summary_messages[1]
         self.assertEqual(summary_system.role, "system")
-        self.assertEqual(summary_system.text, "只执行独立图片观察任务。")
+        self.assertIn("独立图片观察任务", summary_system.text or "")
         self.assertNotIn("群聊系统提示词", summary_system.text or "")
         self.assertEqual(summary_user.role, "user")
-        self.assertIn("请描述本批图片。", summary_user.text or "")
+        self.assertIn("请按图片顺序输出简洁观察摘要", summary_user.text or "")
         self.assertNotIn("当前用户正文", summary_user.text or "")
         self.assertEqual(summary_user.image, [b"tool-image"])
         second_request_text = "\n".join(

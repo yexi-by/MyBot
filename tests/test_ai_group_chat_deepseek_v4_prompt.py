@@ -11,6 +11,9 @@ from app.plugins.ai_group_chat.config import (
 )
 from app.plugins.ai_group_chat.deepseek_v4_prompt import load_deepseek_v4_prompt_pack
 
+VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
+VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
+
 
 def build_config(
     *, extra_requirements_path: Path, roleplay_instruct_path: Path
@@ -24,6 +27,8 @@ def build_config(
         enable_deepseek_v4_roleplay_instruct=True,
         extra_requirements_path=str(extra_requirements_path),
         deepseek_v4_roleplay_instruct_path=str(roleplay_instruct_path),
+        tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
+        tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
         group_config=[],
     )
 
@@ -111,6 +116,8 @@ class DeepSeekV4PromptPackTest(unittest.TestCase):
                 enable_deepseek_v4_roleplay_instruct=True,
                 extra_requirements_path=str(extra_path),
                 deepseek_v4_roleplay_instruct_path=str(roleplay_path),
+                tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
+                tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
                 group_config=[],
             )
             group_config = GroupChatConfig(

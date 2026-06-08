@@ -4,6 +4,9 @@ import unittest
 
 from app.plugins.ai_group_chat.config import AIGroupChatConfig
 
+VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
+VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
+
 
 class AIGroupChatConfigTest(unittest.TestCase):
     """验证 AI 群聊插件配置的关键约束。"""
@@ -26,6 +29,8 @@ class AIGroupChatConfigTest(unittest.TestCase):
             supports_multimodal=False,
             multimodal_fallback_model_name="gpt-5.5",
             multimodal_fallback_model_vendors="openai",
+            tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
+            tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
             group_config=[],
         )
 
@@ -43,13 +48,15 @@ class AIGroupChatConfigTest(unittest.TestCase):
         self.assertIsNone(config.multimodal_fallback_model_name)
 
     def test_forward_image_tool_defaults_are_valid(self) -> None:
-        """合并转发图片工具和视觉摘要配置有安全默认值。"""
+        """合并转发图片工具数量配置有明确边界。"""
         config = AIGroupChatConfig(
             model_name="deepseek-v4-pro",
             model_vendors="deepseek",
             supports_multimodal=False,
             multimodal_fallback_model_name="gpt-5.5-vision",
             multimodal_fallback_model_vendors="openai",
+            tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
+            tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
             group_config=[],
         )
 
@@ -61,10 +68,14 @@ class AIGroupChatConfigTest(unittest.TestCase):
         self.assertEqual(config.tool_image_delivery_mode, "auto")
         self.assertEqual(config.tool_image_summary_max_images, 6)
         self.assertFalse(config.persist_tool_image_observations)
-        self.assertIsNone(config.tool_image_observation_system_prompt_path)
-        self.assertIsNone(config.tool_image_observation_user_prompt_path)
-        self.assertIn("独立的图片观察任务", config.tool_image_observation_system_prompt)
-        self.assertIn("客观描述", config.tool_image_observation_user_prompt)
+        self.assertEqual(
+            config.tool_image_observation_system_prompt_path,
+            VISION_SYSTEM_PROMPT_PATH,
+        )
+        self.assertEqual(
+            config.tool_image_observation_user_prompt_path,
+            VISION_USER_PROMPT_PATH,
+        )
 
     def test_forward_image_limits_reject_invalid_values(self) -> None:
         """合并转发图片工具数量和并发配置必须有明确边界。"""
@@ -75,19 +86,41 @@ class AIGroupChatConfigTest(unittest.TestCase):
                 supports_multimodal=False,
                 multimodal_fallback_model_name="gpt-5.5-vision",
                 multimodal_fallback_model_vendors="openai",
+                tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
+                tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
                 forward_image_max_images_per_call=0,
                 group_config=[],
             )
 
-    def test_observation_prompt_rejects_blank_inline_prompt(self) -> None:
-        """未配置提示词文件时，内联视觉摘要提示词不能为空。"""
-        with self.assertRaisesRegex(ValueError, "tool_image_observation_system_prompt"):
+    def test_observation_prompt_requires_explicit_files_for_summary(self) -> None:
+        """需要视觉摘要时，必须显式配置两个提示词文件路径。"""
+        with self.assertRaisesRegex(
+            ValueError, "tool_image_observation_system_prompt_path"
+        ):
             _ = AIGroupChatConfig(
                 model_name="deepseek-v4-pro",
                 model_vendors="deepseek",
                 supports_multimodal=False,
                 multimodal_fallback_model_name="gpt-5.5-vision",
                 multimodal_fallback_model_vendors="openai",
-                tool_image_observation_system_prompt="   ",
                 group_config=[],
+            )
+
+    def test_inline_observation_prompt_fields_are_rejected(self) -> None:
+        """视觉摘要提示词不允许通过内联配置绕过文件边界。"""
+        with self.assertRaisesRegex(ValueError, "tool_image_observation_system_prompt"):
+            _ = AIGroupChatConfig.model_validate(
+                {
+                    "model_name": "deepseek-v4-pro",
+                    "model_vendors": "deepseek",
+                    "supports_multimodal": False,
+                    "multimodal_fallback_model_name": "gpt-5.5-vision",
+                    "multimodal_fallback_model_vendors": "openai",
+                    "tool_image_observation_system_prompt_path": (
+                        VISION_SYSTEM_PROMPT_PATH
+                    ),
+                    "tool_image_observation_user_prompt_path": VISION_USER_PROMPT_PATH,
+                    "tool_image_observation_system_prompt": "禁止内联",
+                    "group_config": [],
+                }
             )

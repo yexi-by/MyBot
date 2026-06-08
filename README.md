@@ -121,7 +121,7 @@ tool_image_observation_system_prompt_path = "plugins_config/ai_group_chat/prompt
 tool_image_observation_user_prompt_path = "plugins_config/ai_group_chat/prompts/vision/user.md"
 ```
 
-视觉摘要请求是独立请求，不复用群聊 system prompt、长期上下文、当前用户正文或工具历史。`tool_image_observation_system_prompt_path` 用于定义纯图片观察边界，`tool_image_observation_user_prompt_path` 用于定义观察任务和输出粒度；路径为空时使用配置内置默认提示词。
+视觉摘要请求是独立请求，不复用群聊 system prompt、长期上下文、当前用户正文或工具历史。`tool_image_observation_system_prompt_path` 用于定义纯图片观察边界，`tool_image_observation_user_prompt_path` 用于定义观察任务和输出粒度；需要视觉摘要时必须显式配置这两个非空提示词文件，不支持内联提示词，也不存在代码内置默认提示词。
 
 ## 运行边界
 

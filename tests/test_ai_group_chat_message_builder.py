@@ -28,6 +28,9 @@ from app.models import (
 from app.plugins.ai_group_chat.config import AIGroupChatConfig, GroupChatConfig
 from app.plugins.ai_group_chat.message_builder import GroupChatMessageBuilder
 
+VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
+VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
+
 
 class EmptyDatabase:
     """测试用空消息数据库。"""
@@ -99,6 +102,8 @@ def build_config() -> AIGroupChatConfig:
         supports_multimodal=False,
         multimodal_fallback_model_name="gpt-5.5-vision",
         multimodal_fallback_model_vendors="CLIProxyAPI",
+        tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
+        tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
         group_config=[
             GroupChatConfig(
                 group_id="40000",

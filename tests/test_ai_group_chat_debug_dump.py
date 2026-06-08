@@ -10,6 +10,9 @@ from app.plugins.ai_group_chat.debug_dump import AIGroupChatDebugDumper
 from app.services import ChatMessage
 from app.services.llm.schemas import LLMToolCall
 
+VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
+VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
+
 
 def build_config(*, enabled: bool) -> AIGroupChatConfig:
     """构造测试用 AI 群聊配置。"""
@@ -19,6 +22,8 @@ def build_config(*, enabled: bool) -> AIGroupChatConfig:
         multimodal_fallback_model_name="gpt-5.5-vision",
         multimodal_fallback_model_vendors="CLIProxyAPI",
         debug_dump_messages=enabled,
+        tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
+        tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
         group_config=[],
     )
 

@@ -53,24 +53,12 @@ class AIGroupChatConfig(StrictModel):
     persist_tool_image_observations: bool = False
     tool_image_observation_system_prompt_path: str | None = None
     tool_image_observation_user_prompt_path: str | None = None
-    tool_image_observation_system_prompt: str = (
-        "你是一个独立的图片观察任务。只根据本次请求附带的图片和图片元信息描述可见内容。"
-        "不要使用任何外部上下文、角色设定、长期记忆、当前对话内容或其他图片摘要。"
-        "不要替任何人回复消息。"
-    )
-    tool_image_observation_user_prompt: str = (
-        "请客观描述这些图片中可见的信息。"
-        "只描述能看见的内容，不猜测来源、身份或图片外的上下文。"
-    )
     group_config: list[GroupChatConfig]
 
     @model_validator(mode="after")
     def check_multimodal_fallback_and_prompts(self) -> "AIGroupChatConfig":
         """校验多模态备用模型和视觉摘要提示词边界。"""
-        if self.supports_multimodal:
-            self._check_observation_prompts()
-            return self
-        if not (
+        if not self.supports_multimodal and not (
             self._has_text(self.multimodal_fallback_model_name)
             and self._has_text(self.multimodal_fallback_model_vendors)
         ):
@@ -78,25 +66,44 @@ class AIGroupChatConfig(StrictModel):
                 "主模型不支持多模态时必须配置 multimodal_fallback_model_name "
                 "和 multimodal_fallback_model_vendors"
             )
-        self._check_observation_prompts()
+        if self._uses_tool_image_summary():
+            self._check_observation_prompt_files()
         return self
 
     def _has_text(self, value: str | None) -> bool:
         """判断可选配置字符串是否填写了有效内容。"""
         return value is not None and value.strip() != ""
 
-    def _check_observation_prompts(self) -> None:
-        """未配置提示词文件时，内联视觉摘要提示词不能为空。"""
-        has_system_prompt_source = self._has_text(
-            self.tool_image_observation_system_prompt_path
-        ) or self._has_text(self.tool_image_observation_system_prompt)
-        has_user_prompt_source = self._has_text(
-            self.tool_image_observation_user_prompt_path
-        ) or self._has_text(self.tool_image_observation_user_prompt)
-        if not has_system_prompt_source:
-            raise ValueError("tool_image_observation_system_prompt 不能为空")
-        if not has_user_prompt_source:
-            raise ValueError("tool_image_observation_user_prompt 不能为空")
+    def _uses_tool_image_summary(self) -> bool:
+        """判断当前配置是否可能调用独立视觉摘要请求。"""
+        if self.tool_image_delivery_mode == "metadata_only":
+            return False
+        if self.tool_image_delivery_mode == "vision_summary":
+            return True
+        return not self.supports_multimodal
+
+    def _check_observation_prompt_files(self) -> None:
+        """视觉摘要启用时，提示词只能来自显式配置的非空文件。"""
+        self._check_observation_prompt_file(
+            file_path=self.tool_image_observation_system_prompt_path,
+            field_name="tool_image_observation_system_prompt_path",
+        )
+        self._check_observation_prompt_file(
+            file_path=self.tool_image_observation_user_prompt_path,
+            field_name="tool_image_observation_user_prompt_path",
+        )
+
+    def _check_observation_prompt_file(
+        self, *, file_path: str | None, field_name: str
+    ) -> None:
+        """校验视觉摘要提示词文件路径存在且内容非空。"""
+        if file_path is None or file_path.strip() == "":
+            raise ValueError(f"{field_name} 必须配置为提示词文件路径")
+        path = Path(file_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"{field_name} 不存在: {path}")
+        if path.read_text(encoding="utf-8").strip() == "":
+            raise ValueError(f"{field_name} 为空: {path}")
 
 
 def load_ai_group_chat_config() -> AIGroupChatConfig:
