@@ -25,7 +25,7 @@ from .base import BaseMixin
 
 
 class NapCatSendMessageError(RuntimeError):
-    """NapCat send_msg 返回失败或超时时抛出的显式异常。"""
+    """NapCat send_msg 发送失败时抛出的显式异常。"""
 
     def __init__(self, message: str, *, response: Response | None = None) -> None:
         """保存错误摘要与可选 NapCat 响应。"""
@@ -35,20 +35,54 @@ class NapCatSendMessageError(RuntimeError):
     @classmethod
     def from_response(cls, *, response: Response) -> "NapCatSendMessageError":
         """根据 NapCat 失败响应构造异常。"""
-        return cls(
-            "NapCat 发送消息失败: "
-            f"status={response.status!r} "
-            f"retcode={response.retcode} "
-            f"message={response.message!r} "
-            f"wording={response.wording!r} "
-            f"data={_summarize_response_data(response.data)}",
+        error_class: type[NapCatSendMessageError]
+        prefix: str
+        if _is_uncertain_send_response(response=response):
+            error_class = NapCatSendStatusUncertainError
+            prefix = "NapCat 发送消息失败，发送状态不确定，为避免重复发送已停止重试"
+        else:
+            error_class = NapCatRetryableSendMessageError
+            prefix = "NapCat 发送消息失败"
+        return error_class(
+            _build_response_error_message(prefix=prefix, response=response),
             response=response,
         )
 
     @classmethod
     def from_timeout(cls, *, error: TimeoutError) -> "NapCatSendMessageError":
         """根据等待 NapCat 回包超时构造异常。"""
-        return cls(f"NapCat 发送消息失败: {error}")
+        return NapCatSendStatusUncertainError(
+            "NapCat 发送消息失败，发送状态不确定，为避免重复发送已停止重试: "
+            f"{error}"
+        )
+
+
+class NapCatRetryableSendMessageError(NapCatSendMessageError):
+    """NapCat send_msg 明确失败，可按配置重试。"""
+
+
+class NapCatSendStatusUncertainError(NapCatSendMessageError):
+    """NapCat send_msg 是否已实际发出无法确认，禁止自动重试。"""
+
+
+def _build_response_error_message(*, prefix: str, response: Response) -> str:
+    """构造包含 NapCat 响应摘要的发送错误文案。"""
+    return (
+        f"{prefix}: "
+        f"status={response.status!r} "
+        f"retcode={response.retcode} "
+        f"message={response.message!r} "
+        f"wording={response.wording!r} "
+        f"data={_summarize_response_data(response.data)}"
+    )
+
+
+def _is_uncertain_send_response(*, response: Response) -> bool:
+    """判断 send_msg 失败响应是否处于可能已发出的不确定状态。"""
+    if response.retcode == 1200:
+        return True
+    response_text = f"{response.message}\n{response.wording}".casefold()
+    return "timeout" in response_text and "sendmsg" in response_text
 
 
 def _summarize_response_data(data: JsonValue) -> str:
@@ -187,7 +221,7 @@ class MessageMixin(BaseMixin):
     async def _call_send_msg_with_retry(self, *, params: JsonObject) -> Response:
         """调用 NapCat send_msg，并对可恢复发送失败执行配置化重试。"""
         retrier = create_retry_manager(
-            error_types=(NapCatSendMessageError,),
+            error_types=(NapCatRetryableSendMessageError,),
             retry_count=self.send_retry_count,
             retry_delay=self.send_retry_delay,
         )

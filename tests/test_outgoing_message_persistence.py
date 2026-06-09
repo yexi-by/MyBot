@@ -155,7 +155,7 @@ class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
         client = FakeMessageClient(
             database=database,
             responses=[
-                Response(status="failed", retcode=1200, message="send timeout"),
+                Response(status="failed", retcode=500, message="temporary failure"),
                 Response(status="ok", retcode=0, data={"message_id": 90001}),
             ],
         )
@@ -167,14 +167,65 @@ class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(database.records), 1)
         self.assertEqual(database.records[0].message_id, "90001")
 
+    async def test_message_mixin_does_not_retry_action_timeout(self) -> None:
+        """等待 send_msg 回包超时时不重试，避免消息实际已发出后重复发送。"""
+        database = RecordingDatabase()
+        client = FakeMessageClient(
+            database=database,
+            responses=[
+                TimeoutError("等待 NapCat 响应超时"),
+                Response(status="ok", retcode=0, data={"message_id": 90002}),
+            ],
+        )
+
+        with self.assertRaises(NapCatSendMessageError) as raised:
+            _ = await client.send_msg(group_id="40000", text="你好")
+
+        self.assertIn("发送状态不确定", str(raised.exception))
+        self.assertEqual(len(client.sent_actions), 1)
+        self.assertEqual(database.records, [])
+
+    async def test_message_mixin_does_not_retry_napcat_send_msg_timeout(
+        self,
+    ) -> None:
+        """NapCat sendMsg 内部超时时不重试，避免同一正文重复出现在群里。"""
+        database = RecordingDatabase()
+        client = FakeMessageClient(
+            database=database,
+            responses=[
+                Response(
+                    status="failed",
+                    retcode=1200,
+                    message=(
+                        "Timeout: NTEvent serviceAndMethod:"
+                        "NodeIKernelMsgService/sendMsg "
+                        "ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate"
+                    ),
+                    wording=(
+                        "Timeout: NTEvent serviceAndMethod:"
+                        "NodeIKernelMsgService/sendMsg "
+                        "ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate"
+                    ),
+                ),
+                Response(status="ok", retcode=0, data={"message_id": 90003}),
+            ],
+        )
+
+        with self.assertRaises(NapCatSendMessageError) as raised:
+            _ = await client.send_msg(group_id="40000", text="你好")
+
+        self.assertIn("发送状态不确定", str(raised.exception))
+        self.assertEqual(len(client.sent_actions), 1)
+        self.assertEqual(database.records, [])
+
     async def test_message_mixin_raises_after_send_retries_exhausted(self) -> None:
         """send_msg 连续失败时抛出显式发送异常，不保存出站消息。"""
         database = RecordingDatabase()
         client = FakeMessageClient(
             database=database,
             responses=[
-                Response(status="failed", retcode=1200, message="send timeout"),
-                TimeoutError("等待 NapCat 响应超时"),
+                Response(status="failed", retcode=500, message="temporary failure"),
+                Response(status="failed", retcode=500, message="temporary failure"),
             ],
         )
         client.send_retry_count = 2
