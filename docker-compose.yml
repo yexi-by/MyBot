@@ -1,6 +1,6 @@
 services:
   mybot:
-    image: docker.io/yexi12345/mybotdev:latest
+    image: docker.io/yexi12345/mybot:latest
     container_name: mybot
     restart: unless-stopped
     ports:
