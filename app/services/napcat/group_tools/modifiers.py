@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal
 
-from app.models import At, GroupMessage, MessageSegment, NapCatId, Reply, Response, Text
+from app.models import At, GroupMessage, MessageSegment, NapCatId, Node, Reply, Response, Text
 
 from .arguments import MENTION_ALL
 from .protocols import NapCatGroupToolBot
@@ -37,11 +37,13 @@ class GroupMessageDirectiveParser:
         bot: NapCatGroupToolBot,
         event: GroupMessage,
         allow_mention_all: bool,
+        max_reply_chars: int = 100,
     ) -> None:
         """绑定当前群事件与 @全体权限开关。"""
         self.bot: NapCatGroupToolBot = bot
         self.event: GroupMessage = event
         self.allow_mention_all: bool = allow_mention_all
+        self.max_reply_chars: int = max_reply_chars
 
     def parse(self, *, content: str) -> GroupMessageDirectives:
         """解析模型 content，返回清理后的正文和待执行的消息修饰动作。"""
@@ -93,10 +95,37 @@ class GroupMessageDirectiveParser:
 
     async def send_content(self, *, content: str) -> Response:
         """发送模型 content，并应用 content 中声明的群消息修饰标记。"""
+        message_segments = self.build_message_segments(content=content)
+        if self._should_send_as_forward(message_segments=message_segments):
+            return await self.bot.send_group_forward_msg(
+                group_id=self.event.group_id,
+                messages=[
+                    Node.new(
+                        user_id=self._build_forward_sender_id(),
+                        nickname="机器人",
+                        content=message_segments,
+                    )
+                ],
+            )
         return await self.bot.send_msg(
             group_id=self.event.group_id,
-            message_segment=self.build_message_segments(content=content),
+            message_segment=message_segments,
         )
+
+    def _should_send_as_forward(self, *, message_segments: list[MessageSegment]) -> bool:
+        """判断实际文本长度是否达到合并转发阈值。"""
+        text_chars = sum(
+            len(segment.data.text)
+            for segment in message_segments
+            if isinstance(segment, Text)
+        )
+        return text_chars >= self.max_reply_chars
+
+    def _build_forward_sender_id(self) -> NapCatId:
+        """确定合并转发节点里展示的机器人 QQ。"""
+        if self.bot.boot_id != "":
+            return self.bot.boot_id
+        return self.event.self_id
 
     def _validate_mention_target(
         self, *, target: str, errors: list[str]

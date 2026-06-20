@@ -142,6 +142,7 @@ class GroupChatToolLoop:
             forward_image_download_timeout_seconds=(
                 self.config.forward_image_download_timeout_seconds
             ),
+            max_reply_chars=self.config.max_reply_chars,
             http_client=self.context.direct_httpx,
         )
         tool_executor = CompositeToolExecutor(

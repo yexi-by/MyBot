@@ -8,7 +8,7 @@ from typing import Protocol, cast
 import httpx
 
 from app.api.mixins.message import NapCatSendMessageError
-from app.models import GroupMessage, JsonObject, MessageSegment, Response, Sender, Text
+from app.models import GroupMessage, JsonObject, MessageSegment, Node, Response, Sender, Text
 from app.plugins.ai_group_chat.ai_group_chat import AIGroupChatPlugin
 from app.plugins.ai_group_chat.config import AIGroupChatConfig
 from app.plugins.ai_group_chat.debug_dump import AIGroupChatDebugDumper
@@ -69,9 +69,11 @@ class FakeBot:
 
     def __init__(self) -> None:
         """初始化发送记录。"""
+        self.boot_id = "10000"
         self.sent_texts: list[str] = []
         self.sent_segment_types: list[list[str]] = []
         self.forward_responses: dict[str, Response] = {}
+        self.sent_forward_messages: list[tuple[str, list[MessageSegment]]] = []
         self.image_responses: dict[str, Response] = {}
         self.forward_calls: list[str] = []
         self.image_calls: list[tuple[str | None, str | None]] = []
@@ -94,6 +96,17 @@ class FakeBot:
         if text is not None:
             self.sent_texts.append(text)
         return Response(status="ok", retcode=0)
+
+    async def send_group_forward_msg(
+        self, *, group_id: str, messages: list[MessageSegment]
+    ) -> Response:
+        """记录合并转发发送动作并返回成功响应。"""
+        self.sent_forward_messages.append((group_id, messages))
+        return Response(
+            status="ok",
+            retcode=0,
+            data={"message_id": "90000", "forward_id": "forward-90000"},
+        )
 
     async def get_forward_msg(self, *, message_id: str) -> Response:
         """返回预置合并转发响应。"""
@@ -185,6 +198,23 @@ class FakeLLM:
         """返回无工具调用的模型响应。"""
         _ = (messages, model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
         return LLMResponse(content="正式回复", reasoning_content="模型思考")
+
+
+class FakeLongReplyLLM(FakeLLM):
+    """测试用 LLM，返回超过普通发送阈值的正文。"""
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        model_vendors: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """返回无工具调用的长正文。"""
+        _ = (messages, model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
+        return LLMResponse(content="这是一段很长的正式回复", reasoning_content=None)
 
 
 class FakeMCPToolManager:
@@ -632,6 +662,7 @@ def build_config(
     model_vendors: str = "CLIProxyAPI",
     supports_multimodal: bool = False,
     context_compression_notice: str = "上下文有点长，我先整理一下记忆，稍等我几秒喵~",
+    max_reply_chars: int = 100,
 ) -> AIGroupChatConfig:
     """构造测试用 AI 群聊配置。"""
     return AIGroupChatConfig(
@@ -643,6 +674,7 @@ def build_config(
         output_reasoning_content=output_reasoning_content,
         pass_back_reasoning_content=pass_back_reasoning_content,
         context_compression_notice=context_compression_notice,
+        max_reply_chars=max_reply_chars,
         tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
         tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
         group_config=[],
@@ -751,6 +783,39 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
         self.assertEqual(chat_handler.messages_lst[-1].text, "正式回复")
         self.assertIsNone(chat_handler.messages_lst[-1].reasoning_content)
+
+    async def test_long_reply_is_sent_as_group_forward_message(self) -> None:
+        """超过字数阈值的 AI 回复会作为单节点合并转发发送。"""
+        fake_context = FakeContext(llm=FakeLongReplyLLM())
+        config = build_config(output_reasoning_content=False, max_reply_chars=5)
+        tool_loop = GroupChatToolLoop(
+            config=config,
+            context=cast(Context, fake_context),
+            debug_dumper=AIGroupChatDebugDumper(config=config),
+        )
+        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+
+        await tool_loop.run(
+            msg=build_message(),
+            chat_handler=chat_handler,
+            turn_messages=[ChatMessage(role="user", text="用户消息")],
+        )
+
+        self.assertEqual(fake_context.bot.sent_texts, [])
+        self.assertEqual(len(fake_context.bot.sent_forward_messages), 1)
+        group_id, messages = fake_context.bot.sent_forward_messages[0]
+        self.assertEqual(group_id, "40000")
+        self.assertEqual(len(messages), 1)
+        node = messages[0]
+        self.assertIsInstance(node, Node)
+        node = cast(Node, node)
+        self.assertIsInstance(node.data.content, list)
+        content = cast(list[MessageSegment], node.data.content)
+        self.assertEqual([segment.type for segment in content], ["text"])
+        text_segment = cast(Text, content[0])
+        self.assertEqual(text_segment.data.text, "这是一段很长的正式回复")
+        self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
+        self.assertEqual(chat_handler.messages_lst[-1].text, "这是一段很长的正式回复")
 
     async def test_reasoning_can_be_passed_back_as_structured_field(self) -> None:
         """开启思维链回传时，长期上下文写入结构化字段且正文干净。"""

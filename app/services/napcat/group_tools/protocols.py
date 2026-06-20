@@ -7,6 +7,7 @@ from app.models import (
     MessageSegment,
     Meta,
     NapCatId,
+    Node,
     Notice,
     PrivateMessage,
     Request,
@@ -18,6 +19,8 @@ type CachedNapCatMessage = GroupMessage | PrivateMessage | Notice | Meta | Reque
 
 class NapCatGroupToolBot(Protocol):
     """描述群聊本地工具所需的最小 NapCat BOT 能力。"""
+
+    boot_id: NapCatId
 
     async def send_msg(
         self,
@@ -50,6 +53,12 @@ class NapCatGroupToolBot(Protocol):
 
     async def get_forward_msg(self, message_id: NapCatId) -> Response:
         """获取合并转发消息详情。"""
+        ...
+
+    async def send_group_forward_msg(
+        self, *, group_id: NapCatId, messages: list[Node]
+    ) -> Response:
+        """发送群聊合并转发消息。"""
         ...
 
     async def get_image(

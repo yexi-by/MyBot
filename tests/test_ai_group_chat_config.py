@@ -65,6 +65,7 @@ class AIGroupChatConfigTest(unittest.TestCase):
         self.assertEqual(config.forward_image_max_all_images, 12)
         self.assertEqual(config.forward_image_fetch_concurrency, 4)
         self.assertEqual(config.forward_image_download_timeout_seconds, 15.0)
+        self.assertEqual(config.max_reply_chars, 100)
         self.assertEqual(config.tool_image_delivery_mode, "auto")
         self.assertEqual(config.tool_image_summary_max_images, 6)
         self.assertFalse(config.persist_tool_image_observations)
@@ -103,6 +104,21 @@ class AIGroupChatConfigTest(unittest.TestCase):
                 supports_multimodal=False,
                 multimodal_fallback_model_name="gpt-5.5-vision",
                 multimodal_fallback_model_vendors="openai",
+                group_config=[],
+            )
+
+    def test_max_reply_chars_rejects_invalid_values(self) -> None:
+        """AI 群回复普通发送字数阈值必须大于零。"""
+        with self.assertRaises(ValueError):
+            _ = AIGroupChatConfig(
+                model_name="deepseek-v4-pro",
+                model_vendors="deepseek",
+                supports_multimodal=False,
+                multimodal_fallback_model_name="gpt-5.5-vision",
+                multimodal_fallback_model_vendors="openai",
+                tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
+                tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
+                max_reply_chars=0,
                 group_config=[],
             )
 

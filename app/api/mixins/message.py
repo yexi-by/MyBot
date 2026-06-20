@@ -7,9 +7,11 @@ from app.models import (
     Dice,
     Face,
     File,
+    Forward,
     Image,
     MessageSegment,
     NapCatId,
+    Node,
     Record,
     Reply,
     Response,
@@ -220,6 +222,12 @@ class MessageMixin(BaseMixin):
 
     async def _call_send_msg_with_retry(self, *, params: JsonObject) -> Response:
         """调用 NapCat send_msg，并对可恢复发送失败执行配置化重试。"""
+        return await self._call_send_action_with_retry(action="send_msg", params=params)
+
+    async def _call_send_action_with_retry(
+        self, *, action: str, params: JsonObject
+    ) -> Response:
+        """调用 NapCat 发送类 Action，并对可恢复失败执行配置化重试。"""
         retrier = create_retry_manager(
             error_types=(NapCatRetryableSendMessageError,),
             retry_count=self.send_retry_count,
@@ -228,7 +236,7 @@ class MessageMixin(BaseMixin):
         async for attempt in retrier:
             with attempt:
                 try:
-                    response = await self._call_action("send_msg", params)
+                    response = await self._call_action(action, params)
                 except TimeoutError as exc:
                     raise NapCatSendMessageError.from_timeout(error=exc) from exc
                 if response.status != "ok" or response.retcode != 0:
@@ -288,6 +296,61 @@ class MessageMixin(BaseMixin):
             message_id = raw_message_id.strip()
             if message_id:
                 return message_id
+        return None
+
+    async def send_group_forward_msg(
+        self, *, group_id: NapCatId, messages: list[Node]
+    ) -> Response:
+        """发送群聊合并转发消息。"""
+        params = self._build_params(group_id=group_id, messages=messages)
+        response = await self._call_send_action_with_retry(
+            action="send_group_forward_msg",
+            params=params,
+        )
+        await self._store_sent_group_forward_message(
+            response=response,
+            group_id=group_id,
+        )
+        return response
+
+    async def _store_sent_group_forward_message(
+        self, *, response: Response, group_id: NapCatId
+    ) -> None:
+        """在合并转发发送成功后保存可引用的 Forward 消息段。"""
+        if response.status != "ok" or response.retcode != 0:
+            return
+        forward_id = self._extract_sent_forward_id(response=response)
+        if forward_id is None:
+            log_event(
+                level="WARNING",
+                event="napcat.sent_forward.forward_id_missing",
+                category="napcat_api",
+                message="发送合并转发成功但 NapCat 响应缺少 forward_id，无法保存出站合并转发段",
+                response_data=response.data,
+            )
+            return
+        await self._store_sent_message(
+            response=response,
+            group_id=group_id,
+            user_id=None,
+            message_segment=[Forward.new(forward_id)],
+        )
+
+    def _extract_sent_forward_id(self, *, response: Response) -> NapCatId | None:
+        """从 NapCat 合并转发响应中提取 forward_id。"""
+        data = response.data
+        if not isinstance(data, dict):
+            return None
+        response_data: JsonObject = data
+        raw_forward_id = response_data.get("forward_id")
+        if isinstance(raw_forward_id, bool):
+            return None
+        if isinstance(raw_forward_id, int):
+            return str(raw_forward_id)
+        if isinstance(raw_forward_id, str):
+            forward_id = raw_forward_id.strip()
+            if forward_id:
+                return forward_id
         return None
 
     async def delete_msg(self, message_id: NapCatId) -> None:

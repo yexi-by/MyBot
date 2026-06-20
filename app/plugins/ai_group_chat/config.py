@@ -31,6 +31,7 @@ class AIGroupChatConfig(StrictModel):
     max_tool_rounds: int = Field(default=8, ge=1)
     token_estimation_safety_factor: float = Field(default=1.25, ge=1)
     context_compression_notice: str = "上下文有点长，我先整理一下记忆，稍等我几秒喵~"
+    max_reply_chars: int = Field(default=100, ge=1)
     output_reasoning_content: bool = False
     pass_back_reasoning_content: bool = False
     debug_dump_messages: bool = False

@@ -11,7 +11,16 @@ from redis.asyncio import Redis
 
 from app.api.mixins.message import MessageMixin, NapCatSendMessageError
 from app.database import RedisDatabaseManager
-from app.models import GroupMessage, Image, MessageSegment, NapCatId, Response
+from app.models import (
+    Forward,
+    GroupMessage,
+    Image,
+    MessageSegment,
+    NapCatId,
+    Node,
+    Response,
+    Text,
+)
 from app.models.common import JsonObject
 
 
@@ -250,6 +259,42 @@ class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, "ok")
         self.assertEqual(len(client.sent_actions), 1)
         self.assertEqual(database.records, [])
+
+    async def test_group_forward_send_records_forward_segment(self) -> None:
+        """send_group_forward_msg 成功后保存合并转发段，支持后续引用。"""
+        database = RecordingDatabase()
+        client = FakeMessageClient(
+            database=database,
+            responses=[
+                Response(
+                    status="ok",
+                    retcode=0,
+                    data={"message_id": 90004, "forward_id": "forward-90004"},
+                )
+            ],
+        )
+
+        response = await client.send_group_forward_msg(
+            group_id="40000",
+            messages=[
+                Node.new(
+                    user_id="10000",
+                    nickname="机器人",
+                    content=[Text.new("长回复正文")],
+                )
+            ],
+        )
+
+        self.assertEqual(response.status, "ok")
+        self.assertEqual(len(database.records), 1)
+        record = database.records[0]
+        self.assertEqual(record.message_id, "90004")
+        self.assertEqual(record.group_id, "40000")
+        self.assertEqual([segment.type for segment in record.message_segments], ["forward"])
+        forward_segment = record.message_segments[0]
+        self.assertIsInstance(forward_segment, Forward)
+        forward_segment = cast(Forward, forward_segment)
+        self.assertEqual(forward_segment.data.id, "forward-90004")
 
     async def test_database_stores_outgoing_base64_image_as_cached_group_message(
         self,

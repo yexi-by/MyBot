@@ -9,9 +9,12 @@ from app.models import StrictModel
 
 MENTION_ALL: Literal["all"] = "all"
 MAX_HISTORY_LIMIT: int = 100
+MAX_HISTORY_SCAN_LIMIT: int = 500
 BEIJING_TIMEZONE: timezone = timezone(timedelta(hours=8))
 HISTORY_TIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
-type HistoryQueryMode = Literal["recent_count", "recent_duration", "date_range"]
+type HistoryQueryMode = Literal[
+    "recent_count", "recent_duration", "date_range", "around_message"
+]
 type ForwardImageQueryMode = Literal["single", "message", "all"]
 
 
@@ -118,8 +121,8 @@ class GetGroupHistoryMessagesArgs(StrictModel):
     query_mode: HistoryQueryMode = Field(
         default="recent_count",
         description=(
-            "历史消息查询模式。recent_count 表示最近 N 条；"
-            "recent_duration 表示最近一段分钟数；date_range 表示指定起止时间范围。"
+            "recent_count 最近 N 条；recent_duration 最近分钟；"
+            "date_range 北京时间范围；around_message 某消息前后文。"
         ),
     )
     limit: int = Field(
@@ -127,23 +130,48 @@ class GetGroupHistoryMessagesArgs(StrictModel):
         ge=1,
         le=MAX_HISTORY_LIMIT,
         description=(
-            "最多返回的消息数量，默认 20，最大 100。"
-            "recent_count 模式表示最近 N 条；时间范围模式用于限制返回量。"
+            "返回上限，默认 20，最大 100；around_message 由 before/after 控制。"
         ),
     )
     duration_minutes: int | None = Field(
         default=None,
         ge=1,
         le=10080,
-        description="recent_duration 模式使用：向前回溯的分钟数，最大 10080 分钟。",
+        description="recent_duration：回溯分钟数，最大 10080。",
     )
     start_time: str | None = Field(
         default=None,
-        description="date_range 模式使用：开始时间，格式为 YYYY-MM-DD HH:MM:SS，北京时间。",
+        description="date_range 开始时间，格式 YYYY-MM-DD HH:MM:SS，北京时间。",
     )
     end_time: str | None = Field(
         default=None,
-        description="date_range 模式使用：结束时间，格式为 YYYY-MM-DD HH:MM:SS，北京时间。",
+        description="date_range 结束时间，格式 YYYY-MM-DD HH:MM:SS，北京时间。",
+    )
+    user_id: str | None = Field(
+        default=None,
+        description="可选 QQ 号；只保留该成员发言。",
+    )
+    context_message_id: str | None = Field(
+        default=None,
+        description="around_message 锚点消息 ID。",
+    )
+    before_count: int = Field(
+        default=10,
+        ge=0,
+        le=MAX_HISTORY_LIMIT,
+        description="锚点前消息数量，默认 10。",
+    )
+    after_count: int = Field(
+        default=10,
+        ge=0,
+        le=MAX_HISTORY_LIMIT,
+        description="锚点后消息数量，默认 10。",
+    )
+    scan_limit: int = Field(
+        default=100,
+        ge=1,
+        le=MAX_HISTORY_SCAN_LIMIT,
+        description="本地扫描窗口，默认 100，最大 500；用于 user_id 或 around_message。",
     )
 
     @model_validator(mode="after")
@@ -154,6 +182,10 @@ class GetGroupHistoryMessagesArgs(StrictModel):
         if self.query_mode == "recent_duration":
             if self.duration_minutes is None:
                 raise ValueError("recent_duration 模式必须填写 duration_minutes")
+            return self
+        if self.query_mode == "around_message":
+            if self.context_message_id is None:
+                raise ValueError("around_message 模式必须填写 context_message_id")
             return self
         if self.start_time is None or self.end_time is None:
             raise ValueError("date_range 模式必须填写 start_time 和 end_time")

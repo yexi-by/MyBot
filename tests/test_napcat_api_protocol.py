@@ -17,8 +17,10 @@ from app.database import RedisDatabaseManager
 from app.models import (
     JsonObject,
     NapCatId,
+    Node,
     Response,
     StreamTransferResult,
+    Text,
     to_json_value,
 )
 
@@ -206,6 +208,44 @@ class NapCatProtocolAlignmentTest(unittest.IsolatedAsyncioTestCase):
         params = client.last_send_params()
         self.assertEqual(params["user_id"], ["200", "300"])
         self.assertNotIn("user_ids", params)
+
+    async def test_send_group_forward_msg_uses_napcat_forward_action(self) -> None:
+        """发送群合并转发时使用 NapCat 的专用 action 和 messages 参数。"""
+        client = RecordingClient()
+
+        response = await client.send_group_forward_msg(
+            group_id="100",
+            messages=[
+                Node.new(
+                    user_id="10000",
+                    nickname="机器人",
+                    content=[Text.new("长回复正文")],
+                )
+            ],
+        )
+
+        action, params = client.action_calls[-1]
+        self.assertEqual(response.status, "ok")
+        self.assertEqual(action, "send_group_forward_msg")
+        self.assertIsNotNone(params)
+        if params is None:
+            raise AssertionError("合并转发调用必须包含参数")
+        self.assertEqual(params["group_id"], "100")
+        self.assertEqual(
+            params["messages"],
+            [
+                {
+                    "type": "node",
+                    "data": {
+                        "user_id": "10000",
+                        "nickname": "机器人",
+                        "content": [
+                            {"type": "text", "data": {"text": "长回复正文"}}
+                        ],
+                    },
+                }
+            ],
+        )
 
 
 class NapCatStreamDispatchTest(unittest.IsolatedAsyncioTestCase):

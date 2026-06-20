@@ -36,6 +36,7 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
         forward_image_max_all_images: int = 12,
         forward_image_fetch_concurrency: int = 4,
         forward_image_download_timeout_seconds: float = 15.0,
+        max_reply_chars: int = 100,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         """绑定当前群事件，并注册可供模型调用的群聊工具。"""
@@ -45,6 +46,7 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
             bot=bot,
             event=event,
             allow_mention_all=allow_mention_all,
+            max_reply_chars=max_reply_chars,
         )
         self._files: GroupFileToolset = GroupFileToolset(bot=bot, event=event)
         self._forward: GroupForwardToolset = GroupForwardToolset(

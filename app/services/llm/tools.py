@@ -130,7 +130,7 @@ class LLMToolRegistry(LLMToolExecutor):
         value = self._resolve_schema_reference(value=value, definitions=definitions)
         normalized: JsonObject = {}
         for key, item in value.items():
-            if key in {"$defs", "default"}:
+            if key in {"$defs", "default", "title"}:
                 continue
             normalized[key] = self._normalize_schema_node(
                 value=item,
