@@ -129,6 +129,8 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
         self.context: Context = context
         self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
         self.consumers: list[asyncio.Task[None]] = []
+        self._active_futures: set[asyncio.Future[bool]] = set()
+        self._stopped = False
         self.controller: PluginControllerProtocol | None = None
         self._pending_listeners: list[
             tuple[str, Callable[..., Awaitable[object]]]
@@ -157,6 +159,8 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
 
     async def add_to_queue(self, msg: T) -> bool:
         """将事件放入插件队列并等待消费结果。"""
+        if self._stopped:
+            raise RuntimeError(f"插件 {self.name} 已停止，无法接收新事件")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
         await self.task_queue.put((msg, future))
@@ -164,11 +168,19 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
 
     async def consumer(self) -> None:
         """持续消费插件事件队列。"""
-        while True:
+        while not self._stopped:
             data, future = await self.task_queue.get()
+            self._active_futures.add(future)
             try:
+                if future.cancelled():
+                    continue
                 result = await self.run(msg=data)
-                future.set_result(result)
+                if not future.done():
+                    future.set_result(result)
+            except asyncio.CancelledError:
+                if not future.done():
+                    _ = future.cancel()
+                raise
             except Exception as e:
                 log_exception(
                     event="plugin.consumer.exception",
@@ -178,8 +190,10 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
                     plugin_name=self.name,
                     event_model=type(data).__name__,
                 )
-                future.set_exception(e)
+                if not future.done():
+                    future.set_exception(e)
             finally:
+                self._active_futures.discard(future)
                 self.task_queue.task_done()
 
     def register_consumers(self) -> None:
@@ -189,9 +203,23 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
             self.consumers.append(consumer)
 
     async def stop_consumers(self) -> None:
-        """取消并停止插件消费者任务。"""
+        """停止接收新事件，并取消活动及排队任务。"""
+        self._stopped = True
+        for future in tuple(self._active_futures):
+            if not future.done():
+                _ = future.cancel()
         for consumer in self.consumers:
             _ = consumer.cancel()
+
+        while True:
+            try:
+                _, future = self.task_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if not future.done():
+                _ = future.cancel()
+            self.task_queue.task_done()
+
         if self.consumers:
             try:
                 _ = await asyncio.wait_for(

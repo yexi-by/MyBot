@@ -123,6 +123,29 @@ tool_image_observation_user_prompt_path = "plugins_config/ai_group_chat/prompts/
 
 视觉摘要请求是独立请求，不复用群聊 system prompt、长期上下文、当前用户正文或工具历史。`tool_image_observation_system_prompt_path` 用于定义纯图片观察边界，`tool_image_observation_user_prompt_path` 用于定义观察任务和输出粒度；需要视觉摘要时必须显式配置这两个非空提示词文件，不支持内联提示词，也不存在代码内置默认提示词。
 
+### Neavo 群聊生图
+
+Neavo 群聊生图插件通过异步任务 API 提交自然语言指令并轮询图片结果。群成员使用以下格式触发：
+
+```text
+#生图 一只戴耳机的橘猫
+```
+
+插件配置放在 `plugins_config/plugins.toml`：
+
+```toml
+[neavo_image_generate]
+group_ids = ["123456789"]
+base_url = "https://image-api.example.com"
+api_token = "CHANGE_ME"
+poll_interval_seconds = 3.0
+generation_timeout_seconds = 600.0
+request_timeout_seconds = 30.0
+max_image_bytes = 20971520
+```
+
+`api_token` 属于部署密钥，不得提交到仓库或写入日志。生产环境应使用 HTTPS；使用明文 HTTP 时，Bearer Token 和请求内容不会受到传输加密保护。插件最多并行处理 5 个任务，超过上限的请求会等待空闲消费者。
+
 ## 运行边界
 
 - `app/api/` 负责 NapCat Action 调用封装，不放插件业务逻辑。
@@ -153,7 +176,8 @@ app/
 │   ├── auto_unban/       # 自动解禁插件
 │   ├── delete_recalled_message/
 │   ├── group_notice/
-│   └── image_generate/
+│   ├── image_generate/
+│   └── neavo_image_generate/
 ├── services/
 │   ├── llm/              # LLM 路由、OpenAI 协议转换、MCP 和工具注册
 │   └── napcat/           # NapCat 本地工具集

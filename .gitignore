@@ -34,6 +34,7 @@ logs/
 debug/
 data/
 image/
+tmp/
 *.log
 *.trace
 *.tmp

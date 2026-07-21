@@ -1,0 +1,737 @@
+"""Neavo 群聊生图插件的配置、协议与并发行为测试。"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import unittest
+from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass
+from typing import cast
+from unittest.mock import patch
+from uuid import UUID
+
+import httpx
+from pydantic import ValidationError
+
+from app.models import At, GroupMessage, Image, MessageSegment, Response, Sender, Text
+from app.plugins.base import Context
+from app.plugins.neavo_image_generate.client import (
+    MAX_CONSECUTIVE_POLL_RETRIES,
+    NeavoGenerationTimeoutError,
+    NeavoImageClient,
+    NeavoProtocolError,
+    NeavoTransportError,
+    NeavoUpstreamError,
+)
+from app.plugins.neavo_image_generate.config import NeavoImageGenerateConfig
+from app.plugins.neavo_image_generate.plugin import (
+    MAX_PROMPT_LENGTH,
+    NeavoImageGeneratePlugin,
+    extract_prompt,
+)
+
+API_TOKEN = "test-neavo-token"
+BASE_URL = "https://neavo.example"
+ALLOWED_GROUP_ID = "40000"
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+)
+GIF_BYTES = base64.b64decode(
+    "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+)
+JOB_A = UUID("550e8400-e29b-41d4-a716-446655440000")
+JOB_B = UUID("550e8400-e29b-41d4-a716-446655440001")
+
+type AsyncHttpHandler = Callable[
+    [httpx.Request], Coroutine[None, None, httpx.Response]
+]
+type SleepFunction = Callable[[float], Awaitable[None]]
+
+
+def build_config(**overrides: object) -> NeavoImageGenerateConfig:
+    """构造带安全假 Token 的测试配置。"""
+    values: dict[str, object] = {
+        "group_ids": [ALLOWED_GROUP_ID],
+        "base_url": BASE_URL,
+        "api_token": API_TOKEN,
+        "poll_interval_seconds": 3.0,
+        "generation_timeout_seconds": 60.0,
+        "request_timeout_seconds": 10.0,
+        "max_image_bytes": 20 * 1024 * 1024,
+    }
+    values.update(overrides)
+    return NeavoImageGenerateConfig.model_validate(values)
+
+
+def build_group_message(
+    *,
+    text: str = "#生图 一只猫",
+    message: list[MessageSegment] | None = None,
+    group_id: str = ALLOWED_GROUP_ID,
+    user_id: str = "20001",
+    message_id: str = "30001",
+) -> GroupMessage:
+    """构造测试用群消息。"""
+    segments: list[MessageSegment]
+    if message is not None:
+        segments = message
+    else:
+        segments = [cast(MessageSegment, Text.new(text))]
+    return GroupMessage(
+        time=1_777_132_900,
+        self_id="10000",
+        post_type="message",
+        message_type="group",
+        sub_type="normal",
+        user_id=user_id,
+        message_id=message_id,
+        group_id=group_id,
+        group_name="测试群",
+        message=segments,
+        raw_message=text,
+        sender=Sender(user_id=user_id, nickname=f"用户{user_id}", role="member"),
+    )
+
+
+@dataclass(slots=True)
+class SentMessage:
+    """FakeBot 记录的一次群消息发送。"""
+
+    group_id: str
+    segments: list[MessageSegment]
+
+
+class FakeBot:
+    """记录插件发送内容的测试 Bot。"""
+
+    def __init__(self) -> None:
+        """初始化发送记录。"""
+        self.boot_id = "10000"
+        self.sent_messages: list[SentMessage] = []
+
+    async def send_msg(
+        self,
+        *,
+        group_id: str,
+        message_segment: list[MessageSegment] | None = None,
+    ) -> Response:
+        """记录发送动作并返回成功响应。"""
+        self.sent_messages.append(
+            SentMessage(group_id=group_id, segments=list(message_segment or []))
+        )
+        return Response(status="ok", retcode=0)
+
+
+class FakeContext:
+    """仅提供 Neavo 插件需要的运行期依赖。"""
+
+    def __init__(self, *, http_client: httpx.AsyncClient) -> None:
+        """绑定 FakeBot 与测试 HTTP 客户端。"""
+        self.bot = FakeBot()
+        self.direct_httpx = http_client
+
+
+async def no_sleep(_seconds: float) -> None:
+    """跳过真实轮询等待。"""
+
+
+def extract_at_user(segments: list[MessageSegment]) -> str | None:
+    """提取发送消息中的首个艾特目标。"""
+    for segment in segments:
+        if isinstance(segment, At):
+            return segment.data.qq
+    return None
+
+
+def extract_text(segments: list[MessageSegment]) -> str:
+    """拼接发送消息中的文本段。"""
+    return "".join(
+        segment.data.text for segment in segments if isinstance(segment, Text)
+    )
+
+
+def extract_image_bytes(segments: list[MessageSegment]) -> bytes | None:
+    """解码发送消息中的首张 base64 图片。"""
+    for segment in segments:
+        if not isinstance(segment, Image):
+            continue
+        prefix = "base64://"
+        if not segment.data.file.startswith(prefix):
+            return None
+        return base64.b64decode(segment.data.file.removeprefix(prefix))
+    return None
+
+
+class NeavoImageGenerateConfigTest(unittest.IsolatedAsyncioTestCase):
+    """验证 Neavo 插件配置边界。"""
+
+    async def test_config_normalizes_ids_url_and_masks_token(self) -> None:
+        """群号、根地址和密钥按配置契约规范化。"""
+        config = build_config(
+            group_ids=[40000],
+            base_url=" https://neavo.example/ ",
+            api_token=f" {API_TOKEN} ",
+        )
+
+        self.assertEqual(config.group_ids, [ALLOWED_GROUP_ID])
+        self.assertEqual(config.base_url, BASE_URL)
+        self.assertEqual(config.api_token.get_secret_value(), API_TOKEN)
+        self.assertNotIn(API_TOKEN, repr(config))
+
+    async def test_config_rejects_unknown_and_unsafe_values(self) -> None:
+        """未知字段、空密钥和越界轮询间隔必须显式失败。"""
+        invalid_overrides = [
+            {"unexpected": True},
+            {"api_token": "   "},
+            {"base_url": "ftp://neavo.example"},
+            {"base_url": "https://user:password@neavo.example"},
+            {"poll_interval_seconds": 1.9},
+            {"poll_interval_seconds": 5.1},
+        ]
+
+        for overrides in invalid_overrides:
+            with self.subTest(overrides=overrides):
+                with self.assertRaises(ValidationError):
+                    _ = build_config(**overrides)
+
+
+class NeavoImageClientTest(unittest.IsolatedAsyncioTestCase):
+    """验证 Neavo HTTP 协议客户端。"""
+
+    async def asyncSetUp(self) -> None:
+        """初始化待关闭的测试 HTTP 客户端列表。"""
+        self.http_clients: list[httpx.AsyncClient] = []
+
+    async def asyncTearDown(self) -> None:
+        """关闭每个 MockTransport 客户端。"""
+        for http_client in self.http_clients:
+            await http_client.aclose()
+
+    def make_client(
+        self,
+        *,
+        handler: AsyncHttpHandler,
+        config: NeavoImageGenerateConfig | None = None,
+        sleep: SleepFunction = no_sleep,
+    ) -> NeavoImageClient:
+        """创建使用 MockTransport 的协议客户端。"""
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        self.http_clients.append(http_client)
+        return NeavoImageClient(
+            config=config or build_config(),
+            http_client=http_client,
+            sleep=sleep,
+        )
+
+    async def test_generate_sends_bearer_and_polls_400_until_image(self) -> None:
+        """202 任务会按固定间隔轮询，且只有 400 被视为处理中。"""
+        requests: list[tuple[str, str]] = []
+        sleeps: list[float] = []
+        poll_count = 0
+
+        async def record_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal poll_count
+            requests.append((request.method, request.url.path))
+            self.assertEqual(request.headers["Authorization"], f"Bearer {API_TOKEN}")
+            if request.method == "POST":
+                payload = cast(dict[str, object], json.loads(request.content))
+                self.assertEqual(payload, {"instruction": "一只戴耳机的橘猫"})
+                return httpx.Response(202, json={"id": str(JOB_A)})
+            poll_count += 1
+            if poll_count <= 2:
+                return httpx.Response(400, json={"detail": "pending"})
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "image/png"},
+                content=PNG_BYTES,
+            )
+
+        client = self.make_client(handler=handler, sleep=record_sleep)
+
+        result = await client.generate("一只戴耳机的橘猫")
+
+        self.assertEqual(result.job_id, JOB_A)
+        self.assertEqual(result.image_bytes, PNG_BYTES)
+        self.assertEqual(result.mime_type, "image/png")
+        self.assertEqual(sleeps, [3.0, 3.0, 3.0])
+        self.assertEqual(
+            requests,
+            [
+                ("POST", "/new"),
+                ("GET", f"/result/{JOB_A}"),
+                ("GET", f"/result/{JOB_A}"),
+                ("GET", f"/result/{JOB_A}"),
+            ],
+        )
+
+    async def test_submit_rejects_invalid_uuid(self) -> None:
+        """202 响应缺少规范 UUID 时作为协议错误失败。"""
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(202, json={"id": "not-a-uuid"})
+
+        client = self.make_client(handler=handler)
+
+        with self.assertRaises(NeavoProtocolError) as raised:
+            _ = await client.generate("测试提示词")
+
+        self.assertEqual(raised.exception.stage, "submit")
+        self.assertEqual(raised.exception.status_code, 202)
+
+    async def test_submit_transport_error_is_not_retried(self) -> None:
+        """POST 网络状态不明时禁止自动重试，避免重复生图。"""
+        submit_count = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal submit_count
+            submit_count += 1
+            raise httpx.ReadTimeout("提交超时", request=request)
+
+        client = self.make_client(handler=handler)
+
+        with self.assertRaises(NeavoTransportError) as raised:
+            _ = await client.generate("测试提示词")
+
+        self.assertEqual(submit_count, 1)
+        self.assertEqual(raised.exception.stage, "submit")
+        self.assertIsNone(raised.exception.job_id)
+
+    async def test_poll_retries_three_times_after_initial_network_error(self) -> None:
+        """GET 连续网络故障最多重试三次后终止。"""
+        poll_count = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal poll_count
+            if request.method == "POST":
+                return httpx.Response(202, json={"id": str(JOB_A)})
+            poll_count += 1
+            raise httpx.ConnectError("轮询连接失败", request=request)
+
+        client = self.make_client(handler=handler)
+
+        with self.assertRaises(NeavoTransportError) as raised:
+            _ = await client.generate("测试提示词")
+
+        self.assertEqual(poll_count, 1 + MAX_CONSECUTIVE_POLL_RETRIES)
+        self.assertEqual(raised.exception.stage, "poll")
+        self.assertEqual(raised.exception.job_id, JOB_A)
+
+    async def test_terminal_http_statuses_are_not_polled_again(self) -> None:
+        """除 400 外的错误状态均为终态错误。"""
+        for status_code in (401, 404, 422, 500, 502, 503):
+            with self.subTest(status_code=status_code):
+                poll_count = 0
+
+                async def handler(request: httpx.Request) -> httpx.Response:
+                    nonlocal poll_count
+                    if request.method == "POST":
+                        return httpx.Response(202, json={"id": str(JOB_A)})
+                    poll_count += 1
+                    return httpx.Response(status_code, json={"detail": "secret"})
+
+                client = self.make_client(handler=handler)
+                with self.assertRaises(NeavoUpstreamError) as raised:
+                    _ = await client.generate("测试提示词")
+
+                self.assertEqual(poll_count, 1)
+                self.assertEqual(raised.exception.stage, "poll")
+                self.assertEqual(raised.exception.status_code, status_code)
+                self.assertEqual(raised.exception.job_id, JOB_A)
+
+    async def test_image_response_validation_rejects_invalid_content(self) -> None:
+        """空数据、非图片、不可识别图片和超限图片均被拒绝。"""
+        cases: list[tuple[str, dict[str, str], bytes, int]] = [
+            ("non-image-type", {"Content-Type": "application/json"}, PNG_BYTES, 1024),
+            ("empty", {"Content-Type": "image/png"}, b"", 1024),
+            ("unknown", {"Content-Type": "image/png"}, b"not-an-image", 1024),
+            (
+                "oversized",
+                {"Content-Type": "image/png"},
+                PNG_BYTES,
+                len(PNG_BYTES) - 1,
+            ),
+        ]
+        for name, headers, content, max_image_bytes in cases:
+            with self.subTest(name=name):
+
+                async def handler(request: httpx.Request) -> httpx.Response:
+                    if request.method == "POST":
+                        return httpx.Response(202, json={"id": str(JOB_A)})
+                    return httpx.Response(200, headers=headers, content=content)
+
+                client = self.make_client(
+                    handler=handler,
+                    config=build_config(max_image_bytes=max_image_bytes),
+                )
+                with self.assertRaises(NeavoProtocolError) as raised:
+                    _ = await client.generate("测试提示词")
+
+                self.assertEqual(raised.exception.stage, "validate")
+                self.assertEqual(raised.exception.status_code, 200)
+                self.assertEqual(raised.exception.job_id, JOB_A)
+
+    async def test_generation_timeout_preserves_job_id(self) -> None:
+        """总期限到达时报告超时，并保留已提交任务 ID。"""
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(202, json={"id": str(JOB_A)})
+
+        async def blocking_sleep(_seconds: float) -> None:
+            await asyncio.Event().wait()
+
+        client = self.make_client(
+            handler=handler,
+            config=build_config(generation_timeout_seconds=0.01),
+            sleep=blocking_sleep,
+        )
+
+        with self.assertRaises(NeavoGenerationTimeoutError) as raised:
+            _ = await client.generate("测试提示词")
+
+        self.assertEqual(raised.exception.stage, "poll")
+        self.assertEqual(raised.exception.job_id, JOB_A)
+
+
+class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
+    """验证群聊路由、发送归属与队列并发。"""
+
+    async def asyncSetUp(self) -> None:
+        """初始化需在测试结束时清理的插件与客户端。"""
+        self.plugins: list[NeavoImageGeneratePlugin] = []
+        self.http_clients: list[httpx.AsyncClient] = []
+
+    async def asyncTearDown(self) -> None:
+        """停止消费者并关闭 MockTransport 客户端。"""
+        for plugin in self.plugins:
+            await plugin.stop_consumers()
+        for http_client in self.http_clients:
+            await http_client.aclose()
+
+    def make_plugin(
+        self,
+        *,
+        handler: AsyncHttpHandler,
+        config: NeavoImageGenerateConfig | None = None,
+        sleep: SleepFunction = no_sleep,
+    ) -> tuple[NeavoImageGeneratePlugin, FakeBot]:
+        """构造使用真实 BasePlugin 队列和 MockTransport 的插件。"""
+        plugin_config = config or build_config()
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        self.http_clients.append(http_client)
+        fake_context = FakeContext(http_client=http_client)
+        with patch(
+            "app.plugins.neavo_image_generate.plugin.load_neavo_image_generate_config",
+            return_value=plugin_config,
+        ):
+            plugin = NeavoImageGeneratePlugin(context=cast(Context, fake_context))
+        plugin.client = NeavoImageClient(
+            config=plugin_config,
+            http_client=http_client,
+            sleep=sleep,
+        )
+        self.plugins.append(plugin)
+        return plugin, fake_context.bot
+
+    async def test_extract_prompt_requires_independent_command_token(self) -> None:
+        """命令可跨文本段拼接，但近似词和正文中的令牌不触发。"""
+        split_message = build_group_message(
+            message=[Text.new("#生"), At.new("99999"), Text.new("图  白猫  ")]
+        )
+        cases = [
+            (split_message, "白猫"),
+            (build_group_message(text="#生图\n夜景"), "夜景"),
+            (build_group_message(text="#生图"), ""),
+            (build_group_message(text="#生图片"), None),
+            (build_group_message(text="请用 #生图 画猫"), None),
+            (build_group_message(text="普通消息"), None),
+        ]
+
+        for message, expected in cases:
+            with self.subTest(raw_message=message.raw_message):
+                self.assertEqual(extract_prompt(message), expected)
+
+    async def test_queue_filters_other_groups_and_non_commands_before_http(self) -> None:
+        """白名单外消息和普通消息不会进入耗时生成流程。"""
+        request_count = 0
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            return httpx.Response(500)
+
+        plugin, bot = self.make_plugin(handler=handler)
+
+        results = await asyncio.gather(
+            plugin.add_to_queue(
+                build_group_message(group_id="40001", text="#生图 白猫")
+            ),
+            plugin.add_to_queue(build_group_message(text="#生图片 白猫")),
+            plugin.add_to_queue(build_group_message(text="普通消息")),
+        )
+
+        self.assertEqual(results, [False, False, False])
+        self.assertEqual(request_count, 0)
+        self.assertEqual(bot.sent_messages, [])
+
+    async def test_empty_and_oversized_prompts_are_rejected_locally(self) -> None:
+        """空提示词和 4097 字提示词只向发起者返回本地校验错误。"""
+        request_count = 0
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            return httpx.Response(500)
+
+        plugin, bot = self.make_plugin(handler=handler)
+        empty_message = build_group_message(text="#生图", user_id="21001")
+        long_message = build_group_message(
+            text=f"#生图 {'猫' * (MAX_PROMPT_LENGTH + 1)}",
+            user_id="21002",
+            message_id="30002",
+        )
+
+        results = await asyncio.gather(
+            plugin.add_to_queue(empty_message),
+            plugin.add_to_queue(long_message),
+        )
+
+        self.assertEqual(results, [True, True])
+        self.assertEqual(request_count, 0)
+        self.assertEqual(
+            {extract_at_user(item.segments) for item in bot.sent_messages},
+            {"21001", "21002"},
+        )
+        sent_text = "\n".join(extract_text(item.segments) for item in bot.sent_messages)
+        self.assertIn("填写图片描述", sent_text)
+        self.assertIn(str(MAX_PROMPT_LENGTH), sent_text)
+
+    async def test_max_length_prompt_generates_and_sends_base64_image(self) -> None:
+        """4096 字边界提示词可以生成，并把图片艾特回原用户。"""
+        prompt = "猫" * MAX_PROMPT_LENGTH
+        submitted_prompts: list[str] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                payload = cast(dict[str, object], json.loads(request.content))
+                instruction = payload.get("instruction")
+                self.assertIsInstance(instruction, str)
+                submitted_prompts.append(cast(str, instruction))
+                return httpx.Response(202, json={"id": str(JOB_A)})
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "image/png"},
+                content=PNG_BYTES,
+            )
+
+        plugin, bot = self.make_plugin(handler=handler)
+
+        handled = await plugin.add_to_queue(
+            build_group_message(text=f"#生图 {prompt}", user_id="22001")
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(submitted_prompts, [prompt])
+        self.assertEqual(len(bot.sent_messages), 2)
+        status, result = bot.sent_messages
+        self.assertEqual(extract_at_user(status.segments), "22001")
+        self.assertIn("正在生成", extract_text(status.segments))
+        self.assertEqual(extract_at_user(result.segments), "22001")
+        self.assertEqual(extract_image_bytes(result.segments), PNG_BYTES)
+
+    async def test_two_users_can_finish_in_reverse_order_without_result_mixup(
+        self,
+    ) -> None:
+        """多人请求各自绑定任务 ID，后提交者可先完成且图片不串人。"""
+        slow_poll_started = asyncio.Event()
+        allow_slow_result = asyncio.Event()
+        prompt_jobs = {"慢任务": JOB_A, "快任务": JOB_B}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                payload = cast(dict[str, object], json.loads(request.content))
+                prompt = payload.get("instruction")
+                self.assertIsInstance(prompt, str)
+                return httpx.Response(
+                    202,
+                    json={"id": str(prompt_jobs[cast(str, prompt)])},
+                )
+            if request.url.path.endswith(str(JOB_A)):
+                slow_poll_started.set()
+                await allow_slow_result.wait()
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "image/png"},
+                    content=PNG_BYTES,
+                )
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "image/gif"},
+                content=GIF_BYTES,
+            )
+
+        plugin, bot = self.make_plugin(handler=handler)
+        slow_task = asyncio.create_task(
+            plugin.add_to_queue(
+                build_group_message(
+                    text="#生图 慢任务", user_id="23001", message_id="33001"
+                )
+            )
+        )
+        await asyncio.wait_for(slow_poll_started.wait(), timeout=1)
+        fast_task = asyncio.create_task(
+            plugin.add_to_queue(
+                build_group_message(
+                    text="#生图 快任务", user_id="23002", message_id="33002"
+                )
+            )
+        )
+        try:
+            self.assertTrue(await asyncio.wait_for(fast_task, timeout=1))
+            self.assertFalse(slow_task.done())
+        finally:
+            allow_slow_result.set()
+        self.assertTrue(await asyncio.wait_for(slow_task, timeout=1))
+
+        result_by_user = {
+            cast(str, extract_at_user(item.segments)): image_bytes
+            for item in bot.sent_messages
+            if (image_bytes := extract_image_bytes(item.segments)) is not None
+        }
+        self.assertEqual(
+            result_by_user,
+            {"23001": PNG_BYTES, "23002": GIF_BYTES},
+        )
+        completion_order = [
+            extract_at_user(item.segments)
+            for item in bot.sent_messages
+            if extract_image_bytes(item.segments) is not None
+        ]
+        self.assertEqual(completion_order, ["23002", "23001"])
+
+    async def test_sixth_request_waits_until_one_of_five_consumers_is_free(
+        self,
+    ) -> None:
+        """并发峰值固定为五，第六个任务在插件队列中等待。"""
+        release_results = asyncio.Event()
+        five_active = asyncio.Event()
+        active_polls = 0
+        max_active_polls = 0
+        submitted_prompts: list[str] = []
+        job_ids = [
+            UUID(f"550e8400-e29b-41d4-a716-{index:012d}") for index in range(1, 7)
+        ]
+        prompt_jobs = {f"任务{index}": job_ids[index - 1] for index in range(1, 7)}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal active_polls, max_active_polls
+            if request.method == "POST":
+                payload = cast(dict[str, object], json.loads(request.content))
+                prompt = payload.get("instruction")
+                self.assertIsInstance(prompt, str)
+                prompt_text = cast(str, prompt)
+                submitted_prompts.append(prompt_text)
+                return httpx.Response(202, json={"id": str(prompt_jobs[prompt_text])})
+            active_polls += 1
+            max_active_polls = max(max_active_polls, active_polls)
+            if active_polls == 5:
+                five_active.set()
+            try:
+                await release_results.wait()
+            finally:
+                active_polls -= 1
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "image/png"},
+                content=PNG_BYTES,
+            )
+
+        plugin, _bot = self.make_plugin(handler=handler)
+        tasks = [
+            asyncio.create_task(
+                plugin.add_to_queue(
+                    build_group_message(
+                        text=f"#生图 任务{index}",
+                        user_id=f"24{index:03d}",
+                        message_id=f"34{index:03d}",
+                    )
+                )
+            )
+            for index in range(1, 7)
+        ]
+        try:
+            await asyncio.wait_for(five_active.wait(), timeout=1)
+            self.assertEqual(len(submitted_prompts), 5)
+            self.assertFalse(tasks[5].done())
+        finally:
+            release_results.set()
+
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
+        self.assertEqual(results, [True] * 6)
+        self.assertEqual(max_active_polls, 5)
+        self.assertCountEqual(submitted_prompts, [f"任务{index}" for index in range(1, 7)])
+
+    async def test_failed_request_does_not_cancel_another_user_request(self) -> None:
+        """单个上游失败只通知对应用户，不影响并发中的成功任务。"""
+        prompt_jobs = {"失败任务": JOB_A, "成功任务": JOB_B}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                payload = cast(dict[str, object], json.loads(request.content))
+                prompt = payload.get("instruction")
+                self.assertIsInstance(prompt, str)
+                return httpx.Response(
+                    202,
+                    json={"id": str(prompt_jobs[cast(str, prompt)])},
+                )
+            if request.url.path.endswith(str(JOB_A)):
+                return httpx.Response(500, json={"detail": API_TOKEN})
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "image/png"},
+                content=PNG_BYTES,
+            )
+
+        plugin, bot = self.make_plugin(handler=handler)
+        results = await asyncio.gather(
+            plugin.add_to_queue(
+                build_group_message(
+                    text="#生图 失败任务", user_id="25001", message_id="35001"
+                )
+            ),
+            plugin.add_to_queue(
+                build_group_message(
+                    text="#生图 成功任务", user_id="25002", message_id="35002"
+                )
+            ),
+        )
+
+        self.assertEqual(results, [True, True])
+        failure_messages = [
+            item
+            for item in bot.sent_messages
+            if extract_at_user(item.segments) == "25001"
+        ]
+        success_messages = [
+            item
+            for item in bot.sent_messages
+            if extract_at_user(item.segments) == "25002"
+        ]
+        self.assertTrue(
+            any("生图失败" in extract_text(item.segments) for item in failure_messages)
+        )
+        self.assertTrue(
+            any(extract_image_bytes(item.segments) == PNG_BYTES for item in success_messages)
+        )
+        all_sent_text = "\n".join(
+            extract_text(item.segments) for item in bot.sent_messages
+        )
+        self.assertNotIn(API_TOKEN, all_sent_text)
+
+
+if __name__ == "__main__":
+    unittest.main()
