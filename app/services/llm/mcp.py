@@ -1,5 +1,6 @@
 """MCP 工具加载与 LLM 工具暴露。"""
 
+import os
 from contextlib import AsyncExitStack
 from typing import cast, override
 
@@ -11,6 +12,22 @@ from pydantic import Field
 from app.models import JsonObject, JsonValue, StrictModel, to_json_value
 
 from .schemas import LLMToolDefinition, LLMToolExecutor
+
+_INHERITED_PROXY_ENV_NAMES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "npm_config_proxy",
+    "npm_config_https_proxy",
+)
+_INHERITED_PROXY_ENV_NAMES_CASEFOLDED = frozenset(
+    name.casefold() for name in _INHERITED_PROXY_ENV_NAMES
+)
 
 
 class MCPServerConfig(StrictModel):
@@ -100,7 +117,7 @@ class MCPToolManager(LLMToolExecutor):
         server_params = StdioServerParameters(
             command=server_config.command,
             args=server_config.args,
-            env=server_config.env,
+            env=build_mcp_server_environment(server_config.env),
             cwd=server_config.cwd,
         )
         read_stream, write_stream = await self._exit_stack.enter_async_context(
@@ -143,3 +160,17 @@ class MCPToolManager(LLMToolExecutor):
                 continue
             content.append(to_json_value(item.model_dump(mode="json", by_alias=True)))
         return {"is_error": result.isError, "content": content}
+
+
+def build_mcp_server_environment(
+    configured_env: dict[str, str] | None,
+) -> dict[str, str] | None:
+    """继承代理变量，并让 MCP 私有配置覆盖同名值。"""
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name.casefold() in _INHERITED_PROXY_ENV_NAMES_CASEFOLDED
+    }
+    if configured_env is not None:
+        environment.update(configured_env)
+    return environment or None

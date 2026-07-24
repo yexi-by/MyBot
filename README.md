@@ -94,6 +94,8 @@ env = { EXAMPLE_API_KEY = "CHANGE_ME" }
 disabled = false
 ```
 
+镜像已固定预装 `firecrawl-mcp`，使用 `npx -y firecrawl-mcp` 不需要在容器启动时下载依赖。MCP 子进程会继承容器中的 HTTP、HTTPS、ALL、NO_PROXY 及 npm 代理变量；server 自身 `env` 中的同名值优先。
+
 AI 群聊插件的主模型不支持图片输入时，需要配置多模态备用模型。当前消息或引用消息包含图片时，本轮正式回复请求会切到备用模型：
 
 ```toml

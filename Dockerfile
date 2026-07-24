@@ -42,7 +42,8 @@ ENV UV_COMPILE_BYTECODE=1
 ENV PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock package.json package-lock.json README.md ./
+RUN npm ci --omit=dev --ignore-scripts=false
 COPY app ./app
 
 CMD ["uv", "run", "--frozen", "--no-dev", "python", "-m", "app.main"]
