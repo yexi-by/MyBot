@@ -15,10 +15,20 @@ from uuid import UUID
 import httpx
 from pydantic import ValidationError
 
-from app.models import At, GroupMessage, Image, MessageSegment, Response, Sender, Text
+from app.models import (
+    At,
+    GroupMessage,
+    Image,
+    MessageSegment,
+    Reply,
+    Response,
+    Sender,
+    Text,
+)
 from app.plugins.base import Context
 from app.plugins.neavo_image_generate.client import (
     MAX_CONSECUTIVE_POLL_RETRIES,
+    MAX_INPUT_IMAGE_BYTES,
     NeavoGenerationTimeoutError,
     NeavoImageClient,
     NeavoProtocolError,
@@ -28,7 +38,10 @@ from app.plugins.neavo_image_generate.client import (
 from app.plugins.neavo_image_generate.config import NeavoImageGenerateConfig
 from app.plugins.neavo_image_generate.plugin import (
     MAX_PROMPT_LENGTH,
+    PRIORITY,
+    REVERSE_COMMAND_TOKEN,
     NeavoImageGeneratePlugin,
+    extract_command,
     extract_prompt,
 )
 
@@ -124,12 +137,38 @@ class FakeBot:
         return Response(status="ok", retcode=0)
 
 
+class FakeDatabase:
+    """按消息 ID 返回测试群消息。"""
+
+    def __init__(self, *, messages: dict[str, GroupMessage] | None = None) -> None:
+        """保存可被回复引用的消息。"""
+        self.messages = messages or {}
+        self.searches: list[tuple[str, str, str]] = []
+
+    async def search_messages(
+        self,
+        *,
+        self_id: str,
+        group_id: str,
+        message_id: str,
+    ) -> GroupMessage | None:
+        """记录查询并返回对应历史消息。"""
+        self.searches.append((self_id, group_id, message_id))
+        return self.messages.get(message_id)
+
+
 class FakeContext:
     """仅提供 Neavo 插件需要的运行期依赖。"""
 
-    def __init__(self, *, http_client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        *,
+        http_client: httpx.AsyncClient,
+        stored_messages: dict[str, GroupMessage] | None = None,
+    ) -> None:
         """绑定 FakeBot 与测试 HTTP 客户端。"""
         self.bot = FakeBot()
+        self.database = FakeDatabase(messages=stored_messages)
         self.direct_httpx = http_client
 
 
@@ -225,8 +264,8 @@ class NeavoImageClientTest(unittest.IsolatedAsyncioTestCase):
             sleep=sleep,
         )
 
-    async def test_generate_sends_bearer_and_polls_400_until_image(self) -> None:
-        """202 任务会按固定间隔轮询，且只有 400 被视为处理中。"""
+    async def test_generate_uses_new_routes_and_polls_202_until_image(self) -> None:
+        """新版文生图任务按固定间隔轮询，HTTP 202 表示处理中。"""
         requests: list[tuple[str, str]] = []
         sleeps: list[float] = []
         poll_count = 0
@@ -244,7 +283,7 @@ class NeavoImageClientTest(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(202, json={"id": str(JOB_A)})
             poll_count += 1
             if poll_count <= 2:
-                return httpx.Response(400, json={"detail": "pending"})
+                return httpx.Response(202)
             return httpx.Response(
                 200,
                 headers={"Content-Type": "image/png"},
@@ -262,10 +301,50 @@ class NeavoImageClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             requests,
             [
-                ("POST", "/new"),
-                ("GET", f"/result/{JOB_A}"),
-                ("GET", f"/result/{JOB_A}"),
-                ("GET", f"/result/{JOB_A}"),
+                ("POST", "/text_to_image"),
+                ("GET", f"/text_to_image/{JOB_A}"),
+                ("GET", f"/text_to_image/{JOB_A}"),
+                ("GET", f"/text_to_image/{JOB_A}"),
+            ],
+        )
+
+    async def test_describe_uploads_raw_image_and_polls_text_result(self) -> None:
+        """反推以原始图片提交，并从 JSON 完成响应读取 Florence-2 文本。"""
+        requests: list[tuple[str, str]] = []
+        poll_count = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal poll_count
+            requests.append((request.method, request.url.path))
+            self.assertEqual(request.headers["Authorization"], f"Bearer {API_TOKEN}")
+            if request.method == "POST":
+                self.assertEqual(request.url.path, "/image_to_text")
+                self.assertEqual(request.headers["Content-Type"], "image/png")
+                self.assertEqual(request.content, PNG_BYTES)
+                return httpx.Response(202, json={"id": str(JOB_B)})
+            poll_count += 1
+            if poll_count == 1:
+                return httpx.Response(202)
+            return httpx.Response(
+                200,
+                json={"text": "一只白猫\n\nwhite cat, portrait"},
+            )
+
+        client = self.make_client(handler=handler)
+
+        result = await client.describe(
+            image_bytes=PNG_BYTES,
+            mime_type="image/png",
+        )
+
+        self.assertEqual(result.job_id, JOB_B)
+        self.assertEqual(result.text, "一只白猫\n\nwhite cat, portrait")
+        self.assertEqual(
+            requests,
+            [
+                ("POST", "/image_to_text"),
+                ("GET", f"/image_to_text/{JOB_B}"),
+                ("GET", f"/image_to_text/{JOB_B}"),
             ],
         )
 
@@ -322,7 +401,7 @@ class NeavoImageClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.job_id, JOB_A)
 
     async def test_terminal_http_statuses_are_not_polled_again(self) -> None:
-        """除 400 外的错误状态均为终态错误。"""
+        """除 202 外的错误状态均为终态错误。"""
         for status_code in (401, 404, 422, 500, 502, 503):
             with self.subTest(status_code=status_code):
                 poll_count = 0
@@ -375,6 +454,51 @@ class NeavoImageClientTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(raised.exception.status_code, 200)
                 self.assertEqual(raised.exception.job_id, JOB_A)
 
+    async def test_describe_rejects_invalid_input_before_http(self) -> None:
+        """反推在发请求前拒绝空图片、不匹配类型和超过 10 MiB 的图片。"""
+        request_count = 0
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            return httpx.Response(500)
+
+        client = self.make_client(handler=handler)
+        cases = [
+            (b"", "image/png"),
+            (PNG_BYTES, "image/jpeg"),
+            (b"\x89PNG\r\n\x1a\n" + b"x" * MAX_INPUT_IMAGE_BYTES, "image/png"),
+        ]
+        for image_bytes, mime_type in cases:
+            with self.subTest(mime_type=mime_type, size=len(image_bytes)):
+                with self.assertRaises(NeavoProtocolError) as raised:
+                    _ = await client.describe(
+                        image_bytes=image_bytes,
+                        mime_type=mime_type,
+                    )
+                self.assertEqual(raised.exception.stage, "validate")
+        self.assertEqual(request_count, 0)
+
+    async def test_describe_rejects_missing_text_result(self) -> None:
+        """反推完成响应缺少非空 text 时作为协议错误失败。"""
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return httpx.Response(202, json={"id": str(JOB_A)})
+            return httpx.Response(200, json={"text": "   "})
+
+        client = self.make_client(handler=handler)
+
+        with self.assertRaises(NeavoProtocolError) as raised:
+            _ = await client.describe(
+                image_bytes=PNG_BYTES,
+                mime_type="image/png",
+            )
+
+        self.assertEqual(raised.exception.stage, "validate")
+        self.assertEqual(raised.exception.status_code, 200)
+        self.assertEqual(raised.exception.job_id, JOB_A)
+
     async def test_generation_timeout_preserves_job_id(self) -> None:
         """总期限到达时报告超时，并保留已提交任务 ID。"""
 
@@ -418,12 +542,16 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
         handler: AsyncHttpHandler,
         config: NeavoImageGenerateConfig | None = None,
         sleep: SleepFunction = no_sleep,
+        stored_messages: dict[str, GroupMessage] | None = None,
     ) -> tuple[NeavoImageGeneratePlugin, FakeBot]:
         """构造使用真实 BasePlugin 队列和 MockTransport 的插件。"""
         plugin_config = config or build_config()
         http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         self.http_clients.append(http_client)
-        fake_context = FakeContext(http_client=http_client)
+        fake_context = FakeContext(
+            http_client=http_client,
+            stored_messages=stored_messages,
+        )
         with patch(
             "app.plugins.neavo_image_generate.plugin.load_neavo_image_generate_config",
             return_value=plugin_config,
@@ -455,6 +583,18 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(raw_message=message.raw_message):
                 self.assertEqual(extract_prompt(message), expected)
 
+    async def test_reverse_command_is_exact_and_plugin_has_highest_priority(
+        self,
+    ) -> None:
+        """只有独立 #反推 被识别，且插件优先于其他群聊回复插件。"""
+        reverse = extract_command(build_group_message(text=REVERSE_COMMAND_TOKEN))
+
+        self.assertIsNotNone(reverse)
+        self.assertEqual(reverse.operation if reverse is not None else None, "image_to_text")
+        self.assertIsNone(extract_command(build_group_message(text="#反推一下")))
+        self.assertIsNone(extract_command(build_group_message(text="请帮我 #反推")))
+        self.assertEqual(PRIORITY, 100)
+
     async def test_queue_filters_other_groups_and_non_commands_before_http(self) -> None:
         """白名单外消息和普通消息不会进入耗时生成流程。"""
         request_count = 0
@@ -471,10 +611,11 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
                 build_group_message(group_id="40001", text="#生图 白猫")
             ),
             plugin.add_to_queue(build_group_message(text="#生图片 白猫")),
+            plugin.add_to_queue(build_group_message(text="#反推一下")),
             plugin.add_to_queue(build_group_message(text="普通消息")),
         )
 
-        self.assertEqual(results, [False, False, False])
+        self.assertEqual(results, [False, False, False, False])
         self.assertEqual(request_count, 0)
         self.assertEqual(bot.sent_messages, [])
 
@@ -509,6 +650,136 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
         sent_text = "\n".join(extract_text(item.segments) for item in bot.sent_messages)
         self.assertIn("填写图片描述", sent_text)
         self.assertIn(str(MAX_PROMPT_LENGTH), sent_text)
+
+    async def test_reverse_without_image_returns_usage_without_http(self) -> None:
+        """#反推 没有当前或回复图片时只返回明确用法。"""
+        request_count = 0
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            return httpx.Response(500)
+
+        plugin, bot = self.make_plugin(handler=handler)
+
+        handled = await plugin.add_to_queue(
+            build_group_message(text="#反推", user_id="21501")
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(request_count, 0)
+        self.assertEqual(len(bot.sent_messages), 1)
+        self.assertEqual(extract_at_user(bot.sent_messages[0].segments), "21501")
+        self.assertIn("携带一张图片", extract_text(bot.sent_messages[0].segments))
+
+    async def test_reverse_accepts_attached_image(self) -> None:
+        """#反推 可直接携带图片，并把反推文本艾特回发起者。"""
+        requests: list[tuple[str, str]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append((request.method, request.url.path))
+            if request.url.host == "media.example":
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "image/png"},
+                    content=PNG_BYTES,
+                )
+            if request.method == "POST":
+                self.assertEqual(request.url.path, "/image_to_text")
+                self.assertEqual(request.headers["Content-Type"], "image/png")
+                self.assertEqual(request.content, PNG_BYTES)
+                return httpx.Response(202, json={"id": str(JOB_A)})
+            return httpx.Response(
+                200,
+                json={"text": "白猫坐在窗边\n\nwhite cat, window"},
+            )
+
+        plugin, bot = self.make_plugin(handler=handler)
+        message = build_group_message(
+            message=[
+                cast(MessageSegment, Text.new("#反推")),
+                cast(
+                    MessageSegment,
+                    Image.new(
+                        "attached.png",
+                        url="https://media.example/attached.png",
+                    ),
+                ),
+            ],
+            user_id="21601",
+        )
+
+        handled = await plugin.add_to_queue(message)
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            requests,
+            [
+                ("GET", "/attached.png"),
+                ("POST", "/image_to_text"),
+                ("GET", f"/image_to_text/{JOB_A}"),
+            ],
+        )
+        self.assertEqual(len(bot.sent_messages), 2)
+        self.assertIn("正在反推", extract_text(bot.sent_messages[0].segments))
+        self.assertEqual(extract_at_user(bot.sent_messages[1].segments), "21601")
+        self.assertIn("白猫坐在窗边", extract_text(bot.sent_messages[1].segments))
+
+    async def test_reverse_accepts_replied_image(self) -> None:
+        """回复一条含图片的消息后发送 #反推 也能读取被回复图片。"""
+        replied_message = build_group_message(
+            message=[
+                cast(
+                    MessageSegment,
+                    Image.new(
+                        "replied.webp",
+                        url="https://media.example/replied.webp",
+                    ),
+                )
+            ],
+            user_id="21602",
+            message_id="31602",
+        )
+        requests: list[tuple[str, str]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append((request.method, request.url.path))
+            if request.url.host == "media.example":
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "image/png"},
+                    content=PNG_BYTES,
+                )
+            if request.method == "POST":
+                return httpx.Response(202, json={"id": str(JOB_B)})
+            return httpx.Response(200, json={"text": "回复图片的描述"})
+
+        plugin, bot = self.make_plugin(
+            handler=handler,
+            stored_messages={"31602": replied_message},
+        )
+        command_message = build_group_message(
+            message=[
+                cast(MessageSegment, Reply.new("31602")),
+                cast(MessageSegment, Text.new("#反推")),
+            ],
+            user_id="21603",
+            message_id="31603",
+        )
+
+        handled = await plugin.add_to_queue(command_message)
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            requests,
+            [
+                ("GET", "/replied.webp"),
+                ("POST", "/image_to_text"),
+                ("GET", f"/image_to_text/{JOB_B}"),
+            ],
+        )
+        self.assertEqual(extract_at_user(bot.sent_messages[-1].segments), "21603")
+        self.assertIn("回复图片的描述", extract_text(bot.sent_messages[-1].segments))
 
     async def test_max_length_prompt_generates_and_sends_base64_image(self) -> None:
         """4096 字边界提示词可以生成，并把图片艾特回原用户。"""

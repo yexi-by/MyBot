@@ -123,13 +123,21 @@ tool_image_observation_user_prompt_path = "plugins_config/ai_group_chat/prompts/
 
 视觉摘要请求是独立请求，不复用群聊 system prompt、长期上下文、当前用户正文或工具历史。`tool_image_observation_system_prompt_path` 用于定义纯图片观察边界，`tool_image_observation_user_prompt_path` 用于定义观察任务和输出粒度；需要视觉摘要时必须显式配置这两个非空提示词文件，不支持内联提示词，也不存在代码内置默认提示词。
 
-### Neavo 群聊生图
+### Neavo 群聊图像插件
 
-Neavo 群聊生图插件通过异步任务 API 提交自然语言指令并轮询图片结果。群成员使用以下格式触发：
+Neavo 群聊图像插件使用新版 `/text_to_image` 与 `/image_to_text` 异步任务 API，同时支持文生图和 Florence-2 图片反推。群成员使用以下格式触发文生图：
 
 ```text
 #生图 一只戴耳机的橘猫
 ```
+
+图片反推使用独立命令 `#反推`，既可以在同一条消息中携带图片，也可以回复一条包含图片的群消息：
+
+```text
+#反推
+```
+
+反推只接受 JPEG、PNG 或 WebP，单张图片最大 10 MiB。机器人会返回图片的自然语言描述与标签文本；该结果不能还原原始模型、Seed 或工作流参数。
 
 插件配置放在 `plugins_config/plugins.toml`：
 
@@ -144,7 +152,7 @@ request_timeout_seconds = 30.0
 max_image_bytes = 20971520
 ```
 
-`api_token` 属于部署密钥，不得提交到仓库或写入日志。生产环境应使用 HTTPS；使用明文 HTTP 时，Bearer Token 和请求内容不会受到传输加密保护。插件最多并行处理 5 个任务，超过上限的请求会等待空闲消费者。
+`api_token` 属于部署密钥，不得提交到仓库或写入日志。生产环境应使用 HTTPS；使用明文 HTTP 时，Bearer Token、提示词和反推图片不会受到传输加密保护。两类任务共用 5 个消费者，超过上限的请求会等待空闲消费者。插件使用最高群聊路由优先级，命中 `#生图` 或 `#反推` 后不会继续进入 AI 群聊插件。
 
 ## 运行边界
 

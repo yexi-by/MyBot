@@ -36,6 +36,7 @@ exclude = [
     "image",
     "logs",
     "plugins_config",
+    "tmp",
 ]
 
 [tool.pytest.ini_options]
