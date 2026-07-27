@@ -166,6 +166,12 @@ class NapCatProtocolAlignmentTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("eventType", params)
         self.assertNotIn("group_id", params)
 
+        response = await client.delete_msg_with_response("300")
+        params = client.last_action_params()
+        self.assertEqual(response.status, "ok")
+        self.assertEqual(params["message_id"], "300")
+        self.assertEqual(client.action_calls[-1][0], "delete_msg")
+
         _ = await client.get_ai_record("character", "hello", "100")
         params = client.last_action_params()
         self.assertEqual(params["group_id"], "100")

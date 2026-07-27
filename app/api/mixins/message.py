@@ -357,6 +357,12 @@ class MessageMixin(BaseMixin):
         """撤回消息。"""
         await self._send_action("delete_msg", self._build_params(message_id=message_id))
 
+    async def delete_msg_with_response(self, message_id: NapCatId) -> Response:
+        """撤回消息并等待 NapCat 回包，以便调用方判断腾讯侧是否接受。"""
+        return await self._call_action(
+            "delete_msg", self._build_params(message_id=message_id)
+        )
+
     async def get_msg(self, message_id: NapCatId) -> Response:
         """获取消息详情。"""
         return await self._call_action("get_msg", self._build_params(message_id=message_id))
