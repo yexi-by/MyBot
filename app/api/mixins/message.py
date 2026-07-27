@@ -19,7 +19,7 @@ from app.models import (
     Text,
     Video,
 )
-from app.models.common import JsonObject, JsonValue
+from app.models.common import JsonObject, JsonValue, to_json_value
 from app.utils.log import log_event
 from app.utils.retry_utils import create_retry_manager
 
@@ -310,13 +310,18 @@ class MessageMixin(BaseMixin):
         await self._store_sent_group_forward_message(
             response=response,
             group_id=group_id,
+            messages=messages,
         )
         return response
 
     async def _store_sent_group_forward_message(
-        self, *, response: Response, group_id: NapCatId
+        self,
+        *,
+        response: Response,
+        group_id: NapCatId,
+        messages: list[Node],
     ) -> None:
-        """在合并转发发送成功后保存可引用的 Forward 消息段。"""
+        """保存带原始节点内容的 Forward 消息段，供后续引用直接展开。"""
         if response.status != "ok" or response.retcode != 0:
             return
         forward_id = self._extract_sent_forward_id(response=response)
@@ -333,7 +338,12 @@ class MessageMixin(BaseMixin):
             response=response,
             group_id=group_id,
             user_id=None,
-            message_segment=[Forward.new(forward_id)],
+            message_segment=[
+                Forward.new(
+                    forward_id,
+                    content=to_json_value(messages),
+                )
+            ],
         )
 
     def _extract_sent_forward_id(self, *, response: Response) -> NapCatId | None:

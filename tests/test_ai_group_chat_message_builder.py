@@ -10,6 +10,7 @@ import httpx
 
 from app.database import RedisDatabaseManager
 from app.models import (
+    At,
     File,
     Forward,
     GroupMessage,
@@ -19,11 +20,13 @@ from app.models import (
     MFace,
     Markdown,
     MessageSegment,
+    Node,
     Reply,
     Sender,
     Share,
     Text,
     UnknownSegment,
+    to_json_value,
 )
 from app.plugins.ai_group_chat.config import AIGroupChatConfig, GroupChatConfig
 from app.plugins.ai_group_chat.message_builder import GroupChatMessageBuilder
@@ -310,6 +313,62 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
         self.assertIn("未包含可展开内容", text)
         self.assertIn("qq__get_forward_message", text)
         self.assertIn('message_id="forward-empty"', text)
+
+    def test_quoted_bot_forward_with_cached_content_is_expanded_directly(
+        self,
+    ) -> None:
+        """引用并艾特机器人时直接展示已缓存的机器人长回复。"""
+        forward_nodes = [
+            Node.new(
+                user_id="10000",
+                nickname="机器人",
+                content=[Text.new("这是机器人先前发送的长回复正文")],
+            )
+        ]
+        quoted_message = GroupMessage(
+            time=1_777_132_899,
+            self_id="10000",
+            post_type="message_sent",
+            message_type="group",
+            sub_type="normal",
+            user_id="10000",
+            message_id="90004",
+            group_id="40000",
+            group_name="测试群",
+            message=[
+                Forward.new(
+                    "forward-90004",
+                    content=to_json_value(forward_nodes),
+                )
+            ],
+            raw_message="[合并转发]",
+            sender=Sender(user_id="10000", nickname="机器人"),
+        )
+        builder = GroupChatMessageBuilder(
+            config=build_config(),
+            database=cast(RedisDatabaseManager, ReplyDatabase(quoted_message)),
+            http_client=cast(httpx.AsyncClient, object()),
+        )
+        current_message = build_message(
+            message=[
+                Reply.new("90004"),
+                At.new("10000"),
+                Text.new("请继续解释"),
+            ],
+            raw_message="[回复][CQ:at,qq=10000]请继续解释",
+        )
+
+        chat_message = asyncio.run(
+            builder.build_user_message(
+                msg=current_message,
+                collect_images=False,
+            )
+        )
+        text = chat_message.text or ""
+
+        self.assertIn("## 引用消息", text)
+        self.assertIn("这是机器人先前发送的长回复正文", text)
+        self.assertNotIn("qq__get_forward_message", text)
 
     def test_forward_content_limit_marks_omitted_items(self) -> None:
         """合并转发超过展开上限时会标明已省略。"""

@@ -1,5 +1,6 @@
 """机器人出站消息持久化测试。"""
 
+import asyncio
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -19,7 +20,9 @@ from app.models import (
     NapCatId,
     Node,
     Response,
+    Sender,
     Text,
+    to_json_value,
 )
 from app.models.common import JsonObject
 
@@ -36,12 +39,16 @@ class FakePipeline:
     def __init__(self, redis: "FakeRedis") -> None:
         """初始化 pipeline 暂存区。"""
         self.redis = redis
-        self.hash_items: list[tuple[str, str, str]] = []
+        self.hash_items: list[tuple[str, str, str, bool]] = []
         self.zset_items: list[tuple[str, dict[str, int | float]]] = []
 
     def hset(self, key: str, field: str, value: str) -> None:
         """暂存 Hash 写入。"""
-        self.hash_items.append((key, field, value))
+        self.hash_items.append((key, field, value, False))
+
+    def hsetnx(self, key: str, field: str, value: str) -> None:
+        """暂存仅在字段不存在时生效的 Hash 写入。"""
+        self.hash_items.append((key, field, value, True))
 
     def zadd(self, key: str, mapping: dict[str, int | float]) -> None:
         """暂存 ZSet 写入。"""
@@ -49,8 +56,11 @@ class FakePipeline:
 
     async def execute(self) -> list[object]:
         """提交暂存写入。"""
-        for key, field, value in self.hash_items:
-            self.redis.hashes.setdefault(key, {})[field] = value
+        for key, field, value, only_if_missing in self.hash_items:
+            target_hash = self.redis.hashes.setdefault(key, {})
+            if only_if_missing and field in target_hash:
+                continue
+            target_hash[field] = value
         for key, mapping in self.zset_items:
             self.redis.zsets.setdefault(key, {}).update(mapping)
         return []
@@ -261,7 +271,7 @@ class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(database.records, [])
 
     async def test_group_forward_send_records_forward_segment(self) -> None:
-        """send_group_forward_msg 成功后保存合并转发段，支持后续引用。"""
+        """send_group_forward_msg 成功后保存可直接展开的合并转发段。"""
         database = RecordingDatabase()
         client = FakeMessageClient(
             database=database,
@@ -274,15 +284,16 @@ class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+        forward_nodes = [
+            Node.new(
+                user_id="10000",
+                nickname="机器人",
+                content=[Text.new("长回复正文")],
+            )
+        ]
         response = await client.send_group_forward_msg(
             group_id="40000",
-            messages=[
-                Node.new(
-                    user_id="10000",
-                    nickname="机器人",
-                    content=[Text.new("长回复正文")],
-                )
-            ],
+            messages=forward_nodes,
         )
 
         self.assertEqual(response.status, "ok")
@@ -295,6 +306,66 @@ class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(forward_segment, Forward)
         forward_segment = cast(Forward, forward_segment)
         self.assertEqual(forward_segment.data.id, "forward-90004")
+        self.assertEqual(forward_segment.data.content, to_json_value(forward_nodes))
+
+    async def test_sparse_sent_event_preserves_cached_forward_content(self) -> None:
+        """后到的 ID-only message_sent 事件不得覆盖完整转发节点。"""
+        fake_redis = FakeRedis()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = RedisDatabaseManager(
+                client=cast(httpx.AsyncClient, object()),
+                path=temp_dir,
+                redis_client=cast(Redis, fake_redis),
+                consumers_count=1,
+            )
+            forward_nodes = [
+                Node.new(
+                    user_id="10000",
+                    nickname="机器人",
+                    content=[Text.new("需要保留的长回复")],
+                )
+            ]
+            try:
+                await manager.store_outgoing_message(
+                    self_id="10000",
+                    group_id="40000",
+                    message_id="90004",
+                    message_segments=[
+                        Forward.new(
+                            "forward-90004",
+                            content=to_json_value(forward_nodes),
+                        )
+                    ],
+                )
+                sparse_event = GroupMessage(
+                    time=1_777_132_901,
+                    self_id="10000",
+                    post_type="message_sent",
+                    message_type="group",
+                    sub_type="normal",
+                    user_id="10000",
+                    message_id="90004",
+                    group_id="40000",
+                    message=[Forward.new("forward-90004")],
+                    raw_message="[合并转发]",
+                    sender=Sender(user_id="10000", nickname="机器人"),
+                )
+                await manager.add_to_queue(sparse_event)
+                await asyncio.wait_for(manager.task_queue.join(), timeout=1)
+            finally:
+                await manager.stop_consumers()
+
+            key = "bot:10000:group:40000:msg_data"
+            stored_message = GroupMessage.model_validate_json(
+                fake_redis.hashes[key]["90004"]
+            )
+            stored_forward = stored_message.message[0]
+            self.assertIsInstance(stored_forward, Forward)
+            stored_forward = cast(Forward, stored_forward)
+            self.assertEqual(
+                stored_forward.data.content,
+                to_json_value(forward_nodes),
+            )
 
     async def test_database_stores_outgoing_base64_image_as_cached_group_message(
         self,

@@ -15,6 +15,7 @@ from redis.exceptions import WatchError
 
 from app.models import (
     At,
+    Forward,
     GroupMessage,
     Image,
     MessageSegment,
@@ -162,15 +163,29 @@ class RedisDatabaseManager:
 
     async def _store_msg(self, msg: StoredMessage) -> None:
         """存储消息到 Redis，并为收到的媒体消息保存本地路径。"""
+        hash_key, zset_key, msg_id = self._build_redis_keys(msg=msg)
         if isinstance(msg, (GroupMessage, PrivateMessage)):
             await self._save_media_resources(msg=msg)
-        hash_key, zset_key, msg_id = self._build_redis_keys(msg=msg)
         await self.store_data(
             hash_key=hash_key,
             zset_key=zset_key,
             value=msg.model_dump_json(),
             msg_id=msg_id,
             time_id=msg.time,
+            overwrite_existing=not self._is_sparse_outgoing_forward(msg=msg),
+        )
+
+    def _is_sparse_outgoing_forward(self, *, msg: StoredMessage) -> bool:
+        """判断是否为只能在缓存不存在时写入的机器人 ID-only 转发事件。"""
+        return (
+            isinstance(msg, GroupMessage)
+            and msg.post_type == "message_sent"
+            and msg.user_id == msg.self_id
+            and bool(msg.message)
+            and all(
+                isinstance(segment, Forward) and segment.data.content is None
+                for segment in msg.message
+            )
         )
 
     async def store_data(
@@ -180,12 +195,24 @@ class RedisDatabaseManager:
         value: str,
         msg_id: str | None = None,
         time_id: int | None = None,
+        overwrite_existing: bool = True,
     ) -> None:
-        """将数据存入 Redis Hash 并在 ZSet 中记录时间索引。"""
+        """将数据写入 Redis；关闭覆盖时仅在 Hash 字段不存在时写入。"""
         actual_msg_id = msg_id or str(uuid.uuid4())
         actual_time_id = time_id or int(time.time())
         pipe = self.redis_client.pipeline()
-        _ = pipe.hset(hash_key, actual_msg_id, value)  # pyright: ignore[reportUnknownMemberType]
+        if overwrite_existing:
+            _ = pipe.hset(  # pyright: ignore[reportUnknownMemberType]
+                hash_key,
+                actual_msg_id,
+                value,
+            )
+        else:
+            _ = pipe.hsetnx(  # pyright: ignore[reportUnknownMemberType]
+                hash_key,
+                actual_msg_id,
+                value,
+            )
         _ = pipe.zadd(zset_key, {actual_msg_id: actual_time_id})
         _ = await pipe.execute()
 
