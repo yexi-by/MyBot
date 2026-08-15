@@ -6,10 +6,11 @@ from typing import cast
 
 from fastapi import WebSocket
 
-from app.database import RedisDatabaseManager
+from app.database import SentMessageRecorder
 from app.models.api import ActionPayload
 from app.models.common import JsonObject, NapCatId, to_json_value
 from app.models.events.response import Response, StreamTransferResult
+from app.services.napcat import InlineImageArchiver
 from app.utils.log import log_event
 
 
@@ -17,12 +18,20 @@ class BaseMixin:
     """基础 Mixin，封装 WebSocket Action 调用和响应等待。"""
 
     websocket: WebSocket = cast(WebSocket, cast(object, None))
-    database: RedisDatabaseManager = cast(RedisDatabaseManager, cast(object, None))
+    sent_message_recorder: SentMessageRecorder = cast(
+        SentMessageRecorder, cast(object, None)
+    )
+    inline_image_archiver: InlineImageArchiver = cast(
+        InlineImageArchiver, cast(object, None)
+    )
     echo_dict: dict[str, asyncio.Future[Response]] = cast(
         dict[str, asyncio.Future[Response]], cast(object, None)
     )
     stream_dict: dict[str, asyncio.Queue[Response]] = cast(
         dict[str, asyncio.Queue[Response]], cast(object, None)
+    )
+    persistence_failed_event: asyncio.Event = cast(
+        asyncio.Event, cast(object, None)
     )
     boot_id: NapCatId = ""
     timeout: int = 0
@@ -116,13 +125,34 @@ class BaseMixin:
         self, action: str, params: JsonObject | None = None
     ) -> None:
         """发送不需要等待回包的 NapCat Action。"""
+        self._ensure_persistence_healthy()
         payload = ActionPayload(action=action, params=params)
         await self.websocket.send_text(payload.model_dump_json(exclude_none=True))
+
+    async def _close_for_persistence_failure(self) -> None:
+        """出站消息已发送但无法记录时终止当前 NapCat 会话。"""
+        self.persistence_failed_event.set()
+        try:
+            await self.websocket.close(code=1011, reason="PostgreSQL 持久化失败")
+        except RuntimeError as exc:
+            log_event(
+                level="DEBUG",
+                event="napcat.persistence_close.skipped",
+                category="napcat_api",
+                message="数据库失败后 WebSocket 已经关闭",
+                reason=str(exc),
+            )
+
+    def _ensure_persistence_healthy(self) -> None:
+        """数据库失败后的会话不得继续发起 NapCat Action。"""
+        if self.persistence_failed_event.is_set():
+            raise RuntimeError("当前 NapCat 会话因 PostgreSQL 持久化失败已停止")
 
     async def _call_action(
         self, action: str, params: JsonObject | None = None
     ) -> Response:
         """发送需要等待回包的 NapCat Action。"""
+        self._ensure_persistence_healthy()
         echo = self._generate_echo()
         payload = ActionPayload(action=action, params=params, echo=echo)
         await self.websocket.send_text(payload.model_dump_json(exclude_none=True))
@@ -132,6 +162,7 @@ class BaseMixin:
         self, action: str, params: JsonObject | None = None
     ) -> StreamTransferResult:
         """发送 Stream Action 并收集同一 echo 下的完整回包序列。"""
+        self._ensure_persistence_healthy()
         echo = self._generate_echo()
         queue: asyncio.Queue[Response] = asyncio.Queue()
         self.stream_dict[echo] = queue

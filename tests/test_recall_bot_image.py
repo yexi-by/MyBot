@@ -2,8 +2,10 @@
 
 import unittest
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal, cast
 
+from app.database import GroupDataScope, StoredGroupMessage
 from app.models import (
     GroupMessage,
     Image,
@@ -89,6 +91,28 @@ def build_target_message(
     )
 
 
+def to_stored_message(message: GroupMessage) -> StoredGroupMessage:
+    """把群事件转成撤回插件查询使用的 DTO。"""
+    return StoredGroupMessage(
+        row_id=1,
+        scope=GroupDataScope(
+            bot_id=message.self_id,
+            group_id=message.group_id,
+        ),
+        message_id=message.message_id,
+        group_name=message.group_name,
+        sender_id=message.user_id,
+        sender_name=message.sender.card or message.sender.nickname,
+        sender_role=message.sender.role,
+        occurred_at=datetime.fromtimestamp(message.time, tz=timezone.utc),
+        direction=(
+            "outgoing" if message.post_type == "message_sent" else "incoming"
+        ),
+        segments=tuple(message.message),
+        images=(),
+    )
+
+
 @dataclass(slots=True)
 class Feedback:
     """记录插件发送的一次群内反馈。"""
@@ -143,19 +167,20 @@ class FakeDatabase:
         search_error: Exception | None = None,
     ) -> None:
         """保存查询结果与调用记录。"""
-        self.stored_message = stored_message
+        self.stored_message = (
+            to_stored_message(stored_message) if stored_message is not None else None
+        )
         self.search_error = search_error
         self.searches: list[tuple[str, str, str]] = []
 
-    async def search_messages(
+    async def get_active(
         self,
         *,
-        self_id: str,
-        group_id: str,
+        scope: GroupDataScope,
         message_id: str,
-    ) -> GroupMessage | None:
+    ) -> StoredGroupMessage | None:
         """记录查询范围并返回预设结果。"""
-        self.searches.append((self_id, group_id, message_id))
+        self.searches.append((scope.bot_id, scope.group_id, message_id))
         if self.search_error is not None:
             raise self.search_error
         return self.stored_message
@@ -167,7 +192,7 @@ class FakeContext:
     def __init__(self, *, bot: FakeBot, database: FakeDatabase) -> None:
         """绑定测试 Bot 和消息数据库。"""
         self.bot = bot
-        self.database = database
+        self.group_messages = database
 
 
 class RecallBotImagePluginTest(unittest.IsolatedAsyncioTestCase):
@@ -268,15 +293,15 @@ class RecallBotImagePluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.recalled_message_ids, [])
         self.assertIn("不包含图片", self.bot.feedback[-1].text)
 
-    async def test_missing_cached_message_fails_safely(self) -> None:
-        """缓存缺失时不得绕过归属校验直接撤回引用 ID。"""
+    async def test_missing_active_message_fails_safely(self) -> None:
+        """消息不存在或已撤回时不得直接撤回引用 ID。"""
         plugin = self.create_plugin(stored_message=None)
 
         handled = await plugin.run(build_command_message())
 
         self.assertTrue(handled)
         self.assertEqual(self.bot.recalled_message_ids, [])
-        self.assertIn("缓存可能已经失效", self.bot.feedback[-1].text)
+        self.assertIn("或该消息已撤回", self.bot.feedback[-1].text)
 
     async def test_napcat_rejection_is_reported_as_failure(self) -> None:
         """腾讯或 NapCat 拒绝撤回时展示回包原因，不伪装成功。"""

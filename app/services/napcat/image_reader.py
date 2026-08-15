@@ -17,6 +17,10 @@ from app.utils.log import log_event
 type ImageReadSource = Literal["direct_path", "direct_url", "napcat_refresh"]
 
 
+class ImageReadTooLargeError(ValueError):
+    """读取到的图片超过调用方设定的大小上限。"""
+
+
 class NapCatImageBot(Protocol):
     """描述刷新 NapCat 图片信息所需的最小 BOT 能力。"""
 
@@ -64,16 +68,20 @@ class NapCatImageReader:
         http_client: httpx.AsyncClient | None,
         fetch_concurrency: int,
         download_timeout_seconds: float,
+        max_image_bytes: int | None = None,
     ) -> None:
         """保存读取图片所需依赖和并发边界。"""
         if fetch_concurrency < 1:
             raise ValueError("图片读取并发数必须大于等于 1")
         if download_timeout_seconds <= 0:
             raise ValueError("图片下载超时必须大于 0")
+        if max_image_bytes is not None and max_image_bytes < 1:
+            raise ValueError("图片大小上限必须大于等于 1")
         self.bot: NapCatImageBot = bot
         self.http_client: httpx.AsyncClient | None = http_client
         self.fetch_concurrency: int = fetch_concurrency
         self.download_timeout_seconds: float = download_timeout_seconds
+        self.max_image_bytes: int | None = max_image_bytes
 
     async def read_many(
         self, *, resources: list[NapCatImageResource]
@@ -157,8 +165,7 @@ class NapCatImageReader:
             path = Path(resource.path or "")
             if path.is_file():
                 try:
-                    async with aiofiles.open(path, mode="rb") as file:
-                        return await file.read(), "direct_path"
+                    return await self._read_path(path=path), "direct_path"
                 except Exception as exc:
                     failure_types.append(type(exc).__name__)
                     failures.append(f"读取本地路径失败: {exc}")
@@ -185,11 +192,18 @@ class NapCatImageReader:
         """读取 NapCat 响应中的 base64、本地路径或 URL。"""
         data = response.data if isinstance(response.data, dict) else {}
         raw_base64 = data.get("base64")
-        if isinstance(raw_base64, str) and raw_base64.strip() != "":
-            try:
-                return base64.b64decode(raw_base64, validate=True)
-            except binascii.Error as exc:
-                failures.append(f"NapCat 返回的 base64 无效: {exc}")
+        if isinstance(raw_base64, str):
+            encoded_image = raw_base64.strip()
+            if encoded_image != "":
+                try:
+                    self._validate_base64_encoded_size(
+                        encoded_image=encoded_image
+                    )
+                    image_bytes = base64.b64decode(encoded_image, validate=True)
+                    self._validate_size(image_bytes=image_bytes)
+                    return image_bytes
+                except binascii.Error as exc:
+                    failures.append(f"NapCat 返回的 base64 无效: {exc}")
         for key in ("path", "file"):
             value = data.get(key)
             if not isinstance(value, str) or value.strip() == "":
@@ -199,14 +213,17 @@ class NapCatImageReader:
                 failures.append(f"NapCat 返回的本地路径不存在: {path}")
                 continue
             try:
-                async with aiofiles.open(path, mode="rb") as file:
-                    return await file.read()
+                return await self._read_path(path=path)
+            except ImageReadTooLargeError:
+                raise
             except Exception as exc:
                 failures.append(f"读取 NapCat 本地路径失败: {exc}")
         url = data.get("url")
         if isinstance(url, str) and url.strip() != "":
             try:
                 return await self._download_url(url=url)
+            except ImageReadTooLargeError:
+                raise
             except Exception as exc:
                 failures.append(f"下载 NapCat 刷新 URL 失败: {exc}")
         return None
@@ -215,12 +232,87 @@ class NapCatImageReader:
         """通过 MyBot 本地 HTTP 客户端下载图片。"""
         if self.http_client is None:
             raise RuntimeError("图片 URL 下载需要配置 HTTP 客户端")
+        if self.max_image_bytes is not None:
+            async with self.http_client.stream(
+                "GET",
+                url,
+                timeout=self.download_timeout_seconds,
+            ) as response:
+                response.raise_for_status()
+                declared_size = response.headers.get("content-length")
+                if declared_size is not None:
+                    try:
+                        declared_size_value = int(declared_size)
+                    except ValueError:
+                        declared_size_value = None
+                    if (
+                        declared_size_value is not None
+                        and declared_size_value > self.max_image_bytes
+                    ):
+                        raise ImageReadTooLargeError(
+                            self._size_error(size_bytes=declared_size_value)
+                        )
+
+                chunks: list[bytes] = []
+                size_bytes = 0
+                async for chunk in response.aiter_bytes():
+                    size_bytes += len(chunk)
+                    if size_bytes > self.max_image_bytes:
+                        raise ImageReadTooLargeError(
+                            self._size_error(size_bytes=size_bytes)
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
         response = await self.http_client.get(
             url,
             timeout=self.download_timeout_seconds,
         )
         response.raise_for_status()
         return response.content
+
+    async def _read_path(self, *, path: Path) -> bytes:
+        """在读取前后检查本地图片大小，避免文件变更绕过限制。"""
+        if self.max_image_bytes is not None:
+            stat_result = await asyncio.to_thread(path.stat)
+            if stat_result.st_size > self.max_image_bytes:
+                raise ImageReadTooLargeError(
+                    self._size_error(size_bytes=stat_result.st_size)
+                )
+        async with aiofiles.open(path, mode="rb") as file:
+            if self.max_image_bytes is None:
+                image_bytes = await file.read()
+            else:
+                image_bytes = await file.read(self.max_image_bytes + 1)
+        self._validate_size(image_bytes=image_bytes)
+        return image_bytes
+
+    def _validate_size(self, *, image_bytes: bytes) -> None:
+        """检查已解码或读取的图片字节数。"""
+        if (
+            self.max_image_bytes is not None
+            and len(image_bytes) > self.max_image_bytes
+        ):
+            raise ImageReadTooLargeError(
+                self._size_error(size_bytes=len(image_bytes))
+            )
+
+    def _validate_base64_encoded_size(self, *, encoded_image: str) -> None:
+        """在解码分配内存前拒绝不可能落入字节上限的 base64。"""
+        if self.max_image_bytes is None:
+            return
+        max_encoded_length = 4 * ((self.max_image_bytes + 2) // 3)
+        if len(encoded_image) > max_encoded_length:
+            raise ImageReadTooLargeError(
+                "NapCat 返回的 base64 长度超过 "
+                f"{self.max_image_bytes} 字节图片的可能范围"
+            )
+
+    def _size_error(self, *, size_bytes: int) -> str:
+        """生成一致的图片超限错误。"""
+        return (
+            f"图片大小 {size_bytes} 字节超过上限 "
+            f"{self.max_image_bytes} 字节"
+        )
 
     def _finish_success(
         self,

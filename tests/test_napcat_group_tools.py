@@ -1,10 +1,16 @@
 """NapCat 群聊本地工具测试。"""
 
 import unittest
+from datetime import datetime, timezone
 from typing import cast
 
 import httpx
 
+from app.database import (
+    GroupDataScope,
+    MessageCursor,
+    StoredGroupMessage,
+)
 from app.models import (
     At,
     File,
@@ -27,7 +33,6 @@ from app.services.napcat.group_tools import (
     NapCatGroupToolExecutor,
     NapCatGroupToolBot,
 )
-from app.services.napcat.group_tools.protocols import CachedNapCatMessage
 
 
 def build_group_message(
@@ -64,6 +69,28 @@ def build_group_message(
         message=message_segments,
         raw_message=raw_message_text,
         sender=Sender(user_id=user_id, nickname=nickname, role="member"),
+    )
+
+
+def to_stored_message(message: GroupMessage, *, row_id: int) -> StoredGroupMessage:
+    """把群事件转成历史工具使用的 DTO。"""
+    return StoredGroupMessage(
+        row_id=row_id,
+        scope=GroupDataScope(
+            bot_id=message.self_id,
+            group_id=message.group_id,
+        ),
+        message_id=message.message_id,
+        group_name=message.group_name,
+        sender_id=message.user_id,
+        sender_name=message.sender.card or message.sender.nickname,
+        sender_role=message.sender.role,
+        occurred_at=datetime.fromtimestamp(message.time, tz=timezone.utc),
+        direction=(
+            "outgoing" if message.post_type == "message_sent" else "incoming"
+        ),
+        segments=tuple(message.message),
+        images=(),
     )
 
 
@@ -153,68 +180,204 @@ class FakeBot:
 
 
 class FakeDatabase:
-    """测试用 Redis 历史消息数据库。"""
+    """测试用空群消息仓库。"""
 
-    async def search_messages(
+    async def get_active(
         self,
         *,
-        self_id: str,
-        message_id: str | None = None,
-        root: str | None = None,
-        limit_tuple: tuple[int, int] | None = None,
-        group_id: str | None = None,
-        user_id: str | None = None,
-        max_time: int | None = None,
-        min_time: int | None = None,
-    ) -> CachedNapCatMessage | list[CachedNapCatMessage] | None:
-        """返回空历史。"""
-        _ = (
-            self_id,
-            message_id,
-            root,
-            limit_tuple,
-            group_id,
-            user_id,
-            max_time,
-            min_time,
-        )
+        scope: GroupDataScope,
+        message_id: str,
+    ) -> StoredGroupMessage | None:
+        """返回空消息。"""
+        _ = (scope, message_id)
         return None
+
+    async def list_recent(
+        self,
+        *,
+        scope: GroupDataScope,
+        limit: int,
+        before: MessageCursor | None = None,
+        sender_id: str | None = None,
+    ) -> list[StoredGroupMessage]:
+        """返回空的近期消息。"""
+        _ = (scope, limit, before, sender_id)
+        return []
+
+    async def list_between(
+        self,
+        *,
+        scope: GroupDataScope,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        before: MessageCursor | None = None,
+        sender_id: str | None = None,
+    ) -> list[StoredGroupMessage]:
+        """返回空的时间范围消息。"""
+        _ = (scope, start, end, limit, before, sender_id)
+        return []
+
+    async def list_around(
+        self,
+        *,
+        scope: GroupDataScope,
+        message_id: str,
+        before_count: int,
+        after_count: int,
+        sender_id: str | None = None,
+    ) -> list[StoredGroupMessage]:
+        """返回空的消息上下文。"""
+        _ = (scope, message_id, before_count, after_count, sender_id)
+        return []
 
 
 class HistoryDatabase:
     """返回指定群消息列表的测试数据库。"""
 
-    def __init__(self, messages: list[CachedNapCatMessage]) -> None:
+    def __init__(self, messages: list[GroupMessage]) -> None:
         """保存待返回的历史消息。"""
-        self.messages: list[CachedNapCatMessage] = messages
+        self.messages: list[StoredGroupMessage] = [
+            to_stored_message(message, row_id=index)
+            for index, message in enumerate(messages, start=1)
+        ]
         self.search_calls: list[dict[str, object]] = []
 
-    async def search_messages(
+    async def get_active(
         self,
         *,
-        self_id: str,
-        message_id: str | None = None,
-        root: str | None = None,
-        limit_tuple: tuple[int, int] | None = None,
-        group_id: str | None = None,
-        user_id: str | None = None,
-        max_time: int | None = None,
-        min_time: int | None = None,
-    ) -> CachedNapCatMessage | list[CachedNapCatMessage] | None:
-        """返回预置历史消息。"""
+        scope: GroupDataScope,
+        message_id: str,
+    ) -> StoredGroupMessage | None:
+        """返回指定的活动消息。"""
+        self.search_calls.append(
+            {"method": "get_active", "scope": scope, "message_id": message_id}
+        )
+        return next(
+            (
+                message
+                for message in self.messages
+                if message.scope == scope and message.message_id == message_id
+            ),
+            None,
+        )
+
+    async def list_recent(
+        self,
+        *,
+        scope: GroupDataScope,
+        limit: int,
+        before: MessageCursor | None = None,
+        sender_id: str | None = None,
+    ) -> list[StoredGroupMessage]:
+        """返回预置的近期消息。"""
         self.search_calls.append(
             {
-                "self_id": self_id,
-                "message_id": message_id,
-                "root": root,
-                "limit_tuple": limit_tuple,
-                "group_id": group_id,
-                "user_id": user_id,
-                "max_time": max_time,
-                "min_time": min_time,
+                "method": "list_recent",
+                "scope": scope,
+                "limit": limit,
+                "before": before,
+                "sender_id": sender_id,
             }
         )
-        return self.messages
+        messages = self._filter_sender(sender_id=sender_id)
+        return messages[:limit]
+
+    async def list_between(
+        self,
+        *,
+        scope: GroupDataScope,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        before: MessageCursor | None = None,
+        sender_id: str | None = None,
+    ) -> list[StoredGroupMessage]:
+        """返回预置的时间范围消息。"""
+        self.search_calls.append(
+            {
+                "method": "list_between",
+                "scope": scope,
+                "start": start,
+                "end": end,
+                "limit": limit,
+                "before": before,
+                "sender_id": sender_id,
+            }
+        )
+        messages = self._filter_sender(sender_id=sender_id)
+        return messages[:limit]
+
+    async def list_around(
+        self,
+        *,
+        scope: GroupDataScope,
+        message_id: str,
+        before_count: int,
+        after_count: int,
+        sender_id: str | None = None,
+    ) -> list[StoredGroupMessage]:
+        """返回锚点前后文，顺序为从旧到新。"""
+        self.search_calls.append(
+            {
+                "method": "list_around",
+                "scope": scope,
+                "message_id": message_id,
+                "before_count": before_count,
+                "after_count": after_count,
+                "sender_id": sender_id,
+            }
+        )
+        chronological = sorted(
+            self.messages,
+            key=lambda message: (message.occurred_at, message.row_id),
+        )
+        anchor_index = next(
+            (
+                index
+                for index, message in enumerate(chronological)
+                if message.message_id == message_id
+            ),
+            None,
+        )
+        if anchor_index is None:
+            return []
+        selected = chronological[
+            max(0, anchor_index - before_count) : anchor_index + after_count + 1
+        ]
+        if sender_id is None:
+            return selected
+        return [message for message in selected if message.sender_id == sender_id]
+
+    def _filter_sender(self, *, sender_id: str | None) -> list[StoredGroupMessage]:
+        """按发送者过滤预置消息。"""
+        if sender_id is None:
+            return self.messages
+        return [message for message in self.messages if message.sender_id == sender_id]
+
+
+FORWARD_OWNER_MESSAGE_ID = "forward-owner-message"
+
+
+def build_forward_database(
+    *,
+    forward_ids: tuple[str, ...] = ("root-forward",),
+    message_id: str = FORWARD_OWNER_MESSAGE_ID,
+    self_id: str = "10000",
+    group_id: str = "40000",
+) -> HistoryDatabase:
+    """构造含指定顶层合并转发段的未撤回群消息仓库。"""
+    return HistoryDatabase(
+        [
+            build_group_message(
+                self_id=self_id,
+                group_id=group_id,
+                message_id=message_id,
+                message=[Forward.new(forward_id) for forward_id in forward_ids],
+                raw_message="[合并转发]",
+            )
+        ]
+    )
 
 
 class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
@@ -224,7 +387,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         """content 标记会修饰最终消息，并在正文前补空格。"""
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=FakeDatabase(),
+            group_messages=FakeDatabase(),
             event=build_group_message(),
         )
 
@@ -243,7 +406,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         bot = FakeBot()
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, bot),
-            database=FakeDatabase(),
+            group_messages=FakeDatabase(),
             event=build_group_message(),
             max_reply_chars=5,
         )
@@ -258,7 +421,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         bot = FakeBot()
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, bot),
-            database=FakeDatabase(),
+            group_messages=FakeDatabase(),
             event=build_group_message(),
             max_reply_chars=5,
         )
@@ -285,7 +448,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         """关闭 @全体 时 content 标记解析会返回模型可读错误。"""
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=FakeDatabase(),
+            group_messages=FakeDatabase(),
             event=build_group_message(),
             allow_mention_all=False,
         )
@@ -297,7 +460,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         """本地群工具集仅暴露信息工具，消息修饰由 content 标记承担。"""
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=FakeDatabase(),
+            group_messages=FakeDatabase(),
             event=build_group_message(),
         )
 
@@ -312,7 +475,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         """合并转发工具只向模型暴露 message_id 参数。"""
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=FakeDatabase(),
+            group_messages=FakeDatabase(),
             event=build_group_message(),
         )
 
@@ -327,11 +490,85 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         property_map = cast(JsonObject, properties)
         self.assertEqual(set(property_map.keys()), {"message_id"})
 
+    async def test_forward_tools_reject_unreadable_outer_message_without_napcat(
+        self,
+    ) -> None:
+        """外层消息不存在、跨群或不能唯一定位 Forward 时不得访问 NapCat。"""
+        unavailable_cases: list[
+            tuple[str, FakeDatabase | HistoryDatabase, str]
+        ] = [
+            (
+                "missing-or-recalled",
+                FakeDatabase(),
+                "ActiveGroupMessageNotFound",
+            ),
+            (
+                "other-group",
+                build_forward_database(group_id="other-group"),
+                "ActiveGroupMessageNotFound",
+            ),
+            (
+                "without-forward",
+                HistoryDatabase(
+                    [
+                        build_group_message(
+                            message_id=FORWARD_OWNER_MESSAGE_ID,
+                            message=[Text.new("普通消息")],
+                        )
+                    ]
+                ),
+                "ForwardSegmentNotFound",
+            ),
+            (
+                "multiple-forwards",
+                build_forward_database(forward_ids=("forward-a", "forward-b")),
+                "AmbiguousForwardSegments",
+            ),
+        ]
+        tool_calls: tuple[tuple[str, JsonObject], ...] = (
+            (
+                "qq__get_forward_message",
+                {"message_id": FORWARD_OWNER_MESSAGE_ID},
+            ),
+            (
+                "qq__get_forward_message_images",
+                {"message_id": FORWARD_OWNER_MESSAGE_ID, "mode": "all"},
+            ),
+        )
+
+        for case_name, database, expected_error_type in unavailable_cases:
+            for tool_name, arguments in tool_calls:
+                with self.subTest(case=case_name, tool=tool_name):
+                    bot = FakeBot()
+                    executor = NapCatGroupToolExecutor(
+                        bot=cast(NapCatGroupToolBot, bot),
+                        group_messages=database,
+                        event=build_group_message(),
+                    )
+
+                    execution_result = await executor.call_tool_with_artifacts(
+                        tool_name,
+                        arguments,
+                    )
+
+                    result = require_json_object(execution_result.result)
+                    self.assertIs(result["ok"], False)
+                    self.assertIs(result["is_error"], True)
+                    self.assertEqual(result["error_type"], expected_error_type)
+                    self.assertEqual(result["message_id"], FORWARD_OWNER_MESSAGE_ID)
+                    self.assertIsNone(result["forward_id"])
+                    self.assertEqual(bot.forward_calls, [])
+                    if isinstance(database, HistoryDatabase):
+                        self.assertEqual(
+                            database.search_calls[-1]["scope"],
+                            GroupDataScope(bot_id="10000", group_id="40000"),
+                        )
+
     async def test_history_tool_schema_exposes_filters_without_group_id(self) -> None:
         """历史工具暴露本地过滤参数，但不允许模型指定群号。"""
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=FakeDatabase(),
+            group_messages=FakeDatabase(),
             event=build_group_message(),
         )
 
@@ -347,7 +584,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("group_id", property_map)
         self.assertIn("user_id", property_map)
         self.assertIn("context_message_id", property_map)
-        self.assertIn("scan_limit", property_map)
+        self.assertNotIn("scan_limit", property_map)
 
     def test_history_duration_requires_minutes(self) -> None:
         """按分钟查询历史时必须明确分钟数。"""
@@ -370,7 +607,6 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args.context_message_id, "msg-2")
         self.assertEqual(args.before_count, 10)
         self.assertEqual(args.after_count, 10)
-        self.assertEqual(args.scan_limit, 100)
 
     def test_forward_image_args_require_indices_by_mode(self) -> None:
         """不同合并转发图片选择模式需要明确的定位参数。"""
@@ -440,7 +676,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=HistoryDatabase([history_message]),
+            group_messages=HistoryDatabase([history_message]),
             event=build_group_message(),
         )
 
@@ -473,8 +709,8 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             ["at", "text", "image", "file", "share"],
         )
 
-    async def test_history_messages_filter_by_user_id_after_scan(self) -> None:
-        """指定 QQ 号查询会在当前群本地历史扫描结果中筛选该成员消息。"""
+    async def test_history_messages_push_user_filter_into_recent_query(self) -> None:
+        """指定 QQ 号查询会把成员条件交给群消息仓库。"""
         database = HistoryDatabase(
             [
                 build_group_message(
@@ -507,7 +743,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=database,
+            group_messages=database,
             event=build_group_message(),
         )
 
@@ -517,7 +753,6 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
                 "query_mode": "recent_count",
                 "limit": 1,
                 "user_id": "20000",
-                "scan_limit": 4,
             },
         )
 
@@ -527,10 +762,11 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         first_message = require_json_object(messages[0])
         self.assertEqual(first_message["user_id"], "20000")
         self.assertIn("目标 2", require_string(first_message["text"]))
-        self.assertEqual(database.search_calls[0]["limit_tuple"], (0, 4))
+        self.assertEqual(database.search_calls[0]["method"], "list_recent")
+        self.assertEqual(database.search_calls[0]["limit"], 1)
+        self.assertEqual(database.search_calls[0]["sender_id"], "20000")
         query = require_json_object(result_object["query"])
         self.assertEqual(query["user_id"], "20000")
-        self.assertEqual(query["scan_limit"], 4)
 
     async def test_history_date_range_can_filter_by_user_id(self) -> None:
         """时间范围查询也能在工具层继续按 QQ 号筛选。"""
@@ -551,7 +787,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=database,
+            group_messages=database,
             event=build_group_message(),
         )
 
@@ -571,9 +807,10 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         first_message = require_json_object(messages[0])
         self.assertEqual(first_message["user_id"], "20000")
         self.assertIn("目标范围消息", require_string(first_message["text"]))
-        self.assertIsNone(database.search_calls[0]["limit_tuple"])
-        self.assertIsNotNone(database.search_calls[0]["min_time"])
-        self.assertIsNotNone(database.search_calls[0]["max_time"])
+        self.assertEqual(database.search_calls[0]["method"], "list_between")
+        self.assertIsInstance(database.search_calls[0]["start"], datetime)
+        self.assertIsInstance(database.search_calls[0]["end"], datetime)
+        self.assertEqual(database.search_calls[0]["sender_id"], "20000")
 
     async def test_history_around_message_returns_chronological_context(self) -> None:
         """按消息 ID 查询上下文会返回锚点前后消息并标记锚点。"""
@@ -588,7 +825,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=database,
+            group_messages=database,
             event=build_group_message(),
         )
 
@@ -599,7 +836,6 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
                 "context_message_id": "msg-3",
                 "before_count": 1,
                 "after_count": 2,
-                "scan_limit": 5,
             },
         )
 
@@ -612,7 +848,9 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         anchor_message = require_json_object(messages[1])
         self.assertIs(anchor_message["is_anchor"], True)
         self.assertNotIn("is_anchor", require_json_object(messages[0]))
-        self.assertEqual(database.search_calls[0]["limit_tuple"], (0, 5))
+        self.assertEqual(database.search_calls[0]["method"], "list_around")
+        self.assertEqual(database.search_calls[0]["before_count"], 1)
+        self.assertEqual(database.search_calls[0]["after_count"], 2)
         query = require_json_object(result_object["query"])
         self.assertEqual(query["context_message_id"], "msg-3")
         self.assertEqual(query["before_count"], 1)
@@ -658,7 +896,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=database,
+            group_messages=database,
             event=build_group_message(),
         )
 
@@ -669,7 +907,6 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
                 "context_message_id": "msg-3",
                 "before_count": 2,
                 "after_count": 2,
-                "scan_limit": 5,
                 "user_id": "20000",
             },
         )
@@ -696,7 +933,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=database,
+            group_messages=database,
             event=build_group_message(),
         )
 
@@ -705,7 +942,6 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             {
                 "query_mode": "around_message",
                 "context_message_id": "missing",
-                "scan_limit": 2,
             },
         )
 
@@ -714,7 +950,6 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages, [])
         query = require_json_object(result_object["query"])
         self.assertEqual(query["context_message_id"], "missing")
-        self.assertEqual(query["scan_limit"], 2)
 
     async def test_forward_tool_returns_complete_structured_messages(self) -> None:
         """合并转发工具返回完整结构、原始消息段和辅助可读文本。"""
@@ -749,18 +984,21 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, bot),
-            database=FakeDatabase(),
+            group_messages=build_forward_database(),
             event=build_group_message(),
         )
 
         result = await executor.call_tool(
             "qq__get_forward_message",
-            {"message_id": "root-forward"},
+            {"message_id": FORWARD_OWNER_MESSAGE_ID},
         )
 
         result_object = require_json_object(result)
         self.assertIs(result_object["ok"], True)
+        self.assertEqual(result_object["message_id"], FORWARD_OWNER_MESSAGE_ID)
+        self.assertEqual(result_object["forward_id"], "root-forward")
         self.assertIs(result_object["complete"], True)
+        self.assertEqual(bot.forward_calls, ["root-forward"])
         self.assertIn("看文件", require_string(result_object["readable_text"]))
         messages = require_json_list(result_object["messages"])
         first_message = require_json_object(messages[0])
@@ -812,13 +1050,13 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, bot),
-            database=FakeDatabase(),
+            group_messages=build_forward_database(),
             event=build_group_message(),
         )
 
         result = await executor.call_tool(
             "qq__get_forward_message",
-            {"message_id": "root-forward"},
+            {"message_id": FORWARD_OWNER_MESSAGE_ID},
         )
 
         result_object = require_json_object(result)
@@ -828,7 +1066,9 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         recommended_arguments = require_json_object(
             image_access["recommended_arguments"]
         )
-        self.assertEqual(recommended_arguments["message_id"], "root-forward")
+        self.assertEqual(
+            recommended_arguments["message_id"], FORWARD_OWNER_MESSAGE_ID
+        )
         self.assertEqual(recommended_arguments["mode"], "all")
         readable_text = require_string(result_object["readable_text"])
         self.assertIn("qq__get_forward_message_images", readable_text)
@@ -887,17 +1127,19 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, bot),
-            database=FakeDatabase(),
+            group_messages=build_forward_database(),
             event=build_group_message(),
         )
 
         result = await executor.call_tool_with_artifacts(
             "qq__get_forward_message_images",
-            {"message_id": "root-forward", "mode": "all"},
+            {"message_id": FORWARD_OWNER_MESSAGE_ID, "mode": "all"},
         )
 
         result_object = require_json_object(result.result)
         self.assertIs(result_object["ok"], True)
+        self.assertEqual(result_object["message_id"], FORWARD_OWNER_MESSAGE_ID)
+        self.assertEqual(result_object["forward_id"], "root-forward")
         self.assertEqual(result_object["action"], "get_forward_message_images")
         self.assertEqual(result_object["total_images"], 2)
         self.assertEqual(result_object["returned_count"], 2)
@@ -949,14 +1191,14 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         ) as http_client:
             executor = NapCatGroupToolExecutor(
                 bot=cast(NapCatGroupToolBot, bot),
-                database=FakeDatabase(),
+                group_messages=build_forward_database(),
                 event=build_group_message(),
                 http_client=http_client,
             )
 
             result = await executor.call_tool_with_artifacts(
                 "qq__get_forward_message_images",
-                {"message_id": "root-forward", "mode": "all"},
+                {"message_id": FORWARD_OWNER_MESSAGE_ID, "mode": "all"},
             )
 
         result_object = require_json_object(result.result)
@@ -1005,14 +1247,14 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, bot),
-            database=FakeDatabase(),
+            group_messages=build_forward_database(),
             event=build_group_message(),
             forward_image_max_all_images=3,
         )
 
         result = await executor.call_tool_with_artifacts(
             "qq__get_forward_message_images",
-            {"message_id": "root-forward", "mode": "all"},
+            {"message_id": FORWARD_OWNER_MESSAGE_ID, "mode": "all"},
         )
 
         result_object = require_json_object(result.result)
@@ -1061,13 +1303,13 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, bot),
-            database=FakeDatabase(),
+            group_messages=build_forward_database(),
             event=build_group_message(),
         )
 
         result = await executor.call_tool_with_artifacts(
             "qq__get_forward_message_images",
-            {"message_id": "root-forward", "mode": "all"},
+            {"message_id": FORWARD_OWNER_MESSAGE_ID, "mode": "all"},
         )
 
         result_object = require_json_object(result.result)
@@ -1119,13 +1361,13 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, bot),
-            database=FakeDatabase(),
+            group_messages=build_forward_database(),
             event=build_group_message(),
         )
 
         result = await executor.call_tool(
             "qq__get_forward_message",
-            {"message_id": "root-forward"},
+            {"message_id": FORWARD_OWNER_MESSAGE_ID},
         )
 
         result_object = require_json_object(result)
@@ -1135,7 +1377,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         first_message = require_json_object(messages[0])
         nested_forwards = require_json_list(first_message["nested_forwards"])
         nested = require_json_object(nested_forwards[0])
-        self.assertEqual(nested["message_id"], "nested-forward")
+        self.assertEqual(nested["forward_id"], "nested-forward")
         self.assertIn("嵌套正文", require_string(nested["readable_text"]))
 
     async def test_forward_tool_uses_embedded_nested_content_without_fetch(self) -> None:
@@ -1175,13 +1417,13 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, bot),
-            database=FakeDatabase(),
+            group_messages=build_forward_database(),
             event=build_group_message(),
         )
 
         result = await executor.call_tool(
             "qq__get_forward_message",
-            {"message_id": "root-forward"},
+            {"message_id": FORWARD_OWNER_MESSAGE_ID},
         )
 
         result_object = require_json_object(result)
@@ -1191,7 +1433,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             require_json_object(messages[0])["nested_forwards"]
         )
         nested = require_json_object(nested_forwards[0])
-        self.assertEqual(nested["message_id"], "embedded-forward")
+        self.assertEqual(nested["forward_id"], "embedded-forward")
         self.assertIn("内嵌正文", require_string(nested["readable_text"]))
 
     async def test_forward_tool_stops_recursive_forward_cycle(self) -> None:
@@ -1215,13 +1457,13 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, bot),
-            database=FakeDatabase(),
+            group_messages=build_forward_database(forward_ids=("loop-forward",)),
             event=build_group_message(),
         )
 
         result = await executor.call_tool(
             "qq__get_forward_message",
-            {"message_id": "loop-forward"},
+            {"message_id": FORWARD_OWNER_MESSAGE_ID},
         )
 
         result_object = require_json_object(result)
@@ -1234,13 +1476,13 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         """根合并转发读取失败时返回结构化可恢复错误。"""
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=FakeDatabase(),
+            group_messages=build_forward_database(forward_ids=("missing-forward",)),
             event=build_group_message(),
         )
 
         result = await executor.call_tool(
             "qq__get_forward_message",
-            {"message_id": "missing-forward"},
+            {"message_id": FORWARD_OWNER_MESSAGE_ID},
         )
 
         result_object = require_json_object(result)
@@ -1256,7 +1498,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
         executor = NapCatGroupToolExecutor(
             bot=cast(NapCatGroupToolBot, FakeBot()),
-            database=HistoryDatabase([message]),
+            group_messages=HistoryDatabase([message]),
             event=message,
         )
 
@@ -1270,7 +1512,9 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         first_message = require_json_object(messages[0])
         text = require_string(first_message["text"])
         self.assertIn("qq__get_forward_message", text)
-        self.assertIn('message_id="forward-empty"', text)
+        self.assertIn("消息 ID", text)
+        self.assertNotIn("forward-empty", text)
+        self.assertEqual(first_message["message_id"], "30000")
 
 
 def require_json_object(value: object) -> JsonObject:

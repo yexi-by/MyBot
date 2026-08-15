@@ -22,6 +22,7 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
     """处理群聊中的 AI 角色扮演回复。"""
 
     name: ClassVar[str] = "AI智能群聊回复插件"
+    plugin_id: ClassVar[str] = "ai_group_chat"
     consumers_count: ClassVar[int] = CONSUMERS_COUNT
     priority: ClassVar[int] = PRIORITY
 
@@ -35,7 +36,7 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
         )
         self.message_builder: GroupChatMessageBuilder = GroupChatMessageBuilder(
             config=self.config,
-            database=self.context.database,
+            group_messages=self.context.group_messages,
             bot=self.context.bot,
             http_client=self.context.direct_httpx,
         )

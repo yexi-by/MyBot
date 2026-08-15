@@ -1,6 +1,6 @@
 # MyBot
 
-MyBot 是面向 QQ 群聊场景的机器人服务。服务通过 FastAPI 承载 NapCat 反向 WebSocket 连接，使用 Redis 保存消息缓存和媒体索引，并通过 OpenAI Chat Completions 协议接入文本、工具调用与图片生成能力。
+MyBot 是面向 QQ 群聊场景的机器人服务。服务通过 FastAPI 承载 NapCat 反向 WebSocket 连接，使用 PostgreSQL 保存群消息、撤回归档和图片任务，并通过 OpenAI Chat Completions 协议接入文本、工具调用与图片生成能力。
 
 项目使用 Python 3.13+ 和 `uv` 管理依赖。配置、插件开关、日志目录和运行数据均与业务代码分离。
 
@@ -8,8 +8,8 @@ MyBot 是面向 QQ 群聊场景的机器人服务。服务通过 FastAPI 承载 
 
 - 接收 NapCat 反向 WebSocket 事件，并按事件类型分发给插件。
 - 自动加载插件配置，使用 Pydantic 严格校验配置字段。
-- 缓存群消息、引用消息、撤回事件和媒体文件，供插件在后续回合查询。
-- 为 AI 群聊插件提供长期上下文、上下文压缩、工具调用循环和调试转储。
+- 持久化群消息与群图片；撤回消息对普通查询隐藏，但保留完整取证数据。
+- 为 AI 群聊插件提供进程内上下文、上下文压缩、工具调用循环和调试转储。
 - 通过 MCP stdio 连接外部工具，并按 `mcp__{server}__{tool}` 暴露给 LLM。
 - 提供 NapCat 群聊本地信息工具，支持群文件查询、群文件下载链接查询和群历史消息查询。
 - 解析模型回复中的 `<Reply>` 与 `<At>` 标记，并在发送层转换为 NapCat 消息段。
@@ -30,7 +30,13 @@ cp setting.example.toml setting.toml
 
 3. 按运行环境编辑 `setting.toml`，并按需创建 `plugins_config/plugins.toml`。
 
-4. 启动服务：
+4. 启动 PostgreSQL，并执行 schema migration：
+
+```bash
+uv run python -m app.database.migrations upgrade
+```
+
+5. 启动服务：
 
 ```bash
 uv run python -m app.main
@@ -46,7 +52,14 @@ NapCat 侧的 Bearer Token 来自 `setting.toml` 中的 `[napcat].websocket_toke
 
 ## Docker
 
+Docker 使用 `postgres:18.4-bookworm`。部署配置中的 `[database]` 必须设置
+`host = "postgres"` 和 `password_file = "/run/secrets/postgres_password"`，并删除
+明文 `password` 字段。
+
 ```bash
+umask 077
+mkdir -p secrets
+# 向 secrets/postgres_password 写入数据库密码，文件末尾可以有换行。
 docker compose up -d
 ```
 
@@ -54,12 +67,13 @@ docker compose up -d
 
 - `./setting.toml:/app/setting.toml`
 - `./plugins_config:/app/plugins_config`
-- `./data:/app/data`
+- `./images:/app/images`
 - `./logs:/app/logs`
-- `mybot-venv:/app/.venv`
-- `mybot-uv-cache:/app/.uv-cache`
+- `mybot-postgres-data:/var/lib/postgresql`
 
-镜像提供 Python、uv/uvx、Node/npm/pnpm/yarn、Docker CLI、Git 和常用证书环境。容器启动时执行 `uv run --frozen --no-dev python -m app.main`，依赖版本由 `uv.lock` 固定，虚拟环境与 uv 缓存写入命名卷。
+PostgreSQL 不向宿主机公开 5432，MyBot 通过 Compose 内部网络连接。`migrate` 服务会等待 PostgreSQL 健康，显式执行 migration；只有 migration 成功后 MyBot 才会启动。应用本身只检查数据库版本，不会自动修改 schema。镜像提供 Python、uv/uvx、Node/npm/pnpm/yarn、Docker CLI、Git 和常用证书环境，Python 依赖在构建时由 `uv.lock` 固定进镜像。
+
+数据库密码放在 Git 忽略的 `secrets/postgres_password`。PostgreSQL 数据和图片不会自动过期，也没有项目内备份任务；磁盘或数据卷损坏时无法恢复。
 
 MCP server 的命令、参数和密钥属于部署配置，应写入部署机的 `setting.toml`。
 
@@ -111,7 +125,7 @@ vision_user_prompt_path = "plugins_config/ai_group_chat/prompts/vision/user.md"
 
 主模型支持多模态时，把 `supports_multimodal` 设为 `true`，并删除以上四个 `vision_*` 字段，图片会直接交给主模型。两种模式都使用同一套图片读取服务，依次尝试本地路径、消息段现有 URL 和 NapCat `get_image` 刷新；读取支持并发、超时和部分失败。
 
-合并转发里的图片可以通过本地工具批量读取。所有图片按当前消息、引用消息、工具调用顺序使用同一个单轮上限；超出的数量会明确写入视觉结果和日志。视觉描述默认进入长期上下文，图片字节不会跨轮保存。
+合并转发里的图片可以通过本地工具批量读取。所有图片按当前消息、引用消息、工具调用顺序使用同一个单轮上限；超出的数量会明确写入视觉结果和日志。视觉描述默认进入当前进程的对话上下文，图片字节不会跨轮保存；重启后这部分上下文不会恢复。
 
 ```toml
 [ai_group_chat]
@@ -162,8 +176,13 @@ max_image_bytes = 20971520
 - `app/api/` 负责 NapCat Action 调用封装，不放插件业务逻辑。
 - `app/models/` 负责 NapCat 入站事件、消息段和 JSON 边界模型。
 - `app/services/napcat/` 负责可复用的 NapCat 本地工具集，工具说明写在工具 definition 和参数模型中。
-- `app/plugins/` 负责编排具体业务流程，例如 AI 群聊、群通知、生图和撤回清理。
+- `app/plugins/` 负责编排具体业务流程，例如 AI 群聊、群通知、生图和机器人图片撤回。
 - `app/services/llm/` 负责模型服务路由、OpenAI 协议转换、工具注册和 MCP 工具适配。
+- `app/database/` 负责 PostgreSQL 连接、migration、群消息 repository 和图片任务状态；数据库不保存图片字节。
+
+插件必须声明稳定的 ASCII `plugin_id`。插件私有关系数据使用 `plugin_<plugin_id>` schema、自有 migration 和类型化 repository；业务插件不直接持有 `AsyncSession`，也没有通用 JSONB KV 接口。需要私有表的插件把 `migration_package` 指向自己的 Alembic package，其 `env.py` 调用 `run_plugin_migration_environment()`；没有私有数据的插件不要创建空表或空 migration。
+
+这套边界用于约束受信任的本地插件并防止误写，不是不可信代码沙箱。当前 Compose 使用一个数据库用户；允许加载第三方插件前，必须另行设计 PostgreSQL 角色与权限隔离。
 
 更完整的运行流程见 [docs/runtime_architecture.md](docs/runtime_architecture.md)。
 
@@ -180,12 +199,11 @@ app/
 ├── api/                  # NapCat WebSocket Action 封装
 ├── config/               # 全局配置和插件配置加载
 ├── core/                 # FastAPI 服务、DI、事件分发、插件控制器
-├── database/             # Redis 消息存储和媒体缓存
+├── database/             # PostgreSQL、migration 和群消息 repository
 ├── models/               # NapCat 协议模型和 JSON 边界类型
 ├── plugins/              # 插件实现
 │   ├── ai_group_chat/    # AI 群聊插件
 │   ├── auto_unban/       # 自动解禁插件
-│   ├── delete_recalled_message/
 │   ├── group_notice/
 │   ├── image_generate/
 │   └── neavo_image_generate/
@@ -199,7 +217,7 @@ app/
 
 ```bash
 uv run basedpyright
-uv run python -m unittest discover -s tests
+uv run pytest
 uv run python -m compileall app
 ```
 

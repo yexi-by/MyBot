@@ -1,7 +1,9 @@
 """NapCat 消息相关 Action。"""
 
+import asyncio
 from typing import Literal, overload
 
+from app.database import GroupDataScope
 from app.models import (
     At,
     Dice,
@@ -20,10 +22,12 @@ from app.models import (
     Video,
 )
 from app.models.common import JsonObject, JsonValue, to_json_value
-from app.utils.log import log_event
+from app.utils.log import log_event, log_exception
 from app.utils.retry_utils import create_retry_manager
 
 from .base import BaseMixin
+
+_PERSISTENCE_RETRY_DELAY_SECONDS = 0.25
 
 
 class NapCatSendMessageError(RuntimeError):
@@ -212,12 +216,12 @@ class MessageMixin(BaseMixin):
                 message_type="group", group_id=group_id, message=message_segment
             )
         response = await self._call_send_msg_with_retry(params=params)
-        await self._store_sent_message(
-            response=response,
-            group_id=group_id,
-            user_id=user_id,
-            message_segment=message_segment,
-        )
+        if group_id is not None:
+            await self._store_sent_message(
+                response=response,
+                group_id=group_id,
+                message_segment=message_segment,
+            )
         return response
 
     async def _call_send_msg_with_retry(self, *, params: JsonObject) -> Response:
@@ -249,37 +253,102 @@ class MessageMixin(BaseMixin):
         *,
         response: Response,
         message_segment: list[MessageSegment],
-        group_id: NapCatId | None,
-        user_id: NapCatId | None,
+        group_id: NapCatId,
     ) -> None:
         """在发送成功后保存出站消息，支持后续引用机器人自己的消息。"""
         if response.status != "ok" or response.retcode != 0:
             return
         if not self.boot_id:
             log_event(
-                level="WARNING",
+                level="CRITICAL",
                 event="napcat.sent_message.self_id_missing",
                 category="napcat_api",
-                message="发送成功但机器人 self_id 尚未初始化，无法保存出站消息",
+                message="发送成功但机器人 self_id 尚未初始化，正在终止当前会话",
             )
+            await self._close_for_persistence_failure()
             return
         message_id = self._extract_sent_message_id(response=response)
         if message_id is None:
             log_event(
-                level="WARNING",
+                level="CRITICAL",
                 event="napcat.sent_message.message_id_missing",
                 category="napcat_api",
-                message="发送成功但 NapCat 响应缺少 message_id，无法保存出站消息",
+                message="发送成功但 NapCat 响应缺少 message_id，正在终止当前会话",
                 response_data=response.data,
             )
+            await self._close_for_persistence_failure()
             return
-        await self.database.store_outgoing_message(
-            self_id=self.boot_id,
-            message_id=message_id,
-            group_id=group_id,
-            user_id=user_id,
-            message_segments=message_segment,
+        scope = GroupDataScope(
+            bot_id=str(self.boot_id),
+            group_id=str(group_id),
         )
+        for attempt_number in (1, 2):
+            try:
+                persisted_segments = await self._archive_inline_images(
+                    message_segment=message_segment
+                )
+                await self.sent_message_recorder.record_sent(
+                    scope=scope,
+                    message_id=str(message_id),
+                    segments=persisted_segments,
+                )
+                return
+            except Exception as exc:
+                if attempt_number == 1:
+                    log_event(
+                        level="WARNING",
+                        event="napcat.sent_message.persistence_retry",
+                        category="napcat_api",
+                        message="群消息已发送，但 PostgreSQL 记录失败，250ms 后重试一次",
+                        group_id=group_id,
+                        message_id=message_id,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    await asyncio.sleep(_PERSISTENCE_RETRY_DELAY_SECONDS)
+                    continue
+                log_exception(
+                    event="napcat.sent_message.persistence_failed",
+                    category="napcat_api",
+                    message="群消息已发送，但 PostgreSQL 连续记录失败",
+                    exc=exc,
+                    group_id=group_id,
+                    message_id=message_id,
+                )
+                log_event(
+                    level="CRITICAL",
+                    event="napcat.sent_message.session_aborted",
+                    category="napcat_api",
+                    message="已标记当前 NapCat 会话不健康并停止继续处理",
+                    group_id=group_id,
+                    message_id=message_id,
+                )
+                await self._close_for_persistence_failure()
+                return
+
+    async def _archive_inline_images(
+        self,
+        *,
+        message_segment: list[MessageSegment],
+    ) -> list[MessageSegment]:
+        """主动保存出站内联图片，并只给持久化副本补充本地路径。"""
+        persisted_segments: list[MessageSegment] = []
+        for segment in message_segment:
+            if not isinstance(segment, Image) or not segment.data.file.casefold().startswith(
+                ("base64://", "data:")
+            ):
+                persisted_segments.append(segment)
+                continue
+            archived = await self.inline_image_archiver.archive(
+                source=segment.data.file
+            )
+            persisted_data = segment.data.model_copy(
+                update={"path": str(archived.absolute_path)}
+            )
+            persisted_segments.append(
+                segment.model_copy(update={"data": persisted_data})
+            )
+        return persisted_segments
 
     def _extract_sent_message_id(self, *, response: Response) -> NapCatId | None:
         """从 NapCat send_msg 响应中提取消息 ID。"""
@@ -327,17 +396,17 @@ class MessageMixin(BaseMixin):
         forward_id = self._extract_sent_forward_id(response=response)
         if forward_id is None:
             log_event(
-                level="WARNING",
+                level="CRITICAL",
                 event="napcat.sent_forward.forward_id_missing",
                 category="napcat_api",
-                message="发送合并转发成功但 NapCat 响应缺少 forward_id，无法保存出站合并转发段",
+                message="发送合并转发成功但响应缺少 forward_id，正在终止当前会话",
                 response_data=response.data,
             )
+            await self._close_for_persistence_failure()
             return
         await self._store_sent_message(
             response=response,
             group_id=group_id,
-            user_id=None,
             message_segment=[
                 Forward.new(
                     forward_id,

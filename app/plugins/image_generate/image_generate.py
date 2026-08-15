@@ -1,14 +1,23 @@
 """基于 OpenAI Images 协议的群聊生图插件。"""
 
-from pathlib import Path
+from collections.abc import Sequence
 from typing import ClassVar, Final, override
 
-import aiofiles
+from pydantic import Field
 
 from app.config.plugin_config import load_plugin_config
-from app.models import GroupMessage, Image, NapCatId, Reply, StrictModel, Text
+from app.database import GroupDataScope, StoredGroupMessage
+from app.models import (
+    GroupMessage,
+    Image,
+    MessageSegment,
+    NapCatId,
+    Reply,
+    StrictModel,
+    Text,
+)
 from app.plugins.base import BasePlugin
-from app.services import ChatMessage
+from app.services import ChatMessage, NapCatImageReader, NapCatImageResource
 from app.utils.log import log_event, log_exception
 
 CONFIG_SECTION: Final[str] = "image_generate"
@@ -34,11 +43,14 @@ class ImageGenerateConfig(StrictModel):
     group_ids: list[NapCatId]
     model_name: str
     model_vendors: str
+    image_fetch_concurrency: int = Field(default=4, ge=1)
+    image_download_timeout_seconds: float = Field(default=15.0, gt=0)
 
 
 class ImageGeneratePlugin(BasePlugin[GroupMessage]):
     """处理群聊中的文生图与图生图请求。"""
 
+    plugin_id: ClassVar[str] = "image_generate"
     name: ClassVar[str] = "生图插件"
     consumers_count: ClassVar[int] = CONSUMERS_COUNT
     priority: ClassVar[int] = PRIORITY
@@ -51,6 +63,12 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
             model_cls=ImageGenerateConfig,
         )
         self.group_ids: set[NapCatId] = set(self.config.group_ids)
+        self.image_reader: NapCatImageReader = NapCatImageReader(
+            bot=self.context.bot,
+            http_client=self.context.direct_httpx,
+            fetch_concurrency=self.config.image_fetch_concurrency,
+            download_timeout_seconds=self.config.image_download_timeout_seconds,
+        )
 
     @override
     async def run(self, msg: GroupMessage) -> bool:
@@ -116,25 +134,34 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
 
     async def _collect_input_images(self, *, msg: GroupMessage) -> list[bytes]:
         """收集当前消息和引用消息中的图生图输入图片。"""
-        images = await self._collect_message_images(msg=msg)
+        images = await self._collect_message_images(
+            segments=msg.message,
+            message_id=msg.message_id,
+        )
         reply_message = await self._load_reply_message(msg=msg)
         if reply_message is not None:
-            images.extend(await self._collect_message_images(msg=reply_message))
+            images.extend(
+                await self._collect_message_images(
+                    segments=reply_message.segments,
+                    message_id=reply_message.message_id,
+                )
+            )
         return images
 
-    async def _load_reply_message(self, *, msg: GroupMessage) -> GroupMessage | None:
-        """从 Redis 读取当前消息引用的历史群消息。"""
+    async def _load_reply_message(
+        self, *, msg: GroupMessage
+    ) -> StoredGroupMessage | None:
+        """读取当前消息引用的未撤回群消息。"""
         reply_id = self._extract_reply_id(msg=msg)
         if reply_id is None:
             return None
-        stored_message = await self.context.database.search_messages(
-            self_id=msg.self_id,
-            group_id=msg.group_id,
+        return await self.context.group_messages.get_active(
+            scope=GroupDataScope(
+                bot_id=msg.self_id,
+                group_id=msg.group_id,
+            ),
             message_id=reply_id,
         )
-        if isinstance(stored_message, GroupMessage):
-            return stored_message
-        return None
 
     def _extract_reply_id(self, *, msg: GroupMessage) -> NapCatId | None:
         """提取当前消息引用的消息 ID。"""
@@ -143,39 +170,37 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
                 return segment.data.id
         return None
 
-    async def _collect_message_images(self, *, msg: GroupMessage) -> list[bytes]:
+    async def _collect_message_images(
+        self,
+        *,
+        segments: Sequence[MessageSegment],
+        message_id: NapCatId,
+    ) -> list[bytes]:
         """读取单条群消息中的所有图片。"""
-        images: list[bytes] = []
-        for segment in msg.message:
+        resources: list[NapCatImageResource] = []
+        for segment_index, segment in enumerate(segments):
             if not isinstance(segment, Image):
                 continue
-            try:
-                images.append(await self._load_image_bytes(segment=segment))
-            except Exception as exc:
-                log_event(
-                    level="WARNING",
-                    event="image_generate.image_load_failed",
-                    category="plugin",
-                    message="生图插件读取单张图片失败",
-                    message_id=msg.message_id,
+            resources.append(
+                NapCatImageResource(
+                    label=f"消息 {message_id} 的第 {segment_index + 1} 个消息段",
                     file=segment.data.file,
-                    error=str(exc),
+                    file_id=segment.data.file_id,
+                    path=segment.data.path,
+                    url=segment.data.url,
                 )
-                raise
+            )
+        results = await self.image_reader.read_many(resources=resources)
+        images: list[bytes] = []
+        for result in results:
+            if result.image_bytes is not None:
+                images.append(result.image_bytes)
+                continue
+            raise ValueError(
+                f"图片读取失败: {result.resource.label}: "
+                f"{result.error or '图片没有可读取内容'}"
+            )
         return images
-
-    async def _load_image_bytes(self, *, segment: Image) -> bytes:
-        """优先读取 Redis 媒体缓存路径，缺失时回退到图片 URL。"""
-        if segment.data.path:
-            path = Path(segment.data.path)
-            if path.is_file():
-                async with aiofiles.open(path, mode="rb") as file:
-                    return await file.read()
-        if segment.data.url:
-            async with self.context.direct_httpx.stream("GET", segment.data.url) as response:
-                _ = response.raise_for_status()
-                return await response.aread()
-        raise ValueError(f"图片没有可读取来源: file={segment.data.file}")
 
     async def _send_status(self, *, msg: GroupMessage, image_count: int) -> None:
         """发送生图处理中的状态提醒。"""

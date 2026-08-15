@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 import httpx
 
@@ -161,6 +162,66 @@ class NapCatImageReaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.image_bytes, b"refreshed-image")
         self.assertEqual(result.source, "napcat_refresh")
         self.assertEqual(bot.calls, [(None, "image.png")])
+
+    async def test_oversized_non_aligned_base64_is_rejected_before_decode(
+        self,
+    ) -> None:
+        """长度不是 4 的倍数也必须在解码分配内存前按上限拒绝。"""
+        bot = FakeImageBot()
+        bot.responses["oversized.png"] = Response(
+            status="ok",
+            retcode=0,
+            data={"base64": "A" * 9},
+        )
+        reader = NapCatImageReader(
+            bot=bot,
+            http_client=None,
+            fetch_concurrency=1,
+            download_timeout_seconds=3.0,
+            max_image_bytes=4,
+        )
+
+        with patch(
+            "app.services.napcat.image_reader.base64.b64decode"
+        ) as decode:
+            result = await reader.read(
+                resource=NapCatImageResource(
+                    label="超限图片",
+                    file="oversized.png",
+                )
+            )
+
+        decode.assert_not_called()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_type, "ImageReadTooLargeError")
+        self.assertIn("base64 长度超过", result.error or "")
+
+    async def test_base64_size_precheck_allows_legal_padding(self) -> None:
+        """编码长度恰好达到上限时不误拒绝合法 padding。"""
+        bot = FakeImageBot()
+        bot.responses["padded.png"] = Response(
+            status="ok",
+            retcode=0,
+            data={"base64": "YQ=="},
+        )
+        reader = NapCatImageReader(
+            bot=bot,
+            http_client=None,
+            fetch_concurrency=1,
+            download_timeout_seconds=3.0,
+            max_image_bytes=1,
+        )
+
+        result = await reader.read(
+            resource=NapCatImageResource(
+                label="合法 padding 图片",
+                file="padded.png",
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.image_bytes, b"a")
+        self.assertEqual(result.source, "napcat_refresh")
 
     async def test_read_many_preserves_order_and_returns_partial_errors(self) -> None:
         """批量读取保持输入顺序，单张失败不会中断其他图片。"""

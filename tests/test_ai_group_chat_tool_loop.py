@@ -1,12 +1,15 @@
 """AI 群聊工具循环与视觉工具集成测试。"""
 
 import unittest
+from datetime import UTC, datetime
 from typing import Protocol, cast
 
 import httpx
 
 from app.api.mixins.message import NapCatSendMessageError
+from app.database import GroupDataScope, StoredGroupMessage
 from app.models import (
+    Forward,
     GroupMessage,
     JsonObject,
     MessageSegment,
@@ -165,8 +168,45 @@ class FakeToolManager:
         )
 
 
-class FakeDatabase:
+class EmptyGroupMessageReader:
     """测试中不实际读取历史消息。"""
+
+    def __init__(self) -> None:
+        """初始化当前群未撤回消息映射。"""
+        self.active_messages: dict[tuple[str, str, str], StoredGroupMessage] = {}
+
+    def add_forward(
+        self,
+        *,
+        scope: GroupDataScope,
+        message_id: str,
+        forward_id: str,
+    ) -> None:
+        """加入一条含单个顶层合并转发段的未撤回群消息。"""
+        self.active_messages[(scope.bot_id, scope.group_id, message_id)] = (
+            StoredGroupMessage(
+                row_id=1,
+                scope=scope,
+                message_id=message_id,
+                group_name="测试群",
+                sender_id="20000",
+                sender_name="夜袭",
+                sender_role="member",
+                occurred_at=datetime(2026, 8, 16, tzinfo=UTC),
+                direction="incoming",
+                segments=(Forward.new(forward_id),),
+                images=(),
+            )
+        )
+
+    async def get_active(
+        self,
+        *,
+        scope: GroupDataScope,
+        message_id: str,
+    ) -> StoredGroupMessage | None:
+        """只返回当前机器人和当前群显式加入的未撤回消息。"""
+        return self.active_messages.get((scope.bot_id, scope.group_id, message_id))
 
 
 class FakeBot:
@@ -259,7 +299,7 @@ class FakeContext:
     ) -> None:
         """保存测试依赖。"""
         self.bot = FakeBot()
-        self.database = FakeDatabase()
+        self.group_messages = EmptyGroupMessageReader()
         self.direct_httpx = cast(httpx.AsyncClient, object())
         self.llm: FakeLLMProtocol = llm
         self.mcp_tool_manager = (
@@ -734,7 +774,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
                         LLMToolCall(
                             id="call-forward",
                             name="qq__get_forward_message",
-                            arguments={"message_id": "root-forward"},
+                            arguments={"message_id": "outer-forward"},
                         )
                     ]
                 ),
@@ -742,6 +782,11 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         context = FakeContext(llm=llm)
+        context.group_messages.add_forward(
+            scope=GroupDataScope(bot_id="10000", group_id="40000"),
+            message_id="outer-forward",
+            forward_id="root-forward",
+        )
         context.bot.forward_responses["root-forward"] = Response(
             status="ok",
             retcode=0,

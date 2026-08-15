@@ -1,15 +1,19 @@
+FROM node:24-bookworm-slim AS node_runtime
+
 FROM python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=node_runtime /usr/local/ /usr/local/
 
 # 镜像提供项目运行时和常见 MCP stdio 启动器；具体 MCP server 由部署配置决定。
 # Node 与 Docker CLI 来自上游官方源，保证 stdio 工具链具备完整命令能力。
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Node 官方镜像的 Yarn 软链接指向未复制的 /opt；交给 Corepack 重建。
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
     curl \
     git \
-    gnupg \
     libjemalloc2 \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
@@ -17,16 +21,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && . /etc/os-release \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" \
     > /etc/apt/sources.list.d/docker.list \
-    && curl -fsSL https://deb.nodesource.com/setup_current.x -o /tmp/nodesource_setup.sh \
-    && bash /tmp/nodesource_setup.sh \
-    && apt-get install -y --no-install-recommends \
-    docker-ce-cli \
-    nodejs \
-    && npm install -g npm@latest corepack@latest \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && rm -f /usr/local/bin/yarn /usr/local/bin/yarnpkg \
     && corepack enable \
     && corepack prepare pnpm@latest --activate \
     && corepack prepare yarn@stable --activate \
-    && rm -rf /var/lib/apt/lists/* /tmp/nodesource_setup.sh \
+    && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/lib/*/libjemalloc.so.2 /usr/lib/libjemalloc.so.2
 
 ENV LANG="C.UTF-8"
@@ -43,7 +44,12 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 COPY pyproject.toml uv.lock package.json package-lock.json README.md ./
-RUN npm ci --omit=dev --ignore-scripts=false
+# 锁文件里 tldjs 的 postinstall 只在显式联网更新规则时工作，运行时不消费。
+RUN uv sync --frozen --no-dev \
+    && npm ci --omit=dev --ignore-scripts --loglevel=error \
+    && npm audit --omit=dev --audit-level=low --loglevel=error \
+    && rm -rf /app/.uv-cache
+COPY alembic.ini ./alembic.ini
 COPY app ./app
 
-CMD ["uv", "run", "--frozen", "--no-dev", "python", "-m", "app.main"]
+CMD ["python", "-m", "app.main"]

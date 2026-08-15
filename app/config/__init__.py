@@ -3,6 +3,7 @@
 from .config import RAW_CONFIG_DICT, load_settings
 from .schemas import (
     AppConfig,
+    DatabaseConfig,
     LLMServiceConfig,
     LoggingConfig,
     NapCatConfig,
@@ -14,6 +15,7 @@ from .schemas import (
 
 __all__ = [
     "AppConfig",
+    "DatabaseConfig",
     "LLMServiceConfig",
     "LoggingConfig",
     "NapCatConfig",

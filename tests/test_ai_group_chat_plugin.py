@@ -5,7 +5,7 @@ from typing import cast
 
 import httpx
 
-from app.database import RedisDatabaseManager
+from app.database import GroupDataScope, GroupMessageReader, StoredGroupMessage
 from app.models import (
     At,
     GroupMessage,
@@ -86,29 +86,14 @@ class SmokeBot:
 class SmokeDatabase:
     """引用消息查询始终为空。"""
 
-    async def search_messages(
+    async def get_active(
         self,
         *,
-        self_id: str,
-        message_id: str | None = None,
-        root: str | None = None,
-        limit_tuple: tuple[int, int] | None = None,
-        group_id: str | None = None,
-        user_id: str | None = None,
-        max_time: int | None = None,
-        min_time: int | None = None,
-    ) -> GroupMessage | None:
+        scope: GroupDataScope,
+        message_id: str,
+    ) -> StoredGroupMessage | None:
         """返回空引用上下文。"""
-        _ = (
-            self_id,
-            message_id,
-            root,
-            limit_tuple,
-            group_id,
-            user_id,
-            max_time,
-            min_time,
-        )
+        _ = (scope, message_id)
         return None
 
 
@@ -171,7 +156,7 @@ class SmokeContext:
     def __init__(self) -> None:
         """初始化假 Bot、数据库、LLM 和工具管理器。"""
         self.bot = SmokeBot()
-        self.database = SmokeDatabase()
+        self.group_messages = SmokeDatabase()
         self.direct_httpx = cast(httpx.AsyncClient, object())
         self.llm = SmokeLLM()
         self.mcp_tool_manager = EmptyToolManager()
@@ -235,7 +220,7 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         plugin.debug_dumper = AIGroupChatDebugDumper(config=config)
         plugin.message_builder = GroupChatMessageBuilder(
             config=config,
-            database=cast(RedisDatabaseManager, smoke_context.database),
+            group_messages=cast(GroupMessageReader, smoke_context.group_messages),
             bot=smoke_context.bot,
             http_client=smoke_context.direct_httpx,
         )

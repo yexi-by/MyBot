@@ -6,6 +6,7 @@ from shutil import rmtree
 from pathlib import Path
 
 from app.plugins.ai_group_chat.config import AIGroupChatConfig, GroupChatConfig
+from app.plugins.ai_group_chat.constants import DEBUG_DUMP_DIR
 from app.plugins.ai_group_chat.debug_dump import AIGroupChatDebugDumper
 from app.services import ChatMessage
 from app.services.llm.schemas import LLMToolCall
@@ -40,6 +41,13 @@ def build_group_config() -> GroupChatConfig:
 
 class AIGroupChatDebugDumperTest(unittest.IsolatedAsyncioTestCase):
     """验证 AI 群聊 Markdown 调试文件内容。"""
+
+    def test_default_directory_uses_writable_log_mount(self) -> None:
+        """Docker 只读挂载插件配置时，调试文件仍写入日志目录。"""
+        dumper = AIGroupChatDebugDumper(config=build_config(enabled=False))
+
+        self.assertEqual(DEBUG_DUMP_DIR, Path("logs/ai_group_chat_debug"))
+        self.assertEqual(dumper.root_dir, DEBUG_DUMP_DIR)
 
     async def test_enabled_dumper_only_appends_long_term_context_delta(
         self,

@@ -4,6 +4,7 @@
 .idea/
 .vscode/
 .vs/
+AGENTS.md
 
 # Python 构建与缓存
 __pycache__/
@@ -16,6 +17,7 @@ wheels/
 .venv/
 venv/
 env/
+node_modules/
 
 # 真实配置、密钥与个人隐私
 setting.toml
@@ -29,6 +31,7 @@ setting.local.toml
 *.crt
 *.p12
 *.pfx
+secrets/
 
 # 插件真实配置包含群号、提示词和私有开关，禁止进入镜像上下文
 plugins_config/
@@ -38,6 +41,7 @@ logs/
 debug/
 data/
 image/
+images/
 tmp/
 *.log
 *.trace

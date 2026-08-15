@@ -38,6 +38,7 @@ class GroupNoticePlugin(
     """把加群申请和成员变动通知发送到对应群聊。"""
 
     name: ClassVar[str] = "群成员变动提醒插件"
+    plugin_id: ClassVar[str] = "group_notice"
     consumers_count: ClassVar[int] = CONSUMERS_COUNT
     priority: ClassVar[int] = PRIORITY
 

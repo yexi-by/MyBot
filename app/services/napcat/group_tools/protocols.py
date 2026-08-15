@@ -2,20 +2,8 @@
 
 from typing import Protocol
 
-from app.models import (
-    GroupMessage,
-    MessageSegment,
-    Meta,
-    NapCatId,
-    Node,
-    Notice,
-    PrivateMessage,
-    Request,
-    Response,
-)
+from app.models import MessageSegment, NapCatId, Node, Response
 from app.services.napcat.image_reader import NapCatImageBot
-
-type CachedNapCatMessage = GroupMessage | PrivateMessage | Notice | Meta | Request
 
 
 class NapCatGroupToolBot(NapCatImageBot, Protocol):
@@ -60,23 +48,4 @@ class NapCatGroupToolBot(NapCatImageBot, Protocol):
         self, *, group_id: NapCatId, messages: list[Node]
     ) -> Response:
         """发送群聊合并转发消息。"""
-        ...
-
-
-class NapCatGroupHistoryDatabase(Protocol):
-    """描述群聊历史工具读取 Redis 缓存所需的最小数据库能力。"""
-
-    async def search_messages(
-        self,
-        *,
-        self_id: NapCatId,
-        message_id: NapCatId | None = None,
-        root: str | None = None,
-        limit_tuple: tuple[int, int] | None = None,
-        group_id: NapCatId | None = None,
-        user_id: NapCatId | None = None,
-        max_time: int | None = None,
-        min_time: int | None = None,
-    ) -> CachedNapCatMessage | list[CachedNapCatMessage] | None:
-        """查询 Redis 中的消息缓存。"""
         ...

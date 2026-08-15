@@ -4,6 +4,7 @@ from typing import override
 
 import httpx
 
+from app.database import GroupMessageReader
 from app.models import (
     GroupMessage,
     JsonObject,
@@ -19,7 +20,7 @@ from .forward import GroupForwardToolset
 from .forward_images import GroupForwardImageToolset
 from .history import GroupHistoryToolset
 from .modifiers import GroupMessageDirectiveParser
-from .protocols import NapCatGroupHistoryDatabase, NapCatGroupToolBot
+from .protocols import NapCatGroupToolBot
 
 
 class NapCatGroupToolExecutor(LLMToolExecutor):
@@ -28,7 +29,7 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
     def __init__(
         self,
         bot: NapCatGroupToolBot,
-        database: NapCatGroupHistoryDatabase,
+        group_messages: GroupMessageReader,
         event: GroupMessage,
         allow_mention_all: bool = False,
         forward_image_tool_enabled: bool = True,
@@ -51,10 +52,12 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
         self._files: GroupFileToolset = GroupFileToolset(bot=bot, event=event)
         self._forward: GroupForwardToolset = GroupForwardToolset(
             bot=bot,
+            group_messages=group_messages,
             event=event,
         )
         self._forward_images: GroupForwardImageToolset = GroupForwardImageToolset(
             bot=bot,
+            group_messages=group_messages,
             event=event,
             max_images_per_call=forward_image_max_images_per_call,
             max_all_images=forward_image_max_all_images,
@@ -63,7 +66,7 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
             http_client=http_client,
         )
         self._history: GroupHistoryToolset = GroupHistoryToolset(
-            database=database,
+            group_messages=group_messages,
             event=event,
         )
         self._register_tools()

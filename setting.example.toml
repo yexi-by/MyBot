@@ -18,9 +18,14 @@ websocket_token = "CHANGE_ME_NAPCAT_TOKEN"
 send_retry_count = 3
 send_retry_delay = 1
 
-# 图片、视频等媒体缓存目录；Docker 部署默认挂载到 /app/data。
+# 群图片永久归档目录；视频不会下载。Docker 部署默认挂载到 /app/images。
 [storage]
-media_path = "data"
+image_path = "images"
+image_download_concurrency = 8
+image_download_timeout_seconds = 30
+image_max_bytes = 52428800
+image_retry_delays_seconds = [5, 30, 300]
+image_lease_seconds = 60
 
 # 项目通用出站网络配置；proxy 留空表示不启用代理。
 [network]
@@ -65,9 +70,16 @@ provider_type = "openai"
 retry_count = 3
 retry_delay = 1
 
-[redis]
-# Redis 用于缓存 NapCat 事件和群聊历史消息。
+[database]
+# PostgreSQL 是群消息、撤回记录和图片任务的唯一持久化数据库。
 host = "localhost"
-port = 6379
-db = 0
-password = ""
+port = 5432
+name = "mybot"
+user = "mybot"
+password = "CHANGE_ME_POSTGRES_PASSWORD"
+# Docker secret 部署时改用 password_file，并删除上面的 password。
+# password_file = "/run/secrets/postgres_password"
+pool_size = 10
+max_overflow = 10
+pool_timeout_seconds = 5
+statement_timeout_seconds = 5

@@ -22,6 +22,7 @@ class AutoUnbanPlugin(BasePlugin[GroupBanEvent]):
     """检测配置用户被禁言的事件并立即调用 NapCat 解禁。"""
 
     name: ClassVar[str] = "自动解禁插件"
+    plugin_id: ClassVar[str] = "auto_unban"
     consumers_count: ClassVar[int] = CONSUMERS_COUNT
     priority: ClassVar[int] = PRIORITY
 

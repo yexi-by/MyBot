@@ -9,7 +9,6 @@ from app.models import StrictModel
 
 MENTION_ALL: Literal["all"] = "all"
 MAX_HISTORY_LIMIT: int = 100
-MAX_HISTORY_SCAN_LIMIT: int = 500
 BEIJING_TIMEZONE: timezone = timezone(timedelta(hours=8))
 HISTORY_TIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
 type HistoryQueryMode = Literal[
@@ -65,14 +64,22 @@ class GetForwardMessageArgs(StrictModel):
     """获取合并转发消息详情的工具参数。"""
 
     message_id: str = Field(
-        description="合并转发消息 ID，通常来自消息中的 forward 段 ID。"
+        description=(
+            "当前群中外层群消息的消息 ID；该消息必须未撤回，"
+            "并且恰好包含一个顶层合并转发段。"
+        )
     )
 
 
 class GetForwardMessageImagesArgs(StrictModel):
     """获取合并转发图片的工具参数。"""
 
-    message_id: str = Field(description="当前群收到的合并转发消息 ID。")
+    message_id: str = Field(
+        description=(
+            "当前群中外层群消息的消息 ID；该消息必须未撤回，"
+            "并且恰好包含一个顶层合并转发段。"
+        )
+    )
     mode: ForwardImageQueryMode = Field(
         default="single",
         description=(
@@ -166,12 +173,6 @@ class GetGroupHistoryMessagesArgs(StrictModel):
         ge=0,
         le=MAX_HISTORY_LIMIT,
         description="锚点后消息数量，默认 10。",
-    )
-    scan_limit: int = Field(
-        default=100,
-        ge=1,
-        le=MAX_HISTORY_SCAN_LIMIT,
-        description="本地扫描窗口，默认 100，最大 500；用于 user_id 或 around_message。",
     )
 
     @model_validator(mode="after")

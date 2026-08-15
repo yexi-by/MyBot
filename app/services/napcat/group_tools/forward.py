@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from pydantic import TypeAdapter, ValidationError
 
+from app.database import GroupMessageReader
 from app.models import (
     Forward,
     GroupMessage,
@@ -21,6 +22,11 @@ from app.services.llm.tools import LLMToolRegistry
 from app.services.napcat.message_formatter import NapCatMessageTextFormatter
 
 from .arguments import GetForwardMessageArgs
+from .forward_reference import (
+    ActiveForwardReference,
+    ActiveForwardReferenceError,
+    resolve_active_forward_reference,
+)
 from .protocols import NapCatGroupToolBot
 
 
@@ -28,7 +34,7 @@ from .protocols import NapCatGroupToolBot
 class ForwardReadResult:
     """描述一次合并转发树读取结果。"""
 
-    message_id: NapCatId
+    forward_id: NapCatId
     complete: bool
     messages: list[JsonObject]
     readable_text: str
@@ -39,9 +45,16 @@ class ForwardReadResult:
 class GroupForwardToolset:
     """把合并转发消息读取能力暴露为 LLM 信息工具。"""
 
-    def __init__(self, *, bot: NapCatGroupToolBot, event: GroupMessage) -> None:
+    def __init__(
+        self,
+        *,
+        bot: NapCatGroupToolBot,
+        group_messages: GroupMessageReader,
+        event: GroupMessage,
+    ) -> None:
         """绑定当前群事件和 NapCat Bot。"""
         self.bot: NapCatGroupToolBot = bot
+        self.group_messages: GroupMessageReader = group_messages
         self.event: GroupMessage = event
         self.message_formatter: NapCatMessageTextFormatter = NapCatMessageTextFormatter()
         self.segment_adapter: TypeAdapter[MessageSegment] = TypeAdapter(MessageSegment)
@@ -55,7 +68,8 @@ class GroupForwardToolset:
             name="qq__get_forward_message",
             description=(
                 "信息工具：读取合并转发消息完整内容。"
-                "当你看到合并转发 ID 且需要其中聊天记录辅助回答时，应主动调用；"
+                "当你看到当前群中含合并转发的外层消息 ID，"
+                "且需要其中聊天记录辅助回答时，应主动调用；"
                 "返回原始消息段 JSON、可读文本和嵌套合并转发内容，不发送群消息。"
             ),
             parameters_model=GetForwardMessageArgs,
@@ -65,30 +79,42 @@ class GroupForwardToolset:
     async def get_forward_message(self, arguments: JsonObject) -> JsonValue:
         """读取合并转发消息并返回完整结构化内容。"""
         args = GetForwardMessageArgs.model_validate(arguments)
+        reference = await resolve_active_forward_reference(
+            group_messages=self.group_messages,
+            event=self.event,
+            group_message_id=args.message_id,
+        )
+        if isinstance(reference, ActiveForwardReferenceError):
+            return self._build_reference_error_result(reference=reference)
         result = await self._read_forward_tree(
-            message_id=args.message_id,
+            forward_id=reference.forward_id,
             active_forward_ids=set(),
         )
         if result.root_failed:
-            return self._build_root_error_result(args=args, result=result)
+            return self._build_root_error_result(
+                reference=reference,
+                result=result,
+            )
         image_count = self._count_forward_images(messages=result.messages)
         readable_text = result.readable_text
         image_access: JsonObject | None = None
         if image_count > 0:
             image_access = self._build_image_access_hint(
-                message_id=result.message_id,
+                group_message_id=reference.group_message_id,
+                forward_id=result.forward_id,
                 image_count=image_count,
             )
             readable_text = self._append_image_access_text(
                 readable_text=readable_text,
-                message_id=result.message_id,
+                group_message_id=reference.group_message_id,
                 image_count=image_count,
             )
         return {
             "ok": True,
             "action": "get_forward_message",
             "group_id": to_json_value(self.event.group_id),
-            "message_id": to_json_value(result.message_id),
+            "message_id": reference.group_message_id,
+            "forward_id": to_json_value(result.forward_id),
             "complete": result.complete,
             "image_count": image_count,
             "image_access": image_access,
@@ -98,7 +124,10 @@ class GroupForwardToolset:
         }
 
     def _build_root_error_result(
-        self, *, args: GetForwardMessageArgs, result: ForwardReadResult
+        self,
+        *,
+        reference: ActiveForwardReference,
+        result: ForwardReadResult,
     ) -> JsonObject:
         """构造根合并转发读取失败时的模型可读结果。"""
         first_error = result.errors[0] if result.errors else {}
@@ -109,7 +138,8 @@ class GroupForwardToolset:
             "is_error": True,
             "action": "get_forward_message",
             "group_id": to_json_value(self.event.group_id),
-            "message_id": args.message_id,
+            "message_id": reference.group_message_id,
+            "forward_id": to_json_value(reference.forward_id),
             "complete": False,
             "error_type": error_type if isinstance(error_type, str) else "ForwardError",
             "error": error if isinstance(error, str) else "合并转发消息读取失败",
@@ -119,32 +149,55 @@ class GroupForwardToolset:
             "errors": to_json_value(result.errors),
         }
 
+    def _build_reference_error_result(
+        self, *, reference: ActiveForwardReferenceError
+    ) -> JsonObject:
+        """构造外层群消息不可用时的模型可读结果。"""
+        return {
+            "ok": False,
+            "is_error": True,
+            "action": "get_forward_message",
+            "group_id": to_json_value(self.event.group_id),
+            "message_id": reference.group_message_id,
+            "forward_id": None,
+            "complete": False,
+            "error_type": reference.error_type,
+            "error": reference.error,
+            "message": (
+                "合并转发消息不可读取。请使用当前群中未撤回、"
+                "且恰好含一个顶层合并转发段的外层消息 ID。"
+            ),
+            "messages": [],
+            "readable_text": "",
+            "errors": [],
+        }
+
     async def _read_forward_tree(
         self,
         *,
-        message_id: NapCatId,
+        forward_id: NapCatId,
         active_forward_ids: set[NapCatId],
     ) -> ForwardReadResult:
         """通过 NapCat 读取指定合并转发 ID 对应的消息树。"""
-        if message_id in active_forward_ids:
-            error = self._build_cycle_error(message_id=message_id)
+        if forward_id in active_forward_ids:
+            error = self._build_cycle_error(forward_id=forward_id)
             return ForwardReadResult(
-                message_id=message_id,
+                forward_id=forward_id,
                 complete=False,
                 messages=[],
                 readable_text="",
                 errors=[error],
             )
-        active_forward_ids.add(message_id)
+        active_forward_ids.add(forward_id)
         try:
-            response = await self._safe_get_forward_msg(message_id=message_id)
+            response = await self._safe_get_forward_msg(forward_id=forward_id)
             if response.status != "ok" or response.retcode != 0:
                 error = self._build_response_error(
-                    message_id=message_id,
+                    forward_id=forward_id,
                     response=response,
                 )
                 return ForwardReadResult(
-                    message_id=message_id,
+                    forward_id=forward_id,
                     complete=False,
                     messages=[],
                     readable_text="",
@@ -152,16 +205,16 @@ class GroupForwardToolset:
                     root_failed=True,
                 )
             raw_messages = self._extract_response_messages(
-                message_id=message_id,
+                forward_id=forward_id,
                 response=response,
             )
             if raw_messages is None:
                 error = self._build_invalid_response_error(
-                    message_id=message_id,
+                    forward_id=forward_id,
                     response=response,
                 )
                 return ForwardReadResult(
-                    message_id=message_id,
+                    forward_id=forward_id,
                     complete=False,
                     messages=[],
                     readable_text="",
@@ -174,7 +227,7 @@ class GroupForwardToolset:
             )
             readable_text = self._build_readable_text(messages=messages)
             return ForwardReadResult(
-                message_id=message_id,
+                forward_id=forward_id,
                 complete=not errors,
                 messages=messages,
                 readable_text=readable_text,
@@ -182,12 +235,12 @@ class GroupForwardToolset:
             )
         except Exception as exc:
             error = {
-                "message_id": to_json_value(message_id),
+                "forward_id": to_json_value(forward_id),
                 "error_type": type(exc).__name__,
                 "error": str(exc),
             }
             return ForwardReadResult(
-                message_id=message_id,
+                forward_id=forward_id,
                 complete=False,
                 messages=[],
                 readable_text="",
@@ -195,26 +248,26 @@ class GroupForwardToolset:
                 root_failed=True,
             )
         finally:
-            active_forward_ids.discard(message_id)
+            active_forward_ids.discard(forward_id)
 
     async def _read_embedded_forward_tree(
         self,
         *,
-        message_id: NapCatId,
+        forward_id: NapCatId,
         content: JsonValue,
         active_forward_ids: set[NapCatId],
     ) -> ForwardReadResult:
         """解析已经内嵌在消息段中的合并转发内容。"""
-        if message_id in active_forward_ids:
-            error = self._build_cycle_error(message_id=message_id)
+        if forward_id in active_forward_ids:
+            error = self._build_cycle_error(forward_id=forward_id)
             return ForwardReadResult(
-                message_id=message_id,
+                forward_id=forward_id,
                 complete=False,
                 messages=[],
                 readable_text="",
                 errors=[error],
             )
-        active_forward_ids.add(message_id)
+        active_forward_ids.add(forward_id)
         try:
             raw_messages = self._extract_embedded_messages(content=content)
             messages, errors = await self._build_forward_messages(
@@ -222,24 +275,24 @@ class GroupForwardToolset:
                 active_forward_ids=active_forward_ids,
             )
             return ForwardReadResult(
-                message_id=message_id,
+                forward_id=forward_id,
                 complete=not errors,
                 messages=messages,
                 readable_text=self._build_readable_text(messages=messages),
                 errors=errors,
             )
         finally:
-            active_forward_ids.discard(message_id)
+            active_forward_ids.discard(forward_id)
 
-    async def _safe_get_forward_msg(self, *, message_id: NapCatId) -> Response:
+    async def _safe_get_forward_msg(self, *, forward_id: NapCatId) -> Response:
         """调用 NapCat 获取合并转发详情。"""
-        return await self.bot.get_forward_msg(message_id=message_id)
+        return await self.bot.get_forward_msg(message_id=forward_id)
 
     def _extract_response_messages(
-        self, *, message_id: NapCatId, response: Response
+        self, *, forward_id: NapCatId, response: Response
     ) -> list[JsonValue] | None:
         """从 NapCat get_forward_msg 响应中提取消息列表。"""
-        _ = message_id
+        _ = forward_id
         data = response.data
         if not isinstance(data, dict):
             return None
@@ -332,12 +385,12 @@ class GroupForwardToolset:
         for segment in self._collect_forward_segments(segments=segments):
             if segment.data.content is None:
                 result = await self._read_forward_tree(
-                    message_id=segment.data.id,
+                    forward_id=segment.data.id,
                     active_forward_ids=active_forward_ids,
                 )
             else:
                 result = await self._read_embedded_forward_tree(
-                    message_id=segment.data.id,
+                    forward_id=segment.data.id,
                     content=segment.data.content,
                     active_forward_ids=active_forward_ids,
                 )
@@ -460,15 +513,20 @@ class GroupForwardToolset:
         return image_count
 
     def _build_image_access_hint(
-        self, *, message_id: NapCatId, image_count: int
+        self,
+        *,
+        group_message_id: str,
+        forward_id: NapCatId,
+        image_count: int,
     ) -> JsonObject:
         """生成合并转发图片内容的后续读取提示。"""
         return {
             "available": True,
             "image_count": image_count,
+            "forward_id": to_json_value(forward_id),
             "tool_name": "qq__get_forward_message_images",
             "recommended_arguments": {
-                "message_id": to_json_value(message_id),
+                "message_id": group_message_id,
                 "mode": "all",
             },
             "message": (
@@ -478,14 +536,14 @@ class GroupForwardToolset:
         }
 
     def _append_image_access_text(
-        self, *, readable_text: str, message_id: NapCatId, image_count: int
+        self, *, readable_text: str, group_message_id: str, image_count: int
     ) -> str:
         """在可读文本末尾补充图片读取方式，帮助模型主动继续调用工具。"""
         hint = (
             f"（本合并转发包含 {image_count} 张图片；当前结果只包含图片元信息，"
             "未包含图片内容。需要查看或评价图片时，应继续调用 "
             "qq__get_forward_message_images，"
-            f"参数 message_id=\"{message_id}\", mode=\"all\"。）"
+            f"参数 message_id=\"{group_message_id}\", mode=\"all\"。）"
         )
         if readable_text == "":
             return hint
@@ -558,11 +616,11 @@ class GroupForwardToolset:
         self, *, nested_forward: JsonObject
     ) -> list[str]:
         """生成嵌套合并转发的辅助阅读文本行。"""
-        message_id = nested_forward.get("message_id")
+        forward_id = nested_forward.get("forward_id")
         readable_text = nested_forward.get("readable_text")
-        if not isinstance(message_id, str):
-            message_id = "未知"
-        lines = [f"  （嵌套合并转发，ID: {message_id}）"]
+        if not isinstance(forward_id, str):
+            forward_id = "未知"
+        lines = [f"  （嵌套合并转发，ID: {forward_id}）"]
         if isinstance(readable_text, str) and readable_text:
             for line in readable_text.splitlines():
                 lines.append(f"  {line}")
@@ -597,38 +655,38 @@ class GroupForwardToolset:
     def _result_to_json(self, *, result: ForwardReadResult) -> JsonObject:
         """把内部读取结果转换为 JSON 对象。"""
         return {
-            "message_id": to_json_value(result.message_id),
+            "forward_id": to_json_value(result.forward_id),
             "complete": result.complete,
             "messages": to_json_value(result.messages),
             "readable_text": result.readable_text,
             "errors": to_json_value(result.errors),
         }
 
-    def _build_cycle_error(self, *, message_id: NapCatId) -> JsonObject:
+    def _build_cycle_error(self, *, forward_id: NapCatId) -> JsonObject:
         """构造循环嵌套错误。"""
         return {
-            "message_id": to_json_value(message_id),
+            "forward_id": to_json_value(forward_id),
             "error_type": "ForwardCycle",
-            "error": f"检测到合并转发循环嵌套: {message_id}",
+            "error": f"检测到合并转发循环嵌套: {forward_id}",
         }
 
     def _build_response_error(
-        self, *, message_id: NapCatId, response: Response
+        self, *, forward_id: NapCatId, response: Response
     ) -> JsonObject:
         """构造 NapCat 失败响应错误。"""
         return {
-            "message_id": to_json_value(message_id),
+            "forward_id": to_json_value(forward_id),
             "error_type": "NapCatActionFailed",
             "error": response.message or response.wording or "NapCat 返回失败",
             "response": to_json_value(response),
         }
 
     def _build_invalid_response_error(
-        self, *, message_id: NapCatId, response: Response
+        self, *, forward_id: NapCatId, response: Response
     ) -> JsonObject:
         """构造响应结构不符合预期的错误。"""
         return {
-            "message_id": to_json_value(message_id),
+            "forward_id": to_json_value(forward_id),
             "error_type": "InvalidForwardResponse",
             "error": "NapCat get_forward_msg 响应缺少 data.messages 数组",
             "response": to_json_value(response),

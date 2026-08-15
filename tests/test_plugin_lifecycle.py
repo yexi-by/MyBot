@@ -30,6 +30,7 @@ class LifecyclePlugin(BasePlugin[AllEvent]):
     """通过事件控制运行时机的测试插件。"""
 
     name = "消费者生命周期测试插件"
+    plugin_id = "lifecycle_test"
     consumers_count = 1
     priority = 0
 

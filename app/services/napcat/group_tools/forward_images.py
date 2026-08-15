@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
+from app.database import GroupMessageReader
 from app.models import (
     Forward,
     GroupMessage,
@@ -29,6 +30,11 @@ from app.services.napcat.image_reader import (
 from app.utils.log import log_event
 
 from .arguments import GetForwardMessageImagesArgs
+from .forward_reference import (
+    ActiveForwardReference,
+    ActiveForwardReferenceError,
+    resolve_active_forward_reference,
+)
 from .protocols import NapCatGroupToolBot
 
 
@@ -36,7 +42,7 @@ from .protocols import NapCatGroupToolBot
 class ForwardImageTarget:
     """描述合并转发中的一张图片。"""
 
-    message_id: NapCatId
+    forward_id: NapCatId
     message_index: int
     image_index: int
     file: str | None
@@ -63,6 +69,7 @@ class GroupForwardImageToolset:
         self,
         *,
         bot: NapCatGroupToolBot,
+        group_messages: GroupMessageReader,
         event: GroupMessage,
         max_images_per_call: int,
         max_all_images: int,
@@ -72,6 +79,7 @@ class GroupForwardImageToolset:
     ) -> None:
         """绑定当前群事件和读取配置。"""
         self.bot: NapCatGroupToolBot = bot
+        self.group_messages: GroupMessageReader = group_messages
         self.event: GroupMessage = event
         self.max_images_per_call: int = max_images_per_call
         self.max_all_images: int = max_all_images
@@ -91,7 +99,8 @@ class GroupForwardImageToolset:
             name="qq__get_forward_message_images",
             description=(
                 "信息工具：读取合并转发消息中的图片内容。"
-                "当你需要查看当前群收到的合并转发聊天记录里的图片时，应主动调用此工具。"
+                "当你拿到当前群中含合并转发的外层消息 ID，"
+                "并需要查看其中聊天记录里的图片时，应主动调用此工具。"
                 "支持 single 单张、message 某条消息内全部图片、all 整个合并转发图片；"
                 "all 模式会按配置上限截断，避免一次读取过多图片。"
                 "此工具只返回图片元信息和内部图片附件，不发送群消息。"
@@ -105,17 +114,29 @@ class GroupForwardImageToolset:
     ) -> LLMToolExecutionResult:
         """读取合并转发中的目标图片，并返回模型可见附件。"""
         args = GetForwardMessageImagesArgs.model_validate(arguments)
-        root_messages = await self._load_root_forward_messages(message_id=args.message_id)
+        reference = await resolve_active_forward_reference(
+            group_messages=self.group_messages,
+            event=self.event,
+            group_message_id=args.message_id,
+        )
+        if isinstance(reference, ActiveForwardReferenceError):
+            return LLMToolExecutionResult(
+                result=self._build_reference_error_result(reference=reference)
+            )
+        root_messages = await self._load_root_forward_messages(
+            forward_id=reference.forward_id
+        )
         if root_messages is None:
             return LLMToolExecutionResult(
-                result=self._build_root_error_result(message_id=args.message_id)
+                result=self._build_root_error_result(reference=reference)
             )
         all_targets = self._collect_image_targets(
-            message_id=args.message_id,
+            forward_id=reference.forward_id,
             raw_messages=root_messages,
         )
         self._log_collected_targets(
-            message_id=args.message_id,
+            group_message_id=reference.group_message_id,
+            forward_id=reference.forward_id,
             mode=args.mode,
             targets=all_targets,
         )
@@ -126,7 +147,8 @@ class GroupForwardImageToolset:
         )
         fetch_results = await self._fetch_targets(targets=limited_targets)
         self._log_fetch_results(
-            message_id=args.message_id,
+            group_message_id=reference.group_message_id,
+            forward_id=reference.forward_id,
             mode=args.mode,
             results=fetch_results,
             truncated=truncated_count > 0,
@@ -149,7 +171,8 @@ class GroupForwardImageToolset:
                 "ok": True,
                 "action": "get_forward_message_images",
                 "group_id": to_json_value(self.event.group_id),
-                "message_id": args.message_id,
+                "message_id": reference.group_message_id,
+                "forward_id": to_json_value(reference.forward_id),
                 "mode": args.mode,
                 "total_images": len(selected_targets),
                 "returned_count": len(images),
@@ -167,10 +190,10 @@ class GroupForwardImageToolset:
         )
 
     async def _load_root_forward_messages(
-        self, *, message_id: NapCatId
+        self, *, forward_id: NapCatId
     ) -> list[JsonValue] | None:
         """调用 NapCat 读取合并转发根消息列表。"""
-        response = await self.bot.get_forward_msg(message_id=message_id)
+        response = await self.bot.get_forward_msg(message_id=forward_id)
         if response.status != "ok" or response.retcode != 0:
             return None
         data = response.data
@@ -182,7 +205,7 @@ class GroupForwardImageToolset:
         return [to_json_value(message) for message in raw_messages]
 
     def _collect_image_targets(
-        self, *, message_id: NapCatId, raw_messages: list[JsonValue]
+        self, *, forward_id: NapCatId, raw_messages: list[JsonValue]
     ) -> list[ForwardImageTarget]:
         """从合并转发消息列表中收集图片定位信息。"""
         targets: list[ForwardImageTarget] = []
@@ -194,7 +217,7 @@ class GroupForwardImageToolset:
                     image_index += 1
                     targets.append(
                         ForwardImageTarget(
-                            message_id=message_id,
+                            forward_id=forward_id,
                             message_index=message_index,
                             image_index=image_index,
                             file=segment.data.file,
@@ -208,7 +231,7 @@ class GroupForwardImageToolset:
                 if isinstance(segment, Forward) and segment.data.content is not None:
                     targets.extend(
                         self._collect_embedded_forward_targets(
-                            parent_message_id=message_id,
+                            parent_forward_id=forward_id,
                             parent_message_index=message_index,
                             segment=segment,
                         )
@@ -218,7 +241,7 @@ class GroupForwardImageToolset:
     def _collect_embedded_forward_targets(
         self,
         *,
-        parent_message_id: NapCatId,
+        parent_forward_id: NapCatId,
         parent_message_index: int,
         segment: Forward,
     ) -> list[ForwardImageTarget]:
@@ -227,12 +250,12 @@ class GroupForwardImageToolset:
         if not isinstance(content, list):
             return []
         nested_targets = self._collect_image_targets(
-            message_id=segment.data.id or parent_message_id,
+            forward_id=segment.data.id or parent_forward_id,
             raw_messages=[to_json_value(item) for item in content],
         )
         return [
             ForwardImageTarget(
-                message_id=target.message_id,
+                forward_id=target.forward_id,
                 message_index=parent_message_index,
                 image_index=target.image_index,
                 file=target.file,
@@ -391,7 +414,7 @@ class GroupForwardImageToolset:
     ) -> JsonObject:
         """生成模型可读的图片元信息。"""
         return {
-            "message_id": to_json_value(target.message_id),
+            "forward_id": to_json_value(target.forward_id),
             "message_index": target.message_index,
             "image_index": target.image_index,
             "file": target.file,
@@ -405,7 +428,8 @@ class GroupForwardImageToolset:
     def _log_collected_targets(
         self,
         *,
-        message_id: NapCatId,
+        group_message_id: str,
+        forward_id: NapCatId,
         mode: str,
         targets: list[ForwardImageTarget],
     ) -> None:
@@ -416,12 +440,13 @@ class GroupForwardImageToolset:
             category="napcat_tools",
             message="已收集合并转发图片段字段",
             group_id=to_json_value(self.event.group_id),
-            message_id=to_json_value(message_id),
+            message_id=group_message_id,
+            forward_id=to_json_value(forward_id),
             mode=mode,
             image_count=len(targets),
             images=[
                 {
-                    "message_id": to_json_value(target.message_id),
+                    "forward_id": to_json_value(target.forward_id),
                     "message_index": target.message_index,
                     "image_index": target.image_index,
                     "file": target.file,
@@ -438,7 +463,8 @@ class GroupForwardImageToolset:
     def _log_fetch_results(
         self,
         *,
-        message_id: NapCatId,
+        group_message_id: str,
+        forward_id: NapCatId,
         mode: str,
         results: list[ForwardImageFetchResult],
         truncated: bool,
@@ -450,7 +476,8 @@ class GroupForwardImageToolset:
             category="napcat_tools",
             message="合并转发图片读取完成",
             group_id=to_json_value(self.event.group_id),
-            message_id=to_json_value(message_id),
+            message_id=group_message_id,
+            forward_id=to_json_value(forward_id),
             mode=mode,
             requested_count=len(results),
             returned_count=sum(1 for result in results if result.error is None),
@@ -458,7 +485,7 @@ class GroupForwardImageToolset:
             truncated=truncated,
             images=[
                 {
-                    "message_id": to_json_value(result.target.message_id),
+                    "forward_id": to_json_value(result.target.forward_id),
                     "message_index": result.target.message_index,
                     "image_index": result.target.image_index,
                     "file": result.target.file,
@@ -488,25 +515,50 @@ class GroupForwardImageToolset:
     ) -> JsonObject:
         """生成单张图片读取失败信息。"""
         return {
-            "message_id": to_json_value(target.message_id),
+            "forward_id": to_json_value(target.forward_id),
             "message_index": target.message_index,
             "image_index": target.image_index,
             "error_type": error_type,
             "error": error,
         }
 
-    def _build_root_error_result(self, *, message_id: str) -> JsonObject:
+    def _build_root_error_result(
+        self, *, reference: ActiveForwardReference
+    ) -> JsonObject:
         """构造根合并转发读取失败时的可恢复错误。"""
         return {
             "ok": False,
             "is_error": True,
             "action": "get_forward_message_images",
             "group_id": to_json_value(self.event.group_id),
-            "message_id": message_id,
+            "message_id": reference.group_message_id,
+            "forward_id": to_json_value(reference.forward_id),
             "complete": False,
             "error_type": "NapCatActionFailed",
             "error": "合并转发消息读取失败",
             "message": "合并转发图片读取失败。请根据错误信息修正 message_id 或改用其他回复方式。",
+            "images": [],
+            "errors": [],
+        }
+
+    def _build_reference_error_result(
+        self, *, reference: ActiveForwardReferenceError
+    ) -> JsonObject:
+        """构造外层群消息不可用时的可恢复错误。"""
+        return {
+            "ok": False,
+            "is_error": True,
+            "action": "get_forward_message_images",
+            "group_id": to_json_value(self.event.group_id),
+            "message_id": reference.group_message_id,
+            "forward_id": None,
+            "complete": False,
+            "error_type": reference.error_type,
+            "error": reference.error,
+            "message": (
+                "合并转发图片不可读取。请使用当前群中未撤回、"
+                "且恰好含一个顶层合并转发段的外层消息 ID。"
+            ),
             "images": [],
             "errors": [],
         }

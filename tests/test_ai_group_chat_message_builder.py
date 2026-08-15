@@ -3,12 +3,13 @@
 import asyncio
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
 import httpx
 
-from app.database import RedisDatabaseManager
+from app.database import GroupDataScope, GroupMessageReader, StoredGroupMessage
 from app.models import (
     At,
     File,
@@ -39,29 +40,14 @@ VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
 class EmptyDatabase:
     """测试用空消息数据库。"""
 
-    async def search_messages(
+    async def get_active(
         self,
         *,
-        self_id: str,
-        message_id: str | None = None,
-        root: str | None = None,
-        limit_tuple: tuple[int, int] | None = None,
-        group_id: str | None = None,
-        user_id: str | None = None,
-        max_time: int | None = None,
-        min_time: int | None = None,
-    ) -> GroupMessage | None:
+        scope: GroupDataScope,
+        message_id: str,
+    ) -> StoredGroupMessage | None:
         """不返回引用消息。"""
-        _ = (
-            self_id,
-            message_id,
-            root,
-            limit_tuple,
-            group_id,
-            user_id,
-            max_time,
-            min_time,
-        )
+        _ = (scope, message_id)
         return None
 
 
@@ -70,31 +56,16 @@ class ReplyDatabase(EmptyDatabase):
 
     def __init__(self, reply_message: GroupMessage) -> None:
         """保存固定引用消息。"""
-        self.reply_message: GroupMessage = reply_message
+        self.reply_message: StoredGroupMessage = to_stored_message(reply_message)
 
-    async def search_messages(
+    async def get_active(
         self,
         *,
-        self_id: str,
-        message_id: str | None = None,
-        root: str | None = None,
-        limit_tuple: tuple[int, int] | None = None,
-        group_id: str | None = None,
-        user_id: str | None = None,
-        max_time: int | None = None,
-        min_time: int | None = None,
-    ) -> GroupMessage:
+        scope: GroupDataScope,
+        message_id: str,
+    ) -> StoredGroupMessage:
         """返回固定引用消息。"""
-        _ = (
-            self_id,
-            message_id,
-            root,
-            limit_tuple,
-            group_id,
-            user_id,
-            max_time,
-            min_time,
-        )
+        _ = (scope, message_id)
         return self.reply_message
 
 
@@ -152,6 +123,29 @@ def build_message(
     )
 
 
+def to_stored_message(message: GroupMessage) -> StoredGroupMessage:
+    """把测试群事件转成存储层 DTO。"""
+    sender_name = message.sender.card or message.sender.nickname
+    return StoredGroupMessage(
+        row_id=1,
+        scope=GroupDataScope(
+            bot_id=message.self_id,
+            group_id=message.group_id,
+        ),
+        message_id=message.message_id,
+        group_name=message.group_name,
+        sender_id=message.user_id,
+        sender_name=sender_name,
+        sender_role=message.sender.role,
+        occurred_at=datetime.fromtimestamp(message.time, tz=timezone.utc),
+        direction=(
+            "outgoing" if message.post_type == "message_sent" else "incoming"
+        ),
+        segments=tuple(message.message),
+        images=(),
+    )
+
+
 def build_builder(
     *,
     database: EmptyDatabase,
@@ -160,7 +154,7 @@ def build_builder(
     """构造使用固定图片 Bot 的消息输入构造器。"""
     return GroupChatMessageBuilder(
         config=config if config is not None else build_config(),
-        database=cast(RedisDatabaseManager, database),
+        group_messages=cast(GroupMessageReader, database),
         bot=MissingImageBot(),
         http_client=cast(httpx.AsyncClient, object()),
     )
@@ -169,8 +163,8 @@ def build_builder(
 class GroupChatMessageBuilderTest(unittest.TestCase):
     """验证群消息文本、图片来源顺序和截断规则。"""
 
-    def test_current_message_is_markdown_without_message_id(self) -> None:
-        """当前群消息会转成低噪音 Markdown，不暴露消息 ID。"""
+    def test_current_message_markdown_exposes_outer_message_id(self) -> None:
+        """当前群消息向模型提供可用于受控工具读取的外层消息 ID。"""
         chat_message = asyncio.run(
             build_builder(database=EmptyDatabase()).build_turn_messages(
                 msg=build_message()
@@ -179,10 +173,10 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
 
         text = chat_message.text or ""
         self.assertIn("## 当前消息", text)
+        self.assertIn("- 消息 ID: 30000", text)
         self.assertIn("- 群: 测试群 (40000)", text)
         self.assertIn("- 群员: 夜袭 (20000, 群员)", text)
         self.assertIn("你好呀", text)
-        self.assertNotIn("message_id", text)
         self.assertNotIn("<其他需求>", text)
 
     def test_unreadable_image_returns_structured_error(self) -> None:
@@ -315,8 +309,8 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, text)
 
-    def test_forward_without_content_keeps_forward_id(self) -> None:
-        """没有内嵌内容的合并转发会保留 ID 和工具提示。"""
+    def test_forward_without_content_uses_outer_message_id(self) -> None:
+        """没有内嵌内容的合并转发提示使用外层群消息 ID。"""
         msg = build_message(
             message=[Forward.new("forward-empty")],
             raw_message="[合并转发]",
@@ -327,7 +321,10 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
         ).turn_messages[0]
         text = chat_message.text or ""
 
-        self.assertIn("合并转发消息，ID: forward-empty", text)
+        self.assertIn("- 消息 ID: 30000", text)
+        self.assertIn("合并转发消息", text)
+        self.assertNotIn("forward-empty", text)
+        self.assertIn("该 Forward 所在群消息", text)
         self.assertIn("qq__get_forward_message", text)
 
     def test_quoted_bot_forward_with_cached_content_is_expanded(self) -> None:
@@ -375,6 +372,7 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
         text = chat_message.text or ""
 
         self.assertIn("## 引用消息", text)
+        self.assertIn("- 消息 ID: 90004", text)
         self.assertIn("机器人先前的长回复", text)
         self.assertNotIn("qq__get_forward_message", text)
 

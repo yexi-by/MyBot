@@ -7,15 +7,18 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from collections.abc import Sequence
+from datetime import datetime
 from typing import cast, override
 
 from fastapi import WebSocket
 
 from app.api import BOTClient
 from app.api.mixins.base import BaseMixin
-from app.database import RedisDatabaseManager
+from app.database import GroupDataScope
 from app.models import (
     JsonObject,
+    MessageSegment,
     NapCatId,
     Node,
     Response,
@@ -23,6 +26,21 @@ from app.models import (
     Text,
     to_json_value,
 )
+from app.services.napcat import ImageStore, InlineImageArchiver
+
+
+class FakeSentMessageRecorder:
+    """测试用出站群消息记录器。"""
+
+    async def record_sent(
+        self,
+        *,
+        scope: GroupDataScope,
+        message_id: str,
+        segments: Sequence[MessageSegment],
+        occurred_at: datetime | None = None,
+    ) -> None:
+        """接受一次出站群消息记录调用。"""
 
 
 class RecordingClient(BOTClient):
@@ -30,6 +48,19 @@ class RecordingClient(BOTClient):
 
     def __init__(self) -> None:
         """初始化调用记录。"""
+        self._image_temp_dir = tempfile.TemporaryDirectory()
+        super().__init__(
+            websocket=cast(WebSocket, FakeWebSocket()),
+            sent_message_recorder=FakeSentMessageRecorder(),
+            inline_image_archiver=InlineImageArchiver(
+                store=ImageStore(
+                    root=Path(self._image_temp_dir.name),
+                    max_image_bytes=1024 * 1024,
+                )
+            ),
+            send_retry_delay=0,
+        )
+        self.boot_id = "10000"
         self.action_calls: list[tuple[str, JsonObject | None]] = []
         self.send_calls: list[tuple[str, JsonObject | None]] = []
 
@@ -46,6 +77,12 @@ class RecordingClient(BOTClient):
                     retcode=0,
                     data={"file_path": "stream-cache-path"},
                 )
+        if action == "send_group_forward_msg":
+            return Response(
+                status="ok",
+                retcode=0,
+                data={"message_id": "300", "forward_id": "forward-300"},
+            )
         return Response(status="ok", retcode=0, data={"action": action})
 
     @override
@@ -89,9 +126,10 @@ class StreamClient(BaseMixin):
         """初始化 Stream 测试状态。"""
         self.fake_websocket = FakeWebSocket()
         self.websocket = cast(WebSocket, self.fake_websocket)
-        self.database = cast(RedisDatabaseManager, cast(object, None))
+        self.sent_message_recorder = FakeSentMessageRecorder()
         self.echo_dict: dict[str, asyncio.Future[Response]] = {}
         self.stream_dict: dict[str, asyncio.Queue[Response]] = {}
+        self.persistence_failed_event = asyncio.Event()
         self.boot_id: NapCatId = "10000"
         self.timeout = 1
 

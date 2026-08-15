@@ -17,7 +17,6 @@ from .llm import (
     MCPToolManager,
 )
 from .napcat import (
-    NapCatGroupHistoryDatabase,
     NapCatGroupToolBot,
     NapCatGroupToolExecutor,
     NapCatImageBot,
@@ -41,7 +40,6 @@ __all__ = [
     "MCPConfig",
     "MCPServerConfig",
     "MCPToolManager",
-    "NapCatGroupHistoryDatabase",
     "NapCatGroupToolBot",
     "NapCatGroupToolExecutor",
     "NapCatImageBot",

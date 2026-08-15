@@ -53,6 +53,7 @@ from .events import (
     Sender,
     StreamTransferResult,
 )
+from .image_archive import ImageArchiveTask, StoredImage
 from .segments import (
     At,
     Contact,
@@ -114,6 +115,7 @@ __all__ = [
     "GroupUploadNoticeEvent",
     "HeartBeat",
     "Image",
+    "ImageArchiveTask",
     "InputStatusEvent",
     "Json",
     "JsonObject",
@@ -150,6 +152,7 @@ __all__ = [
     "Sender",
     "Share",
     "StreamTransferResult",
+    "StoredImage",
     "StrictModel",
     "Text",
     "UnknownSegment",

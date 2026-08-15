@@ -121,7 +121,7 @@ class GroupChatToolLoop:
         sent_content_messages: list[ChatMessage] = []
         napcat_executor = NapCatGroupToolExecutor(
             bot=self.context.bot,
-            database=self.context.database,
+            group_messages=self.context.group_messages,
             event=msg,
             allow_mention_all=self.config.allow_mention_all,
             forward_image_tool_enabled=self.config.forward_image_tool_enabled,

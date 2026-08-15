@@ -1,23 +1,66 @@
 services:
+  postgres:
+    image: postgres:18.4-bookworm
+    container_name: mybot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mybot
+      POSTGRES_USER: mybot
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      TZ: Asia/Shanghai
+    secrets:
+      - postgres_password
+    volumes:
+      - mybot-postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mybot -d mybot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  migrate:
+    image: ${MYBOT_IMAGE:-docker.io/yexi12345/mybot:latest}
+    container_name: mybot-migrate
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+    command: ["python", "-m", "app.database.migrations", "upgrade"]
+    volumes:
+      - ./plugins_config:/app/plugins_config:ro
+      - ./setting.toml:/app/setting.toml:ro
+    secrets:
+      - postgres_password
+
   mybot:
-    image: docker.io/yexi12345/mybot:latest
+    image: ${MYBOT_IMAGE:-docker.io/yexi12345/mybot:latest}
     container_name: mybot
     restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "6055:6055"
     environment:
-      - TZ=Asia/Shanghai 
+      - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
     volumes:
       - ./logs:/app/logs
-      - ./plugins_config:/app/plugins_config
-      - ./setting.toml:/app/setting.toml
-      - ./data:/app/data
-      - mybot-venv:/app/.venv
-      - mybot-uv-cache:/app/.uv-cache
+      - ./plugins_config:/app/plugins_config:ro
+      - ./setting.toml:/app/setting.toml:ro
+      - ./images:/app/images
+    secrets:
+      - postgres_password
 
 volumes:
-  mybot-venv:
-  mybot-uv-cache:
+  mybot-postgres-data:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
 
     

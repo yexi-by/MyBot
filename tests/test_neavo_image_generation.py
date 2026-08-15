@@ -8,6 +8,7 @@ import json
 import unittest
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import cast
 from unittest.mock import patch
 from uuid import UUID
@@ -15,6 +16,7 @@ from uuid import UUID
 import httpx
 from pydantic import ValidationError
 
+from app.database import GroupDataScope, StoredGroupMessage
 from app.models import (
     At,
     GroupMessage,
@@ -108,6 +110,28 @@ def build_group_message(
     )
 
 
+def to_stored_message(message: GroupMessage) -> StoredGroupMessage:
+    """把群事件转成插件引用查询使用的 DTO。"""
+    return StoredGroupMessage(
+        row_id=1,
+        scope=GroupDataScope(
+            bot_id=message.self_id,
+            group_id=message.group_id,
+        ),
+        message_id=message.message_id,
+        group_name=message.group_name,
+        sender_id=message.user_id,
+        sender_name=message.sender.card or message.sender.nickname,
+        sender_role=message.sender.role,
+        occurred_at=datetime.fromtimestamp(message.time, tz=timezone.utc),
+        direction=(
+            "outgoing" if message.post_type == "message_sent" else "incoming"
+        ),
+        segments=tuple(message.message),
+        images=(),
+    )
+
+
 @dataclass(slots=True)
 class SentMessage:
     """FakeBot 记录的一次群消息发送。"""
@@ -142,18 +166,20 @@ class FakeDatabase:
 
     def __init__(self, *, messages: dict[str, GroupMessage] | None = None) -> None:
         """保存可被回复引用的消息。"""
-        self.messages = messages or {}
+        self.messages = {
+            message_id: to_stored_message(message)
+            for message_id, message in (messages or {}).items()
+        }
         self.searches: list[tuple[str, str, str]] = []
 
-    async def search_messages(
+    async def get_active(
         self,
         *,
-        self_id: str,
-        group_id: str,
+        scope: GroupDataScope,
         message_id: str,
-    ) -> GroupMessage | None:
+    ) -> StoredGroupMessage | None:
         """记录查询并返回对应历史消息。"""
-        self.searches.append((self_id, group_id, message_id))
+        self.searches.append((scope.bot_id, scope.group_id, message_id))
         return self.messages.get(message_id)
 
 
@@ -168,7 +194,7 @@ class FakeContext:
     ) -> None:
         """绑定 FakeBot 与测试 HTTP 客户端。"""
         self.bot = FakeBot()
-        self.database = FakeDatabase(messages=stored_messages)
+        self.group_messages = FakeDatabase(messages=stored_messages)
         self.direct_httpx = http_client
 
 
