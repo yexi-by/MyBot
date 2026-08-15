@@ -124,8 +124,11 @@ class SmokeLLM:
         messages: list[ChatMessage],
         model_vendors: str,
         model_name: str,
+        retry_count: int | None = None,
+        retry_delay: float | None = None,
     ) -> str:
         """检查独立视觉请求只包含两条消息。"""
+        _ = (retry_count, retry_delay)
         self.vision_models.append((model_vendors, model_name))
         if [message.role for message in messages] != ["system", "user"]:
             raise AssertionError("视觉请求不应携带群聊历史")

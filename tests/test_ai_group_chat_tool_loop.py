@@ -52,6 +52,8 @@ class FakeLLMProtocol(Protocol):
         messages: list[ChatMessage],
         model_vendors: str,
         model_name: str,
+        retry_count: int | None = None,
+        retry_delay: float | None = None,
     ) -> str:
         """返回纯文本响应。"""
         ...
@@ -91,8 +93,11 @@ class RecordingLLM:
         messages: list[ChatMessage],
         model_vendors: str,
         model_name: str,
+        retry_count: int | None = None,
+        retry_delay: float | None = None,
     ) -> str:
         """记录视觉或压缩请求并返回固定文本。"""
+        _ = (retry_count, retry_delay)
         self.text_requests.append(messages[:])
         self.text_models.append((model_vendors, model_name))
         return self.text_response

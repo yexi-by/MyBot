@@ -29,6 +29,8 @@ class AIGroupChatConfig(StrictModel):
     vision_model_vendors: str | None = None
     vision_system_prompt_path: str | None = None
     vision_user_prompt_path: str | None = None
+    vision_request_retry_count: int = Field(default=3, ge=1, le=10)
+    vision_request_retry_delay_seconds: float = Field(default=1.0, gt=0, le=10)
     image_delivery_max_images: int = Field(default=6, ge=1, le=20)
     image_fetch_concurrency: int = Field(default=4, ge=1, le=10)
     image_download_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
@@ -63,6 +65,14 @@ class AIGroupChatConfig(StrictModel):
             configured_fields = [
                 name for name, value in vision_fields.items() if self._has_text(value)
             ]
+            configured_fields.extend(
+                field_name
+                for field_name in (
+                    "vision_request_retry_count",
+                    "vision_request_retry_delay_seconds",
+                )
+                if field_name in self.model_fields_set
+            )
             if configured_fields:
                 raise ValueError(
                     "主模型支持多模态时不应配置独立视觉模型字段: "

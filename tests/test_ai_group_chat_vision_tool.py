@@ -24,16 +24,20 @@ class RecordingVisionLLM:
         self.failure: Exception | None = failure
         self.requests: list[list[ChatMessage]] = []
         self.models: list[tuple[str, str]] = []
+        self.retry_settings: list[tuple[int | None, float | None]] = []
 
     async def get_ai_text_response(
         self,
         messages: list[ChatMessage],
         model_vendors: str,
         model_name: str,
+        retry_count: int | None = None,
+        retry_delay: float | None = None,
     ) -> str:
         """记录隔离请求并返回描述或抛出异常。"""
         self.requests.append(messages[:])
         self.models.append((model_vendors, model_name))
+        self.retry_settings.append((retry_count, retry_delay))
         if self.failure is not None:
             raise self.failure
         return "第一张是红色按钮，第二张显示成功提示。"
@@ -137,6 +141,7 @@ class VisionDescriptionToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivery.result.truncated_count, 1)
         self.assertEqual(len(delivery.result.errors), 1)
         self.assertEqual(llm.models, [("vision-vendor", "vision-model")])
+        self.assertEqual(llm.retry_settings, [(3, 1.0)])
         request_text = "\n".join(
             message.text or "" for message in llm.requests[0]
         )

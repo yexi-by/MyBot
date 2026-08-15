@@ -26,12 +26,24 @@ class ResilientLLMProvider(LLMProvider):
 
     @override
     async def get_ai_response(
-        self, messages: list[ChatMessage], model: str
+        self,
+        messages: list[ChatMessage],
+        model: str,
+        retry_count: int | None = None,
+        retry_delay: float | None = None,
     ) -> str:
-        """调用底层文本接口，并在可恢复错误时重试。"""
+        """调用底层文本接口，并按供应商默认值或当前请求覆盖值重试。"""
         retrier = create_retry_manager(
-            retry_count=self.llm_config.retry_count,
-            retry_delay=self.llm_config.retry_delay,
+            retry_count=(
+                self.llm_config.retry_count
+                if retry_count is None
+                else retry_count
+            ),
+            retry_delay=(
+                self.llm_config.retry_delay
+                if retry_delay is None
+                else retry_delay
+            ),
             error_types=(
                 RateLimitError,
                 APIConnectionError,

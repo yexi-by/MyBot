@@ -57,9 +57,13 @@ class LLMProviderProtocol(Protocol):
     """描述 LLM 服务实现需要提供的最小接口。"""
 
     async def get_ai_response(
-        self, messages: list[ChatMessage], model: str
+        self,
+        messages: list[ChatMessage],
+        model: str,
+        retry_count: int | None = None,
+        retry_delay: float | None = None,
     ) -> str:
-        """获取文本响应。"""
+        """获取文本响应，并允许当前请求覆盖供应商重试参数。"""
         ...
 
     async def get_ai_response_with_tools(

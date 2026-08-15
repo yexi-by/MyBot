@@ -317,6 +317,8 @@ class VisionDescriptionTool:
             messages=messages,
             model_vendors=model_vendors,
             model_name=model_name,
+            retry_count=self.config.vision_request_retry_count,
+            retry_delay=self.config.vision_request_retry_delay_seconds,
         )
         description = response.strip()
         if description == "":

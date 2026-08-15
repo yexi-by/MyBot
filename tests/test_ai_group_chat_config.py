@@ -79,6 +79,8 @@ class AIGroupChatConfigTest(unittest.TestCase):
         self.assertEqual(config.image_delivery_max_images, 6)
         self.assertEqual(config.image_fetch_concurrency, 4)
         self.assertEqual(config.image_download_timeout_seconds, 15.0)
+        self.assertEqual(config.vision_request_retry_count, 3)
+        self.assertEqual(config.vision_request_retry_delay_seconds, 1.0)
         self.assertTrue(config.persist_vision_descriptions)
         self.assertTrue(config.forward_image_tool_enabled)
         self.assertEqual(config.forward_image_max_images_per_call, 6)
@@ -92,11 +94,26 @@ class AIGroupChatConfigTest(unittest.TestCase):
             ("image_delivery_max_images", 0),
             ("image_fetch_concurrency", 0),
             ("image_download_timeout_seconds", 0),
+            ("vision_request_retry_count", 0),
+            ("vision_request_retry_delay_seconds", 0),
             ("forward_image_max_images_per_call", 0),
         ):
             with self.subTest(field_name=field_name):
                 with self.assertRaises(ValueError):
                     _ = build_text_model_config(**{field_name: value})
+
+    def test_multimodal_main_model_rejects_explicit_vision_retry_config(
+        self,
+    ) -> None:
+        """主模型直接看图时，禁止填写不会执行的视觉请求重试参数。"""
+        with self.assertRaisesRegex(ValueError, "vision_request_retry_count"):
+            _ = AIGroupChatConfig(
+                model_name="multimodal-model",
+                model_vendors="main-vendor",
+                supports_multimodal=True,
+                vision_request_retry_count=3,
+                group_config=[],
+            )
 
     def test_vision_prompt_files_must_exist_and_be_nonempty(self) -> None:
         """视觉工具启用时，两个提示词路径必须指向非空文件。"""

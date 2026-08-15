@@ -51,13 +51,18 @@ class LLMHandler:
         messages: list[ChatMessage],
         model_vendors: str,
         model_name: str,
+        retry_count: int | None = None,
+        retry_delay: float | None = None,
     ) -> str:
-        """获取指定模型厂商的文本响应。"""
+        """获取指定模型厂商的文本响应，可覆盖当前请求的重试参数。"""
         for llm in self.services:
             if llm.model_vendors != model_vendors:
                 continue
             return await llm.provider.get_ai_response(
-                messages=messages, model=model_name
+                messages=messages,
+                model=model_name,
+                retry_count=retry_count,
+                retry_delay=retry_delay,
             )
         raise ValueError(f"未定义的服务商名:{model_vendors}")
 

@@ -121,9 +121,13 @@ vision_model_name = "vision-model"
 vision_model_vendors = "openai"
 vision_system_prompt_path = "plugins_config/ai_group_chat/prompts/vision/system.md"
 vision_user_prompt_path = "plugins_config/ai_group_chat/prompts/vision/user.md"
+vision_request_retry_count = 3
+vision_request_retry_delay_seconds = 1.0
 ```
 
-主模型支持多模态时，把 `supports_multimodal` 设为 `true`，并删除以上四个 `vision_*` 字段，图片会直接交给主模型。两种模式都使用同一套图片读取服务，依次尝试本地路径、消息段现有 URL 和 NapCat `get_image` 刷新；读取支持并发、超时和部分失败。
+`vision_request_retry_count` 表示包含首次请求在内的总尝试次数；默认尝试 3 次。失败后的等待时间从 `vision_request_retry_delay_seconds` 开始按指数增长，单次最长等待 10 秒。这两个值只覆盖视觉请求，不会与 LLM 供应商的通用重试次数叠加。
+
+主模型支持多模态时，把 `supports_multimodal` 设为 `true`，并删除所有 `vision_*` 字段，图片会直接交给主模型。两种模式都使用同一套图片读取服务，依次尝试本地路径、消息段现有 URL 和 NapCat `get_image` 刷新；读取支持并发、超时和部分失败。
 
 合并转发里的图片可以通过本地工具批量读取。所有图片按当前消息、引用消息、工具调用顺序使用同一个单轮上限；超出的数量会明确写入视觉结果和日志。视觉描述默认进入当前进程的对话上下文，图片字节不会跨轮保存；重启后这部分上下文不会恢复。
 

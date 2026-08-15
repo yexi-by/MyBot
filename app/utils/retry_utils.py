@@ -40,7 +40,7 @@ def _log_retry_attempt(retry_state: RetryCallState) -> None:
 def create_retry_manager(
     error_types: tuple[type[Exception], ...] = (Exception,),
     retry_count: int = 10,
-    retry_delay: int = 2,
+    retry_delay: float = 2,
 ) -> AsyncRetrying:
     """创建一个异步重试管理器，用于在操作失败时自动进行重试。
 
