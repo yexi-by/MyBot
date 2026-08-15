@@ -13,11 +13,12 @@ from app.models import (
     Request,
     Response,
 )
+from app.services.napcat.image_reader import NapCatImageBot
 
 type CachedNapCatMessage = GroupMessage | PrivateMessage | Notice | Meta | Request
 
 
-class NapCatGroupToolBot(Protocol):
+class NapCatGroupToolBot(NapCatImageBot, Protocol):
     """描述群聊本地工具所需的最小 NapCat BOT 能力。"""
 
     boot_id: NapCatId
@@ -59,12 +60,6 @@ class NapCatGroupToolBot(Protocol):
         self, *, group_id: NapCatId, messages: list[Node]
     ) -> Response:
         """发送群聊合并转发消息。"""
-        ...
-
-    async def get_image(
-        self, file_id: str | None = None, file: str | None = None
-    ) -> Response:
-        """获取图片文件信息。"""
         ...
 
 

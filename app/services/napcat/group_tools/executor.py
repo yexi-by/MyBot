@@ -34,8 +34,8 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
         forward_image_tool_enabled: bool = True,
         forward_image_max_images_per_call: int = 6,
         forward_image_max_all_images: int = 12,
-        forward_image_fetch_concurrency: int = 4,
-        forward_image_download_timeout_seconds: float = 15.0,
+        image_fetch_concurrency: int = 4,
+        image_download_timeout_seconds: float = 15.0,
         max_reply_chars: int = 100,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -58,8 +58,8 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
             event=event,
             max_images_per_call=forward_image_max_images_per_call,
             max_all_images=forward_image_max_all_images,
-            fetch_concurrency=forward_image_fetch_concurrency,
-            download_timeout_seconds=forward_image_download_timeout_seconds,
+            fetch_concurrency=image_fetch_concurrency,
+            download_timeout_seconds=image_download_timeout_seconds,
             http_client=http_client,
         )
         self._history: GroupHistoryToolset = GroupHistoryToolset(

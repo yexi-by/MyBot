@@ -15,6 +15,3 @@ ROLE_LABELS: Final[dict[str, str]] = {
     "admin": "管理员",
     "member": "群员",
 }
-DEEPSEEK_V4_ROLEPLAY_MODELS: Final[frozenset[str]] = frozenset(
-    {"deepseek-v4-pro", "deepseek-v4-flash"}
-)

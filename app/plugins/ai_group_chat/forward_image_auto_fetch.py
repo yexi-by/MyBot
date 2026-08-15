@@ -33,8 +33,6 @@ class ForwardImageAutoFetcher:
             return False
         if not self.config.forward_image_tool_enabled:
             return False
-        if self.config.tool_image_delivery_mode == "metadata_only":
-            return False
         if not isinstance(result, dict):
             return False
         if result.get("ok") is not True:
@@ -101,6 +99,8 @@ class ForwardImageAutoFetcher:
             group_id=group_id,
             message_id=message_id,
             image_artifacts_count=len(execution_result.image_artifacts),
+            image_errors_count=len(execution_result.image_errors),
+            truncated_image_count=execution_result.truncated_image_count,
         )
         return execution_result
 

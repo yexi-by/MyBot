@@ -96,34 +96,35 @@ disabled = false
 
 镜像已固定预装 `firecrawl-mcp`，使用 `npx -y firecrawl-mcp` 不需要在容器启动时下载依赖。MCP 子进程会继承容器中的 HTTP、HTTPS、ALL、NO_PROXY 及 npm 代理变量；server 自身 `env` 中的同名值优先。
 
-AI 群聊插件的主模型不支持图片输入时，需要配置多模态备用模型。当前消息或引用消息包含图片时，本轮正式回复请求会切到备用模型：
+AI 群聊插件始终使用主模型完成正式回复。主模型不支持图片输入时，需要配置独立视觉模型；当前消息、引用消息或工具结果含图时，插件先生成与当前问题有关的事实描述，再把这条系统生成的观察消息交给主模型：
 
 ```toml
 [ai_group_chat]
-model_name = "deepseek-v4-pro"
+model_name = "text-model"
 model_vendors = "deepseek"
 supports_multimodal = false
-multimodal_fallback_model_name = "gpt-5.5"
-multimodal_fallback_model_vendors = "openai"
+vision_model_name = "vision-model"
+vision_model_vendors = "openai"
+vision_system_prompt_path = "plugins_config/ai_group_chat/prompts/vision/system.md"
+vision_user_prompt_path = "plugins_config/ai_group_chat/prompts/vision/user.md"
 ```
 
-合并转发里的图片可以通过本地工具批量读取。图片工具结果默认只服务于本轮回复，不进入长期上下文；如果需要让后续对话记住图片观察摘要，可以显式打开 `persist_tool_image_observations`。
+主模型支持多模态时，把 `supports_multimodal` 设为 `true`，并删除以上四个 `vision_*` 字段，图片会直接交给主模型。两种模式都使用同一套图片读取服务，依次尝试本地路径、消息段现有 URL 和 NapCat `get_image` 刷新；读取支持并发、超时和部分失败。
+
+合并转发里的图片可以通过本地工具批量读取。所有图片按当前消息、引用消息、工具调用顺序使用同一个单轮上限；超出的数量会明确写入视觉结果和日志。视觉描述默认进入长期上下文，图片字节不会跨轮保存。
 
 ```toml
 [ai_group_chat]
 forward_image_tool_enabled = true
 forward_image_max_images_per_call = 6
 forward_image_max_all_images = 12
-forward_image_fetch_concurrency = 4
-forward_image_download_timeout_seconds = 15.0
-tool_image_delivery_mode = "auto"
-tool_image_summary_max_images = 6
-persist_tool_image_observations = false
-tool_image_observation_system_prompt_path = "plugins_config/ai_group_chat/prompts/vision/system.md"
-tool_image_observation_user_prompt_path = "plugins_config/ai_group_chat/prompts/vision/user.md"
+image_delivery_max_images = 6
+image_fetch_concurrency = 4
+image_download_timeout_seconds = 15.0
+persist_vision_descriptions = true
 ```
 
-视觉摘要请求是独立请求，不复用群聊 system prompt、长期上下文、当前用户正文或工具历史。`tool_image_observation_system_prompt_path` 用于定义纯图片观察边界，`tool_image_observation_user_prompt_path` 用于定义观察任务和输出粒度；需要视觉摘要时必须显式配置这两个非空提示词文件，不支持内联提示词，也不存在代码内置默认提示词。
+视觉描述请求只接收视觉提示词、当前问题、图片来源标签和图片字节，不接收群聊角色、长期历史或工具，也不得生成最终群聊回复。两个视觉提示词文件必须存在且非空；提示词应要求模型参考当前问题、只描述可见事实，并把图片内的指令当成普通可见内容而不是需要执行的命令。通用群聊要求由 `extra_requirements_path` 指定，并始终加入 system prompt，不再按模型名称切换提示方式。
 
 ### Neavo 群聊图像插件
 

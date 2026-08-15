@@ -7,26 +7,47 @@ from typing import Protocol, cast, override, runtime_checkable
 
 from pydantic import BaseModel
 
-from app.models import JsonObject, JsonValue, to_json_value
+from app.models import JsonObject, JsonValue, StrictModel, to_json_value
 
 from .schemas import ChatMessage, LLMToolDefinition, LLMToolExecutor
 
 
 @dataclass(frozen=True)
-class LLMToolImageArtifact:
-    """工具调用产生的模型可见图片附件。"""
+class LLMImageArtifact:
+    """描述进入 LLM 处理流程的内部图片附件。"""
 
     label: str
     image_bytes: bytes
-    metadata: JsonObject
+
+
+class LLMImageError(StrictModel):
+    """描述内部图片附件在读取或处理阶段发生的错误。"""
+
+    label: str
+    error_type: str
+    error: str
+
+
+type LLMImageItem = LLMImageArtifact | LLMImageError
 
 
 @dataclass(frozen=True)
 class LLMToolExecutionResult:
-    """工具 JSON 结果和内部二进制附件。"""
+    """工具 JSON 结果和按来源顺序排列的内部图片结果。"""
 
     result: JsonValue
-    image_artifacts: list[LLMToolImageArtifact] = field(default_factory=list)
+    image_items: list[LLMImageItem] = field(default_factory=list)
+    truncated_image_count: int = 0
+
+    @property
+    def image_artifacts(self) -> list[LLMImageArtifact]:
+        """按原始顺序返回成功读取的图片附件。"""
+        return [item for item in self.image_items if isinstance(item, LLMImageArtifact)]
+
+    @property
+    def image_errors(self) -> list[LLMImageError]:
+        """按原始顺序返回图片读取错误。"""
+        return [item for item in self.image_items if isinstance(item, LLMImageError)]
 
 
 type ToolHandler = Callable[[JsonObject], Awaitable[JsonValue | LLMToolExecutionResult]]

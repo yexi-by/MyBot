@@ -8,7 +8,7 @@ from pydantic import Field
 from app.models import JsonObject, JsonValue, StrictModel
 from app.services.llm.tools import (
     LLMToolExecutionResult,
-    LLMToolImageArtifact,
+    LLMImageArtifact,
     LLMToolRegistry,
     tool_result_to_text,
 )
@@ -89,11 +89,10 @@ class LLMToolRegistryTest(unittest.IsolatedAsyncioTestCase):
             _ = arguments
             return LLMToolExecutionResult(
                 result={"ok": True, "returned_count": 1},
-                image_artifacts=[
-                    LLMToolImageArtifact(
+                image_items=[
+                    LLMImageArtifact(
                         label="第 1 张图片",
                         image_bytes=b"image-bytes",
-                        metadata={"message_index": 1, "image_index": 1},
                     )
                 ],
             )

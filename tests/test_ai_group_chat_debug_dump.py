@@ -19,11 +19,11 @@ def build_config(*, enabled: bool) -> AIGroupChatConfig:
     return AIGroupChatConfig(
         model_name="gpt-5.5",
         model_vendors="CLIProxyAPI",
-        multimodal_fallback_model_name="gpt-5.5-vision",
-        multimodal_fallback_model_vendors="CLIProxyAPI",
+        vision_model_name="gpt-5.5-vision",
+        vision_model_vendors="CLIProxyAPI",
         debug_dump_messages=enabled,
-        tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
-        tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
+        vision_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
+        vision_user_prompt_path=VISION_USER_PROMPT_PATH,
         group_config=[],
     )
 

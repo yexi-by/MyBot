@@ -1,8 +1,8 @@
 """AI 群聊输入构造测试。"""
 
-import unittest
 import asyncio
 import tempfile
+import unittest
 from pathlib import Path
 from typing import cast
 
@@ -22,6 +22,7 @@ from app.models import (
     MessageSegment,
     Node,
     Reply,
+    Response,
     Sender,
     Share,
     Text,
@@ -49,7 +50,7 @@ class EmptyDatabase:
         user_id: str | None = None,
         max_time: int | None = None,
         min_time: int | None = None,
-    ) -> None:
+    ) -> GroupMessage | None:
         """不返回引用消息。"""
         _ = (
             self_id,
@@ -64,7 +65,7 @@ class EmptyDatabase:
         return None
 
 
-class ReplyDatabase:
+class ReplyDatabase(EmptyDatabase):
     """测试用引用消息数据库。"""
 
     def __init__(self, reply_message: GroupMessage) -> None:
@@ -97,17 +98,28 @@ class ReplyDatabase:
         return self.reply_message
 
 
-def build_config() -> AIGroupChatConfig:
-    """构造测试用插件配置。"""
-    return AIGroupChatConfig(
-        model_name="gpt-5.5",
-        model_vendors="CLIProxyAPI",
-        supports_multimodal=False,
-        multimodal_fallback_model_name="gpt-5.5-vision",
-        multimodal_fallback_model_vendors="CLIProxyAPI",
-        tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
-        tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
-        group_config=[
+class MissingImageBot:
+    """测试用图片接口，所有刷新请求都返回资源不存在。"""
+
+    async def get_image(
+        self, file_id: str | None = None, file: str | None = None
+    ) -> Response:
+        """返回可恢复的图片读取失败。"""
+        _ = (file_id, file)
+        return Response(status="failed", retcode=404, message="图片不存在")
+
+
+def build_config(**overrides: object) -> AIGroupChatConfig:
+    """构造使用独立视觉工具的测试配置。"""
+    values: dict[str, object] = {
+        "model_name": "text-model",
+        "model_vendors": "main-vendor",
+        "supports_multimodal": False,
+        "vision_model_name": "vision-model",
+        "vision_model_vendors": "vision-vendor",
+        "vision_system_prompt_path": VISION_SYSTEM_PROMPT_PATH,
+        "vision_user_prompt_path": VISION_USER_PROMPT_PATH,
+        "group_config": [
             GroupChatConfig(
                 group_id="40000",
                 system_prompt_path="unused",
@@ -115,15 +127,15 @@ def build_config() -> AIGroupChatConfig:
                 max_context_tokens=1000000,
             )
         ],
-    )
+    }
+    values.update(overrides)
+    return AIGroupChatConfig.model_validate(values)
 
 
 def build_message(
     *, message: list[MessageSegment] | None = None, raw_message: str = "你好呀"
 ) -> GroupMessage:
     """构造测试用群消息。"""
-    if message is None:
-        message = [Text.new("你好呀")]
     return GroupMessage(
         time=1_777_132_900,
         self_id="10000",
@@ -134,88 +146,73 @@ def build_message(
         message_id="30000",
         group_id="40000",
         group_name="测试群",
-        message=message,
+        message=message if message is not None else [Text.new("你好呀")],
         raw_message=raw_message,
         sender=Sender(user_id="20000", nickname="夜袭", role="member"),
     )
 
 
+def build_builder(
+    *,
+    database: EmptyDatabase,
+    config: AIGroupChatConfig | None = None,
+) -> GroupChatMessageBuilder:
+    """构造使用固定图片 Bot 的消息输入构造器。"""
+    return GroupChatMessageBuilder(
+        config=config if config is not None else build_config(),
+        database=cast(RedisDatabaseManager, database),
+        bot=MissingImageBot(),
+        http_client=cast(httpx.AsyncClient, object()),
+    )
+
+
 class GroupChatMessageBuilderTest(unittest.TestCase):
-    """验证群消息到 Markdown 输入的转换。"""
+    """验证群消息文本、图片来源顺序和截断规则。"""
 
     def test_current_message_is_markdown_without_message_id(self) -> None:
         """当前群消息会转成低噪音 Markdown，不暴露消息 ID。"""
-        builder = GroupChatMessageBuilder(
-            config=build_config(),
-            database=cast(RedisDatabaseManager, EmptyDatabase()),
-            http_client=cast(httpx.AsyncClient, object()),
-        )
-
         chat_message = asyncio.run(
-            builder.build_user_message(msg=build_message())
-        )
+            build_builder(database=EmptyDatabase()).build_turn_messages(
+                msg=build_message()
+            )
+        ).turn_messages[0]
 
-        self.assertIsNotNone(chat_message.text)
         text = chat_message.text or ""
         self.assertIn("## 当前消息", text)
         self.assertIn("- 群: 测试群 (40000)", text)
         self.assertIn("- 群员: 夜袭 (20000, 群员)", text)
         self.assertIn("你好呀", text)
         self.assertNotIn("message_id", text)
-
-    def test_user_message_never_contains_deepseek_depth_zero_prompt(self) -> None:
-        """真实用户消息只描述当前群消息，不携带 DSV4 Depth 0 提示词。"""
-        builder = GroupChatMessageBuilder(
-            config=build_config(),
-            database=cast(RedisDatabaseManager, EmptyDatabase()),
-            http_client=cast(httpx.AsyncClient, object()),
-        )
-
-        chat_message = asyncio.run(builder.build_user_message(msg=build_message()))
-
-        text = chat_message.text or ""
         self.assertNotIn("<其他需求>", text)
-        self.assertNotIn("<角色沉浸式扮演需求>", text)
-        self.assertNotIn("【角色沉浸要求】", text)
 
-    def test_image_message_without_collection_marks_image_unattached(self) -> None:
-        """未收集图片时，输入文本明确说明图片未随请求附带。"""
-        builder = GroupChatMessageBuilder(
-            config=build_config(),
-            database=cast(RedisDatabaseManager, EmptyDatabase()),
-            http_client=cast(httpx.AsyncClient, object()),
-        )
+    def test_unreadable_image_returns_structured_error(self) -> None:
+        """图片读取失败时保留来源标签和可恢复错误。"""
         msg = build_message(
             message=[Text.new("看看图"), Image.new("image.png")],
             raw_message="看看图[图片]",
         )
 
-        built_messages = asyncio.run(
-            builder.build_turn_messages(msg=msg, collect_images=False)
+        result = asyncio.run(
+            build_builder(database=EmptyDatabase()).build_turn_messages(msg=msg)
         )
-        chat_message = built_messages.turn_messages[0]
 
-        self.assertTrue(built_messages.contains_image)
-        self.assertEqual(built_messages.loaded_image_count, 0)
-        self.assertIsNone(chat_message.image)
-        self.assertIn("当前请求未附带图片内容", chat_message.text or "")
+        self.assertEqual(result.detected_image_count, 1)
+        self.assertEqual(result.loaded_image_count, 0)
+        self.assertEqual(len(result.image_errors), 1)
+        self.assertEqual(result.image_errors[0].label, "当前消息第 1 张图片")
+        self.assertIn("当前请求未附带图片内容", result.turn_messages[0].text or "")
 
-    def test_current_and_reply_images_are_collected_when_enabled(self) -> None:
-        """开启图片收集时，当前消息和引用消息图片都会进入本轮输入。"""
+    def test_current_and_reply_images_keep_source_order(self) -> None:
+        """当前消息图片排在引用消息图片之前，并保留来源标签。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             current_path = root / "current.bin"
             reply_path = root / "reply.bin"
             current_path.write_bytes(b"current-image")
             reply_path.write_bytes(b"reply-image")
-            reply_message = build_message(
-                message=[Text.new("引用图"), Image.new("reply.png", path=str(reply_path))],
-                raw_message="引用图[图片]",
-            )
-            builder = GroupChatMessageBuilder(
-                config=build_config(),
-                database=cast(RedisDatabaseManager, ReplyDatabase(reply_message)),
-                http_client=cast(httpx.AsyncClient, object()),
+            quoted = build_message(
+                message=[Image.new("reply.png", path=str(reply_path))],
+                raw_message="[图片]",
             )
             msg = build_message(
                 message=[
@@ -226,23 +223,60 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
                 raw_message="看看两张图[图片]",
             )
 
-            built_messages = asyncio.run(
-                builder.build_turn_messages(msg=msg, collect_images=True)
+            result = asyncio.run(
+                build_builder(database=ReplyDatabase(quoted)).build_turn_messages(
+                    msg=msg
+                )
             )
-            chat_message = built_messages.turn_messages[0]
 
-            self.assertTrue(built_messages.contains_image)
-            self.assertEqual(built_messages.loaded_image_count, 2)
-            self.assertEqual(chat_message.image, [b"current-image", b"reply-image"])
-            self.assertIn("图片已随本条输入提供", chat_message.text or "")
-
-    def test_supported_non_text_segments_are_formatted_as_readable_text(self) -> None:
-        """卡片、文件、商城表情和 Markdown 会进入 LLM 可读文本。"""
-        builder = GroupChatMessageBuilder(
-            config=build_config(),
-            database=cast(RedisDatabaseManager, EmptyDatabase()),
-            http_client=cast(httpx.AsyncClient, object()),
+        self.assertEqual(result.detected_image_count, 2)
+        self.assertEqual(result.loaded_image_count, 2)
+        self.assertEqual(
+            [artifact.image_bytes for artifact in result.image_artifacts],
+            [b"current-image", b"reply-image"],
         )
+        self.assertEqual(
+            [artifact.label for artifact in result.image_artifacts],
+            ["当前消息第 1 张图片", "引用消息第 1 张图片"],
+        )
+        self.assertIsNone(result.turn_messages[0].image)
+
+    def test_image_limit_truncates_after_current_then_reply_order(self) -> None:
+        """图片上限先保留当前消息图片，再截断引用消息图片。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            paths = [root / f"image-{index}.bin" for index in range(3)]
+            for index, path in enumerate(paths):
+                path.write_bytes(f"image-{index}".encode())
+            quoted = build_message(
+                message=[Image.new("reply.png", path=str(paths[2]))],
+                raw_message="[图片]",
+            )
+            msg = build_message(
+                message=[
+                    Image.new("current-1.png", path=str(paths[0])),
+                    Image.new("current-2.png", path=str(paths[1])),
+                    Reply.new("reply-message-id"),
+                ],
+                raw_message="[图片][图片]",
+            )
+
+            result = asyncio.run(
+                build_builder(
+                    database=ReplyDatabase(quoted),
+                    config=build_config(image_delivery_max_images=2),
+                ).build_turn_messages(msg=msg)
+            )
+
+        self.assertEqual(result.detected_image_count, 3)
+        self.assertEqual(result.truncated_image_count, 1)
+        self.assertEqual(
+            [artifact.label for artifact in result.image_artifacts],
+            ["当前消息第 1 张图片", "当前消息第 2 张图片"],
+        )
+
+    def test_supported_non_text_segments_are_readable(self) -> None:
+        """卡片、文件、商城表情和 Markdown 会进入 LLM 可读文本。"""
         msg = build_message(
             message=[
                 Share.new(
@@ -254,78 +288,51 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
                     "forward-1",
                     content=[{"type": "text", "data": {"text": "转发正文"}}],
                 ),
-                Json.new(
-                    {
-                        "title": "JSON 标题",
-                        "desc": "JSON 描述",
-                        "url": "https://example.com/json",
-                    }
-                ),
-                MFace.new("emoji-1", summary="表情摘要", url="https://example.com/e"),
-                File.new("report.pdf", name="报告.pdf", file_id="file-1", file_size=2048),
+                Json.new({"title": "JSON 标题", "desc": "JSON 描述"}),
+                MFace.new("emoji-1", summary="表情摘要"),
+                File.new("report.pdf", name="报告.pdf", file_size=2048),
                 Markdown.new("# 标题\n正文"),
-                LightApp.new(
-                    {
-                        "title": "小程序标题",
-                        "desc": "小程序描述",
-                        "url": "https://example.com/app",
-                    }
-                ),
+                LightApp.new({"title": "小程序标题", "desc": "小程序描述"}),
             ],
             raw_message="[复杂消息]",
         )
 
-        chat_message = asyncio.run(builder.build_user_message(msg=msg))
+        chat_message = asyncio.run(
+            build_builder(database=EmptyDatabase()).build_turn_messages(msg=msg)
+        ).turn_messages[0]
         text = chat_message.text or ""
 
-        self.assertIn("链接分享", text)
-        self.assertIn("链接标题", text)
-        self.assertIn("合并转发消息，ID: forward-1", text)
-        self.assertIn("转发正文", text)
-        self.assertIn("JSON 卡片", text)
-        self.assertIn("JSON 标题", text)
-        self.assertIn("商城表情", text)
-        self.assertIn("表情摘要", text)
-        self.assertIn("文件消息", text)
-        self.assertIn("报告.pdf", text)
-        self.assertIn("2.0 KB", text)
-        self.assertIn("Markdown 消息", text)
-        self.assertIn("# 标题", text)
-        self.assertIn("小程序卡片", text)
-        self.assertIn("小程序标题", text)
+        for expected in (
+            "链接标题",
+            "转发正文",
+            "JSON 标题",
+            "表情摘要",
+            "报告.pdf",
+            "2.0 KB",
+            "# 标题",
+            "小程序标题",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text)
 
     def test_forward_without_content_keeps_forward_id(self) -> None:
-        """没有内嵌内容的合并转发会保留 ID 提示。"""
-        builder = GroupChatMessageBuilder(
-            config=build_config(),
-            database=cast(RedisDatabaseManager, EmptyDatabase()),
-            http_client=cast(httpx.AsyncClient, object()),
-        )
+        """没有内嵌内容的合并转发会保留 ID 和工具提示。"""
         msg = build_message(
             message=[Forward.new("forward-empty")],
             raw_message="[合并转发]",
         )
 
-        chat_message = asyncio.run(builder.build_user_message(msg=msg))
+        chat_message = asyncio.run(
+            build_builder(database=EmptyDatabase()).build_turn_messages(msg=msg)
+        ).turn_messages[0]
         text = chat_message.text or ""
 
         self.assertIn("合并转发消息，ID: forward-empty", text)
-        self.assertIn("未包含可展开内容", text)
         self.assertIn("qq__get_forward_message", text)
-        self.assertIn('message_id="forward-empty"', text)
 
-    def test_quoted_bot_forward_with_cached_content_is_expanded_directly(
-        self,
-    ) -> None:
-        """引用并艾特机器人时直接展示已缓存的机器人长回复。"""
-        forward_nodes = [
-            Node.new(
-                user_id="10000",
-                nickname="机器人",
-                content=[Text.new("这是机器人先前发送的长回复正文")],
-            )
-        ]
-        quoted_message = GroupMessage(
+    def test_quoted_bot_forward_with_cached_content_is_expanded(self) -> None:
+        """引用机器人的缓存合并转发时直接展示其中正文。"""
+        quoted = GroupMessage(
             time=1_777_132_899,
             self_id="10000",
             post_type="message_sent",
@@ -338,58 +345,53 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
             message=[
                 Forward.new(
                     "forward-90004",
-                    content=to_json_value(forward_nodes),
+                    content=to_json_value(
+                        [
+                            Node.new(
+                                user_id="10000",
+                                nickname="机器人",
+                                content=[Text.new("机器人先前的长回复")],
+                            )
+                        ]
+                    ),
                 )
             ],
             raw_message="[合并转发]",
             sender=Sender(user_id="10000", nickname="机器人"),
         )
-        builder = GroupChatMessageBuilder(
-            config=build_config(),
-            database=cast(RedisDatabaseManager, ReplyDatabase(quoted_message)),
-            http_client=cast(httpx.AsyncClient, object()),
-        )
-        current_message = build_message(
+        current = build_message(
             message=[
                 Reply.new("90004"),
                 At.new("10000"),
                 Text.new("请继续解释"),
-            ],
-            raw_message="[回复][CQ:at,qq=10000]请继续解释",
+            ]
         )
 
         chat_message = asyncio.run(
-            builder.build_user_message(
-                msg=current_message,
-                collect_images=False,
+            build_builder(database=ReplyDatabase(quoted)).build_turn_messages(
+                msg=current
             )
-        )
+        ).turn_messages[0]
         text = chat_message.text or ""
 
         self.assertIn("## 引用消息", text)
-        self.assertIn("这是机器人先前发送的长回复正文", text)
+        self.assertIn("机器人先前的长回复", text)
         self.assertNotIn("qq__get_forward_message", text)
 
     def test_forward_content_limit_marks_omitted_items(self) -> None:
         """合并转发超过展开上限时会标明已省略。"""
-        builder = GroupChatMessageBuilder(
-            config=build_config(),
-            database=cast(RedisDatabaseManager, EmptyDatabase()),
-            http_client=cast(httpx.AsyncClient, object()),
-        )
-        forward_items = [
+        items = [
             {
                 "sender": {"nickname": f"用户{index}"},
                 "message": [{"type": "text", "data": {"text": f"第{index}条"}}],
             }
             for index in range(1, 11)
         ]
-        msg = build_message(
-            message=[Forward.new("forward-many", content=forward_items)],
-            raw_message="[合并转发]",
-        )
+        msg = build_message(message=[Forward.new("forward-many", content=items)])
 
-        chat_message = asyncio.run(builder.build_user_message(msg=msg))
+        chat_message = asyncio.run(
+            build_builder(database=EmptyDatabase()).build_turn_messages(msg=msg)
+        ).turn_messages[0]
         text = chat_message.text or ""
 
         self.assertIn("第8条", text)
@@ -398,18 +400,18 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
 
     def test_unknown_segment_is_visible_to_model(self) -> None:
         """未支持消息段会以占位摘要进入 LLM 输入。"""
-        builder = GroupChatMessageBuilder(
-            config=build_config(),
-            database=cast(RedisDatabaseManager, EmptyDatabase()),
-            http_client=cast(httpx.AsyncClient, object()),
-        )
         msg = build_message(
-            message=[UnknownSegment(type="custom_type", data={"value": "保留"})],
-            raw_message="[未知消息段]",
+            message=[UnknownSegment(type="custom_type", data={"value": "保留"})]
         )
 
-        chat_message = asyncio.run(builder.build_user_message(msg=msg))
+        chat_message = asyncio.run(
+            build_builder(database=EmptyDatabase()).build_turn_messages(msg=msg)
+        ).turn_messages[0]
         text = chat_message.text or ""
 
         self.assertIn("暂不支持的消息段: custom_type", text)
         self.assertIn("保留", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

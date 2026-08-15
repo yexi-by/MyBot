@@ -20,6 +20,10 @@ from .napcat import (
     NapCatGroupHistoryDatabase,
     NapCatGroupToolBot,
     NapCatGroupToolExecutor,
+    NapCatImageBot,
+    NapCatImageReader,
+    NapCatImageReadResult,
+    NapCatImageResource,
 )
 
 __all__ = [
@@ -40,4 +44,8 @@ __all__ = [
     "NapCatGroupHistoryDatabase",
     "NapCatGroupToolBot",
     "NapCatGroupToolExecutor",
+    "NapCatImageBot",
+    "NapCatImageReader",
+    "NapCatImageReadResult",
+    "NapCatImageResource",
 ]

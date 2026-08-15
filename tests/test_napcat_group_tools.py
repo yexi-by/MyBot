@@ -903,6 +903,8 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result_object["returned_count"], 2)
         self.assertIs(result_object["truncated"], False)
         self.assertEqual(len(result.image_artifacts), 2)
+        self.assertEqual(result.image_errors, [])
+        self.assertEqual(result.truncated_image_count, 0)
         self.assertEqual(result.image_artifacts[0].image_bytes, b"image-a")
         self.assertEqual(result.image_artifacts[1].image_bytes, b"image-b")
         images = require_json_list(result_object["images"])
@@ -1018,6 +1020,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result_object["returned_count"], 3)
         self.assertIs(result_object["truncated"], True)
         self.assertEqual(len(result.image_artifacts), 3)
+        self.assertEqual(result.truncated_image_count, 2)
 
     async def test_forward_image_tool_returns_partial_errors(self) -> None:
         """部分图片读取失败时，成功图片仍作为附件返回。"""
@@ -1071,6 +1074,11 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result_object["ok"], True)
         self.assertEqual(result_object["returned_count"], 1)
         self.assertEqual(len(result.image_artifacts), 1)
+        self.assertEqual(len(result.image_errors), 1)
+        self.assertEqual(
+            result.image_errors[0].label,
+            "合并转发第 2 条消息第 1 张图片",
+        )
         errors = require_json_list(result_object["errors"])
         first_error = require_json_object(errors[0])
         self.assertEqual(first_error["error_type"], "NapCatActionFailed")
