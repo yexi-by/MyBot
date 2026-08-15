@@ -1,7 +1,5 @@
-"""插件路由、内部广播与静态依赖检查。"""
+"""插件事件路由。"""
 
-import ast
-import asyncio
 import inspect
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
@@ -13,11 +11,10 @@ if TYPE_CHECKING:
     from app.plugins.base import BasePlugin
 
 type EventHandler = Callable[..., Awaitable[bool]]
-type InternalListener = Callable[..., Awaitable[object]]
 
 
 class PluginController:
-    """管理插件实例、事件路由与插件内部广播。"""
+    """管理插件实例并建立 NapCat 事件路由。"""
 
     def __init__(
         self,
@@ -28,13 +25,11 @@ class PluginController:
         self.handlers_map: dict[
             type[AllEvent], list[tuple[EventHandler, str]]
         ] = defaultdict(list)
-        self.internal_listeners: dict[str, list[InternalListener]] = defaultdict(list)
         self._load_plugins()
-        self._auto_detect_deadlocks()
 
     @staticmethod
-    def get_dependency(func: EventHandler) -> tuple[str, object]:
-        """读取插件 run 方法的事件类型依赖。"""
+    def _get_event_parameter(func: EventHandler) -> tuple[str, object]:
+        """读取插件 run 方法的事件参数及类型注解。"""
         sig = inspect.signature(func)
         valid_params = [p for p in sig.parameters.values() if p.name != "self"]
         if len(valid_params) != 1:
@@ -61,93 +56,9 @@ class PluginController:
             event_types.append(cast(type[AllEvent], raw_type))
         return tuple(event_types)
 
-    def register_listener(
-        self, event_name: str, callback: InternalListener
-    ) -> None:
-        """注册插件内部广播监听器。"""
-        callback_lst = self.internal_listeners[event_name]
-        callback_lst.append(callback)
-
-    async def broadcast(
-        self, event_name: str, kwargs: dict[str, object]
-    ) -> list[object | BaseException] | None:
-        """广播插件内部事件。"""
-        listeners = self.internal_listeners.get(event_name, [])
-        if not listeners:
-            return None
-        tasks = [func(**kwargs) for func in listeners]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return results
-
     def _load_plugins(self) -> None:
         """载入插件并建立事件类型到插件队列的映射。"""
         for plugin in self.plugin_objects:
-            plugin.set_controller(self)
-            param_name, annotation = self.get_dependency(plugin.run)
+            param_name, annotation = self._get_event_parameter(plugin.run)
             for event_type in self._resolve_event_types(annotation):
                 self.handlers_map[event_type].append((plugin.add_to_queue, param_name))
-
-    def _analyze_code_dependencies(self, plugin: "BasePlugin[AllEvent]") -> set[str]:
-        """读取插件源码并解析 emit 调用依赖。"""
-        dependencies: set[str] = set()
-        try:
-            source = inspect.getsource(plugin.__class__)
-            tree = ast.parse(source)
-        except Exception as exc:
-            raise RuntimeError(f"源码被加密，或为 pyc 文件，禁止运行。错误: {exc}") from exc
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Await):
-                continue
-            if not isinstance(node.value, ast.Call):
-                continue
-            func = node.value.func
-            if not isinstance(func, ast.Attribute) or func.attr != "emit":
-                continue
-            if not node.value.args or not isinstance(node.value.args[0], ast.Constant):
-                continue
-            event_name = node.value.args[0].value
-            if not isinstance(event_name, str):
-                continue
-            dependencies.add(event_name)
-        return dependencies
-
-    def _auto_detect_deadlocks(self) -> None:
-        """构建插件内部事件依赖图并检测闭环。"""
-        event_listeners: dict[str, list[str]] = defaultdict(list)
-        for plugin in self.plugin_objects:
-            for event_name, _ in plugin.pending_listeners():
-                event_listeners[event_name].append(plugin.name)
-
-        graph: dict[str, set[str]] = defaultdict(set)
-        for plugin in self.plugin_objects:
-            outgoing_events = self._analyze_code_dependencies(plugin)
-            for event in outgoing_events:
-                targets = event_listeners.get(event, [])
-                for target in targets:
-                    if target != plugin.name:
-                        graph[plugin.name].add(target)
-
-        visited: set[str] = set()
-        recursion_stack: set[str] = set()
-
-        def dfs(node: str, path: list[str]) -> bool:
-            """使用 DFS 检测依赖图中的环。"""
-            visited.add(node)
-            recursion_stack.add(node)
-            path.append(node)
-            for neighbor in graph[node]:
-                if neighbor not in visited:
-                    if dfs(node=neighbor, path=path):
-                        return True
-                elif neighbor in recursion_stack:
-                    return True
-            recursion_stack.remove(node)
-            _ = path.pop()
-            return False
-
-        for plugin in self.plugin_objects:
-            if plugin.name not in visited:
-                path: list[str] = []
-                if dfs(node=plugin.name, path=path):
-                    chain = " -> ".join(path)
-                    raise RuntimeError(f"AST 静态源码分析检测到死锁链: {chain}")

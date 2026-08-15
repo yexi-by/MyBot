@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, ABCMeta, abstractmethod
-from collections.abc import Awaitable, Callable
-from typing import ClassVar, Protocol, cast
+from collections.abc import Callable
+from typing import ClassVar, cast
 
 import httpx
 
@@ -19,20 +19,6 @@ from app.models import AllEvent
 from app.services import LLMHandler, MCPToolManager
 from app.config import Settings
 from app.utils.log import log_event, log_exception
-
-
-class PluginControllerProtocol(Protocol):
-    """插件控制器在插件基类中需要使用的最小接口。"""
-
-    def register_listener(
-        self, event_name: str, callback: Callable[..., Awaitable[object]]
-    ) -> None:
-        """注册插件内部事件监听器。"""
-
-    async def broadcast(
-        self, event_name: str, kwargs: dict[str, object]
-    ) -> list[object | BaseException] | None:
-        """广播插件内部事件并返回监听器结果。"""
 
 
 PLUGINS: list[type["BasePlugin[AllEvent]"]] = []
@@ -162,31 +148,8 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
         self.consumers: list[asyncio.Task[None]] = []
         self._active_futures: set[asyncio.Future[bool]] = set()
         self._stopped = False
-        self.controller: PluginControllerProtocol | None = None
-        self._pending_listeners: list[
-            tuple[str, Callable[..., Awaitable[object]]]
-        ] = []
         self.register_consumers()
         self.setup()
-
-    def pending_listeners(self) -> list[tuple[str, Callable[..., Awaitable[object]]]]:
-        """返回插件 setup 阶段暂存的内部事件监听器。"""
-        return list(self._pending_listeners)
-
-    def set_controller(self, controller: PluginControllerProtocol) -> None:
-        """绑定插件控制器并补注册 setup 阶段声明的监听器。"""
-        self.controller = controller
-        for event, func in self._pending_listeners:
-            self.controller.register_listener(event_name=event, callback=func)
-
-    async def emit(self, event_name: str, **kwargs: object) -> object | None:
-        """向插件内部事件总线发送事件。"""
-        if self.controller:
-            results = await self.controller.broadcast(
-                event_name=event_name, kwargs=kwargs
-            )
-            if results:
-                return results
 
     async def add_to_queue(self, msg: T) -> bool:
         """将事件放入插件队列并等待消费结果。"""
@@ -269,7 +232,7 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
 
     @abstractmethod
     def setup(self) -> None:
-        """注册插件内部状态与监听器。"""
+        """初始化插件运行所需的状态与服务。"""
         raise NotImplementedError
 
     @abstractmethod
