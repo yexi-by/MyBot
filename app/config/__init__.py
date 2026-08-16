@@ -1,6 +1,6 @@
 """配置模块公共导出。"""
 
-from .config import RAW_CONFIG_DICT, load_settings
+from .config import load_settings
 from .schemas import (
     AppConfig,
     DatabaseConfig,
@@ -20,7 +20,6 @@ __all__ = [
     "LoggingConfig",
     "NapCatConfig",
     "NetworkConfig",
-    "RAW_CONFIG_DICT",
     "ServerConfig",
     "Settings",
     "StorageConfig",

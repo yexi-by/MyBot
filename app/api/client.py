@@ -49,8 +49,8 @@ class BOTClient(
         websocket: WebSocket,
         sent_message_recorder: SentMessageRecorder,
         inline_image_archiver: InlineImageArchiver,
-        send_retry_count: int = 3,
-        send_retry_delay: int = 1,
+        send_retry_count: int = 5,
+        send_retry_delay: float = 0,
     ) -> None:
         """初始化 BOTClient
 
@@ -70,7 +70,7 @@ class BOTClient(
         self.boot_id: NapCatId = ""
         self.timeout: int = 120
         self.send_retry_count: int = send_retry_count
-        self.send_retry_delay: int = send_retry_delay
+        self.send_retry_delay: float = send_retry_delay
 
     def get_self_qq_id(self, msg: AllEvent) -> None:
         """从 NapCat 事件中刷新机器人自身 QQ 号。"""

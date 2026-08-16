@@ -15,7 +15,7 @@ class LLMConfig(StrictModel):
     model_vendors: str
     provider_type: Literal["openai"]
     retry_count: int
-    retry_delay: int
+    retry_delay: float
 
 
 class ChatMessage(StrictModel):

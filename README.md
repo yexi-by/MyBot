@@ -91,8 +91,8 @@ api_key = "sk-xxx"
 base_url = "https://api.deepseek.com"
 model_vendors = "deepseek"
 provider_type = "openai"
-retry_count = 3
-retry_delay = 1
+retry_count = 5
+retry_delay = 0
 ```
 
 MCP 配置采用 `mcpServers` 结构。每个 server 使用 stdio 启动，工具名称会加上稳定前缀，避免与本地工具重名：
@@ -121,11 +121,11 @@ vision_model_name = "vision-model"
 vision_model_vendors = "openai"
 vision_system_prompt_path = "plugins_config/ai_group_chat/prompts/vision/system.md"
 vision_user_prompt_path = "plugins_config/ai_group_chat/prompts/vision/user.md"
-vision_request_retry_count = 3
-vision_request_retry_delay_seconds = 1.0
+vision_request_retry_count = 5
+vision_request_retry_delay_seconds = 0.25
 ```
 
-`vision_request_retry_count` 表示包含首次请求在内的总尝试次数；默认尝试 3 次。失败后的等待时间从 `vision_request_retry_delay_seconds` 开始按指数增长，单次最长等待 10 秒。这两个值只覆盖视觉请求，不会与 LLM 供应商的通用重试次数叠加。
+`vision_request_retry_count` 包含首次请求。视觉请求默认最多尝试 5 次，等待 0.25、0.5、1、2 秒；它不会与供应商重试叠加。
 
 主模型支持多模态时，把 `supports_multimodal` 设为 `true`，并删除所有 `vision_*` 字段，图片会直接交给主模型。两种模式都使用同一套图片读取服务，依次尝试本地路径、消息段现有 URL 和 NapCat `get_image` 刷新；读取支持并发、超时和部分失败。
 
@@ -134,11 +134,11 @@ vision_request_retry_delay_seconds = 1.0
 ```toml
 [ai_group_chat]
 forward_image_tool_enabled = true
-forward_image_max_images_per_call = 6
-forward_image_max_all_images = 12
-image_delivery_max_images = 6
-image_fetch_concurrency = 4
-image_download_timeout_seconds = 15.0
+forward_image_max_images_per_call = 20
+forward_image_max_all_images = 50
+image_delivery_max_images = 20
+image_fetch_concurrency = 16
+image_download_timeout_seconds = 20.0
 persist_vision_descriptions = true
 ```
 

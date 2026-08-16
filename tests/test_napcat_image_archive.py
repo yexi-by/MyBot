@@ -353,7 +353,7 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_success_uses_default_claim_boundaries_and_completes(self) -> None:
-        """默认认领八张、30 秒读取超时和 60 秒租约。"""
+        """默认认领十六张、20 秒读取超时和 45 秒租约。"""
         repository = FakeArchiveRepository(tasks=[self._task(task_id=1)])
         with tempfile.TemporaryDirectory() as temp_dir:
             worker = ImageArchiveWorker(
@@ -365,10 +365,10 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
 
             processed = await worker.run_once()
 
-        self.assertEqual(DEFAULT_ARCHIVE_CONCURRENCY, 8)
-        self.assertEqual(DEFAULT_ARCHIVE_READ_TIMEOUT_SECONDS, 30.0)
-        self.assertEqual(DEFAULT_ARCHIVE_LEASE_SECONDS, 60.0)
-        self.assertEqual(repository.claim_calls, [("bot-10001", 8, 60.0)])
+        self.assertEqual(DEFAULT_ARCHIVE_CONCURRENCY, 16)
+        self.assertEqual(DEFAULT_ARCHIVE_READ_TIMEOUT_SECONDS, 20.0)
+        self.assertEqual(DEFAULT_ARCHIVE_LEASE_SECONDS, 45.0)
+        self.assertEqual(repository.claim_calls, [("bot-10001", 16, 45.0)])
         self.assertEqual(processed, 1)
         self.assertEqual(repository.fail_calls, [])
         self.assertEqual(len(repository.complete_calls), 1)
@@ -423,7 +423,7 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
                     max_image_bytes=2048,
                 )
 
-    async def test_failures_retry_after_five_thirty_and_three_hundred_seconds(self) -> None:
+    async def test_failures_retry_after_one_five_and_twenty_seconds(self) -> None:
         """前三次失败延迟重试，第四次进入终态。"""
         frozen_now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
         repository = FakeArchiveRepository(
@@ -443,14 +443,14 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
 
             await worker.run_once()
 
-        self.assertEqual(DEFAULT_ARCHIVE_RETRY_DELAYS_SECONDS, (5.0, 30.0, 300.0))
+        self.assertEqual(DEFAULT_ARCHIVE_RETRY_DELAYS_SECONDS, (1.0, 5.0, 20.0))
         self.assertEqual(repository.complete_calls, [])
         self.assertEqual(
             [call[2] for call in repository.fail_calls],
             [
+                datetime(2026, 8, 16, 12, 0, 1, tzinfo=UTC),
                 datetime(2026, 8, 16, 12, 0, 5, tzinfo=UTC),
-                datetime(2026, 8, 16, 12, 0, 30, tzinfo=UTC),
-                datetime(2026, 8, 16, 12, 5, tzinfo=UTC),
+                datetime(2026, 8, 16, 12, 0, 20, tzinfo=UTC),
                 None,
             ],
         )
@@ -473,9 +473,9 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(repository.fail_calls), 1)
 
     async def test_worker_never_exceeds_configured_concurrency(self) -> None:
-        """即使仓库违反 limit 返回过多任务，worker 也不超过八个并发。"""
+        """即使仓库违反 limit 返回过多任务，worker 也不超过十六个并发。"""
         repository = FakeArchiveRepository(
-            tasks=[self._task(task_id=index) for index in range(1, 13)]
+            tasks=[self._task(task_id=index) for index in range(1, 25)]
         )
         reader = BlockingReader()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -488,9 +488,9 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
 
             processed = await worker.run_once()
 
-        self.assertEqual(processed, 12)
-        self.assertEqual(reader.max_active, 8)
-        self.assertEqual(len(repository.complete_calls), 12)
+        self.assertEqual(processed, 24)
+        self.assertEqual(reader.max_active, 16)
+        self.assertEqual(len(repository.complete_calls), 24)
         self.assertEqual(repository.fail_calls, [])
 
 

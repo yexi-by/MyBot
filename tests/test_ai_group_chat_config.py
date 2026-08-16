@@ -76,16 +76,16 @@ class AIGroupChatConfigTest(unittest.TestCase):
         """共用图片读取、单轮上限和合并转发配置有明确默认值。"""
         config = build_text_model_config()
 
-        self.assertEqual(config.image_delivery_max_images, 6)
-        self.assertEqual(config.image_fetch_concurrency, 4)
-        self.assertEqual(config.image_download_timeout_seconds, 15.0)
-        self.assertEqual(config.vision_request_retry_count, 3)
-        self.assertEqual(config.vision_request_retry_delay_seconds, 1.0)
+        self.assertEqual(config.image_delivery_max_images, 20)
+        self.assertEqual(config.image_fetch_concurrency, 16)
+        self.assertEqual(config.image_download_timeout_seconds, 20.0)
+        self.assertEqual(config.vision_request_retry_count, 5)
+        self.assertEqual(config.vision_request_retry_delay_seconds, 0.25)
         self.assertTrue(config.persist_vision_descriptions)
         self.assertTrue(config.forward_image_tool_enabled)
-        self.assertEqual(config.forward_image_max_images_per_call, 6)
-        self.assertEqual(config.forward_image_max_all_images, 12)
-        self.assertEqual(config.max_reply_chars, 100)
+        self.assertEqual(config.forward_image_max_images_per_call, 20)
+        self.assertEqual(config.forward_image_max_all_images, 50)
+        self.assertEqual(config.max_reply_chars, 1000)
         self.assertFalse(config.output_reasoning_content)
 
     def test_image_limits_reject_invalid_values(self) -> None:

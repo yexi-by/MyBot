@@ -35,8 +35,8 @@ class BaseMixin:
     )
     boot_id: NapCatId = ""
     timeout: int = 0
-    send_retry_count: int = 3
-    send_retry_delay: int = 1
+    send_retry_count: int = 5
+    send_retry_delay: float = 0
 
     def _generate_echo(self) -> str:
         """生成唯一 echo 标识。"""

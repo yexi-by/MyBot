@@ -33,11 +33,11 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
         event: GroupMessage,
         allow_mention_all: bool = False,
         forward_image_tool_enabled: bool = True,
-        forward_image_max_images_per_call: int = 6,
-        forward_image_max_all_images: int = 12,
-        image_fetch_concurrency: int = 4,
-        image_download_timeout_seconds: float = 15.0,
-        max_reply_chars: int = 100,
+        forward_image_max_images_per_call: int = 20,
+        forward_image_max_all_images: int = 50,
+        image_fetch_concurrency: int = 16,
+        image_download_timeout_seconds: float = 20.0,
+        max_reply_chars: int = 1000,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         """绑定当前群事件，并注册可供模型调用的群聊工具。"""

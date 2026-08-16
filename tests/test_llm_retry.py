@@ -72,6 +72,39 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inner_provider.call_count, 3)
         self.assertEqual(sleep.await_args_list, [call(1.0), call(2.0)])
 
+    async def test_zero_delay_retries_immediately(self) -> None:
+        """零延迟配置不会被固定的一秒退避覆盖。"""
+        inner_provider = FlakyTextProvider(failures_before_success=2)
+        provider = ResilientLLMProvider(
+            inner_provider=inner_provider,
+            llm_config=LLMConfig(
+                api_key="test-key",
+                model_vendors="fast-vendor",
+                provider_type="openai",
+                retry_count=3,
+                retry_delay=0,
+            ),
+        )
+        handler = LLMHandler(
+            services=[
+                LLMProviderWrapper(
+                    model_vendors="fast-vendor",
+                    provider=provider,
+                )
+            ]
+        )
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await handler.get_ai_text_response(
+                messages=[ChatMessage(role="user", text="立即重试")],
+                model_vendors="fast-vendor",
+                model_name="fast-model",
+            )
+
+        self.assertEqual(result, "视觉描述成功")
+        self.assertEqual(inner_provider.call_count, 3)
+        self.assertEqual(sleep.await_args_list, [call(0.0), call(0.0)])
+
 
 if __name__ == "__main__":
     unittest.main()

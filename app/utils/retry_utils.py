@@ -39,8 +39,8 @@ def _log_retry_attempt(retry_state: RetryCallState) -> None:
 
 def create_retry_manager(
     error_types: tuple[type[Exception], ...] = (Exception,),
-    retry_count: int = 10,
-    retry_delay: float = 2,
+    retry_count: int = 5,
+    retry_delay: float = 0,
 ) -> AsyncRetrying:
     """创建一个异步重试管理器，用于在操作失败时自动进行重试。
 
@@ -65,10 +65,18 @@ def create_retry_manager(
         ...     with attempt:
         ...         result = await some_async_operation()
     """
+    if retry_count < 1:
+        raise ValueError("retry_count 必须大于等于 1")
+    if retry_delay < 0:
+        raise ValueError("retry_delay 不能小于 0")
     retry_strategy = retry_if_exception_type(error_types)
     return AsyncRetrying(
         stop=stop_after_attempt(retry_count),
-        wait=wait_exponential(multiplier=1, min=retry_delay, max=10),
+        wait=wait_exponential(
+            multiplier=retry_delay,
+            min=retry_delay,
+            max=max(10, retry_delay),
+        ),
         retry=retry_strategy,
         reraise=True,
         before_sleep=_log_retry_attempt,

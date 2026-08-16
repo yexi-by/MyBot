@@ -21,12 +21,15 @@ class SettingsConfigTest(unittest.TestCase):
 
         self.assertEqual(settings.server.port, 6055)
         self.assertEqual(settings.server.websocket_path_prefix, "/ws")
-        self.assertEqual(settings.napcat.send_retry_count, 3)
-        self.assertEqual(settings.napcat.send_retry_delay, 1)
+        self.assertEqual(settings.napcat.send_retry_count, 5)
+        self.assertEqual(settings.napcat.send_retry_delay, 0)
         self.assertEqual(settings.database.port, 5432)
-        self.assertEqual(settings.database.pool_size, 10)
+        self.assertEqual(settings.database.pool_size, 20)
+        self.assertEqual(settings.database.max_overflow, 20)
+        self.assertEqual(settings.database.pool_timeout_seconds, 2)
+        self.assertEqual(settings.storage.image_download_concurrency, 16)
         self.assertEqual(settings.storage.image_max_bytes, 50 * 1024 * 1024)
-        self.assertEqual(settings.storage.image_retry_delays_seconds, (5, 30, 300))
+        self.assertEqual(settings.storage.image_retry_delays_seconds, (1, 5, 20))
         self.assertEqual(len(settings.llm.providers), 1)
         self.assertNotIn("firecrawl", settings.mcp.mcpServers)
 
@@ -79,5 +82,5 @@ class SettingsConfigTest(unittest.TestCase):
 
         settings = Settings.model_validate(raw_config)
 
-        self.assertEqual(settings.napcat.send_retry_count, 3)
-        self.assertEqual(settings.napcat.send_retry_delay, 1)
+        self.assertEqual(settings.napcat.send_retry_count, 5)
+        self.assertEqual(settings.napcat.send_retry_delay, 0)

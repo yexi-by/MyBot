@@ -43,8 +43,8 @@ class ImageGenerateConfig(StrictModel):
     group_ids: list[NapCatId]
     model_name: str
     model_vendors: str
-    image_fetch_concurrency: int = Field(default=4, ge=1)
-    image_download_timeout_seconds: float = Field(default=15.0, gt=0)
+    image_fetch_concurrency: int = Field(default=16, ge=1)
+    image_download_timeout_seconds: float = Field(default=20.0, gt=0)
 
 
 class ImageGeneratePlugin(BasePlugin[GroupMessage]):

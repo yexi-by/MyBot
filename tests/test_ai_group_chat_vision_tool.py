@@ -141,7 +141,7 @@ class VisionDescriptionToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivery.result.truncated_count, 1)
         self.assertEqual(len(delivery.result.errors), 1)
         self.assertEqual(llm.models, [("vision-vendor", "vision-model")])
-        self.assertEqual(llm.retry_settings, [(3, 1.0)])
+        self.assertEqual(llm.retry_settings, [(5, 0.25)])
         request_text = "\n".join(
             message.text or "" for message in llm.requests[0]
         )

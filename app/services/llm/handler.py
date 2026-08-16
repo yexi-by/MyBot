@@ -94,7 +94,7 @@ class LLMHandler:
         model_vendors: str,
         model_name: str,
         tool_executor: LLMToolExecutor,
-        max_tool_rounds: int = 8,
+        max_tool_rounds: int = 16,
     ) -> str:
         """执行完整工具调用循环，直到模型返回最终文本。"""
         working_messages = messages[:]

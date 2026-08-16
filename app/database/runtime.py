@@ -24,9 +24,9 @@ class PostgreSQLRuntime:
         cls,
         *,
         database_url: str,
-        pool_size: int = 10,
-        max_overflow: int = 10,
-        pool_timeout_seconds: float = 5.0,
+        pool_size: int = 20,
+        max_overflow: int = 20,
+        pool_timeout_seconds: float = 2.0,
         statement_timeout_seconds: float = 5.0,
     ) -> "PostgreSQLRuntime":
         """按系统持久性和连接池约束创建运行时。"""

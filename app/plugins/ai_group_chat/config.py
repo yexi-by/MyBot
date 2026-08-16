@@ -29,16 +29,16 @@ class AIGroupChatConfig(StrictModel):
     vision_model_vendors: str | None = None
     vision_system_prompt_path: str | None = None
     vision_user_prompt_path: str | None = None
-    vision_request_retry_count: int = Field(default=3, ge=1, le=10)
-    vision_request_retry_delay_seconds: float = Field(default=1.0, gt=0, le=10)
-    image_delivery_max_images: int = Field(default=6, ge=1, le=20)
-    image_fetch_concurrency: int = Field(default=4, ge=1, le=10)
-    image_download_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    vision_request_retry_count: int = Field(default=5, ge=1, le=10)
+    vision_request_retry_delay_seconds: float = Field(default=0.25, gt=0, le=10)
+    image_delivery_max_images: int = Field(default=20, ge=1, le=20)
+    image_fetch_concurrency: int = Field(default=16, ge=1, le=32)
+    image_download_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     persist_vision_descriptions: bool = True
-    max_tool_rounds: int = Field(default=8, ge=1)
-    token_estimation_safety_factor: float = Field(default=1.25, ge=1)
+    max_tool_rounds: int = Field(default=16, ge=1)
+    token_estimation_safety_factor: float = Field(default=1.05, ge=1)
     context_compression_notice: str = "上下文有点长，我先整理一下记忆，稍等我几秒喵~"
-    max_reply_chars: int = Field(default=100, ge=1)
+    max_reply_chars: int = Field(default=1000, ge=1)
     output_reasoning_content: bool = False
     pass_back_reasoning_content: bool = False
     debug_dump_messages: bool = False
@@ -48,8 +48,8 @@ class AIGroupChatConfig(StrictModel):
     allow_mention_all: bool = False
     persist_tool_results: bool = False
     forward_image_tool_enabled: bool = True
-    forward_image_max_images_per_call: int = Field(default=6, ge=1, le=20)
-    forward_image_max_all_images: int = Field(default=12, ge=1, le=50)
+    forward_image_max_images_per_call: int = Field(default=20, ge=1, le=20)
+    forward_image_max_all_images: int = Field(default=50, ge=1, le=50)
     group_config: list[GroupChatConfig]
 
     @model_validator(mode="after")

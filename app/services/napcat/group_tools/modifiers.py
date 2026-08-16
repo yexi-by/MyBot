@@ -37,7 +37,7 @@ class GroupMessageDirectiveParser:
         bot: NapCatGroupToolBot,
         event: GroupMessage,
         allow_mention_all: bool,
-        max_reply_chars: int = 100,
+        max_reply_chars: int = 1000,
     ) -> None:
         """绑定当前群事件与 @全体权限开关。"""
         self.bot: NapCatGroupToolBot = bot

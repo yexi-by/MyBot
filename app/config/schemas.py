@@ -49,19 +49,19 @@ class NapCatConfig(StrictModel):
     """NapCat 反向 WebSocket 连接配置。"""
 
     websocket_token: str = Field(min_length=1)
-    send_retry_count: int = Field(default=3, ge=1)
-    send_retry_delay: int = Field(default=1, ge=0)
+    send_retry_count: int = Field(default=5, ge=1)
+    send_retry_delay: float = Field(default=0, ge=0)
 
 
 class StorageConfig(StrictModel):
     """群图片归档配置。"""
 
     image_path: str = "images"
-    image_download_concurrency: int = Field(default=8, ge=1)
-    image_download_timeout_seconds: float = Field(default=30, gt=0)
+    image_download_concurrency: int = Field(default=16, ge=1)
+    image_download_timeout_seconds: float = Field(default=20, gt=0)
     image_max_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
-    image_retry_delays_seconds: tuple[float, float, float] = (5, 30, 300)
-    image_lease_seconds: float = Field(default=60, gt=0)
+    image_retry_delays_seconds: tuple[float, float, float] = (1, 5, 20)
+    image_lease_seconds: float = Field(default=45, gt=0)
 
     @field_validator("image_path")
     @classmethod
@@ -92,9 +92,9 @@ class DatabaseConfig(StrictModel):
     user: str = "mybot"
     password: SecretStr | None = None
     password_file: str | None = None
-    pool_size: int = Field(default=10, ge=1)
-    max_overflow: int = Field(default=10, ge=0)
-    pool_timeout_seconds: float = Field(default=5, gt=0)
+    pool_size: int = Field(default=20, ge=1)
+    max_overflow: int = Field(default=20, ge=0)
+    pool_timeout_seconds: float = Field(default=2, gt=0)
     statement_timeout_seconds: float = Field(default=5, gt=0)
 
     @field_validator("host", "name", "user")
@@ -163,7 +163,7 @@ class NetworkConfig(StrictModel):
     """项目通用网络访问配置。"""
 
     proxy: str | None = None
-    timeout_seconds: float = Field(default=30, gt=0)
+    timeout_seconds: float = Field(default=15, gt=0)
 
     @field_validator("proxy")
     @classmethod
