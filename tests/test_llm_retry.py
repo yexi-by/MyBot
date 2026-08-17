@@ -36,6 +36,21 @@ class FlakyTextProvider(LLMProvider):
 class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
     """验证当前请求可以替换供应商默认重试参数。"""
 
+    async def test_register_instance_allows_provider_without_api_key(self) -> None:
+        """无鉴权 OpenAI 兼容服务使用空 key，客户端不会发送认证头。"""
+        provider_config = LLMProviderConfig.model_validate(
+            {"base_url": "http://model.internal/v1"}
+        )
+
+        with patch("app.services.llm.handler.AsyncOpenAI") as client_type:
+            handler = LLMHandler.register_instance({"local": provider_config})
+
+        client_type.assert_called_once_with(
+            api_key="",
+            base_url="http://model.internal/v1",
+        )
+        self.assertIn("local", handler.services)
+
     async def test_request_override_retries_three_attempts_with_backoff(
         self,
     ) -> None:

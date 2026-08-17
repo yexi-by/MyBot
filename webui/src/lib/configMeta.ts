@@ -90,7 +90,7 @@ export function defaultPluginConfig(
       return {
         groups: [],
         base_url: "",
-        api_token: "",
+        api_token: null,
         poll_interval_seconds: 3,
         generation_timeout_seconds: 600,
         request_timeout_seconds: 30,

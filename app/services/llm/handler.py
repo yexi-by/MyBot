@@ -31,9 +31,14 @@ class LLMHandler:
         """根据配置注册 LLM 服务实例。"""
         services: dict[str, LLMProviderWrapper] = {}
         for provider_id, provider_config in providers.items():
+            api_key = (
+                provider_config.api_key.get_secret_value()
+                if provider_config.api_key is not None
+                else ""
+            )
             raw_service = OpenAIService(
                 client=AsyncOpenAI(
-                    api_key=provider_config.api_key.get_secret_value(),
+                    api_key=api_key,
                     base_url=provider_config.base_url,
                 )
             )

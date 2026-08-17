@@ -246,16 +246,17 @@ class NeavoImageGenerateConfigTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(config.groups, (ALLOWED_GROUP_ID,))
         self.assertEqual(config.base_url, BASE_URL)
+        self.assertIsNotNone(config.api_token)
+        assert config.api_token is not None
         self.assertEqual(config.api_token.get_secret_value(), API_TOKEN)
         self.assertNotIn(API_TOKEN, repr(config))
 
-    async def test_config_rejects_unknown_and_unsafe_values(self) -> None:
-        """未知字段、空密钥和越界轮询间隔必须显式失败。"""
+    async def test_config_rejects_unknown_and_invalid_values(self) -> None:
+        """未知字段、无效 URL 和越界轮询间隔必须显式失败。"""
         invalid_overrides = [
             {"unexpected": True},
-            {"api_token": "   "},
             {"base_url": "ftp://neavo.example"},
-            {"base_url": "https://user:password@neavo.example"},
+            {"base_url": "https://neavo.example/path?query=1"},
             {"poll_interval_seconds": 1.9},
             {"poll_interval_seconds": 5.1},
         ]
@@ -264,6 +265,19 @@ class NeavoImageGenerateConfigTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(overrides=overrides):
                 with self.assertRaises(ValidationError):
                     _ = build_config(**overrides)
+
+    async def test_config_allows_no_token_and_basic_auth_url(self) -> None:
+        """无鉴权服务可省略 Token，Basic Auth 也可放在 URL 中。"""
+        no_token = build_config(api_token="")
+        basic_auth = build_config(
+            base_url="https://user:password@neavo.example/"
+        )
+
+        self.assertIsNone(no_token.api_token)
+        self.assertEqual(
+            basic_auth.base_url,
+            "https://user:password@neavo.example",
+        )
 
 
 class NeavoImageClientTest(unittest.IsolatedAsyncioTestCase):
@@ -293,6 +307,21 @@ class NeavoImageClientTest(unittest.IsolatedAsyncioTestCase):
             http_client=http_client,
             sleep=sleep,
         )
+
+    async def test_unauthenticated_service_omits_authorization_header(self) -> None:
+        """未配置 Token 时请求中不发送空的 Authorization。"""
+        async def handler(request: httpx.Request) -> httpx.Response:
+            self.assertNotIn("Authorization", request.headers)
+            return httpx.Response(202, json={"id": str(JOB_A)})
+
+        client = self.make_client(
+            handler=handler,
+            config=build_config(api_token=""),
+        )
+
+        job_id = await client.submit_text_to_image(prompt="无鉴权服务")
+
+        self.assertEqual(job_id, JOB_A)
 
     async def test_generate_uses_new_routes_and_polls_202_until_image(self) -> None:
         """新版文生图任务按固定间隔轮询，HTTP 202 表示处理中。"""

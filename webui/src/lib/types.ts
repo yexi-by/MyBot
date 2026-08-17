@@ -31,7 +31,7 @@ export interface ServerConfig {
 }
 
 export interface NapCatConfig {
-  websocket_token: string;
+  websocket_token?: string | null;
   send_max_attempts?: number;
   send_retry_delay_seconds?: number;
 }
@@ -77,7 +77,7 @@ export interface LoggingConfig {
 }
 
 export interface LLMProviderConfig {
-  api_key: string;
+  api_key?: string | null;
   base_url?: string | null;
   max_attempts?: number;
   retry_delay_seconds?: number;
@@ -170,7 +170,7 @@ export interface ImageGenerateConfig {
 export interface NeavoImageGenerateConfig {
   groups?: string[];
   base_url: string;
-  api_token: string;
+  api_token?: string | null;
   poll_interval_seconds: number;
   generation_timeout_seconds: number;
   request_timeout_seconds: number;

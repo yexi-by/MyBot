@@ -80,7 +80,7 @@ interface BaseFieldProps {
   placeholder?: string;
 }
 
-/** 文本输入字段。 */
+/** 文本输入字段；清空时从配置载荷中省略该键。 */
 export function TextField({ path, label, description, placeholder }: BaseFieldProps) {
   const { register } = useFormContext();
   const controlId = useId();
@@ -91,7 +91,13 @@ export function TextField({ path, label, description, placeholder }: BaseFieldPr
       description={description}
       controlId={controlId}
     >
-      <Input id={controlId} placeholder={placeholder} {...register(path)} />
+      <Input
+        id={controlId}
+        placeholder={placeholder}
+        {...register(path, {
+          setValueAs: (value: unknown) => value === "" ? undefined : value,
+        })}
+      />
     </FieldShell>
   );
 }

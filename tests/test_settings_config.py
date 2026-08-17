@@ -1,13 +1,14 @@
 """统一配置模型测试。"""
 
 import tomllib
+import tempfile
 import unittest
 from pathlib import Path
 from typing import cast
 
 from sqlalchemy import make_url
 
-from app.config import DatabaseConfig, MyBotConfig
+from app.config import DatabaseConfig, LLMProviderConfig, MyBotConfig, NapCatConfig
 
 
 def load_example() -> dict[str, object]:
@@ -33,12 +34,12 @@ class SettingsConfigTest(unittest.TestCase):
         self.assertIsNotNone(config.plugins.ai_group_chat)
         self.assertIsNotNone(config.plugins.recall_bot_image)
 
-    def test_database_requires_exactly_one_password_source(self) -> None:
-        """数据库内联密码和 secret 文件不能同时配置或同时缺失。"""
+    def test_database_rejects_two_password_sources(self) -> None:
+        """数据库内联密码和 secret 文件不能同时配置。"""
         raw_config = load_example()
         database = cast(dict[str, object], raw_config["database"])
         database["password_file"] = "/run/secrets/postgres_password"
-        with self.assertRaisesRegex(ValueError, "必须且只能配置一个"):
+        with self.assertRaisesRegex(ValueError, "不能同时配置"):
             _ = MyBotConfig.model_validate(raw_config)
 
         del database["password"]
@@ -48,12 +49,28 @@ class SettingsConfigTest(unittest.TestCase):
             "/run/secrets/postgres_password",
         )
 
-    def test_database_rejects_blank_inline_password(self) -> None:
-        """内联密码只有空白时在连接数据库前直接报错。"""
+    def test_database_allows_passwordless_connection(self) -> None:
+        """缺少密码或输入空白密码时构造无密码 PostgreSQL URL。"""
         for password in ("", "   "):
             with self.subTest(password_length=len(password)):
-                with self.assertRaisesRegex(ValueError, "PostgreSQL 密码不能为空"):
-                    _ = DatabaseConfig.model_validate({"password": password})
+                config = DatabaseConfig.model_validate({"password": password})
+                parsed = make_url(config.build_url())
+
+                self.assertIsNone(config.password)
+                self.assertIsNone(parsed.password)
+
+        config = DatabaseConfig.model_validate({})
+        self.assertIsNone(config.resolve_password())
+        self.assertIsNone(make_url(config.build_url()).password)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            password_file = Path(temp_dir) / "password"
+            password_file.write_text("\n", encoding="utf-8")
+            file_config = DatabaseConfig.model_validate(
+                {"password_file": str(password_file)}
+            )
+            self.assertIsNone(file_config.resolve_password())
+            self.assertIsNone(make_url(file_config.build_url()).password)
 
     def test_database_url_escapes_password_once_for_all_consumers(self) -> None:
         """应用与 migration 共用 URL 构造并保留特殊字符。"""
@@ -71,6 +88,16 @@ class SettingsConfigTest(unittest.TestCase):
         self.assertEqual(parsed.drivername, "postgresql+asyncpg")
         self.assertEqual(parsed.host, "postgres")
         self.assertEqual(parsed.password, "p@ss:/%word")
+
+    def test_service_authentication_values_are_optional(self) -> None:
+        """NapCat 和 LLM 服务均可明确选择无鉴权运行。"""
+        napcat = NapCatConfig.model_validate({"websocket_token": "  "})
+        provider = LLMProviderConfig.model_validate({"api_key": ""})
+
+        self.assertIsNone(napcat.websocket_token)
+        self.assertIsNone(provider.api_key)
+        self.assertEqual(provider.max_attempts, 5)
+        self.assertEqual(provider.retry_delay_seconds, 0)
 
     def test_napcat_send_defaults_when_omitted(self) -> None:
         """发送尝试字段省略时使用积极默认值。"""

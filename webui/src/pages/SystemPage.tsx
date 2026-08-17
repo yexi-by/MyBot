@@ -45,7 +45,7 @@ export default function SystemPage() {
         <TextField
           path="napcat.websocket_token"
           label="WebSocket Token"
-          description="NapCat 连接时校验的 Bearer Token"
+          description="留空时不校验，填写后要求 NapCat 发送相同 Bearer Token"
         />
         <NumberField
           path="napcat.send_max_attempts"
@@ -59,7 +59,10 @@ export default function SystemPage() {
         />
       </SectionCard>
 
-      <SectionCard title="数据库" description="PostgreSQL 连接池；密码与密码文件二选一。">
+      <SectionCard
+        title="数据库"
+        description="PostgreSQL 连接池；无密码服务可留空，需要认证时密码与密码文件二选一。"
+      >
         <TextField path="database.host" label="主机" placeholder="默认 localhost" />
         <NumberField path="database.port" label="端口" placeholder="默认 5432" />
         <TextField path="database.name" label="数据库名" placeholder="默认 mybot" />

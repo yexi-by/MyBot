@@ -5,7 +5,7 @@ import unittest
 from typing import cast
 
 from dishka import AsyncContainer
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, status
 
 from app.config import ConfigWatcher, MyBotConfig
 from app.core.di import DirectHttpx, ProxyHttpx
@@ -92,6 +92,25 @@ class _FakeConfigWatcher:
         self.stop_event.set()
 
 
+class _FakeAuthWebSocket:
+    """记录 WebSocket 鉴权阶段的接受与关闭动作。"""
+
+    def __init__(self, *, authorization: str | None = None) -> None:
+        self.headers = (
+            {"authorization": authorization} if authorization is not None else {}
+        )
+        self.accepted = False
+        self.close_code: int | None = None
+
+    async def accept(self) -> None:
+        """记录连接已接受。"""
+        self.accepted = True
+
+    async def close(self, *, code: int) -> None:
+        """记录连接关闭码。"""
+        self.close_code = code
+
+
 class _FakeContainer:
     """按依赖键返回 lifespan 所需的 fake 对象。"""
 
@@ -167,6 +186,47 @@ class NapCatServerLifespanTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(direct_httpx.closed)
         self.assertTrue(runtime.disposed)
         self.assertTrue(container.closed)
+
+    async def test_missing_websocket_token_disables_authentication(self) -> None:
+        """NapCat 未配置 Token 时直接接受反向 WebSocket。"""
+        config = MyBotConfig.model_validate(
+            {"napcat": {}, "database": {}}
+        )
+        container = _FakeContainer({MyBotConfig: config})
+        server = object.__new__(NapCatServer)
+        server.container = cast(AsyncContainer, cast(object, container))
+        websocket = _FakeAuthWebSocket()
+
+        await server._check_auth_token(  # pyright: ignore[reportPrivateUsage]
+            cast(WebSocket, cast(object, websocket))
+        )
+
+        self.assertTrue(websocket.accepted)
+        self.assertIsNone(websocket.close_code)
+
+    async def test_configured_websocket_token_is_still_enforced(self) -> None:
+        """显式 Token 仍拒绝缺少 Bearer 认证的连接。"""
+        config = MyBotConfig.model_validate(
+            {
+                "napcat": {"websocket_token": "test-token"},
+                "database": {},
+            }
+        )
+        container = _FakeContainer({MyBotConfig: config})
+        server = object.__new__(NapCatServer)
+        server.container = cast(AsyncContainer, cast(object, container))
+        websocket = _FakeAuthWebSocket()
+
+        with self.assertRaisesRegex(ValueError, "Token 校验失败"):
+            await server._check_auth_token(  # pyright: ignore[reportPrivateUsage]
+                cast(WebSocket, cast(object, websocket))
+            )
+
+        self.assertFalse(websocket.accepted)
+        self.assertEqual(
+            websocket.close_code,
+            status.WS_1008_POLICY_VIOLATION,
+        )
 
     async def test_dependency_resolution_failure_closes_created_runtime(self) -> None:
         """后续依赖解析失败时，先前创建的连接池仍会释放。"""

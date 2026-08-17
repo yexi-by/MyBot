@@ -104,6 +104,7 @@ function NeavoImageGenerateFields() {
         <TextField
           path="plugins.neavo_image_generate.api_token"
           label="API Token"
+          description="留空时不发送 Authorization"
         />
       </SectionCard>
       <SectionCard title="生图配置">

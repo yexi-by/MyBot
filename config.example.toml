@@ -11,6 +11,7 @@ log_level = "info"
 
 [napcat]
 websocket_token = "CHANGE_ME_NAPCAT_TOKEN"
+# 删除或留空即可关闭 WebSocket Token 校验。
 send_max_attempts = 5
 send_retry_delay_seconds = 0
 
@@ -36,6 +37,7 @@ compression = "gz"
 
 [llm.providers.deepseek]
 api_key = "sk-CHANGE_ME"
+# 无鉴权的 OpenAI 兼容服务可删除 api_key。
 base_url = "https://api.deepseek.com"
 max_attempts = 5
 retry_delay_seconds = 0
@@ -55,7 +57,7 @@ port = 5432
 name = "mybot"
 user = "mybot"
 password = "CHANGE_ME_POSTGRES_PASSWORD"
-# Docker 使用 password_file，并删除 password。
+# 无密码数据库可删除 password；Docker 使用 password_file，并删除 password。
 # password_file = "/run/secrets/postgres_password"
 pool_size = 20
 max_overflow = 20
@@ -114,6 +116,7 @@ download_timeout_seconds = 20
 groups = ["123456789"]
 base_url = "https://image-api.example.com"
 api_token = "CHANGE_ME"
+# Neavo 服务不要求鉴权时可删除 api_token。
 poll_interval_seconds = 3
 generation_timeout_seconds = 600
 request_timeout_seconds = 30

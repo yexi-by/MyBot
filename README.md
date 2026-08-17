@@ -34,7 +34,7 @@ NapCat 反向 WebSocket 地址通常是：
 ws://<本机局域网 IP>:6055/ws/napcat
 ```
 
-Bearer Token 来自 `[napcat].websocket_token`。
+配置 `[napcat].websocket_token` 时校验 Bearer Token；省略或留空时不校验。
 
 ## WebUI
 
@@ -102,6 +102,8 @@ max_attempts = 5
 retry_delay_seconds = 0
 ```
 
+无鉴权的 OpenAI 兼容服务可以省略 `api_key`。未配置 key 时不会发送 `Authorization` 请求头。
+
 插件使用 `{ provider, name }` 引用模型，例如：
 
 ```toml
@@ -124,6 +126,7 @@ disabled = false
 ```
 
 MCP 命令、环境变量和密钥属于部署配置，不应提交到仓库。
+镜像内已包含 `/app/node_modules/.bin/firecrawl-mcp`、`/app/node_modules/.bin/mcp-searxng` 和 `/usr/local/bin/github-mcp-server`，部署配置可以直接使用这些 stdio 命令，不需要运行时下载安装。
 
 ### AI 群聊与视觉描述
 
@@ -168,7 +171,7 @@ request_timeout_seconds = 30
 max_image_bytes = 20971520
 ```
 
-省略整个插件节即可停用。`api_token` 不得提交或写入日志。
+省略整个插件节即可停用；Neavo 服务不要求鉴权时可以省略 `api_token`。实际 Token 不得提交或写入日志。
 
 ## 运行边界
 

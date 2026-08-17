@@ -197,9 +197,13 @@ class NapCatServer:
                 log_run_end(message="服务已安全关闭")
 
     async def _check_auth_token(self, websocket: WebSocket) -> None:
-        """校验 NapCat WebSocket Bearer Token。"""
+        """按可选配置校验 NapCat WebSocket Bearer Token。"""
         config = await self.container.get(MyBotConfig)
-        token = config.napcat.websocket_token.get_secret_value()
+        configured_token = config.napcat.websocket_token
+        if configured_token is None:
+            await websocket.accept()
+            return
+        token = configured_token.get_secret_value()
         auth_header = websocket.headers.get("authorization", "")
         expected_header = "Bearer " + token
         if not secrets.compare_digest(auth_header, expected_header):

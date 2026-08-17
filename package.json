@@ -2,7 +2,8 @@
   "name": "mybot-runtime-mcp",
   "private": true,
   "dependencies": {
-    "firecrawl-mcp": "3.24.0"
+    "firecrawl-mcp": "3.24.0",
+    "mcp-searxng": "1.15.0"
   },
   "overrides": {
     "axios": "1.18.0",

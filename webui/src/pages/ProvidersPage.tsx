@@ -34,7 +34,12 @@ export default function ProvidersPage() {
     }
     const next: Record<string, LLMProviderConfig> = {
       ...providers,
-      [id]: { api_key: "", base_url: null },
+      [id]: {
+        api_key: null,
+        base_url: null,
+        max_attempts: 5,
+        retry_delay_seconds: 0,
+      },
     };
     setValue("llm.providers", next, { shouldDirty: true });
     setNewProviderId("");
@@ -81,7 +86,7 @@ export default function ProvidersPage() {
           <TextField
             path={`llm.providers.${id}.api_key`}
             label="API Key"
-            description="明文展示与编辑（内网部署）"
+            description="留空时不发送 Authorization；内网 WebUI 明文展示"
           />
           <TextField
             path={`llm.providers.${id}.base_url`}

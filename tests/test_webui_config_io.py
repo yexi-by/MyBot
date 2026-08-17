@@ -137,6 +137,38 @@ class WebUIConfigIOTest(unittest.TestCase):
         self.assertNotIn("network", written)
         self.assertNotIn("storage", written)
 
+    def test_blank_password_does_not_conflict_with_password_file(self) -> None:
+        """WebUI 空密码与已配置的 secret 文件可以一起提交。"""
+        original = commented_config().replace(
+            'password = "test-password"',
+            'password_file = "/run/secrets/postgres_password"',
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_file = root / "mybot.toml"
+            config_file.write_text(original, encoding="utf-8")
+            manager = self._manager(root)
+            current = read_config_payload(config_file=config_file)
+            payload = dict(current.config)
+            payload["database"] = {
+                **current.config["database"],
+                "password": "",
+            }
+
+            _ = write_config_payload(
+                config_file=config_file,
+                payload=payload,
+                base_sha256=current.sha256,
+                boot_config=manager.boot_config,
+            )
+            written = tomllib.loads(config_file.read_text(encoding="utf-8"))
+
+        self.assertNotIn("password", written["database"])
+        self.assertEqual(
+            written["database"]["password_file"],
+            "/run/secrets/postgres_password",
+        )
+
     def test_write_removes_and_adds_plugin_sections(self) -> None:
         """payload 缺失的插件节被删除，新节被追加。"""
         with tempfile.TemporaryDirectory() as temp_dir:

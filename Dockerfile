@@ -1,5 +1,7 @@
 FROM node:24-bookworm-slim AS node_runtime
 
+FROM ghcr.io/github/github-mcp-server@sha256:881b53d6f75f69bdbc1b5b10fc2f1361717c19054143b3a8529fb5c32061a50e AS github_mcp
+
 FROM node_runtime AS webui_build
 
 # WebUI 前端在镜像内构建，产物由 FastAPI 直接伺服。
@@ -13,25 +15,15 @@ FROM python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY --from=node_runtime /usr/local/ /usr/local/
+COPY --from=github_mcp /server/github-mcp-server /usr/local/bin/github-mcp-server
 
-# 镜像提供项目运行时和常见 MCP stdio 启动器；具体 MCP server 由部署配置决定。
-# Node 与 Docker CLI 来自上游官方源，保证 stdio 工具链具备完整命令能力。
+# 镜像提供项目运行时、Node MCP stdio 启动器和官方 GitHub MCP server。
 # Node 官方镜像的 Yarn 软链接指向未复制的 /opt；交给 Corepack 重建。
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
-    curl \
-    git \
     libjemalloc2 \
-    && install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
-    && chmod a+r /etc/apt/keyrings/docker.asc \
-    && . /etc/os-release \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" \
-    > /etc/apt/sources.list.d/docker.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -f /usr/local/bin/yarn /usr/local/bin/yarnpkg \
     && corepack enable \
     && corepack prepare pnpm@latest --activate \

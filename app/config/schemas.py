@@ -61,16 +61,18 @@ class ServerConfig(ConfigModel):
 class NapCatConfig(ConfigModel):
     """NapCat 反向 WebSocket 连接配置。"""
 
-    websocket_token: SecretStr
+    websocket_token: SecretStr | None = None
     send_max_attempts: int = Field(default=5, ge=1)
     send_retry_delay_seconds: float = Field(default=0, ge=0)
 
     @field_validator("websocket_token")
     @classmethod
-    def validate_websocket_token(cls, value: SecretStr) -> SecretStr:
-        """拒绝空白 WebSocket Token。"""
-        if value.get_secret_value().strip() == "":
-            raise ValueError("websocket_token 不能为空")
+    def validate_websocket_token(
+        cls, value: SecretStr | None
+    ) -> SecretStr | None:
+        """空白 Token 表示不校验 NapCat WebSocket 请求。"""
+        if value is not None and value.get_secret_value().strip() == "":
+            return None
         return value
 
 
@@ -145,34 +147,32 @@ class DatabaseConfig(ConfigModel):
     @field_validator("password")
     @classmethod
     def validate_password(cls, value: SecretStr | None) -> SecretStr | None:
-        """拒绝空白密码，合法密码保持原值且不写入错误信息。"""
+        """空白密码表示数据库不使用密码认证。"""
         if value is not None and value.get_secret_value().strip() == "":
-            raise ValueError("PostgreSQL 密码不能为空")
+            return None
         return value
 
     @model_validator(mode="after")
     def validate_password_source(self) -> "DatabaseConfig":
-        """确保密码只来自配置值或 secret 文件之一。"""
+        """配置认证信息时，内联密码和 secret 文件只能选择一种。"""
         has_password = self.password is not None
         has_password_file = self.password_file is not None
-        if has_password == has_password_file:
-            raise ValueError("database.password 与 password_file 必须且只能配置一个")
+        if has_password and has_password_file:
+            raise ValueError("database.password 与 password_file 不能同时配置")
         return self
 
-    def resolve_password(self) -> str:
-        """读取数据库密码，且不把密码写入日志。"""
+    def resolve_password(self) -> str | None:
+        """读取可选数据库密码，且不把密码写入日志。"""
         if self.password is not None:
             return self.password.get_secret_value()
         if self.password_file is None:
-            raise RuntimeError("PostgreSQL 密码来源未配置")
+            return None
         password_path = Path(self.password_file)
         try:
             password = password_path.read_text(encoding="utf-8").strip()
         except OSError as exc:
             raise RuntimeError(f"无法读取 PostgreSQL 密码文件: {password_path}") from exc
-        if password == "":
-            raise RuntimeError("PostgreSQL 密码文件不能为空")
-        return password
+        return password or None
 
     def build_url(self) -> str:
         """使用 SQLAlchemy URL 统一转义连接字段和数据库密码。"""
@@ -216,17 +216,17 @@ class LoggingConfig(ConfigModel):
 class LLMProviderConfig(ConfigModel):
     """单个 OpenAI 兼容 LLM provider 配置。"""
 
-    api_key: SecretStr
+    api_key: SecretStr | None = None
     base_url: str | None = None
-    max_attempts: int = Field(ge=1)
-    retry_delay_seconds: float = Field(ge=0)
+    max_attempts: int = Field(default=5, ge=1)
+    retry_delay_seconds: float = Field(default=0, ge=0)
 
     @field_validator("api_key")
     @classmethod
-    def validate_api_key(cls, value: SecretStr) -> SecretStr:
-        """拒绝空 API key，且不在错误信息中回显内容。"""
-        if value.get_secret_value().strip() == "":
-            raise ValueError("api_key 不能为空")
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        """空白 API key 表示上游服务不需要鉴权。"""
+        if value is not None and value.get_secret_value().strip() == "":
+            return None
         return value
 
     @field_validator("base_url")
@@ -430,7 +430,7 @@ class NeavoImageGenerateConfig(ConfigModel):
 
     groups: tuple[NapCatId, ...] = ()
     base_url: str
-    api_token: SecretStr
+    api_token: SecretStr | None = None
     poll_interval_seconds: float = Field(ge=2.0, le=5.0, allow_inf_nan=False)
     generation_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
     request_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
@@ -450,19 +450,19 @@ class NeavoImageGenerateConfig(ConfigModel):
         parsed = urlsplit(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("base_url 必须是有效的 HTTP 或 HTTPS 地址")
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("base_url 不允许包含用户信息")
         if parsed.query or parsed.fragment:
             raise ValueError("base_url 不允许包含查询参数或片段")
         return base_url
 
     @field_validator("api_token")
     @classmethod
-    def validate_api_token(cls, value: SecretStr) -> SecretStr:
-        """拒绝空 Token，且不在错误信息中回显其内容。"""
+    def validate_api_token(cls, value: SecretStr | None) -> SecretStr | None:
+        """空白 Token 表示 Neavo 服务不需要 Bearer 鉴权。"""
+        if value is None:
+            return None
         token = value.get_secret_value().strip()
         if token == "":
-            raise ValueError("api_token 不能为空")
+            return None
         return SecretStr(token)
 
 
