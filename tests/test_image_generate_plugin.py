@@ -4,16 +4,18 @@ import unittest
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import cast
-from unittest.mock import patch
 
 import httpx
 
+from app.config import ImageGenerateConfig
 from app.database import GroupDataScope, StoredGroupMessage
 from app.models import GroupMessage, Image, MessageSegment, Reply, Response, Sender, Text
 from app.plugins.base import Context
-from app.plugins.image_generate.image_generate import (
-    ImageGenerateConfig,
-    ImageGeneratePlugin,
+from app.plugins.image_generate.image_generate import ImageGeneratePlugin
+from tests.config_helpers import (
+    FakeConfigManager,
+    build_plugin_snapshot,
+    plugin_config_view,
 )
 
 
@@ -117,22 +119,37 @@ class ImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
                 http_client=http_client,
                 group_messages=group_messages,
             )
-            config = ImageGenerateConfig(
-                group_ids=["40000"],
-                model_name="image-model",
-                model_vendors="image-vendor",
+            config = ImageGenerateConfig.model_validate(
+                {
+                    "groups": ["40000"],
+                    "model": {
+                        "provider": "image-vendor",
+                        "name": "image-model",
+                    },
+                }
             )
-            with patch(
-                "app.plugins.image_generate.image_generate.load_plugin_config",
-                return_value=config,
-            ):
-                plugin = ImageGeneratePlugin(context=cast(Context, context))
+            manager = FakeConfigManager(
+                build_plugin_snapshot(image_generate=config)
+            )
+            plugin = ImageGeneratePlugin(
+                context=cast(Context, context),
+                plugin_config=plugin_config_view(
+                    manager,
+                    plugin_id="image_generate",
+                ),
+            )
             try:
+                runtime = plugin._current_runtime()  # pyright: ignore[reportPrivateUsage]
+                if runtime is None:
+                    raise AssertionError("生图测试配置应启用插件")
                 collect_input_images = cast(
                     Callable[..., Awaitable[list[bytes]]],
                     getattr(plugin, "_collect_input_images"),
                 )
-                images = await collect_input_images(msg=build_command())
+                images = await collect_input_images(
+                    msg=build_command(),
+                    image_reader=runtime.image_reader,
+                )
             finally:
                 await plugin.stop_consumers()
 

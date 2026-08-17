@@ -105,8 +105,8 @@ class FakeMessageClient(MessageMixin):
         self.responses: list[Response | Exception] = list(responses) or [
             Response(status="ok", retcode=0, data={"message_id": 90000})
         ]
-        self.send_retry_count = 3
-        self.send_retry_delay = 0
+        self.send_max_attempts = 3
+        self.send_retry_delay_seconds = 0
         self.timeout = 1
 
     @override
@@ -296,7 +296,7 @@ class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
                 Response(status="failed", retcode=500, message="temporary failure"),
             ],
         )
-        client.send_retry_count = 2
+        client.send_max_attempts = 2
 
         with self.assertRaises(NapCatSendMessageError):
             _ = await client.send_msg(group_id="40000", text="你好")

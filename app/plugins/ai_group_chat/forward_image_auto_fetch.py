@@ -1,12 +1,12 @@
 """合并转发图片自动补取逻辑。"""
 
+from app.config import AIGroupChatConfig
 from app.models import JsonObject, JsonValue
 from app.services import CompositeToolExecutor
 from app.services.llm.schemas import LLMToolCall
 from app.services.llm.tools import LLMToolExecutionResult
 from app.utils.log import log_event
 
-from .config import AIGroupChatConfig
 
 FORWARD_MESSAGE_TOOL_NAME = "qq__get_forward_message"
 FORWARD_MESSAGE_IMAGES_TOOL_NAME = "qq__get_forward_message_images"
@@ -31,7 +31,7 @@ class ForwardImageAutoFetcher:
             return False
         if explicit_forward_image_call:
             return False
-        if not self.config.forward_image_tool_enabled:
+        if not self.config.images.forward_tool_enabled:
             return False
         if not isinstance(result, dict):
             return False

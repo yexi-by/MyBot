@@ -3,6 +3,7 @@
 from typing import ClassVar, Final, override
 
 from app.database import GroupDataScope, StoredGroupMessage
+from app.config import EmptyPluginConfig
 from app.models import GroupMessage, Image, NapCatId, Reply, Response, Text
 from app.plugins.base import BasePlugin
 from app.utils.log import log_event, log_exception
@@ -28,6 +29,8 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
     @override
     async def run(self, msg: GroupMessage) -> bool:
         """识别引用撤回指令，校验目标归属并尝试撤回图片。"""
+        if self.plugin_config.get(EmptyPluginConfig) is None:
+            return False
         if msg.post_type != "message" or self._extract_plain_text(msg=msg) != RECALL_COMMAND:
             return False
 

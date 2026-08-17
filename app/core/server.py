@@ -14,7 +14,7 @@ from dishka.integrations.fastapi import FromDishka, inject, setup_dishka
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 
 from app.api import BOTClient
-from app.config import Settings
+from app.config import ConfigWatcher, MyBotConfig
 from app.database import (
     DatabaseMigrator,
     GroupDataScope,
@@ -41,10 +41,10 @@ class EventPersistenceError(RuntimeError):
 class NapCatServer:
     """承载 NapCat 反向 WebSocket 连接的 FastAPI 服务。"""
 
-    def __init__(self, container: AsyncContainer, settings: Settings) -> None:
+    def __init__(self, container: AsyncContainer, config: MyBotConfig) -> None:
         """创建 FastAPI 应用并注册路由。"""
         self.container: AsyncContainer = container
-        self.settings: Settings = settings
+        self.config: MyBotConfig = config
         self.app: FastAPI = FastAPI(lifespan=self.lifespan)
         setup_dishka(self.container, self.app)
         self._register_routes()
@@ -81,16 +81,18 @@ class NapCatServer:
         """检查数据库版本并管理全局网络与连接池资源。"""
         log_run_start(
             message="正在初始化服务组件",
-            app_name=self.settings.app.name,
-            environment=self.settings.app.environment,
-            host=self.settings.server.host,
-            port=self.settings.server.port,
-            websocket_path_prefix=self.settings.server.websocket_path_prefix,
+            app_name=self.config.app.name,
+            environment=self.config.app.environment,
+            host=self.config.server.host,
+            port=self.config.server.port,
+            websocket_path_prefix=self.config.server.websocket_path_prefix,
         )
         runtime: PostgreSQLRuntime | None = None
         mcp_tool_manager: MCPToolManager | None = None
         direct_httpx: DirectHttpx | None = None
         proxy_httpx: ProxyHttpx | None = None
+        config_watcher: ConfigWatcher | None = None
+        config_watcher_task: asyncio.Task[None] | None = None
         active_error: BaseException | None = None
         try:
             runtime = await self.container.get(PostgreSQLRuntime)
@@ -98,12 +100,14 @@ class NapCatServer:
             mcp_tool_manager = await self.container.get(MCPToolManager)
             direct_httpx = await self.container.get(DirectHttpx)
             proxy_httpx = await self.container.get(ProxyHttpx | None)
+            config_watcher = await self.container.get(ConfigWatcher)
             await runtime.check_connection()
             await migrator.assert_current()
             await mcp_tool_manager.start()
             _ = await self.container.get(PostgreSQLMessageRepository)
             _ = await self.container.get(ImageArchiveWorkerFactory)
             _ = await self.container.get(LLMHandler | None)
+            config_watcher_task = asyncio.create_task(config_watcher.run())
             log_event(
                 level="SUCCESS",
                 event="app.startup.ready",
@@ -141,6 +145,16 @@ class NapCatServer:
                         resource_name=resource_name,
                     )
 
+            if config_watcher is not None:
+                config_watcher.stop()
+            if config_watcher_task is not None:
+                async def wait_config_watcher() -> None:
+                    await asyncio.wait_for(config_watcher_task, timeout=3)
+
+                await close_resource(
+                    resource_name="config_watcher",
+                    operation=wait_config_watcher,
+                )
             if mcp_tool_manager is not None:
                 await close_resource(
                     resource_name="mcp_tool_manager",
@@ -174,8 +188,8 @@ class NapCatServer:
 
     async def _check_auth_token(self, websocket: WebSocket) -> None:
         """校验 NapCat WebSocket Bearer Token。"""
-        setting = await self.container.get(Settings)
-        token = setting.napcat.websocket_token
+        config = await self.container.get(MyBotConfig)
+        token = config.napcat.websocket_token.get_secret_value()
         auth_header = websocket.headers.get("authorization", "")
         expected_header = "Bearer " + token
         if not secrets.compare_digest(auth_header, expected_header):
@@ -318,7 +332,7 @@ class NapCatServer:
 
     def _register_routes(self) -> None:
         """注册 WebSocket 路由。"""
-        websocket_path = f"{self.settings.server.websocket_path_prefix}/{{client_id}}"
+        websocket_path = f"{self.config.server.websocket_path_prefix}/{{client_id}}"
 
         @self.app.websocket(websocket_path)
         @inject

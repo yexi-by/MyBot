@@ -19,6 +19,7 @@ node_modules/
 AGENTS.md
 setting.toml
 setting.local.toml
+/config/
 *.secret.toml
 .env
 .env.*
@@ -58,4 +59,4 @@ archived_plugins_config/
 Thumbs.db
 
 # 保留可提交的示例配置
-!setting.example.toml
+!config.example.toml

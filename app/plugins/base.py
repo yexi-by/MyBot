@@ -9,6 +9,7 @@ from typing import ClassVar, cast
 
 import httpx
 
+from app.config import PluginConfigView
 from app.api import BOTClient
 from app.database import (
     GroupMessageReader,
@@ -17,7 +18,6 @@ from app.database import (
 )
 from app.models import AllEvent
 from app.services import LLMHandler, MCPToolManager
-from app.config import Settings
 from app.utils.log import log_event, log_exception
 
 
@@ -76,7 +76,6 @@ class Context:
 
     def __init__(
         self,
-        settings: Settings,
         bot: BOTClient,
         group_messages: GroupMessageReader,
         plugin_id: str,
@@ -87,7 +86,6 @@ class Context:
         mcp_tool_manager: MCPToolManager | None = None,
     ) -> None:
         """保存插件运行期可用服务。"""
-        self.settings: Settings = settings
         self.bot: BOTClient = bot
         self.group_messages: GroupMessageReader = group_messages
         self.plugin_id: str = plugin_id
@@ -141,9 +139,11 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
     def __init__(
         self,
         context: Context,
+        plugin_config: PluginConfigView,
     ) -> None:
         """初始化插件上下文、任务队列和消费者。"""
         self.context: Context = context
+        self.plugin_config: PluginConfigView = plugin_config
         self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
         self.consumers: list[asyncio.Task[None]] = []
         self._active_futures: set[asyncio.Future[bool]] = set()

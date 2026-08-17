@@ -8,6 +8,11 @@ from app.core.dispatcher import EventDispatcher
 from app.core.plugin_manager import PluginController
 from app.models import AllEvent, GroupBanEvent, GroupMessage, Sender, Text
 from app.plugins.base import PLUGINS, BasePlugin, Context
+from tests.config_helpers import (
+    FakeConfigManager,
+    build_plugin_snapshot,
+    plugin_config_view,
+)
 
 
 class RoutingPlugin(BasePlugin[GroupMessage | GroupBanEvent]):
@@ -57,7 +62,13 @@ class PluginRoutingTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         """创建插件、控制器和事件分发器。"""
-        self.plugin = RoutingPlugin(context=cast(Context, object()))
+        self.plugin = RoutingPlugin(
+            context=cast(Context, object()),
+            plugin_config=plugin_config_view(
+                FakeConfigManager(build_plugin_snapshot()),
+                plugin_id="event_routing_test",
+            ),
+        )
         plugin = cast(BasePlugin[AllEvent], cast(object, self.plugin))
         self.controller = PluginController(plugin_objects=[plugin])
         self.dispatcher = EventDispatcher(

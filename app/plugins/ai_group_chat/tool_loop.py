@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from app.api.mixins.message import NapCatSendMessageError
+from app.config import AIGroupChatConfig
 from app.models import GroupMessage, JsonObject, JsonValue
 from app.plugins.base import Context
 from app.services import (
@@ -20,7 +21,6 @@ from app.services.llm.tools import (
 )
 from app.utils.log import log_event
 
-from .config import AIGroupChatConfig
 from .context_compressor import GroupChatContextCompressor
 from .debug_dump import AIGroupChatDebugDumper
 from .forward_image_auto_fetch import (
@@ -95,7 +95,7 @@ class GroupChatToolLoop:
         self.debug_dumper: AIGroupChatDebugDumper = debug_dumper
         self.vision_tool: VisionDescriptionTool = vision_tool
         self.token_estimator: ConservativeTokenEstimator = ConservativeTokenEstimator(
-            safety_factor=config.token_estimation_safety_factor
+            safety_factor=config.token_safety_factor
         )
         self.context_compressor: GroupChatContextCompressor = (
             GroupChatContextCompressor()
@@ -124,14 +124,14 @@ class GroupChatToolLoop:
             group_messages=self.context.group_messages,
             event=msg,
             allow_mention_all=self.config.allow_mention_all,
-            forward_image_tool_enabled=self.config.forward_image_tool_enabled,
+            forward_image_tool_enabled=self.config.images.forward_tool_enabled,
             forward_image_max_images_per_call=(
-                self.config.forward_image_max_images_per_call
+                self.config.images.forward_max_per_call
             ),
-            forward_image_max_all_images=self.config.forward_image_max_all_images,
-            image_fetch_concurrency=self.config.image_fetch_concurrency,
+            forward_image_max_all_images=self.config.images.forward_max_per_turn,
+            image_fetch_concurrency=self.config.images.fetch_concurrency,
             image_download_timeout_seconds=(
-                self.config.image_download_timeout_seconds
+                self.config.images.download_timeout_seconds
             ),
             max_reply_chars=self.config.max_reply_chars,
             http_client=self.context.direct_httpx,
@@ -158,9 +158,9 @@ class GroupChatToolLoop:
             message="AI 群聊工具循环开始",
             group_id=msg.group_id,
             message_id=msg.message_id,
-            model_name=self.config.model_name,
-            model_vendors=self.config.model_vendors,
-            supports_multimodal=self.config.supports_multimodal,
+            model_name=self.config.model.name,
+            provider=self.config.model.provider,
+            supports_images=self.config.model.supports_images,
             working_messages_count=len(working_messages),
             tools_count=len(tools),
             tool_names=[tool.name for tool in tools],
@@ -176,15 +176,15 @@ class GroupChatToolLoop:
                 round_index=round_index,
                 messages_count=len(working_messages),
                 working_messages_count=len(working_messages),
-                model_name=self.config.model_name,
-                model_vendors=self.config.model_vendors,
+                model_name=self.config.model.name,
+                provider=self.config.model.provider,
                 tools_count=len(tools),
                 tool_choice="auto",
             )
             response = await self.context.llm.get_ai_response_with_tools(
                 messages=working_messages,
-                model_vendors=self.config.model_vendors,
-                model_name=self.config.model_name,
+                provider=self.config.model.provider,
+                model_name=self.config.model.name,
                 tools=tools,
             )
             content = self._normalize_content(response.content)
@@ -429,8 +429,8 @@ class GroupChatToolLoop:
         )
         summary = await self.context.llm.get_ai_text_response(
             messages=compression_messages,
-            model_vendors=self.config.model_vendors,
-            model_name=self.config.model_name,
+            provider=self.config.model.provider,
+            model_name=self.config.model.name,
         )
         normalized_summary = self._normalize_content(summary)
         if normalized_summary is None:
@@ -811,7 +811,7 @@ class GroupChatToolLoop:
         stripped_turn_image_count = self._count_images(messages=turn_messages)
         sanitized_turn_messages = self._strip_history_images(messages=turn_messages)
         history_messages = sanitized_turn_messages[:]
-        if self.config.persist_tool_results:
+        if self.config.retain_tool_results:
             history_messages.extend(tool_history_messages)
         history_messages.extend(vision_history_messages)
         history_messages.extend(sent_content_messages)
@@ -828,8 +828,12 @@ class GroupChatToolLoop:
             tool_history_messages_count=len(tool_history_messages),
             vision_history_messages_count=len(vision_history_messages),
             persisted_messages_count=len(history_messages),
-            persist_tool_results=self.config.persist_tool_results,
-            persist_vision_descriptions=self.config.persist_vision_descriptions,
+            retain_tool_results=self.config.retain_tool_results,
+            retain_vision_descriptions=(
+                self.config.vision.retain_descriptions
+                if self.config.vision is not None
+                else False
+            ),
             replace_existing_history=replace_existing_history,
         )
         if replace_existing_history:
@@ -885,7 +889,7 @@ class GroupChatToolLoop:
                 memory_reasoning_content=memory_reasoning_content,
             )
         reasoning_text = self._normalize_content(reasoning_content)
-        if not self.config.output_reasoning_content or reasoning_text is None:
+        if not self.config.show_reasoning or reasoning_text is None:
             return ReplyContent(
                 visible_content=content,
                 memory_content=content,
@@ -909,6 +913,6 @@ class GroupChatToolLoop:
         self, reasoning_content: str | None
     ) -> str | None:
         """按配置决定是否把模型原生思维链作为结构化字段回传给后续请求。"""
-        if not self.config.pass_back_reasoning_content:
+        if not self.config.retain_reasoning:
             return None
         return self._normalize_content(reasoning_content)

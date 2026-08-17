@@ -234,8 +234,8 @@ class MessageMixin(BaseMixin):
         """调用 NapCat 发送类 Action，并对可恢复失败执行配置化重试。"""
         retrier = create_retry_manager(
             error_types=(NapCatRetryableSendMessageError,),
-            retry_count=self.send_retry_count,
-            retry_delay=self.send_retry_delay,
+            max_attempts=self.send_max_attempts,
+            retry_delay_seconds=self.send_retry_delay_seconds,
         )
         async for attempt in retrier:
             with attempt:

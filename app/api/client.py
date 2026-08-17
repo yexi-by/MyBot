@@ -49,8 +49,8 @@ class BOTClient(
         websocket: WebSocket,
         sent_message_recorder: SentMessageRecorder,
         inline_image_archiver: InlineImageArchiver,
-        send_retry_count: int = 5,
-        send_retry_delay: float = 0,
+        send_max_attempts: int = 5,
+        send_retry_delay_seconds: float = 0,
     ) -> None:
         """初始化 BOTClient
 
@@ -58,8 +58,8 @@ class BOTClient(
             websocket: WebSocket 连接实例
             sent_message_recorder: 出站群消息记录接口
             inline_image_archiver: 出站内联图片归档服务
-            send_retry_count: NapCat send_msg 发送总尝试次数
-            send_retry_delay: NapCat send_msg 发送初始退避秒数
+            send_max_attempts: NapCat send_msg 发送总尝试次数
+            send_retry_delay_seconds: NapCat send_msg 发送初始退避秒数
         """
         self.websocket: WebSocket = websocket
         self.sent_message_recorder: SentMessageRecorder = sent_message_recorder
@@ -69,8 +69,8 @@ class BOTClient(
         self.persistence_failed_event: asyncio.Event = asyncio.Event()
         self.boot_id: NapCatId = ""
         self.timeout: int = 120
-        self.send_retry_count: int = send_retry_count
-        self.send_retry_delay: float = send_retry_delay
+        self.send_max_attempts: int = send_max_attempts
+        self.send_retry_delay_seconds: float = send_retry_delay_seconds
 
     def get_self_qq_id(self, msg: AllEvent) -> None:
         """从 NapCat 事件中刷新机器人自身 QQ 号。"""

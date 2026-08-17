@@ -2,16 +2,13 @@
 
 from dataclasses import dataclass, field
 from hashlib import sha256
-from pathlib import Path
 
+from app.config import MaterializedAIGroupChatConfig
 from app.models import StrictModel
 from app.plugins.base import Context
 from app.services import ChatMessage
 from app.services.llm.tools import LLMImageArtifact, LLMImageError, LLMImageItem
 from app.utils.log import log_event
-
-from .config import AIGroupChatConfig
-
 
 class VisionDescriptionResult(StrictModel):
     """描述内部视觉工具生成的结构化结果。"""
@@ -45,9 +42,11 @@ class VisionDelivery:
 class VisionDescriptionTool:
     """把图片直接交给主模型，或调用独立视觉模型生成文字描述。"""
 
-    def __init__(self, *, config: AIGroupChatConfig, context: Context) -> None:
+    def __init__(
+        self, *, config: MaterializedAIGroupChatConfig, context: Context
+    ) -> None:
         """保存视觉工具配置与 LLM 访问入口。"""
-        self.config: AIGroupChatConfig = config
+        self.config = config
         self.context: Context = context
 
     async def deliver(
@@ -92,7 +91,7 @@ class VisionDescriptionTool:
             return VisionDelivery([], [], None)
         remaining_slots = max(
             0,
-            self.config.image_delivery_max_images - turn_state.consumed_image_slots,
+            self.config.source.images.max_per_turn - turn_state.consumed_image_slots,
         )
         selected_items = unique_items[:remaining_slots]
         selected_artifacts = [
@@ -122,9 +121,9 @@ class VisionDescriptionTool:
             retained_error_count=len(selected_errors),
             truncated_count=total_truncated_count,
             consumed_image_slots=turn_state.consumed_image_slots,
-            max_image_slots=self.config.image_delivery_max_images,
+            max_image_slots=self.config.source.images.max_per_turn,
         )
-        if self.config.supports_multimodal:
+        if self.config.source.model.supports_images:
             delivery = self._build_direct_delivery(
                 artifacts=selected_artifacts,
                 errors=selected_errors,
@@ -280,20 +279,20 @@ class VisionDescriptionTool:
         source_name: str,
     ) -> str:
         """发起不携带群聊角色、历史或工具的独立视觉请求。"""
-        model_name = self.config.vision_model_name
-        model_vendors = self.config.vision_model_vendors
-        if model_name is None or model_vendors is None:
+        vision = self.config.source.vision
+        if vision is None:
             raise RuntimeError("独立视觉模型配置缺失")
+        system_prompt = self.config.vision_system_prompt
+        user_prompt = self.config.vision_user_prompt
+        if system_prompt is None or user_prompt is None:
+            raise RuntimeError("独立视觉提示词尚未加载")
         labels = "\n".join(
             f"{index}. {artifact.label}"
             for index, artifact in enumerate(artifacts, start=1)
         )
         prompt = "\n\n".join(
             [
-                self._read_prompt(
-                    path_value=self.config.vision_user_prompt_path,
-                    field_name="vision_user_prompt_path",
-                ),
+                user_prompt,
                 f"图片来源：{source_name}",
                 f"当前问题：\n{question.strip() or '（当前消息没有文字问题）'}",
                 f"图片顺序：\n{labels}",
@@ -302,10 +301,7 @@ class VisionDescriptionTool:
         messages = [
             ChatMessage(
                 role="system",
-                text=self._read_prompt(
-                    path_value=self.config.vision_system_prompt_path,
-                    field_name="vision_system_prompt_path",
-                ),
+                text=system_prompt,
             ),
             ChatMessage(
                 role="user",
@@ -315,10 +311,10 @@ class VisionDescriptionTool:
         ]
         response = await self.context.llm.get_ai_text_response(
             messages=messages,
-            model_vendors=model_vendors,
-            model_name=model_name,
-            retry_count=self.config.vision_request_retry_count,
-            retry_delay=self.config.vision_request_retry_delay_seconds,
+            provider=vision.model.provider,
+            model_name=vision.model.name,
+            max_attempts=vision.max_attempts,
+            retry_delay_seconds=vision.retry_delay_seconds,
         )
         description = response.strip()
         if description == "":
@@ -397,7 +393,8 @@ class VisionDescriptionTool:
     ) -> list[ChatMessage]:
         """只按配置保存成功生成的视觉描述，不保存临时读取错误。"""
         if (
-            not self.config.persist_vision_descriptions
+            self.config.source.vision is None
+            or not self.config.source.vision.retain_descriptions
             or result.description is None
         ):
             return []
@@ -409,15 +406,3 @@ class VisionDescriptionTool:
         digest.update(len(artifact.image_bytes).to_bytes(8, byteorder="big"))
         digest.update(artifact.image_bytes)
         return digest.hexdigest()
-
-    def _read_prompt(self, *, path_value: str | None, field_name: str) -> str:
-        """读取配置中显式指定的非空视觉提示词。"""
-        if path_value is None or path_value.strip() == "":
-            raise ValueError(f"{field_name} 必须配置为提示词文件路径")
-        path = Path(path_value)
-        if not path.is_file():
-            raise FileNotFoundError(f"{field_name} 不存在: {path}")
-        content = path.read_text(encoding="utf-8").strip()
-        if content == "":
-            raise ValueError(f"{field_name} 为空: {path}")
-        return content

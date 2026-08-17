@@ -9,6 +9,7 @@ from typing import cast
 
 import httpx
 
+from app.config import AIGroupChatConfig, AIGroupConfig
 from app.database import GroupDataScope, GroupMessageReader, StoredGroupMessage
 from app.models import (
     At,
@@ -30,7 +31,6 @@ from app.models import (
     UnknownSegment,
     to_json_value,
 )
-from app.plugins.ai_group_chat.config import AIGroupChatConfig, GroupChatConfig
 from app.plugins.ai_group_chat.message_builder import GroupChatMessageBuilder
 
 VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
@@ -83,18 +83,20 @@ class MissingImageBot:
 def build_config(**overrides: object) -> AIGroupChatConfig:
     """构造使用独立视觉工具的测试配置。"""
     values: dict[str, object] = {
-        "model_name": "text-model",
-        "model_vendors": "main-vendor",
-        "supports_multimodal": False,
-        "vision_model_name": "vision-model",
-        "vision_model_vendors": "vision-vendor",
-        "vision_system_prompt_path": VISION_SYSTEM_PROMPT_PATH,
-        "vision_user_prompt_path": VISION_USER_PROMPT_PATH,
-        "group_config": [
-            GroupChatConfig(
-                group_id="40000",
-                system_prompt_path="unused",
-                knowledge_base_path="unused",
+        "model": {
+            "provider": "main-vendor",
+            "name": "text-model",
+            "supports_images": False,
+        },
+        "vision": {
+            "model": {"provider": "vision-vendor", "name": "vision-model"},
+            "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
+            "user_prompt_file": VISION_USER_PROMPT_PATH,
+        },
+        "groups": [
+            AIGroupConfig(
+                id="40000",
+                system_prompt_file="unused",
                 max_context_tokens=1000000,
             )
         ],
@@ -258,7 +260,7 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
             result = asyncio.run(
                 build_builder(
                     database=ReplyDatabase(quoted),
-                    config=build_config(image_delivery_max_images=2),
+                    config=build_config(images={"max_per_turn": 2}),
                 ).build_turn_messages(msg=msg)
             )
 

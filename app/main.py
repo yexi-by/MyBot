@@ -2,34 +2,38 @@
 
 import uvicorn
 
-from app.config import load_settings
+from app.config import ConfigLoadError, ConfigManager
 from app.utils.log import configure_logging
 
 
 def main() -> None:
     """启动 NapCat 反向 WebSocket 服务。"""
-    settings = load_settings()
+    try:
+        config_manager = ConfigManager.create()
+    except ConfigLoadError as exc:
+        raise SystemExit(f"配置加载失败: {exc}") from exc
+    config = config_manager.boot_config
     configure_logging(
-        log_dir=settings.logging.directory,
-        console_level=settings.logging.console_level,
-        file_level=settings.logging.file_level,
-        retention=settings.logging.retention,
-        rotation=settings.logging.rotation,
-        compression=settings.logging.compression,
+        log_dir=config.logging.directory,
+        console_level=config.logging.console_level,
+        file_level=config.logging.file_level,
+        retention=config.logging.retention,
+        rotation=config.logging.rotation,
+        compression=config.logging.compression,
     )
 
     from dishka import make_async_container
 
     from app.core import NapCatServer, MyProvider
 
-    container = make_async_container(MyProvider(settings=settings))
-    napcat = NapCatServer(container=container, settings=settings)
+    container = make_async_container(MyProvider(config_manager=config_manager))
+    napcat = NapCatServer(container=container, config=config)
     uvicorn.run(
         napcat.app,
-        host=settings.server.host,
-        port=settings.server.port,
-        log_level=settings.server.log_level,
-        access_log=settings.server.access_log,
+        host=config.server.host,
+        port=config.server.port,
+        log_level=config.server.log_level,
+        access_log=config.server.access_log,
     )
 
 

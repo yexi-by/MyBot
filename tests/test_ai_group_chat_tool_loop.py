@@ -7,6 +7,7 @@ from typing import Protocol, cast
 import httpx
 
 from app.api.mixins.message import NapCatSendMessageError
+from app.config import AIGroupChatConfig, MaterializedAIGroupChatConfig
 from app.database import GroupDataScope, StoredGroupMessage
 from app.models import (
     Forward,
@@ -18,7 +19,6 @@ from app.models import (
     Sender,
     Text,
 )
-from app.plugins.ai_group_chat.config import AIGroupChatConfig
 from app.plugins.ai_group_chat.debug_dump import AIGroupChatDebugDumper
 from app.plugins.ai_group_chat.tool_loop import GroupChatToolLoop
 from app.plugins.ai_group_chat.vision_tool import (
@@ -50,10 +50,10 @@ class FakeLLMProtocol(Protocol):
     async def get_ai_text_response(
         self,
         messages: list[ChatMessage],
-        model_vendors: str,
+        provider: str,
         model_name: str,
-        retry_count: int | None = None,
-        retry_delay: float | None = None,
+        max_attempts: int | None = None,
+        retry_delay_seconds: float | None = None,
     ) -> str:
         """返回纯文本响应。"""
         ...
@@ -61,7 +61,7 @@ class FakeLLMProtocol(Protocol):
     async def get_ai_response_with_tools(
         self,
         messages: list[ChatMessage],
-        model_vendors: str,
+        provider: str,
         model_name: str,
         tools: list[LLMToolDefinition],
         tool_choice: LLMToolChoice = "auto",
@@ -91,21 +91,21 @@ class RecordingLLM:
     async def get_ai_text_response(
         self,
         messages: list[ChatMessage],
-        model_vendors: str,
+        provider: str,
         model_name: str,
-        retry_count: int | None = None,
-        retry_delay: float | None = None,
+        max_attempts: int | None = None,
+        retry_delay_seconds: float | None = None,
     ) -> str:
         """记录视觉或压缩请求并返回固定文本。"""
-        _ = (retry_count, retry_delay)
+        _ = (max_attempts, retry_delay_seconds)
         self.text_requests.append(messages[:])
-        self.text_models.append((model_vendors, model_name))
+        self.text_models.append((provider, model_name))
         return self.text_response
 
     async def get_ai_response_with_tools(
         self,
         messages: list[ChatMessage],
-        model_vendors: str,
+        provider: str,
         model_name: str,
         tools: list[LLMToolDefinition],
         tool_choice: LLMToolChoice = "auto",
@@ -114,7 +114,7 @@ class RecordingLLM:
         """记录正式请求并弹出下一条响应。"""
         _ = (tools, tool_choice, parallel_tool_calls)
         self.formal_requests.append(messages[:])
-        self.formal_models.append((model_vendors, model_name))
+        self.formal_models.append((provider, model_name))
         if not self.responses:
             raise AssertionError("正式响应队列已耗尽")
         return self.responses.pop(0)
@@ -314,34 +314,40 @@ class FakeContext:
 
 def build_config(
     *,
-    supports_multimodal: bool = False,
+    supports_images: bool = False,
     model_name: str = "main-model",
-    model_vendors: str = "main-vendor",
-    output_reasoning_content: bool = False,
-    pass_back_reasoning_content: bool = False,
-    persist_vision_descriptions: bool = True,
+    provider: str = "main-vendor",
+    show_reasoning: bool = False,
+    retain_reasoning: bool = False,
+    retain_vision_descriptions: bool = True,
     max_reply_chars: int = 100,
     context_compression_notice: str = "正在整理上下文",
 ) -> AIGroupChatConfig:
     """按主模型能力构造有效配置。"""
     values: dict[str, object] = {
-        "model_name": model_name,
-        "model_vendors": model_vendors,
-        "supports_multimodal": supports_multimodal,
-        "output_reasoning_content": output_reasoning_content,
-        "pass_back_reasoning_content": pass_back_reasoning_content,
-        "persist_vision_descriptions": persist_vision_descriptions,
+        "model": {
+            "provider": provider,
+            "name": model_name,
+            "supports_images": supports_images,
+        },
+        "show_reasoning": show_reasoning,
+        "retain_reasoning": retain_reasoning,
         "max_reply_chars": max_reply_chars,
         "context_compression_notice": context_compression_notice,
-        "group_config": [],
+        "groups": [],
     }
-    if not supports_multimodal:
+    if not supports_images:
         values.update(
             {
-                "vision_model_name": "vision-model",
-                "vision_model_vendors": "vision-vendor",
-                "vision_system_prompt_path": VISION_SYSTEM_PROMPT_PATH,
-                "vision_user_prompt_path": VISION_USER_PROMPT_PATH,
+                "vision": {
+                    "model": {
+                        "provider": "vision-vendor",
+                        "name": "vision-model",
+                    },
+                    "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
+                    "user_prompt_file": VISION_USER_PROMPT_PATH,
+                    "retain_descriptions": retain_vision_descriptions,
+                }
             }
         )
     return AIGroupChatConfig.model_validate(values)
@@ -370,6 +376,20 @@ def build_tool_call(call_id: str = "call-1") -> LLMToolCall:
     return LLMToolCall(id=call_id, name=TOOL_NAME, arguments={})
 
 
+def materialize_config(config: AIGroupChatConfig) -> MaterializedAIGroupChatConfig:
+    """为视觉工具补齐已经由统一加载器读取的提示词。"""
+    return MaterializedAIGroupChatConfig(
+        source=config,
+        groups=(),
+        vision_system_prompt=(
+            "只描述可见事实。" if config.vision is not None else None
+        ),
+        vision_user_prompt=(
+            "结合当前问题描述图片。" if config.vision is not None else None
+        ),
+    )
+
+
 def build_loop(
     *, config: AIGroupChatConfig, context: FakeContext
 ) -> GroupChatToolLoop:
@@ -379,7 +399,10 @@ def build_loop(
         config=config,
         context=typed_context,
         debug_dumper=AIGroupChatDebugDumper(config=config),
-        vision_tool=VisionDescriptionTool(config=config, context=typed_context),
+        vision_tool=VisionDescriptionTool(
+            config=materialize_config(config),
+            context=typed_context,
+        ),
     )
 
 
@@ -422,7 +445,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         context = FakeContext(llm=llm)
-        config = build_config(pass_back_reasoning_content=True)
+        config = build_config(retain_reasoning=True)
         chat_handler = ContextHandler(
             system_prompt="系统提示词", max_context_tokens=1000000
         )
@@ -447,7 +470,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         context = FakeContext(llm=llm)
-        config = build_config(output_reasoning_content=True)
+        config = build_config(show_reasoning=True)
         chat_handler = ContextHandler(
             system_prompt="系统提示词", max_context_tokens=1000000
         )
@@ -478,7 +501,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         config = build_config()
         typed_context = cast(Context, context)
         vision_tool = VisionDescriptionTool(
-            config=config,
+            config=materialize_config(config),
             context=typed_context,
         )
         state = VisionTurnState()
@@ -531,7 +554,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         context = FakeContext(llm=llm)
-        config = build_config(pass_back_reasoning_content=True)
+        config = build_config(retain_reasoning=True)
         chat_handler = ContextHandler(
             system_prompt="系统提示词", max_context_tokens=1000000
         )
@@ -553,7 +576,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         context = FakeContext(llm=llm)
         config = build_config(
             model_name="deepseek-v4-pro",
-            model_vendors="deepseek",
+            provider="deepseek",
         )
         chat_handler = ContextHandler(
             system_prompt="系统提示词\n通用群聊要求",
@@ -647,7 +670,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             llm=llm,
             tool_manager=FakeToolManager(image_bytes=b"tool-image"),
         )
-        config = build_config(persist_vision_descriptions=False)
+        config = build_config(retain_vision_descriptions=False)
         chat_handler = ContextHandler(
             system_prompt="系统提示词", max_context_tokens=1000000
         )
@@ -677,7 +700,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             llm=llm,
             tool_manager=FakeToolManager(image_bytes=b"tool-image"),
         )
-        config = build_config(supports_multimodal=True)
+        config = build_config(supports_images=True)
         chat_handler = ContextHandler(
             system_prompt="系统提示词", max_context_tokens=1000000
         )
@@ -1011,7 +1034,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         context = FakeContext(llm=llm)
         config = build_config(
             model_name="deepseek-v4-pro",
-            model_vendors="main-vendor",
+            provider="main-vendor",
             context_compression_notice="我先整理一下记忆",
         )
         chat_handler = ContextHandler(

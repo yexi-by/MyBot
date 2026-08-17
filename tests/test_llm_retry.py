@@ -4,9 +4,10 @@ import unittest
 from typing import override
 from unittest.mock import AsyncMock, call, patch
 
+from app.config import LLMProviderConfig
 from app.services.llm.base import LLMProvider
 from app.services.llm.handler import LLMHandler
-from app.services.llm.schemas import ChatMessage, LLMConfig, LLMProviderWrapper
+from app.services.llm.schemas import ChatMessage, LLMProviderWrapper
 from app.services.llm.wrapper import ResilientLLMProvider
 
 
@@ -42,30 +43,30 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
         inner_provider = FlakyTextProvider(failures_before_success=2)
         provider = ResilientLLMProvider(
             inner_provider=inner_provider,
-            llm_config=LLMConfig(
-                api_key="test-key",
-                model_vendors="vision-vendor",
-                provider_type="openai",
-                retry_count=1,
-                retry_delay=9,
+            provider_config=LLMProviderConfig.model_validate(
+                {
+                    "api_key": "test-key",
+                    "max_attempts": 1,
+                    "retry_delay_seconds": 9,
+                }
             ),
         )
         handler = LLMHandler(
-            services=[
-                LLMProviderWrapper(
-                    model_vendors="vision-vendor",
+            services={
+                "vision-vendor": LLMProviderWrapper(
+                    provider_id="vision-vendor",
                     provider=provider,
                 )
-            ]
+            }
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
             result = await handler.get_ai_text_response(
                 messages=[ChatMessage(role="user", text="看图")],
-                model_vendors="vision-vendor",
+                provider="vision-vendor",
                 model_name="vision-model",
-                retry_count=3,
-                retry_delay=1,
+                max_attempts=3,
+                retry_delay_seconds=1,
             )
 
         self.assertEqual(result, "视觉描述成功")
@@ -77,27 +78,27 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
         inner_provider = FlakyTextProvider(failures_before_success=2)
         provider = ResilientLLMProvider(
             inner_provider=inner_provider,
-            llm_config=LLMConfig(
-                api_key="test-key",
-                model_vendors="fast-vendor",
-                provider_type="openai",
-                retry_count=3,
-                retry_delay=0,
+            provider_config=LLMProviderConfig.model_validate(
+                {
+                    "api_key": "test-key",
+                    "max_attempts": 3,
+                    "retry_delay_seconds": 0,
+                }
             ),
         )
         handler = LLMHandler(
-            services=[
-                LLMProviderWrapper(
-                    model_vendors="fast-vendor",
+            services={
+                "fast-vendor": LLMProviderWrapper(
+                    provider_id="fast-vendor",
                     provider=provider,
                 )
-            ]
+            }
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
             result = await handler.get_ai_text_response(
                 messages=[ChatMessage(role="user", text="立即重试")],
-                model_vendors="fast-vendor",
+                provider="fast-vendor",
                 model_name="fast-model",
             )
 

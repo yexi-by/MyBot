@@ -1,21 +1,23 @@
 """Root 用户被禁言时自动解除禁言。"""
 
+from dataclasses import dataclass
 from typing import ClassVar, Final, override
 
-from app.config.plugin_config import load_plugin_config
-from app.models import GroupBanEvent, NapCatId, StrictModel
+from app.config import AutoUnbanConfig
+from app.models import GroupBanEvent, NapCatId
 from app.plugins.base import BasePlugin
 from app.utils.log import log_event, log_exception
 
-CONFIG_SECTION: Final[str] = "auto_unban"
 CONSUMERS_COUNT: Final[int] = 1
 PRIORITY: Final[int] = 10
 
 
-class AutoUnbanConfig(StrictModel):
-    """自动解禁插件配置。"""
+@dataclass(frozen=True, slots=True)
+class _AutoUnbanRuntime:
+    """单次配置版本对应的运行对象。"""
 
-    root_ids: list[NapCatId]
+    config: AutoUnbanConfig
+    protected_users: frozenset[NapCatId]
 
 
 class AutoUnbanPlugin(BasePlugin[GroupBanEvent]):
@@ -28,19 +30,37 @@ class AutoUnbanPlugin(BasePlugin[GroupBanEvent]):
 
     @override
     def setup(self) -> None:
-        """读取需要保护的 Root 用户列表。"""
-        self.config: AutoUnbanConfig = load_plugin_config(
-            section_name=CONFIG_SECTION,
-            model_cls=AutoUnbanConfig,
+        """初始化延迟构造的配置运行对象。"""
+        self._runtime_revision = 0
+        self._runtime: _AutoUnbanRuntime | None = None
+
+    def _current_runtime(self) -> _AutoUnbanRuntime | None:
+        """为当前插件配置版本构造一次运行对象。"""
+        revision = self.plugin_config.revision
+        if self._runtime_revision == revision:
+            return self._runtime
+        config = self.plugin_config.get(AutoUnbanConfig)
+        runtime = (
+            None
+            if config is None
+            else _AutoUnbanRuntime(
+                config=config,
+                protected_users=frozenset(config.protected_users),
+            )
         )
-        self.root_ids: set[NapCatId] = set(self.config.root_ids)
+        self._runtime = runtime
+        self._runtime_revision = revision
+        return runtime
 
     @override
     async def run(self, msg: GroupBanEvent) -> bool:
         """在 Root 用户被禁言时自动解除禁言。"""
+        runtime = self._current_runtime()
+        if runtime is None:
+            return False
         if msg.sub_type != "ban":
             return False
-        if msg.user_id not in self.root_ids:
+        if msg.user_id not in runtime.protected_users:
             return False
         log_event(
             level="INFO",

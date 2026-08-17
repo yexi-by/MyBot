@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import ClassVar, Final, Literal, override
 
+from app.config import NeavoImageGenerateConfig
 from app.database import GroupDataScope
 from app.models import (
     At,
@@ -31,7 +32,6 @@ from .client import (
     NeavoImageClient,
     NeavoImageError,
 )
-from .config import NeavoImageGenerateConfig, load_neavo_image_generate_config
 
 COMMAND_TOKEN: Final[str] = "#生图"
 REVERSE_COMMAND_TOKEN: Final[str] = "#反推"
@@ -57,6 +57,16 @@ class LoadedInputImage:
     image_bytes: bytes
     mime_type: str
     source: ImageReadSource
+
+
+@dataclass(frozen=True, slots=True)
+class _NeavoRuntime:
+    """单次配置版本对应的运行对象。"""
+
+    config: NeavoImageGenerateConfig
+    groups: frozenset[NapCatId]
+    client: NeavoImageClient
+    image_reader: NapCatImageReader
 
 
 class NeavoInputImageError(RuntimeError):
@@ -103,41 +113,71 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
 
     @override
     def setup(self) -> None:
-        """读取配置并使用共享直连 HTTP 客户端初始化协议客户端。"""
-        self.config: NeavoImageGenerateConfig = load_neavo_image_generate_config()
-        self.group_ids: set[NapCatId] = set(self.config.group_ids)
-        self.client: NeavoImageClient = NeavoImageClient(
-            config=self.config,
-            http_client=self.context.direct_httpx,
+        """初始化延迟构造的配置运行对象。"""
+        self._runtime_revision = 0
+        self._runtime: _NeavoRuntime | None = None
+
+    def _current_runtime(self) -> _NeavoRuntime | None:
+        """为当前插件配置版本构造一次运行对象。"""
+        revision = self.plugin_config.revision
+        if self._runtime_revision == revision:
+            return self._runtime
+        config = self.plugin_config.get(NeavoImageGenerateConfig)
+        runtime = (
+            None
+            if config is None
+            else _NeavoRuntime(
+                config=config,
+                groups=frozenset(config.groups),
+                client=NeavoImageClient(
+                    config=config,
+                    http_client=self.context.direct_httpx,
+                ),
+                image_reader=NapCatImageReader(
+                    bot=self.context.bot,
+                    http_client=self.context.direct_httpx,
+                    fetch_concurrency=1,
+                    download_timeout_seconds=config.request_timeout_seconds,
+                    max_image_bytes=MAX_INPUT_IMAGE_BYTES,
+                ),
+            )
         )
-        self.image_reader: NapCatImageReader = NapCatImageReader(
-            bot=self.context.bot,
-            http_client=self.context.direct_httpx,
-            fetch_concurrency=1,
-            download_timeout_seconds=self.config.request_timeout_seconds,
-            max_image_bytes=MAX_INPUT_IMAGE_BYTES,
-        )
+        self._runtime = runtime
+        self._runtime_revision = revision
+        return runtime
 
     @override
     async def add_to_queue(self, msg: GroupMessage) -> bool:
         """在耗时队列外过滤无关群聊和普通消息。"""
-        if msg.group_id not in self.group_ids or extract_command(msg) is None:
+        runtime = self._current_runtime()
+        if (
+            runtime is None
+            or msg.group_id not in runtime.groups
+            or extract_command(msg) is None
+        ):
             return False
         return await super().add_to_queue(msg)
 
     @override
     async def run(self, msg: GroupMessage) -> bool:
         """执行命中的图像命令，并阻止消息继续进入低优先级插件。"""
-        if msg.group_id not in self.group_ids:
+        runtime = self._current_runtime()
+        if runtime is None or msg.group_id not in runtime.groups:
             return False
         command = extract_command(msg)
         if command is None:
             return False
         if command.operation == "text_to_image":
-            return await self._run_text_to_image(msg=msg, prompt=command.prompt or "")
-        return await self._run_image_to_text(msg=msg)
+            return await self._run_text_to_image(
+                msg=msg,
+                prompt=command.prompt or "",
+                runtime=runtime,
+            )
+        return await self._run_image_to_text(msg=msg, runtime=runtime)
 
-    async def _run_text_to_image(self, *, msg: GroupMessage, prompt: str) -> bool:
+    async def _run_text_to_image(
+        self, *, msg: GroupMessage, prompt: str, runtime: _NeavoRuntime
+    ) -> bool:
         """校验文生图命令、等待任务并发送图片。"""
         if prompt == "":
             await self._send_text(
@@ -161,7 +201,7 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
             text=" 已收到，正在生成图片…",
         )
         try:
-            result = await self.client.generate(prompt=prompt)
+            result = await runtime.client.generate(prompt=prompt)
         except NeavoGenerationTimeoutError as exc:
             self._log_expected_failure(
                 msg=msg,
@@ -202,7 +242,9 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
         )
         return True
 
-    async def _run_image_to_text(self, *, msg: GroupMessage) -> bool:
+    async def _run_image_to_text(
+        self, *, msg: GroupMessage, runtime: _NeavoRuntime
+    ) -> bool:
         """从当前消息或被回复消息读取图片并返回反推文本。"""
         image_segment = await self._find_reverse_image(msg=msg)
         if image_segment is None:
@@ -216,6 +258,7 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
             input_image = await self._load_input_image(
                 segment=image_segment,
                 message_id=msg.message_id,
+                image_reader=runtime.image_reader,
             )
         except NeavoInputImageError as exc:
             log_event(
@@ -247,7 +290,7 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
             text=" 已收到，正在反推图片描述…",
         )
         try:
-            result = await self.client.describe(
+            result = await runtime.client.describe(
                 image_bytes=input_image.image_bytes,
                 mime_type=input_image.mime_type,
             )
@@ -328,10 +371,11 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
         *,
         segment: Image,
         message_id: NapCatId,
+        image_reader: NapCatImageReader,
     ) -> LoadedInputImage:
         """按本地路径、原始 URL、NapCat 刷新的顺序读取输入图片。"""
         data = segment.data
-        read_result = await self.image_reader.read(
+        read_result = await image_reader.read(
             resource=NapCatImageResource(
                 label=f"Neavo 反推图片 {message_id}",
                 file=data.file,

@@ -9,7 +9,7 @@ from dishka import provide as provide  # pyright: ignore[reportUnknownVariableTy
 from fastapi import WebSocket
 
 from app.api import BOTClient
-from app.config import Settings
+from app.config import ConfigManager, ConfigWatcher, MyBotConfig
 from app.database import (
     DatabaseMigrator,
     PluginMigrationRegistry,
@@ -47,47 +47,57 @@ class MyProvider(Provider):
     # Dishka 的 from_context 返回提供器占位对象，第三方类型无法表达为 WebSocket 实例。
     websocket: ClassVar[object] = from_context(provides=WebSocket, scope=Scope.SESSION)
 
-    def __init__(self, settings: Settings) -> None:
-        """保存启动阶段已经校验过的全局配置。"""
+    def __init__(self, config_manager: ConfigManager) -> None:
+        """保存启动阶段已经校验过的统一配置。"""
         super().__init__()
-        self.settings = settings
+        self.config_manager = config_manager
 
     @provide(scope=Scope.APP)
-    def get_settings(self) -> Settings:
-        """读取并构造全局配置。"""
-        return self.settings
+    def get_config_manager(self) -> ConfigManager:
+        """返回统一配置管理器。"""
+        return self.config_manager
 
     @provide(scope=Scope.APP)
-    def get_database_url(self, settings: Settings) -> PostgreSQLUrl:
+    def get_config(self, manager: ConfigManager) -> MyBotConfig:
+        """返回启动时固定的完整配置。"""
+        return manager.boot_config
+
+    @provide(scope=Scope.APP)
+    def get_config_watcher(self, manager: ConfigManager) -> ConfigWatcher:
+        """创建插件配置目录 watcher。"""
+        return ConfigWatcher(manager=manager)
+
+    @provide(scope=Scope.APP)
+    def get_database_url(self, config: MyBotConfig) -> PostgreSQLUrl:
         """构造不会被手工拼接破坏的 PostgreSQL DSN。"""
-        return PostgreSQLUrl(settings.database.build_url())
+        return PostgreSQLUrl(config.database.build_url())
 
     @provide(scope=Scope.APP)
     def get_postgresql_runtime(
         self,
         database_url: PostgreSQLUrl,
-        settings: Settings,
+        config: MyBotConfig,
     ) -> PostgreSQLRuntime:
         """创建 PostgreSQL engine 和短生命周期 session factory。"""
-        config = settings.database
+        database = config.database
         return PostgreSQLRuntime.create(
             database_url=database_url,
-            pool_size=config.pool_size,
-            max_overflow=config.max_overflow,
-            pool_timeout_seconds=config.pool_timeout_seconds,
-            statement_timeout_seconds=config.statement_timeout_seconds,
+            pool_size=database.pool_size,
+            max_overflow=database.max_overflow,
+            pool_timeout_seconds=database.pool_timeout_seconds,
+            statement_timeout_seconds=database.statement_timeout_seconds,
         )
 
     @provide(scope=Scope.APP)
     def get_group_message_repository(
         self,
         runtime: PostgreSQLRuntime,
-        settings: Settings,
+        config: MyBotConfig,
     ) -> PostgreSQLMessageRepository:
         """创建群消息、撤回和图片任务共用的 PostgreSQL repository。"""
         return PostgreSQLMessageRepository(
             session_factory=runtime.session_factory,
-            image_root=Path(settings.storage.image_path).resolve(),
+            image_root=Path(config.storage.images.directory).resolve(),
         )
 
     @provide(scope=Scope.APP)
@@ -119,9 +129,9 @@ class MyProvider(Provider):
         )
 
     @provide(scope=Scope.APP)
-    def get_direct_httpx(self, settings: Settings) -> DirectHttpx:
+    def get_direct_httpx(self, config: MyBotConfig) -> DirectHttpx:
         """创建不带代理的 HTTP 客户端。"""
-        return DirectHttpx(httpx.AsyncClient(timeout=settings.network.timeout_seconds))
+        return DirectHttpx(httpx.AsyncClient(timeout=config.network.timeout_seconds))
 
     @provide(scope=Scope.APP)
     def get_event_type_checker(self) -> EventTypeChecker:
@@ -129,33 +139,33 @@ class MyProvider(Provider):
         return EventTypeChecker()
 
     @provide(scope=Scope.APP)
-    def get_proxy_httpx(self, settings: Settings) -> ProxyHttpx | None:
+    def get_proxy_httpx(self, config: MyBotConfig) -> ProxyHttpx | None:
         """初始化可选代理 HTTP 客户端。"""
-        proxy = settings.network.proxy
+        proxy = config.network.proxy
         if proxy is None:
             return None
         return ProxyHttpx(
-            httpx.AsyncClient(proxy=proxy, timeout=settings.network.timeout_seconds)
+            httpx.AsyncClient(proxy=proxy, timeout=config.network.timeout_seconds)
         )
 
     @provide(scope=Scope.APP)
-    def get_llm_handler(self, settings: Settings) -> LLMHandler | None:
+    def get_llm_handler(self, config: MyBotConfig) -> LLMHandler | None:
         """初始化可选 LLM 服务。"""
-        if not settings.llm.providers:
+        if not config.llm.providers:
             return None
-        return LLMHandler.register_instance(settings.llm.providers)
+        return LLMHandler.register_instance(config.llm.providers)
 
     @provide(scope=Scope.APP)
-    def get_mcp_tool_manager(self, settings: Settings) -> MCPToolManager:
+    def get_mcp_tool_manager(self, config: MyBotConfig) -> MCPToolManager:
         """创建 MCP 工具管理器。"""
-        return MCPToolManager(settings.mcp)
+        return MCPToolManager(config.mcp)
 
     @provide(scope=Scope.APP)
-    def get_image_store(self, settings: Settings) -> ImageStore:
+    def get_image_store(self, config: MyBotConfig) -> ImageStore:
         """创建内容寻址的群图片文件存储。"""
         return ImageStore(
-            root=Path(settings.storage.image_path).resolve(),
-            max_image_bytes=settings.storage.image_max_bytes,
+            root=Path(config.storage.images.directory).resolve(),
+            max_image_bytes=config.storage.images.max_bytes,
         )
 
     @provide(scope=Scope.APP)
@@ -164,19 +174,19 @@ class MyProvider(Provider):
         repository: PostgreSQLMessageRepository,
         direct_httpx: DirectHttpx,
         image_store: ImageStore,
-        settings: Settings,
+        config: MyBotConfig,
     ) -> ImageArchiveWorkerFactory:
         """创建按 NapCat 会话绑定机器人身份的图片归档 worker 工厂。"""
-        storage = settings.storage
+        storage = config.storage.images
         return ImageArchiveWorkerFactory(
             repository=repository,
             http_client=direct_httpx,
             store=image_store,
-            concurrency=storage.image_download_concurrency,
-            download_timeout_seconds=storage.image_download_timeout_seconds,
-            max_image_bytes=storage.image_max_bytes,
-            lease_seconds=storage.image_lease_seconds,
-            retry_delays_seconds=storage.image_retry_delays_seconds,
+            concurrency=storage.download_concurrency,
+            download_timeout_seconds=storage.download_timeout_seconds,
+            max_image_bytes=storage.max_bytes,
+            lease_seconds=storage.lease_seconds,
+            retry_delays_seconds=storage.retry_delays_seconds,
         )
 
     @provide(scope=Scope.APP)
@@ -193,15 +203,15 @@ class MyProvider(Provider):
         websocket: WebSocket,
         repository: PostgreSQLMessageRepository,
         inline_image_archiver: InlineImageArchiver,
-        settings: Settings,
+        config: MyBotConfig,
     ) -> BOTClient:
         """创建当前 WebSocket 会话的机器人客户端。"""
         return BOTClient(
             websocket=websocket,
             sent_message_recorder=repository,
             inline_image_archiver=inline_image_archiver,
-            send_retry_count=settings.napcat.send_retry_count,
-            send_retry_delay=settings.napcat.send_retry_delay,
+            send_max_attempts=config.napcat.send_max_attempts,
+            send_retry_delay_seconds=config.napcat.send_retry_delay_seconds,
         )
 
     @provide(scope=Scope.SESSION)
@@ -210,7 +220,7 @@ class MyProvider(Provider):
         bot: BOTClient,
         repository: PostgreSQLMessageRepository,
         repository_builder: PluginRepositoryBuilder,
-        settings: Settings,
+        config_manager: ConfigManager,
         directhttpx: DirectHttpx,
         proxy_httpx: ProxyHttpx | None,
         llm: LLMHandler | None,
@@ -221,7 +231,6 @@ class MyProvider(Provider):
         plugin_objects: list[BasePlugin[AllEvent]] = []
         for cls in PLUGINS:
             context = Context(
-                settings=settings,
                 bot=bot,
                 group_messages=repository,
                 plugin_id=cls.plugin_id,
@@ -231,7 +240,12 @@ class MyProvider(Provider):
                 direct_httpx=directhttpx,
                 proxy_httpx=proxy_httpx,
             )
-            plugin_objects.append(cls(context=context))
+            plugin_objects.append(
+                cls(
+                    context=context,
+                    plugin_config=config_manager.bind_plugin(cls.plugin_id),
+                )
+            )
         return PluginController(plugin_objects=plugin_objects)
 
     @provide(scope=Scope.SESSION)

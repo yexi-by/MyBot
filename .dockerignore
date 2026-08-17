@@ -22,6 +22,9 @@ node_modules/
 # 真实配置、密钥与个人隐私
 setting.toml
 setting.local.toml
+config/
+!app/config/
+!app/config/**
 *.secret.toml
 .env
 .env.*
@@ -61,4 +64,4 @@ docker-compose.yml
 # 保留构建所需文件和可公开示例
 !Dockerfile
 !README.md
-!setting.example.toml
+!config.example.toml

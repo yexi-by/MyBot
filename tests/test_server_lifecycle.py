@@ -1,12 +1,13 @@
 """NapCatServer 应用级资源生命周期回归测试。"""
 
+import asyncio
 import unittest
 from typing import cast
 
 from dishka import AsyncContainer
 from fastapi import FastAPI
 
-from app.config import Settings
+from app.config import ConfigWatcher, MyBotConfig
 from app.core.di import DirectHttpx, ProxyHttpx
 from app.core.server import NapCatServer
 from app.database import (
@@ -74,6 +75,23 @@ class _FakeMCPManager:
             raise RuntimeError("mcp close failed")
 
 
+class _FakeConfigWatcher:
+    """记录配置 watcher 是否完成停止。"""
+
+    def __init__(self) -> None:
+        self.stop_event = asyncio.Event()
+        self.stopped = False
+
+    async def run(self) -> None:
+        """等待生命周期通知停止。"""
+        await self.stop_event.wait()
+        self.stopped = True
+
+    def stop(self) -> None:
+        """通知 run 返回。"""
+        self.stop_event.set()
+
+
 class _FakeContainer:
     """按依赖键返回 lifespan 所需的 fake 对象。"""
 
@@ -96,9 +114,9 @@ class _FakeContainer:
 class NapCatServerLifespanTest(unittest.IsolatedAsyncioTestCase):
     """验证启动失败和关闭失败都不会漏掉已创建资源。"""
 
-    def _settings(self) -> Settings:
+    def _config(self) -> MyBotConfig:
         """构造不依赖本机配置文件的最小设置。"""
-        return Settings.model_validate(
+        return MyBotConfig.model_validate(
             {
                 "napcat": {"websocket_token": "test-token"},
                 "database": {"password": "test-password"},
@@ -109,7 +127,7 @@ class NapCatServerLifespanTest(unittest.IsolatedAsyncioTestCase):
         """绕过路由注册，只测试 lifespan 本身。"""
         server = object.__new__(NapCatServer)
         server.container = cast(AsyncContainer, cast(object, container))
-        server.settings = self._settings()
+        server.config = self._config()
         return server
 
     def _resources(
@@ -125,6 +143,7 @@ class NapCatServerLifespanTest(unittest.IsolatedAsyncioTestCase):
             MCPToolManager: mcp,
             DirectHttpx: direct_httpx,
             ProxyHttpx | None: None,
+            ConfigWatcher: _FakeConfigWatcher(),
             PostgreSQLMessageRepository: object(),
             ImageArchiveWorkerFactory: object(),
             LLMHandler | None: None,

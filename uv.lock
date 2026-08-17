@@ -618,10 +618,11 @@ dependencies = [
     { name = "loguru" },
     { name = "mcp" },
     { name = "openai" },
-    { name = "pydantic-settings" },
+    { name = "pydantic" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "tenacity" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "watchfiles" },
     { name = "websockets" },
 ]
 
@@ -642,10 +643,11 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mcp", specifier = ">=1.27.0" },
     { name = "openai", specifier = ">=2.14.0" },
-    { name = "pydantic-settings", specifier = ">=2.12.0" },
+    { name = "pydantic", specifier = ">=2.12.5" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.52" },
     { name = "tenacity", specifier = ">=9.1.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.40.0" },
+    { name = "watchfiles", specifier = ">=1.1.1" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
 

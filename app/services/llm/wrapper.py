@@ -4,12 +4,12 @@ from typing import override
 
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 
+from app.config.schemas import LLMProviderConfig
 from app.utils.retry_utils import create_retry_manager
 
 from .base import LLMProvider
 from .schemas import (
     ChatMessage,
-    LLMConfig,
     LLMResponse,
     LLMToolChoice,
     LLMToolDefinition,
@@ -19,30 +19,32 @@ from .schemas import (
 class ResilientLLMProvider(LLMProvider):
     """为底层 LLM 提供商增加统一重试能力。"""
 
-    def __init__(self, inner_provider: LLMProvider, llm_config: LLMConfig) -> None:
+    def __init__(
+        self, inner_provider: LLMProvider, provider_config: LLMProviderConfig
+    ) -> None:
         """保存底层服务商与重试配置。"""
         self.inner_provider: LLMProvider = inner_provider
-        self.llm_config: LLMConfig = llm_config
+        self.provider_config: LLMProviderConfig = provider_config
 
     @override
     async def get_ai_response(
         self,
         messages: list[ChatMessage],
         model: str,
-        retry_count: int | None = None,
-        retry_delay: float | None = None,
+        max_attempts: int | None = None,
+        retry_delay_seconds: float | None = None,
     ) -> str:
         """调用底层文本接口，并按供应商默认值或当前请求覆盖值重试。"""
         retrier = create_retry_manager(
-            retry_count=(
-                self.llm_config.retry_count
-                if retry_count is None
-                else retry_count
+            max_attempts=(
+                self.provider_config.max_attempts
+                if max_attempts is None
+                else max_attempts
             ),
-            retry_delay=(
-                self.llm_config.retry_delay
-                if retry_delay is None
-                else retry_delay
+            retry_delay_seconds=(
+                self.provider_config.retry_delay_seconds
+                if retry_delay_seconds is None
+                else retry_delay_seconds
             ),
             error_types=(
                 RateLimitError,
@@ -72,8 +74,8 @@ class ResilientLLMProvider(LLMProvider):
     ) -> LLMResponse:
         """调用底层工具接口，并在可恢复错误时重试。"""
         retrier = create_retry_manager(
-            retry_count=self.llm_config.retry_count,
-            retry_delay=self.llm_config.retry_delay,
+            max_attempts=self.provider_config.max_attempts,
+            retry_delay_seconds=self.provider_config.retry_delay_seconds,
             error_types=(
                 RateLimitError,
                 APIConnectionError,
@@ -103,8 +105,8 @@ class ResilientLLMProvider(LLMProvider):
     ) -> str:
         """调用底层图片接口，并在可恢复错误时重试。"""
         retrier = create_retry_manager(
-            retry_count=self.llm_config.retry_count,
-            retry_delay=self.llm_config.retry_delay,
+            max_attempts=self.provider_config.max_attempts,
+            retry_delay_seconds=self.provider_config.retry_delay_seconds,
             error_types=(
                 RateLimitError,
                 APIConnectionError,

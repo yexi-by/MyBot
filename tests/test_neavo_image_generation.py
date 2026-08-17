@@ -10,12 +10,12 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import cast
-from unittest.mock import patch
 from uuid import UUID
 
 import httpx
 from pydantic import ValidationError
 
+from app.config import NeavoImageGenerateConfig
 from app.database import GroupDataScope, StoredGroupMessage
 from app.models import (
     At,
@@ -37,7 +37,6 @@ from app.plugins.neavo_image_generate.client import (
     NeavoTransportError,
     NeavoUpstreamError,
 )
-from app.plugins.neavo_image_generate.config import NeavoImageGenerateConfig
 from app.plugins.neavo_image_generate.plugin import (
     MAX_PROMPT_LENGTH,
     PRIORITY,
@@ -45,6 +44,11 @@ from app.plugins.neavo_image_generate.plugin import (
     NeavoImageGeneratePlugin,
     extract_command,
     extract_prompt,
+)
+from tests.config_helpers import (
+    FakeConfigManager,
+    build_plugin_snapshot,
+    plugin_config_view,
 )
 
 API_TOKEN = "test-neavo-token"
@@ -68,7 +72,7 @@ type SleepFunction = Callable[[float], Awaitable[None]]
 def build_config(**overrides: object) -> NeavoImageGenerateConfig:
     """构造带安全假 Token 的测试配置。"""
     values: dict[str, object] = {
-        "group_ids": [ALLOWED_GROUP_ID],
+        "groups": [ALLOWED_GROUP_ID],
         "base_url": BASE_URL,
         "api_token": API_TOKEN,
         "poll_interval_seconds": 3.0,
@@ -235,12 +239,12 @@ class NeavoImageGenerateConfigTest(unittest.IsolatedAsyncioTestCase):
     async def test_config_normalizes_ids_url_and_masks_token(self) -> None:
         """群号、根地址和密钥按配置契约规范化。"""
         config = build_config(
-            group_ids=[40000],
+            groups=[40000],
             base_url=" https://neavo.example/ ",
             api_token=f" {API_TOKEN} ",
         )
 
-        self.assertEqual(config.group_ids, [ALLOWED_GROUP_ID])
+        self.assertEqual(config.groups, (ALLOWED_GROUP_ID,))
         self.assertEqual(config.base_url, BASE_URL)
         self.assertEqual(config.api_token.get_secret_value(), API_TOKEN)
         self.assertNotIn(API_TOKEN, repr(config))
@@ -554,6 +558,7 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
         """初始化需在测试结束时清理的插件与客户端。"""
         self.plugins: list[NeavoImageGeneratePlugin] = []
         self.http_clients: list[httpx.AsyncClient] = []
+        self.config_managers: list[FakeConfigManager] = []
 
     async def asyncTearDown(self) -> None:
         """停止消费者并关闭 MockTransport 客户端。"""
@@ -578,16 +583,21 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
             http_client=http_client,
             stored_messages=stored_messages,
         )
-        with patch(
-            "app.plugins.neavo_image_generate.plugin.load_neavo_image_generate_config",
-            return_value=plugin_config,
-        ):
-            plugin = NeavoImageGeneratePlugin(context=cast(Context, fake_context))
-        plugin.client = NeavoImageClient(
-            config=plugin_config,
-            http_client=http_client,
-            sleep=sleep,
+        manager = FakeConfigManager(
+            build_plugin_snapshot(neavo_image_generate=plugin_config)
         )
+        self.config_managers.append(manager)
+        plugin = NeavoImageGeneratePlugin(
+            context=cast(Context, fake_context),
+            plugin_config=plugin_config_view(
+                manager,
+                plugin_id="neavo_image_generate",
+            ),
+        )
+        runtime = plugin._current_runtime()  # pyright: ignore[reportPrivateUsage]
+        if runtime is None:
+            raise AssertionError("Neavo 测试配置应启用插件")
+        runtime.client._sleep = sleep  # pyright: ignore[reportPrivateUsage]
         self.plugins.append(plugin)
         return plugin, fake_context.bot
 
@@ -644,6 +654,36 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [False, False, False, False])
         self.assertEqual(request_count, 0)
         self.assertEqual(bot.sent_messages, [])
+
+    async def test_queue_filter_uses_latest_group_config(self) -> None:
+        """新增群立即接收命令，移除的群不再进入消费者队列。"""
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            raise AssertionError("空提示词应在本地返回用法，不应请求上游")
+
+        plugin, _bot = self.make_plugin(handler=handler)
+        manager = self.config_managers[-1]
+        self.assertFalse(
+            await plugin.add_to_queue(
+                build_group_message(text="#生图", group_id="50000")
+            )
+        )
+
+        manager.plugins = build_plugin_snapshot(
+            revision=2,
+            neavo_image_generate=build_config(groups=["50000"]),
+        )
+
+        self.assertFalse(
+            await plugin.add_to_queue(
+                build_group_message(text="#生图", group_id="40000")
+            )
+        )
+        self.assertTrue(
+            await plugin.add_to_queue(
+                build_group_message(text="#生图", group_id="50000")
+            )
+        )
 
     async def test_empty_and_oversized_prompts_are_rejected_locally(self) -> None:
         """空提示词和 4097 字提示词只向发起者返回本地校验错误。"""

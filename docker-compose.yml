@@ -31,8 +31,7 @@ services:
       - PYTHONUNBUFFERED=1
     command: ["python", "-m", "app.database.migrations", "upgrade"]
     volumes:
-      - ./plugins_config:/app/plugins_config:ro
-      - ./setting.toml:/app/setting.toml:ro
+      - ./config:/app/config:ro
     secrets:
       - postgres_password
 
@@ -50,8 +49,7 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - ./logs:/app/logs
-      - ./plugins_config:/app/plugins_config:ro
-      - ./setting.toml:/app/setting.toml:ro
+      - ./config:/app/config:ro
       - ./images:/app/images
     secrets:
       - postgres_password

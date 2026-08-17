@@ -7,16 +7,6 @@ from pydantic import Field, field_serializer, model_validator
 
 from app.models import JsonObject, JsonValue, StrictModel
 
-class LLMConfig(StrictModel):
-    """定义单个 LLM 服务商配置。"""
-
-    api_key: str
-    base_url: str | None = None
-    model_vendors: str
-    provider_type: Literal["openai"]
-    retry_count: int
-    retry_delay: float
-
 
 class ChatMessage(StrictModel):
     """定义传递给 LLM 的统一聊天消息。"""
@@ -60,8 +50,8 @@ class LLMProviderProtocol(Protocol):
         self,
         messages: list[ChatMessage],
         model: str,
-        retry_count: int | None = None,
-        retry_delay: float | None = None,
+        max_attempts: int | None = None,
+        retry_delay_seconds: float | None = None,
     ) -> str:
         """获取文本响应，并允许当前请求覆盖供应商重试参数。"""
         ...
@@ -90,7 +80,7 @@ class LLMProviderProtocol(Protocol):
 class LLMProviderWrapper:
     """绑定模型厂商名称与具体服务实现。"""
 
-    model_vendors: str
+    provider_id: str
     provider: LLMProviderProtocol
 
 

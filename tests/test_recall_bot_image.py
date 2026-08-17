@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal, cast
 
+from app.config import EmptyPluginConfig
 from app.database import GroupDataScope, StoredGroupMessage
 from app.models import (
     GroupMessage,
@@ -19,6 +20,11 @@ from app.plugins.base import Context
 from app.plugins.recall_bot_image.recall_bot_image import (
     RECALL_COMMAND,
     RecallBotImagePlugin,
+)
+from tests.config_helpers import (
+    FakeConfigManager,
+    build_plugin_snapshot,
+    plugin_config_view,
 )
 
 BOT_ID = "10000"
@@ -226,7 +232,17 @@ class RecallBotImagePluginTest(unittest.IsolatedAsyncioTestCase):
             search_error=search_error,
         )
         context = FakeContext(bot=self.bot, database=self.database)
-        self.plugin = RecallBotImagePlugin(context=cast(Context, context))
+        self.plugin = RecallBotImagePlugin(
+            context=cast(Context, context),
+            plugin_config=plugin_config_view(
+                FakeConfigManager(
+                    build_plugin_snapshot(
+                        recall_bot_image=EmptyPluginConfig()
+                    )
+                ),
+                plugin_id="recall_bot_image",
+            ),
+        )
         return self.plugin
 
     async def test_exact_reply_command_recalls_bot_image(self) -> None:

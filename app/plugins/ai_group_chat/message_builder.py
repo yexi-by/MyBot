@@ -6,6 +6,7 @@ from datetime import datetime
 
 import httpx
 
+from app.config import AIGroupChatConfig
 from app.database import GroupDataScope, GroupMessageReader, StoredGroupMessage
 from app.models import (
     GroupMessage,
@@ -24,7 +25,6 @@ from app.services.llm.tools import LLMImageArtifact, LLMImageError, LLMImageItem
 from app.services.napcat.message_formatter import NapCatMessageTextFormatter
 from app.utils.log import log_event
 
-from .config import AIGroupChatConfig
 from .constants import (
     BEIJING_TIMEZONE,
     ROLE_LABELS,
@@ -78,8 +78,8 @@ class GroupChatMessageBuilder:
         self.image_reader: NapCatImageReader = NapCatImageReader(
             bot=bot,
             http_client=http_client,
-            fetch_concurrency=config.image_fetch_concurrency,
-            download_timeout_seconds=config.image_download_timeout_seconds,
+            fetch_concurrency=config.images.fetch_concurrency,
+            download_timeout_seconds=config.images.download_timeout_seconds,
         )
         self.message_formatter: NapCatMessageTextFormatter = NapCatMessageTextFormatter()
 
@@ -103,7 +103,7 @@ class GroupChatMessageBuilder:
             else []
         )
         all_resources = [*current_resources, *reply_resources]
-        selected_resources = all_resources[: self.config.image_delivery_max_images]
+        selected_resources = all_resources[: self.config.images.max_per_turn]
         truncated_image_count = len(all_resources) - len(selected_resources)
         read_results = await self.image_reader.read_many(resources=selected_resources)
         image_items: list[LLMImageItem] = []

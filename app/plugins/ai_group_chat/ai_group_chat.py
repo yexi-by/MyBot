@@ -1,21 +1,41 @@
 """基于工具调用的 AI 智能群聊回复插件。"""
 
-from typing import ClassVar, override
+import asyncio
+from dataclasses import dataclass
+from typing import ClassVar, Mapping, override
 
+from app.config import MaterializedAIGroupChatConfig, MaterializedAIGroupConfig
 from app.models import At, GroupMessage, NapCatId
 from app.plugins.base import BasePlugin
 from app.services import ContextHandler
 from app.utils.log import log_event
 
-from .config import AIGroupChatConfig, build_system_prompt, load_ai_group_chat_config
-from .constants import (
-    CONSUMERS_COUNT,
-    PRIORITY,
-)
+from .constants import CONSUMERS_COUNT, PRIORITY
 from .debug_dump import AIGroupChatDebugDumper
 from .message_builder import GroupChatMessageBuilder
 from .tool_loop import GroupChatToolLoop
 from .vision_tool import VisionDescriptionTool, VisionTurnState
+
+
+@dataclass(frozen=True, slots=True)
+class _AIGroupChatRuntime:
+    """单次配置版本对应的 AI 群聊运行对象。"""
+
+    revision: int
+    config: MaterializedAIGroupChatConfig
+    groups: Mapping[str, MaterializedAIGroupConfig]
+    debug_dumper: AIGroupChatDebugDumper
+    message_builder: GroupChatMessageBuilder
+    vision_tool: VisionDescriptionTool
+    tool_loop: GroupChatToolLoop
+
+
+@dataclass(slots=True)
+class _GroupContextEntry:
+    """单群内存上下文及其 system prompt 来源。"""
+
+    handler: ContextHandler
+    system_prompt: str
 
 
 class AIGroupChatPlugin(BasePlugin[GroupMessage]):
@@ -28,79 +48,156 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
 
     @override
     def setup(self) -> None:
-        """读取插件配置并初始化每个群的上下文。"""
-        self.config: AIGroupChatConfig = load_ai_group_chat_config()
-        self.group_contexts: dict[str, ContextHandler] = {}
-        self.debug_dumper: AIGroupChatDebugDumper = AIGroupChatDebugDumper(
-            config=self.config
-        )
-        self.message_builder: GroupChatMessageBuilder = GroupChatMessageBuilder(
-            config=self.config,
-            group_messages=self.context.group_messages,
-            bot=self.context.bot,
-            http_client=self.context.direct_httpx,
-        )
-        self.vision_tool: VisionDescriptionTool = VisionDescriptionTool(
-            config=self.config,
-            context=self.context,
-        )
-        self.tool_loop: GroupChatToolLoop = GroupChatToolLoop(
-            config=self.config,
-            context=self.context,
-            debug_dumper=self.debug_dumper,
-            vision_tool=self.vision_tool,
-        )
-        log_event(
-            level="DEBUG",
-            event="ai_group_chat.setup.start",
-            category="plugin",
-            message="AI 群聊插件开始初始化",
-            model_name=self.config.model_name,
-            model_vendors=self.config.model_vendors,
-            supports_multimodal=self.config.supports_multimodal,
-            debug_dump_messages=self.config.debug_dump_messages,
-            group_count=len(self.config.group_config),
-        )
-        for group_config in self.config.group_config:
-            system_prompt = build_system_prompt(
-                config=self.config,
-                group_config=group_config,
+        """初始化配置缓存和每群串行锁。"""
+        self._runtime_revision = 0
+        self._runtime: _AIGroupChatRuntime | None = None
+        self._group_contexts: dict[str, _GroupContextEntry] = {}
+        self._group_locks: dict[str, asyncio.Lock] = {}
+        self._debug_initialized_revision: dict[str, int] = {}
+
+    def _current_runtime(self) -> _AIGroupChatRuntime | None:
+        """为当前插件配置版本构造一次完整运行对象。"""
+        revision = self.plugin_config.revision
+        if self._runtime_revision == revision:
+            self._synchronize_contexts(runtime=self._runtime)
+            return self._runtime
+        materialized = self.plugin_config.get(MaterializedAIGroupChatConfig)
+        if materialized is None:
+            runtime = None
+        else:
+            config = materialized.source
+            debug_dumper = AIGroupChatDebugDumper(config=config)
+            message_builder = GroupChatMessageBuilder(
+                config=config,
+                group_messages=self.context.group_messages,
+                bot=self.context.bot,
+                http_client=self.context.direct_httpx,
             )
-            group_key = self._id_key(group_config.group_id)
-            chat_handler = ContextHandler(
-                system_prompt=system_prompt,
-                max_context_tokens=group_config.max_context_tokens,
+            vision_tool = VisionDescriptionTool(
+                config=materialized,
+                context=self.context,
             )
-            self.group_contexts[group_key] = chat_handler
-            dump_path = self.debug_dumper.initialize_group(
-                group_config=group_config,
-                messages=chat_handler.messages_lst,
+            tool_loop = GroupChatToolLoop(
+                config=config,
+                context=self.context,
+                debug_dumper=debug_dumper,
+                vision_tool=vision_tool,
+            )
+            runtime = _AIGroupChatRuntime(
+                revision=revision,
+                config=materialized,
+                groups={str(group.source.id): group for group in materialized.groups},
+                debug_dumper=debug_dumper,
+                message_builder=message_builder,
+                vision_tool=vision_tool,
+                tool_loop=tool_loop,
             )
             log_event(
                 level="DEBUG",
-                event="ai_group_chat.group_context.initialized",
+                event="ai_group_chat.config.loaded",
                 category="plugin",
-                message="AI 群聊上下文初始化完成",
-                group_id=group_key,
-                max_context_tokens=group_config.max_context_tokens,
-                system_prompt_chars=len(system_prompt),
-                debug_dump_path=str(dump_path) if dump_path is not None else "",
+                message="AI 群聊插件运行配置已更新",
+                revision=revision,
+                model_name=config.model.name,
+                provider=config.model.provider,
+                supports_images=config.model.supports_images,
+                debug_dump_messages=config.debug_dump_messages,
+                group_count=len(runtime.groups),
             )
+        self._runtime = runtime
+        self._runtime_revision = revision
+        self._synchronize_contexts(runtime=runtime)
+        return runtime
+
+    def _synchronize_contexts(self, *, runtime: _AIGroupChatRuntime | None) -> None:
+        """在群请求结束后删除停用或提示词已变化的上下文。"""
+        for group_id, entry in tuple(self._group_contexts.items()):
+            lock = self._group_locks.get(group_id)
+            if lock is not None and lock.locked():
+                continue
+            group = runtime.groups.get(group_id) if runtime is not None else None
+            prompt_changed = (
+                group is not None and entry.system_prompt != group.system_prompt
+            )
+            if group is not None and not prompt_changed:
+                continue
+            self._group_contexts.pop(group_id, None)
+            self._debug_initialized_revision.pop(group_id, None)
+            if group is None:
+                continue
+            log_event(
+                level="INFO",
+                event="ai_group_chat.group_context.reset",
+                category="plugin",
+                message="AI 群聊提示词或知识库变化，已清空本群内存上下文",
+                group_id=group_id,
+                max_context_tokens=group.source.max_context_tokens,
+                system_prompt_chars=len(group.system_prompt),
+            )
+
+    def _get_group_context(
+        self,
+        *,
+        runtime: _AIGroupChatRuntime,
+        group: MaterializedAIGroupConfig,
+    ) -> ContextHandler:
+        """在群锁内初始化、重置或更新上下文预算。"""
+        group_id = str(group.source.id)
+        entry = self._group_contexts.get(group_id)
+        reset = entry is not None and entry.system_prompt != group.system_prompt
+        if entry is None or reset:
+            handler = ContextHandler(
+                system_prompt=group.system_prompt,
+                max_context_tokens=group.source.max_context_tokens,
+            )
+            entry = _GroupContextEntry(
+                handler=handler,
+                system_prompt=group.system_prompt,
+            )
+            self._group_contexts[group_id] = entry
+            log_event(
+                level="INFO" if reset else "DEBUG",
+                event=(
+                    "ai_group_chat.group_context.reset"
+                    if reset
+                    else "ai_group_chat.group_context.initialized"
+                ),
+                category="plugin",
+                message=(
+                    "AI 群聊提示词或知识库变化，已清空本群内存上下文"
+                    if reset
+                    else "AI 群聊上下文初始化完成"
+                ),
+                group_id=group_id,
+                max_context_tokens=group.source.max_context_tokens,
+                system_prompt_chars=len(group.system_prompt),
+            )
+        else:
+            entry.handler.max_context_tokens = group.source.max_context_tokens
+
+        if self._debug_initialized_revision.get(group_id) != runtime.revision:
+            dump_path = runtime.debug_dumper.initialize_group(
+                group_config=group.source,
+                messages=entry.handler.messages_lst,
+            )
+            self._debug_initialized_revision[group_id] = runtime.revision
+            if dump_path is not None:
+                log_event(
+                    level="DEBUG",
+                    event="ai_group_chat.debug_dump.initialized",
+                    category="plugin",
+                    message="AI 群聊调试转储已按新配置初始化",
+                    group_id=group_id,
+                    debug_dump_path=str(dump_path),
+                )
+        return entry.handler
 
     @override
     async def run(self, msg: GroupMessage) -> bool:
         """在机器人被艾特时触发 AI 群聊回复。"""
-        group_key = self._id_key(msg.group_id)
-        if group_key not in self.group_contexts:
-            log_event(
-                level="DEBUG",
-                event="ai_group_chat.event.skipped_unconfigured_group",
-                category="plugin",
-                message="群未配置 AI 群聊插件，已跳过",
-                group_id=group_key,
-                message_id=msg.message_id,
-                user_id=msg.user_id,
-            )
+        group_key = str(msg.group_id)
+        runtime = self._current_runtime()
+        if runtime is None or group_key not in runtime.groups:
             return False
         if not self._is_bot_mentioned(msg=msg):
             log_event(
@@ -115,83 +212,100 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 segment_count=len(msg.message),
             )
             return False
-        chat_handler = self.group_contexts[group_key]
-        log_event(
-            level="DEBUG",
-            event="ai_group_chat.event.accepted",
-            category="plugin",
-            message="群消息命中 AI 回复条件",
-            group_id=group_key,
-            message_id=msg.message_id,
-            user_id=msg.user_id,
-            raw_message=msg.raw_message,
-            segment_count=len(msg.message),
-            context_messages_count=len(chat_handler.messages_lst),
-        )
-        built_turn_messages = await self.message_builder.build_turn_messages(
-            msg=msg,
-        )
-        vision_turn_state = VisionTurnState()
-        input_vision_delivery = await self.vision_tool.deliver(
-            items=built_turn_messages.image_items,
-            truncated_count=built_turn_messages.truncated_image_count,
-            question=built_turn_messages.question,
-            source_name="当前消息和引用消息",
-            turn_state=vision_turn_state,
-        )
-        log_event(
-            level="DEBUG",
-            event="ai_group_chat.turn_messages.built",
-            category="plugin",
-            message="AI 群聊本轮输入构造完成",
-            group_id=group_key,
-            message_id=msg.message_id,
-            turn_messages_count=len(built_turn_messages.turn_messages),
-            text_chars=sum(
-                len(message.text or "")
-                for message in built_turn_messages.turn_messages
-            ),
-            detected_image_count=built_turn_messages.detected_image_count,
-            image_count=built_turn_messages.loaded_image_count,
-            image_errors_count=len(built_turn_messages.image_errors),
-            truncated_image_count=built_turn_messages.truncated_image_count,
-            vision_messages_count=len(input_vision_delivery.working_messages),
-            vision_ok=(
-                input_vision_delivery.result.ok
-                if input_vision_delivery.result is not None
-                else None
-            ),
-            vision_is_error=(
-                input_vision_delivery.result.is_error
-                if input_vision_delivery.result is not None
-                else None
-            ),
-            vision_observed_count=(
-                input_vision_delivery.result.observed_count
-                if input_vision_delivery.result is not None
-                else 0
-            ),
-            model_name=self.config.model_name,
-            model_vendors=self.config.model_vendors,
-        )
-        await self.tool_loop.run(
-            msg=msg,
-            chat_handler=chat_handler,
-            turn_messages=built_turn_messages.turn_messages,
-            input_vision_messages=input_vision_delivery.working_messages,
-            input_vision_history_messages=input_vision_delivery.history_messages,
-            question=built_turn_messages.question,
-            vision_turn_state=vision_turn_state,
-        )
-        log_event(
-            level="DEBUG",
-            event="ai_group_chat.event.finished",
-            category="plugin",
-            message="AI 群聊事件处理完成",
-            group_id=group_key,
-            message_id=msg.message_id,
-            context_messages_count=len(chat_handler.messages_lst),
-        )
+
+        lock = self._group_locks.setdefault(group_key, asyncio.Lock())
+        async with lock:
+            runtime = self._current_runtime()
+            if runtime is None:
+                self._group_contexts.pop(group_key, None)
+                return False
+            group = runtime.groups.get(group_key)
+            if group is None:
+                self._group_contexts.pop(group_key, None)
+                return False
+            chat_handler = self._get_group_context(runtime=runtime, group=group)
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.event.accepted",
+                category="plugin",
+                message="群消息命中 AI 回复条件",
+                group_id=group_key,
+                message_id=msg.message_id,
+                user_id=msg.user_id,
+                raw_message=msg.raw_message,
+                segment_count=len(msg.message),
+                context_messages_count=len(chat_handler.messages_lst),
+                config_revision=runtime.revision,
+            )
+            built_turn_messages = await runtime.message_builder.build_turn_messages(
+                msg=msg,
+            )
+            vision_turn_state = VisionTurnState()
+            input_vision_delivery = await runtime.vision_tool.deliver(
+                items=built_turn_messages.image_items,
+                truncated_count=built_turn_messages.truncated_image_count,
+                question=built_turn_messages.question,
+                source_name="当前消息和引用消息",
+                turn_state=vision_turn_state,
+            )
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.turn_messages.built",
+                category="plugin",
+                message="AI 群聊本轮输入构造完成",
+                group_id=group_key,
+                message_id=msg.message_id,
+                turn_messages_count=len(built_turn_messages.turn_messages),
+                text_chars=sum(
+                    len(message.text or "")
+                    for message in built_turn_messages.turn_messages
+                ),
+                detected_image_count=built_turn_messages.detected_image_count,
+                image_count=built_turn_messages.loaded_image_count,
+                image_errors_count=len(built_turn_messages.image_errors),
+                truncated_image_count=built_turn_messages.truncated_image_count,
+                vision_messages_count=len(input_vision_delivery.working_messages),
+                vision_ok=(
+                    input_vision_delivery.result.ok
+                    if input_vision_delivery.result is not None
+                    else None
+                ),
+                vision_is_error=(
+                    input_vision_delivery.result.is_error
+                    if input_vision_delivery.result is not None
+                    else None
+                ),
+                vision_observed_count=(
+                    input_vision_delivery.result.observed_count
+                    if input_vision_delivery.result is not None
+                    else 0
+                ),
+                model_name=runtime.config.source.model.name,
+                provider=runtime.config.source.model.provider,
+            )
+            await runtime.tool_loop.run(
+                msg=msg,
+                chat_handler=chat_handler,
+                turn_messages=built_turn_messages.turn_messages,
+                input_vision_messages=input_vision_delivery.working_messages,
+                input_vision_history_messages=input_vision_delivery.history_messages,
+                question=built_turn_messages.question,
+                vision_turn_state=vision_turn_state,
+            )
+            log_event(
+                level="DEBUG",
+                event="ai_group_chat.event.finished",
+                category="plugin",
+                message="AI 群聊事件处理完成",
+                group_id=group_key,
+                message_id=msg.message_id,
+                context_messages_count=len(chat_handler.messages_lst),
+            )
+
+        latest_runtime = self._current_runtime()
+        if latest_runtime is None or group_key not in latest_runtime.groups:
+            self._group_contexts.pop(group_key, None)
+            self._debug_initialized_revision.pop(group_key, None)
         return True
 
     def _is_bot_mentioned(self, *, msg: GroupMessage) -> bool:
@@ -206,7 +320,3 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             if isinstance(segment, At) and segment.data.qq != "all":
                 mentions.append(segment.data.qq)
         return mentions
-
-    def _id_key(self, value: NapCatId) -> str:
-        """把 NapCat ID 作为字典键使用。"""
-        return value

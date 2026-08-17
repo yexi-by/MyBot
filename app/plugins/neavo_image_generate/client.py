@@ -10,9 +10,8 @@ from uuid import UUID
 
 import httpx
 
+from app.config import NeavoImageGenerateConfig
 from app.utils.file_type import detect_mime_type
-
-from .config import NeavoImageGenerateConfig
 
 type NeavoRequestStage = Literal["submit", "poll", "validate"]
 type SleepFunction = Callable[[float], Awaitable[None]]

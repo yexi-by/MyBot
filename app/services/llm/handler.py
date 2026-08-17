@@ -4,10 +4,11 @@ from typing import Self
 
 from openai import AsyncOpenAI
 
+from app.config.schemas import LLMProviderConfig
+
 from .providers.openai import OpenAIService
 from .schemas import (
     ChatMessage,
-    LLMConfig,
     LLMProviderWrapper,
     LLMResponse,
     LLMToolChoice,
@@ -21,77 +22,75 @@ from .wrapper import ResilientLLMProvider
 class LLMHandler:
     """按模型厂商路由到具体 LLM 服务。"""
 
-    def __init__(self, services: list[LLMProviderWrapper]) -> None:
-        """保存已注册服务列表。"""
-        self.services: list[LLMProviderWrapper] = services
+    def __init__(self, services: dict[str, LLMProviderWrapper]) -> None:
+        """保存按稳定 ID 注册的服务。"""
+        self.services: dict[str, LLMProviderWrapper] = services
 
     @classmethod
-    def register_instance(cls, settings: list[LLMConfig]) -> Self:
+    def register_instance(cls, providers: dict[str, LLMProviderConfig]) -> Self:
         """根据配置注册 LLM 服务实例。"""
-        services: list[LLMProviderWrapper] = []
-        for model_config in settings:
+        services: dict[str, LLMProviderWrapper] = {}
+        for provider_id, provider_config in providers.items():
             raw_service = OpenAIService(
                 client=AsyncOpenAI(
-                    api_key=model_config.api_key,
-                    base_url=model_config.base_url,
+                    api_key=provider_config.api_key.get_secret_value(),
+                    base_url=provider_config.base_url,
                 )
             )
             safe_service = ResilientLLMProvider(
-                inner_provider=raw_service, llm_config=model_config
+                inner_provider=raw_service, provider_config=provider_config
             )
             wrapper = LLMProviderWrapper(
-                model_vendors=model_config.model_vendors,
+                provider_id=provider_id,
                 provider=safe_service,
             )
-            services.append(wrapper)
+            services[provider_id] = wrapper
         return cls(services=services)
 
     async def get_ai_text_response(
         self,
         messages: list[ChatMessage],
-        model_vendors: str,
+        provider: str,
         model_name: str,
-        retry_count: int | None = None,
-        retry_delay: float | None = None,
+        max_attempts: int | None = None,
+        retry_delay_seconds: float | None = None,
     ) -> str:
         """获取指定模型厂商的文本响应，可覆盖当前请求的重试参数。"""
-        for llm in self.services:
-            if llm.model_vendors != model_vendors:
-                continue
-            return await llm.provider.get_ai_response(
-                messages=messages,
-                model=model_name,
-                retry_count=retry_count,
-                retry_delay=retry_delay,
-            )
-        raise ValueError(f"未定义的服务商名:{model_vendors}")
+        llm = self.services.get(provider)
+        if llm is None:
+            raise ValueError(f"未定义的 LLM provider: {provider}")
+        return await llm.provider.get_ai_response(
+            messages=messages,
+            model=model_name,
+            max_attempts=max_attempts,
+            retry_delay_seconds=retry_delay_seconds,
+        )
 
     async def get_ai_response_with_tools(
         self,
         messages: list[ChatMessage],
-        model_vendors: str,
+        provider: str,
         model_name: str,
         tools: list[LLMToolDefinition],
         tool_choice: LLMToolChoice = "auto",
         parallel_tool_calls: bool = True,
     ) -> LLMResponse:
         """获取指定模型厂商的工具调用结构化响应。"""
-        for llm in self.services:
-            if llm.model_vendors != model_vendors:
-                continue
-            return await llm.provider.get_ai_response_with_tools(
-                messages=messages,
-                model=model_name,
-                tools=tools,
-                tool_choice=tool_choice,
-                parallel_tool_calls=parallel_tool_calls,
-            )
-        raise ValueError(f"未定义的服务商名:{model_vendors}")
+        llm = self.services.get(provider)
+        if llm is None:
+            raise ValueError(f"未定义的 LLM provider: {provider}")
+        return await llm.provider.get_ai_response_with_tools(
+            messages=messages,
+            model=model_name,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+        )
 
     async def run_ai_with_tools(
         self,
         messages: list[ChatMessage],
-        model_vendors: str,
+        provider: str,
         model_name: str,
         tool_executor: LLMToolExecutor,
         max_tool_rounds: int = 16,
@@ -102,13 +101,13 @@ class LLMHandler:
         if not tools:
             return await self.get_ai_text_response(
                 messages=working_messages,
-                model_vendors=model_vendors,
+                provider=provider,
                 model_name=model_name,
             )
         for _ in range(max_tool_rounds):
             response = await self.get_ai_response_with_tools(
                 messages=working_messages,
-                model_vendors=model_vendors,
+                provider=provider,
                 model_name=model_name,
                 tools=tools,
             )
@@ -139,14 +138,13 @@ class LLMHandler:
         self,
         message: ChatMessage,
         model: str,
-        model_vendors: str,
+        provider: str,
     ) -> str:
         """获取指定模型厂商的图片响应。"""
-        for llm in self.services:
-            if llm.model_vendors != model_vendors:
-                continue
-            return await llm.provider.get_image(
-                message=message,
-                model=model,
-            )
-        raise ValueError(f"未定义的服务商名:{model_vendors}")
+        llm = self.services.get(provider)
+        if llm is None:
+            raise ValueError(f"未定义的 LLM provider: {provider}")
+        return await llm.provider.get_image(
+            message=message,
+            model=model,
+        )
