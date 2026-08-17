@@ -6,6 +6,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { SectionCard } from "@/components/SectionCard";
+import { SettingsGrid } from "@/components/SettingsGrid";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,7 +49,7 @@ export default function McpPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <Alert>
         <AlertTitle>MCP 改动需要重启进程后生效</AlertTitle>
         <AlertDescription>
@@ -56,6 +57,7 @@ export default function McpPage() {
         </AlertDescription>
       </Alert>
 
+      <SettingsGrid>
       <SectionCard title="MCP 总开关" description="关闭后所有 MCP server 都不会启动。">
         <SwitchField
           path="mcp.enabled"
@@ -90,7 +92,7 @@ export default function McpPage() {
             label="工作目录"
             placeholder="留空使用进程当前目录"
           />
-          <div className="md:col-span-2">
+          <div className="xl:col-span-2">
             <StringListField
               path={`mcp.servers.${name}.args`}
               label="命令参数"
@@ -98,7 +100,7 @@ export default function McpPage() {
               addLabel="添加参数"
             />
           </div>
-          <div className="md:col-span-2">
+          <div className="xl:col-span-2">
             <KeyValueField
               path={`mcp.servers.${name}.env`}
               label="环境变量"
@@ -114,7 +116,7 @@ export default function McpPage() {
       ))}
 
       <SectionCard title="新增 MCP 服务">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center md:col-span-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center xl:col-span-2">
           <Input
             aria-label="新 MCP 服务名"
             placeholder="服务名，如 firecrawl"
@@ -133,6 +135,7 @@ export default function McpPage() {
           </Button>
         </div>
       </SectionCard>
+      </SettingsGrid>
     </div>
   );
 }

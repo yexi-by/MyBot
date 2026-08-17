@@ -65,14 +65,14 @@ docker compose up -d
 
 主要挂载如下：
 
-- `./config:/app/config:ro`
+- `./config:/app/config:rw`（MyBot 在线保存配置）
 - `./images:/app/images`
 - `./logs:/app/logs`
 - `mybot-postgres-data:/var/lib/postgresql`
 
 `migrate` 会等待 PostgreSQL 健康后执行 migration，成功后 MyBot 才启动。应用启动时只检查 migration 版本，不会自动修改 schema。数据库和图片没有自动过期或备份机制。
 
-默认 Compose 把 `config/` 只读挂载，因此容器内 WebUI 可以查看和校验配置，但保存会失败。只有确认内网访问边界并明确允许在线写配置后，才应把 `mybot` 服务的该挂载改为 `:rw`；`migrate` 仍保持只读。
+默认 Compose 允许 MyBot 通过 WebUI 在线保存 `config/`，`migrate` 服务仍保持只读挂载。WebUI 面向可信内网使用，不应直接暴露到公网。
 
 ## 配置
 

@@ -9,6 +9,7 @@ import type {
   FileListResponse,
   FileSaveResponse,
   MyBotConfigData,
+  PowerResponse,
 } from "./types";
 
 export class ApiError extends Error {
@@ -98,4 +99,12 @@ export function saveFile(
     method: "PUT",
     body: JSON.stringify({ content, base_sha256: baseSha256 }),
   });
+}
+
+export function restartSystem(): Promise<PowerResponse> {
+  return request<PowerResponse>("/api/system/restart", { method: "POST" });
+}
+
+export function shutdownSystem(): Promise<PowerResponse> {
+  return request<PowerResponse>("/api/system/shutdown", { method: "POST" });
 }

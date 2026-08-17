@@ -25,18 +25,24 @@ def main() -> None:
     from dishka import make_async_container
 
     from app.core import NapCatServer, MyProvider
+    from app.webui import PowerController
 
     container = make_async_container(MyProvider(config_manager=config_manager))
+    power = PowerController()
     napcat = NapCatServer(
-        container=container, config=config, config_manager=config_manager
+        container=container, config=config, config_manager=config_manager, power=power
     )
-    uvicorn.run(
-        napcat.app,
-        host=config.server.host,
-        port=config.server.port,
-        log_level=config.server.log_level,
-        access_log=config.server.access_log,
+    server = uvicorn.Server(
+        uvicorn.Config(
+            napcat.app,
+            host=config.server.host,
+            port=config.server.port,
+            log_level=config.server.log_level,
+            access_log=config.server.access_log,
+        )
     )
+    power.bind(server)
+    server.run()
 
 
 if __name__ == "__main__":

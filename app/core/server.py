@@ -25,7 +25,7 @@ from app.models import GroupMessage, GroupRecallNoticeEvent, Meta, Response
 from app.services import LLMHandler, MCPToolManager
 from app.services.napcat import ImageArchiveWorkerFactory
 from app.utils.log import log_event, log_exception, log_run_end, log_run_start
-from app.webui import create_webui_router, mount_webui_static
+from app.webui import PowerController, create_webui_router, mount_webui_static
 
 from .di import DirectHttpx, ProxyHttpx
 from .dispatcher import EventDispatcher
@@ -47,6 +47,7 @@ class NapCatServer:
         container: AsyncContainer,
         config: MyBotConfig,
         config_manager: ConfigManager,
+        power: PowerController | None = None,
     ) -> None:
         """创建 FastAPI 应用并注册路由。"""
         self.container: AsyncContainer = container
@@ -54,7 +55,9 @@ class NapCatServer:
         self.app: FastAPI = FastAPI(lifespan=self.lifespan)
         setup_dishka(self.container, self.app)
         self.app.include_router(
-            create_webui_router(manager=config_manager, watcher_active=True)
+            create_webui_router(
+                manager=config_manager, watcher_active=True, power=power
+            )
         )
         self._register_routes()
         mount_webui_static(self.app)

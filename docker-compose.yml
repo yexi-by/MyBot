@@ -49,7 +49,7 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - ./logs:/app/logs
-      - ./config:/app/config:ro
+      - ./config:/app/config:rw
       - ./images:/app/images
     secrets:
       - postgres_password

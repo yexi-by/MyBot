@@ -1,11 +1,14 @@
 """WebUI 配置 API 路由；ConfigManager 在创建路由时显式注入。"""
 
+from uuid import uuid4
+
 from fastapi import APIRouter, HTTPException, Response, status
 
 from app.config import RESTART_ONLY_SECTIONS, ConfigLoadError, ConfigManager
 
 from . import config_io, files
 from .config_io import ConfigConflictError
+from .power import PowerAction, PowerController
 from .schemas import (
     ConfigGetResponse,
     ConfigIssuePayload,
@@ -18,6 +21,7 @@ from .schemas import (
     FileListResponse,
     FileSaveRequest,
     FileSaveResponse,
+    PowerResponse,
 )
 
 
@@ -48,10 +52,14 @@ def _is_invalid_path_error(error: ConfigLoadError) -> bool:
 
 
 def create_webui_router(
-    *, manager: ConfigManager, watcher_active: bool
+    *,
+    manager: ConfigManager,
+    watcher_active: bool,
+    power: PowerController | None = None,
 ) -> APIRouter:
     """创建配置与文本文件 API 路由，并绑定配置管理器。"""
     router = APIRouter(prefix="/api")
+    boot_id = uuid4().hex
 
     @router.get("/config")
     def get_config(response: Response) -> ConfigGetResponse:
@@ -84,6 +92,7 @@ def create_webui_router(
                 watcher_active=watcher_active,
                 restart_only_sections=list(RESTART_ONLY_SECTIONS),
                 restart_required_sections=restart_now,
+                boot_id=boot_id,
             ),
         )
 
@@ -181,6 +190,34 @@ def create_webui_router(
             ) from exc
         return FileSaveResponse(sha256=digest)
 
+    def _request_power(action: PowerAction) -> PowerResponse:
+        """受理电源操作：延迟优雅停机，是否重新拉起由外部守护策略决定。"""
+        if power is None or not power.available:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="当前运行模式未启用电源控制",
+            )
+        power.request(action)
+        return PowerResponse(
+            ok=True,
+            action=action,
+            message=(
+                "已受理重启请求，进程将优雅退出；是否自动拉起取决于部署的守护策略"
+                if action == "restart"
+                else "已受理关机请求，进程将优雅退出"
+            ),
+        )
+
+    @router.post("/system/restart", status_code=status.HTTP_202_ACCEPTED)
+    async def restart_process() -> PowerResponse:
+        """重启进程：优雅停机后由 Docker restart 策略或运维手动拉起。"""
+        return _request_power("restart")
+
+    @router.post("/system/shutdown", status_code=status.HTTP_202_ACCEPTED)
+    async def shutdown_process() -> PowerResponse:
+        """关机：优雅停机；Docker 守护下会被重新拉起，效果等同重启。"""
+        return _request_power("shutdown")
+
     _ = (
         get_config,
         validate_config,
@@ -188,5 +225,7 @@ def create_webui_router(
         list_files,
         read_file,
         save_file,
+        restart_process,
+        shutdown_process,
     )
     return router

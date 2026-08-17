@@ -6,6 +6,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { SectionCard } from "@/components/SectionCard";
+import { SettingsGrid } from "@/components/SettingsGrid";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -52,7 +53,7 @@ export default function ProvidersPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <Alert>
         <AlertTitle>Provider 改动需要重启进程后生效</AlertTitle>
         <AlertDescription>
@@ -66,6 +67,7 @@ export default function ProvidersPage() {
         </p>
       ) : null}
 
+      <SettingsGrid>
       {providerIds.map((id) => (
         <SectionCard
           key={id}
@@ -105,7 +107,7 @@ export default function ProvidersPage() {
       ))}
 
       <SectionCard title="新增 Provider" description="ID 不能为空，也不能包含首尾空格。">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center md:col-span-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center xl:col-span-2">
           <Input
             aria-label="新 Provider ID"
             placeholder="provider ID，如 deepseek"
@@ -124,6 +126,7 @@ export default function ProvidersPage() {
           </Button>
         </div>
       </SectionCard>
+      </SettingsGrid>
     </div>
   );
 }

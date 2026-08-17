@@ -2,6 +2,7 @@
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { SectionCard } from "@/components/SectionCard";
+import { SettingsGrid } from "@/components/SettingsGrid";
 import {
   NumberField,
   SelectField,
@@ -11,13 +12,15 @@ import {
 
 export default function SystemPage() {
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <Alert>
         <AlertTitle>本页改动需要重启进程后生效</AlertTitle>
         <AlertDescription>
           停止编辑后会自动写入配置文件，但运行中的服务继续使用启动时的配置。
         </AlertDescription>
       </Alert>
+
+      <SettingsGrid>
 
       <SectionCard title="服务监听" description="HTTP 与 WebSocket 服务监听参数。">
         <TextField path="server.host" label="监听地址" placeholder="默认 0.0.0.0" />
@@ -182,6 +185,7 @@ export default function SystemPage() {
           )}
         />
       </SectionCard>
+      </SettingsGrid>
     </div>
   );
 }

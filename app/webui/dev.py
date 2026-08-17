@@ -8,15 +8,20 @@ from fastapi import FastAPI
 
 from app.config import CONFIG_FILE, ConfigManager
 
+from .power import PowerController
 from .routes import create_webui_router
 from .spa import mount_webui_static
 
 
-def create_dev_app(*, config_file: Path) -> FastAPI:
+def create_dev_app(
+    *, config_file: Path, power: PowerController | None = None
+) -> FastAPI:
     """创建只挂载 WebUI 能力的最小 FastAPI 应用。"""
     manager = ConfigManager.create(config_file=config_file)
     app = FastAPI(title="MyBot WebUI Dev")
-    app.include_router(create_webui_router(manager=manager, watcher_active=False))
+    app.include_router(
+        create_webui_router(manager=manager, watcher_active=False, power=power)
+    )
     mount_webui_static(app)
     return app
 
@@ -28,13 +33,18 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=6056)
     namespace = parser.parse_args()
-    app = create_dev_app(config_file=Path(str(namespace.config)))
-    uvicorn.run(
-        app,
-        host=str(namespace.host),
-        port=int(namespace.port),
-        log_level="info",
+    power = PowerController()
+    app = create_dev_app(config_file=Path(str(namespace.config)), power=power)
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=str(namespace.host),
+            port=int(namespace.port),
+            log_level="info",
+        )
     )
+    power.bind(server)
+    server.run()
 
 
 if __name__ == "__main__":

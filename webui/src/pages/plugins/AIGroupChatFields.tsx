@@ -55,7 +55,7 @@ function VisionSection() {
       }
     >
       {supportsImages ? (
-        <div className="md:col-span-2">
+        <div className="xl:col-span-2">
           <Alert>
             <AlertTitle>主模型已支持图片</AlertTitle>
             <AlertDescription>
@@ -94,7 +94,7 @@ function VisionSection() {
           />
         </>
       ) : (
-        <p className="text-sm text-muted-foreground md:col-span-2">
+        <p className="text-sm text-muted-foreground xl:col-span-2">
           未配置视觉模型；主模型不支持图片时必须启用。
         </p>
       )}
@@ -230,7 +230,7 @@ export default function AIGroupChatFields() {
           label="通用要求文件"
           placeholder="ai_group_chat/prompts/extra_requirements.md"
         />
-        <div className="md:col-span-2">
+        <div className="xl:col-span-2">
           <TextareaField
             path="plugins.ai_group_chat.context_compression_notice"
             label="上下文压缩提示语"
@@ -261,10 +261,8 @@ export default function AIGroupChatFields() {
         />
       </SectionCard>
 
-      <div className="space-y-4">
-        <h3 className="text-base font-medium">群列表</h3>
-        <GroupsSection />
-      </div>
+      <h3 className="col-span-full text-base font-medium">群列表</h3>
+      <GroupsSection />
     </>
   );
 }

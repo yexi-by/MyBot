@@ -65,7 +65,9 @@ AI 插件为每个群持有独立 `asyncio.Lock`。同群事件串行，不同�
 - `images/`：永久群图片。
 - `logs/`：日志和 AI 调试转储。
 
-WebUI 与主服务同端口，不另建配置状态。配置表单停止编辑 800ms 后自动校验并写回，文本文件停止编辑 1 秒后自动写回；每次请求都使用读取时的内容哈希，外部修改发生后不会被静默覆盖。文本文件接口只允许访问 `config/` 内的 `.md` 和 `.txt`。生产 Compose 默认把配置目录只读挂载；改成可写属于独立的部署权限决定。
+WebUI 与主服务同端口，不另建配置状态。配置表单停止编辑 800ms 后自动校验并写回，文本文件停止编辑 1 秒后自动写回；每次请求都使用读取时的内容哈希，外部修改发生后不会被静默覆盖。文本文件接口只允许访问 `config/` 内的 `.md` 和 `.txt`。生产 Compose 允许 MyBot 写入配置目录，migration 服务仍使用只读挂载。
+
+WebUI 还提供 `POST /api/system/restart` 与 `POST /api/system/shutdown` 电源端点：`PowerController` 延迟触发 uvicorn 优雅停机，重启/关机在进程级行为一致，是否重新拉起由外部守护策略决定（`docker-compose.yml` 的 mybot 服务是 `restart: unless-stopped`，容器内两种操作都会被重新拉起）。
 
 ## 关闭顺序
 

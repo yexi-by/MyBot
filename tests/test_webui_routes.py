@@ -1,14 +1,18 @@
 """WebUI 配置 API 路由测试。"""
 
+import asyncio
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
+import uvicorn
 
+from app.webui import PowerController
 from app.webui.dev import create_dev_app
 
 
@@ -40,8 +44,10 @@ def base_config() -> str:
 class WebUIRoutesTest(unittest.IsolatedAsyncioTestCase):
     """通过 dev app 工厂验证各端点状态码与契约。"""
 
-    def _client(self, root: Path) -> httpx.AsyncClient:
-        app = create_dev_app(config_file=root / "mybot.toml")
+    def _client(
+        self, root: Path, *, power: PowerController | None = None
+    ) -> httpx.AsyncClient:
+        app = create_dev_app(config_file=root / "mybot.toml", power=power)
         return httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://webui.test"
         )
@@ -66,6 +72,7 @@ class WebUIRoutesTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body["meta"]["watcher_active"])
         self.assertIn("server", body["meta"]["restart_only_sections"])
         self.assertEqual(body["meta"]["restart_required_sections"], [])
+        self.assertTrue(body["meta"]["boot_id"])
         self.assertEqual(response.headers["cache-control"], "no-store")
 
     async def test_validate_reports_issues_without_writing(self) -> None:
@@ -228,6 +235,44 @@ class WebUIRoutesTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(reread.json()["content"], "新角色")
         self.assertEqual(reread.headers["cache-control"], "no-store")
+
+    async def test_power_actions_trigger_graceful_exit(self) -> None:
+        """重启与关机端点受理后延迟触发 uvicorn 优雅停机。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "mybot.toml").write_text(base_config(), encoding="utf-8")
+            power = PowerController(delay_seconds=0.05)
+            namespace = SimpleNamespace(should_exit=False)
+            power.bind(cast(uvicorn.Server, namespace))
+            async with self._client(root, power=power) as client:
+                restart_response = await client.post("/api/system/restart")
+                shutdown_response = await client.post("/api/system/shutdown")
+                for _ in range(100):
+                    if namespace.should_exit:
+                        break
+                    await asyncio.sleep(0.02)
+
+        self.assertEqual(restart_response.status_code, 202)
+        self.assertEqual(restart_response.json()["action"], "restart")
+        self.assertTrue(restart_response.json()["ok"])
+        self.assertEqual(shutdown_response.status_code, 202)
+        self.assertEqual(shutdown_response.json()["action"], "shutdown")
+        self.assertTrue(namespace.should_exit)
+
+    async def test_power_actions_unavailable_without_binding(self) -> None:
+        """未绑定电源控制时电源端点返回 503。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "mybot.toml").write_text(base_config(), encoding="utf-8")
+            async with self._client(root) as client:
+                restart_response = await client.post("/api/system/restart")
+                shutdown_response = await client.post("/api/system/shutdown")
+
+        self.assertEqual(restart_response.status_code, 503)
+        self.assertEqual(shutdown_response.status_code, 503)
+        self.assertEqual(
+            restart_response.json()["detail"], "当前运行模式未启用电源控制"
+        )
 
 
 if __name__ == "__main__":

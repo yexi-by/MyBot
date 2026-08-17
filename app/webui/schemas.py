@@ -1,6 +1,6 @@
 """WebUI 配置 API 的请求与响应模型。"""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -20,6 +20,7 @@ class ConfigMeta(BaseModel):
     watcher_active: bool
     restart_only_sections: list[str]
     restart_required_sections: list[str]
+    boot_id: str
 
 
 class ConfigGetResponse(BaseModel):
@@ -85,3 +86,11 @@ class FileSaveResponse(BaseModel):
     """文本文件保存结果。"""
 
     sha256: str
+
+
+class PowerResponse(BaseModel):
+    """电源操作受理结果；进程会在响应返回后优雅停机。"""
+
+    ok: bool
+    action: Literal["restart", "shutdown"]
+    message: str

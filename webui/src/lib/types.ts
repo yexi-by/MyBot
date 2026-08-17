@@ -216,6 +216,7 @@ export interface ConfigMeta {
   watcher_active: boolean;
   restart_only_sections: string[];
   restart_required_sections: string[];
+  boot_id: string;
 }
 
 export interface ConfigGetResponse {
@@ -249,4 +250,10 @@ export interface FileGetResponse {
 
 export interface FileSaveResponse {
   sha256: string;
+}
+
+export interface PowerResponse {
+  ok: boolean;
+  action: "restart" | "shutdown";
+  message: string;
 }

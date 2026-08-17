@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useFormContext } from "react-hook-form";
 
 import { SectionCard } from "@/components/SectionCard";
+import { SettingsGrid } from "@/components/SettingsGrid";
 import { ModelRefField } from "@/components/ModelRefField";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,7 +30,7 @@ import AIGroupChatFields from "./AIGroupChatFields";
 function GroupNoticeFields() {
   return (
     <SectionCard title="群通知配置">
-      <div className="md:col-span-2">
+      <div className="xl:col-span-2">
         <StringListField
           path="plugins.group_notice.groups"
           label="生效群号"
@@ -49,7 +50,7 @@ function GroupNoticeFields() {
 function AutoUnbanFields() {
   return (
     <SectionCard title="自动解禁配置">
-      <div className="md:col-span-2">
+      <div className="xl:col-span-2">
         <StringListField
           path="plugins.auto_unban.protected_users"
           label="保护用户列表"
@@ -69,7 +70,7 @@ function ImageGenerateFields() {
         <ModelRefField path="plugins.image_generate.model" />
       </SectionCard>
       <SectionCard title="生图配置">
-        <div className="md:col-span-2">
+        <div className="xl:col-span-2">
           <StringListField
             path="plugins.image_generate.groups"
             label="生效群号"
@@ -108,7 +109,7 @@ function NeavoImageGenerateFields() {
         />
       </SectionCard>
       <SectionCard title="生图配置">
-        <div className="md:col-span-2">
+        <div className="xl:col-span-2">
           <StringListField
             path="plugins.neavo_image_generate.groups"
             label="生效群号"
@@ -145,7 +146,7 @@ function NeavoImageGenerateFields() {
 function RecallBotImageFields() {
   return (
     <SectionCard title="撤回图片配置">
-      <p className="text-sm text-muted-foreground md:col-span-2">
+      <p className="text-sm text-muted-foreground xl:col-span-2">
         该插件没有额外配置项，启用开关即全部配置。
       </p>
     </SectionCard>
@@ -187,7 +188,7 @@ export default function PluginPage({ pluginId }: { pluginId: PluginId }) {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div className="flex items-center justify-between rounded-lg border p-4">
         <div>
           <h2 className="text-lg font-semibold">{meta.name}</h2>
@@ -212,7 +213,9 @@ export default function PluginPage({ pluginId }: { pluginId: PluginId }) {
       </div>
 
       {enabled ? (
-        <PluginFields pluginId={pluginId} />
+        <SettingsGrid>
+          <PluginFields pluginId={pluginId} />
+        </SettingsGrid>
       ) : (
         <p className="text-sm text-muted-foreground">
           插件已禁用；打开开关后将按默认配置创建该插件的配置节。
