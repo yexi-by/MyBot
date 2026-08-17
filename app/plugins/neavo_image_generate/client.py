@@ -10,9 +10,8 @@ from uuid import UUID
 
 import httpx
 
+from app.config import NeavoImageGenerateConfig
 from app.utils.file_type import detect_mime_type
-
-from .config import NeavoImageGenerateConfig
 
 type NeavoRequestStage = Literal["submit", "poll", "validate"]
 type SleepFunction = Callable[[float], Awaitable[None]]
@@ -438,7 +437,9 @@ class NeavoImageClient:
         return normalized_mime_type
 
     def _authorization_headers(self) -> dict[str, str]:
-        """构造鉴权请求头，不暴露或记录 Token。"""
+        """仅在配置 Token 时构造鉴权请求头。"""
+        if self._config.api_token is None:
+            return {}
         token = self._config.api_token.get_secret_value()
         return {"Authorization": f"Bearer {token}"}
 

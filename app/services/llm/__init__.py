@@ -5,7 +5,6 @@ from .handler import LLMHandler
 from .mcp import MCPConfig, MCPServerConfig, MCPToolManager
 from .schemas import (
     ChatMessage,
-    LLMConfig,
     LLMContextConfig,
     LLMResponse,
     LLMToolCall,
@@ -18,7 +17,6 @@ __all__ = [
     "ChatMessage",
     "CompositeToolExecutor",
     "ContextHandler",
-    "LLMConfig",
     "LLMContextConfig",
     "LLMHandler",
     "LLMResponse",

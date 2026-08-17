@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from app.api.mixins.message import NapCatSendMessageError
+from app.config import AIGroupChatConfig
 from app.models import GroupMessage, JsonObject, JsonValue
 from app.plugins.base import Context
 from app.services import (
@@ -12,24 +13,22 @@ from app.services import (
     NapCatGroupToolExecutor,
 )
 from app.services.llm.schemas import LLMResponse, LLMToolCall, LLMToolDefinition
-from app.services.llm.tools import LLMToolImageArtifact, build_tool_result_message
+from app.services.llm.tools import (
+    LLMImageArtifact,
+    LLMImageError,
+    LLMImageItem,
+    build_tool_result_message,
+)
 from app.utils.log import log_event
 
-from .config import (
-    AIGroupChatConfig,
-    load_extra_requirements,
-    should_use_deepseek_v4_depth_zero_prompt,
-    should_use_deepseek_v4_depth_zero_prompt_for_model,
-)
 from .context_compressor import GroupChatContextCompressor
 from .debug_dump import AIGroupChatDebugDumper
-from .deepseek_v4_prompt import DeepSeekV4PromptPack, load_deepseek_v4_prompt_pack
 from .forward_image_auto_fetch import (
     FORWARD_MESSAGE_IMAGES_TOOL_NAME,
     ForwardImageAutoFetcher,
 )
 from .token_budget import ConservativeTokenEstimator, TokenBudgetEstimate
-from .visual_observer import ToolImageObserver
+from .vision_tool import VisionDescriptionTool, VisionTurnState
 
 
 @dataclass(frozen=True)
@@ -55,27 +54,28 @@ class PreparedTurnContext:
     """描述本轮请求前整理好的工作上下文。"""
 
     working_messages: list[ChatMessage]
-    turn_messages: list[ChatMessage]
+    persisted_turn_messages: list[ChatMessage]
     replace_existing_history: bool
 
 
 @dataclass(frozen=True)
-class ActiveModelConfig:
-    """描述本轮正式 LLM 请求使用的模型。"""
+class ToolCallResultForModel:
+    """描述单次工具调用交给主模型的消息和图片旁路结果。"""
 
-    model_name: str
-    model_vendors: str
-    supports_multimodal: bool
-    used_multimodal_fallback: bool = False
+    message: ChatMessage
+    is_error: bool
+    image_items: list[LLMImageItem]
+    truncated_image_count: int
 
+    @property
+    def image_artifacts_count(self) -> int:
+        """返回成功图片数。"""
+        return sum(isinstance(item, LLMImageArtifact) for item in self.image_items)
 
-@dataclass(frozen=True)
-class TurnPromptInjection:
-    """描述本轮正式请求需要临时追加的提示词。"""
-
-    messages: list[ChatMessage]
-    deepseek_v4_depth_zero_injected: bool
-    general_requirements_injected: bool
+    @property
+    def image_errors_count(self) -> int:
+        """返回图片错误数。"""
+        return sum(isinstance(item, LLMImageError) for item in self.image_items)
 
 
 class GroupChatToolLoop:
@@ -87,23 +87,21 @@ class GroupChatToolLoop:
         config: AIGroupChatConfig,
         context: Context,
         debug_dumper: AIGroupChatDebugDumper,
+        vision_tool: VisionDescriptionTool,
     ) -> None:
         """保存工具循环所需的配置和运行上下文。"""
         self.config: AIGroupChatConfig = config
         self.context: Context = context
         self.debug_dumper: AIGroupChatDebugDumper = debug_dumper
+        self.vision_tool: VisionDescriptionTool = vision_tool
         self.token_estimator: ConservativeTokenEstimator = ConservativeTokenEstimator(
-            safety_factor=config.token_estimation_safety_factor
+            safety_factor=config.token_safety_factor
         )
         self.context_compressor: GroupChatContextCompressor = (
             GroupChatContextCompressor()
         )
         self.forward_image_auto_fetcher: ForwardImageAutoFetcher = (
             ForwardImageAutoFetcher(config=config)
-        )
-        self.tool_image_observer: ToolImageObserver = ToolImageObserver(
-            config=config,
-            context=context,
         )
 
     async def run(
@@ -112,35 +110,28 @@ class GroupChatToolLoop:
         msg: GroupMessage,
         chat_handler: ContextHandler,
         turn_messages: list[ChatMessage],
-        active_model: ActiveModelConfig | None = None,
+        input_vision_messages: list[ChatMessage],
+        input_vision_history_messages: list[ChatMessage],
+        question: str,
+        vision_turn_state: VisionTurnState,
     ) -> None:
         """执行群聊专用工具调用循环。"""
-        if active_model is None:
-            active_model = ActiveModelConfig(
-                model_name=self.config.model_name,
-                model_vendors=self.config.model_vendors,
-                supports_multimodal=self.config.supports_multimodal,
-            )
-        prompt_injection = self._build_turn_prompt_injection(
-            active_model=active_model,
-            system_prompt=chat_handler.system_prompt,
-        )
         tool_history_messages: list[ChatMessage] = []
-        tool_image_history_messages: list[ChatMessage] = []
+        vision_history_messages: list[ChatMessage] = []
         sent_content_messages: list[ChatMessage] = []
         napcat_executor = NapCatGroupToolExecutor(
             bot=self.context.bot,
-            database=self.context.database,
+            group_messages=self.context.group_messages,
             event=msg,
             allow_mention_all=self.config.allow_mention_all,
-            forward_image_tool_enabled=self.config.forward_image_tool_enabled,
+            forward_image_tool_enabled=self.config.images.forward_tool_enabled,
             forward_image_max_images_per_call=(
-                self.config.forward_image_max_images_per_call
+                self.config.images.forward_max_per_call
             ),
-            forward_image_max_all_images=self.config.forward_image_max_all_images,
-            forward_image_fetch_concurrency=self.config.forward_image_fetch_concurrency,
-            forward_image_download_timeout_seconds=(
-                self.config.forward_image_download_timeout_seconds
+            forward_image_max_all_images=self.config.images.forward_max_per_turn,
+            image_fetch_concurrency=self.config.images.fetch_concurrency,
+            image_download_timeout_seconds=(
+                self.config.images.download_timeout_seconds
             ),
             max_reply_chars=self.config.max_reply_chars,
             http_client=self.context.direct_httpx,
@@ -153,11 +144,12 @@ class GroupChatToolLoop:
             msg=msg,
             chat_handler=chat_handler,
             turn_messages=turn_messages,
+            input_vision_messages=input_vision_messages,
+            input_vision_history_messages=input_vision_history_messages,
             tools=tools,
-            prompt_injection=prompt_injection,
         )
         working_messages = prepared_context.working_messages
-        turn_messages = prepared_context.turn_messages
+        persisted_turn_messages = prepared_context.persisted_turn_messages
         replace_existing_history = prepared_context.replace_existing_history
         log_event(
             level="DEBUG",
@@ -166,19 +158,14 @@ class GroupChatToolLoop:
             message="AI 群聊工具循环开始",
             group_id=msg.group_id,
             message_id=msg.message_id,
-            model_name=active_model.model_name,
-            model_vendors=active_model.model_vendors,
-            supports_multimodal=active_model.supports_multimodal,
-            used_multimodal_fallback=active_model.used_multimodal_fallback,
+            model_name=self.config.model.name,
+            provider=self.config.model.provider,
+            supports_images=self.config.model.supports_images,
             working_messages_count=len(working_messages),
             tools_count=len(tools),
             tool_names=[tool.name for tool in tools],
         )
         for round_index in range(1, self.config.max_tool_rounds + 1):
-            request_messages = self._build_llm_request_messages(
-                working_messages=working_messages,
-                prompt_injection=prompt_injection,
-            )
             log_event(
                 level="DEBUG",
                 event="ai_group_chat.llm.request",
@@ -187,24 +174,17 @@ class GroupChatToolLoop:
                 group_id=msg.group_id,
                 message_id=msg.message_id,
                 round_index=round_index,
-                messages_count=len(request_messages),
+                messages_count=len(working_messages),
                 working_messages_count=len(working_messages),
-                deepseek_v4_depth_zero_injected=(
-                    prompt_injection.deepseek_v4_depth_zero_injected
-                ),
-                general_requirements_injected=(
-                    prompt_injection.general_requirements_injected
-                ),
-                active_model_name=active_model.model_name,
-                active_model_vendors=active_model.model_vendors,
-                used_multimodal_fallback=active_model.used_multimodal_fallback,
+                model_name=self.config.model.name,
+                provider=self.config.model.provider,
                 tools_count=len(tools),
                 tool_choice="auto",
             )
             response = await self.context.llm.get_ai_response_with_tools(
-                messages=request_messages,
-                model_vendors=active_model.model_vendors,
-                model_name=active_model.model_name,
+                messages=working_messages,
+                provider=self.config.model.provider,
+                model_name=self.config.model.name,
                 tools=tools,
             )
             content = self._normalize_content(response.content)
@@ -245,10 +225,10 @@ class GroupChatToolLoop:
                     await self._finish_turn(
                         msg=msg,
                         chat_handler=chat_handler,
-                        turn_messages=turn_messages,
+                        turn_messages=persisted_turn_messages,
                         sent_content_messages=sent_content_messages,
                         tool_history_messages=tool_history_messages,
-                        tool_image_history_messages=tool_image_history_messages,
+                        vision_history_messages=vision_history_messages,
                         replace_existing_history=replace_existing_history,
                         title="群消息发送失败后的长期上下文",
                         failure_status_message=send_result.failure_status_message,
@@ -263,9 +243,10 @@ class GroupChatToolLoop:
                     response=response,
                     tool_executor=tool_executor,
                     tool_history_messages=tool_history_messages,
-                    tool_image_history_messages=tool_image_history_messages,
+                    vision_history_messages=vision_history_messages,
                     round_index=round_index,
-                    active_model=active_model,
+                    question=question,
+                    vision_turn_state=vision_turn_state,
                 )
                 continue
 
@@ -273,10 +254,10 @@ class GroupChatToolLoop:
                 await self._finish_turn(
                     msg=msg,
                     chat_handler=chat_handler,
-                    turn_messages=turn_messages,
+                    turn_messages=persisted_turn_messages,
                     sent_content_messages=sent_content_messages,
                     tool_history_messages=tool_history_messages,
-                    tool_image_history_messages=tool_image_history_messages,
+                    vision_history_messages=vision_history_messages,
                     replace_existing_history=replace_existing_history,
                     title="无工具调用自动结束后的长期上下文",
                 )
@@ -294,10 +275,10 @@ class GroupChatToolLoop:
             await self._finish_turn(
                 msg=msg,
                 chat_handler=chat_handler,
-                turn_messages=turn_messages,
+                turn_messages=persisted_turn_messages,
                 sent_content_messages=sent_content_messages,
                 tool_history_messages=tool_history_messages,
-                tool_image_history_messages=tool_image_history_messages,
+                vision_history_messages=vision_history_messages,
                 replace_existing_history=replace_existing_history,
                 title="空响应自动结束后的长期上下文",
             )
@@ -310,8 +291,9 @@ class GroupChatToolLoop:
         msg: GroupMessage,
         chat_handler: ContextHandler,
         turn_messages: list[ChatMessage],
+        input_vision_messages: list[ChatMessage],
+        input_vision_history_messages: list[ChatMessage],
         tools: list[LLMToolDefinition],
-        prompt_injection: TurnPromptInjection,
     ) -> PreparedTurnContext:
         """在请求模型前按 token 预算决定是否压缩历史上下文。"""
         stored_messages = chat_handler.messages_lst
@@ -329,13 +311,14 @@ class GroupChatToolLoop:
                 stripped_image_count=stripped_history_image_count,
                 history_messages_count=len(history_messages),
             )
-        candidate_messages = [*history_messages, *turn_messages]
-        candidate_request_messages = self._build_llm_request_messages(
-            working_messages=candidate_messages,
-            prompt_injection=prompt_injection,
-        )
+        current_working_messages = [*turn_messages, *input_vision_messages]
+        current_persisted_messages = [
+            *turn_messages,
+            *input_vision_history_messages,
+        ]
+        candidate_messages = [*history_messages, *current_working_messages]
         budget = self.token_estimator.check_request(
-            messages=candidate_request_messages,
+            messages=candidate_messages,
             tools=tools,
             max_context_tokens=chat_handler.max_context_tokens,
         )
@@ -350,20 +333,15 @@ class GroupChatToolLoop:
             max_context_tokens=budget.max_context_tokens,
             should_compress=budget.should_compress,
             current_history_messages_count=len(chat_handler.messages_lst),
-            turn_messages_count=len(turn_messages),
-            request_messages_count=len(candidate_request_messages),
-            deepseek_v4_depth_zero_injected=(
-                prompt_injection.deepseek_v4_depth_zero_injected
-            ),
-            general_requirements_injected=(
-                prompt_injection.general_requirements_injected
-            ),
+            turn_messages_count=len(current_working_messages),
+            persisted_turn_messages_count=len(current_persisted_messages),
+            request_messages_count=len(candidate_messages),
             tools_count=len(tools),
         )
         if not budget.should_compress:
             return PreparedTurnContext(
                 working_messages=candidate_messages,
-                turn_messages=turn_messages,
+                persisted_turn_messages=current_persisted_messages,
                 replace_existing_history=False,
             )
         _ = await self.context.bot.send_msg(
@@ -375,18 +353,24 @@ class GroupChatToolLoop:
             chat_handler=chat_handler,
             budget=budget,
         )
-        rebuilt_user_message = self.context_compressor.build_rebuilt_user_message(
-            summary=summary,
-            current_turn_messages=turn_messages,
+        rebuilt_working_user_message = (
+            self.context_compressor.build_rebuilt_user_message(
+                summary=summary,
+                current_turn_messages=current_working_messages,
+            )
         )
-        rebuilt_turn_messages = [rebuilt_user_message]
-        rebuilt_working_messages = [chat_handler.system_prompt, *rebuilt_turn_messages]
-        rebuilt_request_messages = self._build_llm_request_messages(
-            working_messages=rebuilt_working_messages,
-            prompt_injection=prompt_injection,
+        rebuilt_persisted_user_message = (
+            self.context_compressor.build_rebuilt_user_message(
+                summary=summary,
+                current_turn_messages=current_persisted_messages,
+            )
         )
+        rebuilt_working_messages = [
+            chat_handler.system_prompt,
+            rebuilt_working_user_message,
+        ]
         rebuilt_budget = self.token_estimator.check_request(
-            messages=rebuilt_request_messages,
+            messages=rebuilt_working_messages,
             tools=tools,
             max_context_tokens=chat_handler.max_context_tokens,
         )
@@ -400,9 +384,9 @@ class GroupChatToolLoop:
             rebuilt_estimated_tokens=rebuilt_budget.estimated_tokens,
             max_context_tokens=rebuilt_budget.max_context_tokens,
             rebuilt_should_still_compress=rebuilt_budget.should_compress,
-            rebuilt_user_chars=len(rebuilt_user_message.text or ""),
-            rebuilt_image_count=len(rebuilt_user_message.image or []),
-            rebuilt_request_messages_count=len(rebuilt_request_messages),
+            rebuilt_user_chars=len(rebuilt_working_user_message.text or ""),
+            rebuilt_image_count=len(rebuilt_working_user_message.image or []),
+            rebuilt_request_messages_count=len(rebuilt_working_messages),
         )
         if rebuilt_budget.should_compress:
             raise RuntimeError(
@@ -412,7 +396,7 @@ class GroupChatToolLoop:
             )
         return PreparedTurnContext(
             working_messages=rebuilt_working_messages,
-            turn_messages=rebuilt_turn_messages,
+            persisted_turn_messages=[rebuilt_persisted_user_message],
             replace_existing_history=True,
         )
 
@@ -445,8 +429,8 @@ class GroupChatToolLoop:
         )
         summary = await self.context.llm.get_ai_text_response(
             messages=compression_messages,
-            model_vendors=self.config.model_vendors,
-            model_name=self.config.model_name,
+            provider=self.config.model.provider,
+            model_name=self.config.model.name,
         )
         normalized_summary = self._normalize_content(summary)
         if normalized_summary is None:
@@ -462,107 +446,6 @@ class GroupChatToolLoop:
         )
         return normalized_summary
 
-    def _build_turn_prompt_injection(
-        self, *, active_model: ActiveModelConfig, system_prompt: ChatMessage
-    ) -> TurnPromptInjection:
-        """按本轮正式模型构造不写入长期上下文的提示词。"""
-        if should_use_deepseek_v4_depth_zero_prompt_for_model(
-            config=self.config,
-            model_name=active_model.model_name,
-        ):
-            prompt_pack = self._load_deepseek_v4_prompt_pack(
-                model_name=active_model.model_name
-            )
-            include_extra_requirements = not self._system_contains_text(
-                system_prompt=system_prompt,
-                text=prompt_pack.extra_requirements,
-            )
-            return TurnPromptInjection(
-                messages=[
-                    prompt_pack.build_depth_zero_message(
-                        include_extra_requirements=include_extra_requirements,
-                    )
-                ],
-                deepseek_v4_depth_zero_injected=True,
-                general_requirements_injected=include_extra_requirements,
-            )
-        if self._should_inject_general_requirements(
-            active_model=active_model,
-            system_prompt=system_prompt,
-        ):
-            extra_requirements = load_extra_requirements(config=self.config)
-            return TurnPromptInjection(
-                messages=[self._build_extra_requirements_message(extra_requirements)],
-                deepseek_v4_depth_zero_injected=False,
-                general_requirements_injected=True,
-            )
-        return TurnPromptInjection(
-            messages=[],
-            deepseek_v4_depth_zero_injected=False,
-            general_requirements_injected=False,
-        )
-
-    def _load_deepseek_v4_prompt_pack(self, *, model_name: str) -> DeepSeekV4PromptPack:
-        """读取 DeepSeek V4 Depth 0 提示词包。"""
-        prompt_pack = load_deepseek_v4_prompt_pack(config=self.config)
-        log_event(
-            level="DEBUG",
-            event="ai_group_chat.deepseek_v4_prompt.loaded",
-            category="plugin",
-            message="DeepSeek V4 Depth 0 提示词已加载",
-            model_name=model_name,
-            extra_requirements_path=str(prompt_pack.extra_requirements_path),
-            roleplay_instruct_path=str(prompt_pack.roleplay_instruct_path),
-            extra_requirements_chars=len(prompt_pack.extra_requirements),
-            roleplay_instruct_chars=len(prompt_pack.roleplay_instruct),
-        )
-        return prompt_pack
-
-    def _should_inject_general_requirements(
-        self, *, active_model: ActiveModelConfig, system_prompt: ChatMessage
-    ) -> bool:
-        """判断备用非 DeepSeek V4 模型是否需要临时通用群聊要求。"""
-        if active_model.model_name == self.config.model_name:
-            return False
-        if not should_use_deepseek_v4_depth_zero_prompt(config=self.config):
-            return False
-        extra_requirements = load_extra_requirements(config=self.config)
-        return not self._system_contains_text(
-            system_prompt=system_prompt,
-            text=extra_requirements,
-        )
-
-    def _build_extra_requirements_message(self, extra_requirements: str) -> ChatMessage:
-        """构造只包含通用群聊行为要求的临时 user 消息。"""
-        return ChatMessage(
-            role="user",
-            text=(
-                "<其他需求>\n"
-                f"{extra_requirements}\n"
-                "</其他需求>"
-            ),
-        )
-
-    def _system_contains_text(self, *, system_prompt: ChatMessage, text: str) -> bool:
-        """判断长期 system prompt 是否已经包含指定提示词文本。"""
-        system_text = system_prompt.text or ""
-        return text.strip() in system_text
-
-    def _should_use_deepseek_v4_depth_zero_prompt(self) -> bool:
-        """判断当前模型是否需要注入 DeepSeek V4 Depth 0 user prompt。"""
-        return should_use_deepseek_v4_depth_zero_prompt(config=self.config)
-
-    def _build_llm_request_messages(
-        self, *, working_messages: list[ChatMessage], prompt_injection: TurnPromptInjection
-    ) -> list[ChatMessage]:
-        """生成本次正式 LLM 请求 messages，不污染长期上下文。"""
-        if not prompt_injection.messages:
-            return working_messages
-        return [
-            *working_messages,
-            *prompt_injection.messages,
-        ]
-
     async def _handle_tool_response(
         self,
         *,
@@ -571,9 +454,10 @@ class GroupChatToolLoop:
         response: LLMResponse,
         tool_executor: CompositeToolExecutor,
         tool_history_messages: list[ChatMessage],
-        tool_image_history_messages: list[ChatMessage],
+        vision_history_messages: list[ChatMessage],
         round_index: int,
-        active_model: ActiveModelConfig,
+        question: str,
+        vision_turn_state: VisionTurnState,
     ) -> None:
         """处理模型请求的信息工具调用，并把工具结果写回本轮工作上下文。"""
         log_event(
@@ -593,13 +477,14 @@ class GroupChatToolLoop:
                 tool_calls=response.tool_calls,
             )
         )
-        tool_result_history, _ = await self._execute_tool_call_results(
+        tool_result_history = await self._execute_tool_call_results(
             working_messages=working_messages,
             tool_calls=response.tool_calls,
             tool_executor=tool_executor,
             group_id=msg.group_id,
-            active_model=active_model,
-            tool_image_history_messages=tool_image_history_messages,
+            vision_history_messages=vision_history_messages,
+            question=question,
+            vision_turn_state=vision_turn_state,
         )
         tool_history_messages.extend(tool_result_history)
 
@@ -611,7 +496,7 @@ class GroupChatToolLoop:
         turn_messages: list[ChatMessage],
         sent_content_messages: list[ChatMessage],
         tool_history_messages: list[ChatMessage],
-        tool_image_history_messages: list[ChatMessage],
+        vision_history_messages: list[ChatMessage],
         replace_existing_history: bool,
         title: str,
         failure_status_message: ChatMessage | None = None,
@@ -622,9 +507,7 @@ class GroupChatToolLoop:
             turn_messages=turn_messages,
             sent_content_messages=sent_content_messages,
             tool_history_messages=tool_history_messages,
-            tool_image_history_messages=tool_image_history_messages,
-            assistant_content=None,
-            assistant_reasoning_content=None,
+            vision_history_messages=vision_history_messages,
             replace_existing_history=replace_existing_history,
             failure_status_message=failure_status_message,
         )
@@ -753,13 +636,14 @@ class GroupChatToolLoop:
         tool_calls: list[LLMToolCall],
         tool_executor: CompositeToolExecutor,
         group_id: str,
-        active_model: ActiveModelConfig,
-        tool_image_history_messages: list[ChatMessage],
-    ) -> tuple[list[ChatMessage], bool]:
+        vision_history_messages: list[ChatMessage],
+        question: str,
+        vision_turn_state: VisionTurnState,
+    ) -> list[ChatMessage]:
         """执行工具调用，并只返回 tool 结果消息。"""
         history_messages: list[ChatMessage] = []
-        has_error = False
-        image_artifacts: list[LLMToolImageArtifact] = []
+        image_items: list[LLMImageItem] = []
+        truncated_image_count = 0
         explicit_forward_image_call = any(
             tool_call.name == FORWARD_MESSAGE_IMAGES_TOOL_NAME
             for tool_call in tool_calls
@@ -775,15 +659,16 @@ class GroupChatToolLoop:
                 tool_name=tool_call.name,
                 arguments=tool_call.arguments,
             )
-            tool_message, is_error, tool_image_artifacts = await self._call_tool_for_model(
+            outcome = await self._call_tool_for_model(
                 tool_call=tool_call,
                 tool_executor=tool_executor,
                 group_id=group_id,
                 explicit_forward_image_call=explicit_forward_image_call,
             )
-            working_messages.append(tool_message)
-            history_messages.append(tool_message)
-            image_artifacts.extend(tool_image_artifacts)
+            working_messages.append(outcome.message)
+            history_messages.append(outcome.message)
+            image_items.extend(outcome.image_items)
+            truncated_image_count += outcome.truncated_image_count
             log_event(
                 level="DEBUG",
                 event="ai_group_chat.tool_call.finished",
@@ -792,20 +677,61 @@ class GroupChatToolLoop:
                 group_id=group_id,
                 tool_call_id=tool_call.id,
                 tool_name=tool_call.name,
-                is_error=is_error,
-                tool_message_chars=len(tool_message.text or ""),
+                is_error=outcome.is_error,
+                tool_message_chars=len(outcome.message.text or ""),
+                image_artifacts_count=outcome.image_artifacts_count,
+                image_errors_count=outcome.image_errors_count,
+                truncated_image_count=outcome.truncated_image_count,
             )
-            if is_error:
-                has_error = True
-        if image_artifacts:
-            observation = await self.tool_image_observer.observe(
-                artifacts=image_artifacts,
-                active_model=active_model,
-                source_tool_name=", ".join(tool_call.name for tool_call in tool_calls),
+        if image_items or truncated_image_count > 0:
+            delivery = await self.vision_tool.deliver(
+                items=image_items,
+                truncated_count=truncated_image_count,
+                question=question,
+                source_name=(
+                    "工具 "
+                    + ", ".join(tool_call.name for tool_call in tool_calls)
+                    + " 返回的图片"
+                ),
+                turn_state=vision_turn_state,
             )
-            working_messages.extend(observation.working_messages)
-            tool_image_history_messages.extend(observation.history_messages)
-        return history_messages, has_error
+            working_messages.extend(delivery.working_messages)
+            vision_history_messages.extend(delivery.history_messages)
+            log_event(
+                level=(
+                    "WARNING"
+                    if delivery.result is not None and delivery.result.is_error
+                    else "DEBUG"
+                ),
+                event="ai_group_chat.tool_images.delivered",
+                category="plugin",
+                message="工具图片已通过内部视觉服务交给主模型",
+                group_id=group_id,
+                vision_ok=(
+                    delivery.result.ok if delivery.result is not None else None
+                ),
+                vision_is_error=(
+                    delivery.result.is_error
+                    if delivery.result is not None
+                    else None
+                ),
+                observed_count=(
+                    delivery.result.observed_count
+                    if delivery.result is not None
+                    else 0
+                ),
+                truncated_count=(
+                    delivery.result.truncated_count
+                    if delivery.result is not None
+                    else 0
+                ),
+                errors_count=(
+                    len(delivery.result.errors)
+                    if delivery.result is not None
+                    else 0
+                ),
+            )
+        return history_messages
 
     async def _call_tool_for_model(
         self,
@@ -814,17 +740,19 @@ class GroupChatToolLoop:
         tool_executor: CompositeToolExecutor,
         group_id: str,
         explicit_forward_image_call: bool,
-    ) -> tuple[ChatMessage, bool, list[LLMToolImageArtifact]]:
+    ) -> ToolCallResultForModel:
         """调用工具并把成功或失败结果都整理为模型可读的 tool 消息。"""
         result: JsonValue
-        image_artifacts: list[LLMToolImageArtifact] = []
+        image_items: list[LLMImageItem] = []
+        truncated_image_count = 0
         try:
             execution_result = await tool_executor.call_tool_with_artifacts(
                 name=tool_call.name,
                 arguments=tool_call.arguments,
             )
             result = execution_result.result
-            image_artifacts = execution_result.image_artifacts
+            image_items = list(execution_result.image_items)
+            truncated_image_count = execution_result.truncated_image_count
             if self.forward_image_auto_fetcher.should_fetch(
                 tool_call=tool_call,
                 result=result,
@@ -839,7 +767,8 @@ class GroupChatToolLoop:
                     forward_result=result,
                     image_result=auto_image_result.result,
                 )
-                image_artifacts.extend(auto_image_result.image_artifacts)
+                image_items.extend(auto_image_result.image_items)
+                truncated_image_count += auto_image_result.truncated_image_count
         except Exception as exc:
             error_result: JsonObject = {
                 "ok": False,
@@ -847,10 +776,14 @@ class GroupChatToolLoop:
                 "tool_name": tool_call.name,
             }
             result = error_result
-        return (
-            build_tool_result_message(tool_call_id=tool_call.id, result=result),
-            self._is_tool_error_result(result=result),
-            image_artifacts,
+        return ToolCallResultForModel(
+            message=build_tool_result_message(
+                tool_call_id=tool_call.id,
+                result=result,
+            ),
+            is_error=self._is_tool_error_result(result=result),
+            image_items=image_items,
+            truncated_image_count=truncated_image_count,
         )
 
     def _is_tool_error_result(self, *, result: JsonValue) -> bool:
@@ -870,9 +803,7 @@ class GroupChatToolLoop:
         turn_messages: list[ChatMessage],
         sent_content_messages: list[ChatMessage],
         tool_history_messages: list[ChatMessage],
-        tool_image_history_messages: list[ChatMessage],
-        assistant_content: str | None,
-        assistant_reasoning_content: str | None,
+        vision_history_messages: list[ChatMessage],
         replace_existing_history: bool,
         failure_status_message: ChatMessage | None = None,
     ) -> None:
@@ -880,21 +811,12 @@ class GroupChatToolLoop:
         stripped_turn_image_count = self._count_images(messages=turn_messages)
         sanitized_turn_messages = self._strip_history_images(messages=turn_messages)
         history_messages = sanitized_turn_messages[:]
+        if self.config.retain_tool_results:
+            history_messages.extend(tool_history_messages)
+        history_messages.extend(vision_history_messages)
+        history_messages.extend(sent_content_messages)
         if failure_status_message is not None:
             history_messages.append(failure_status_message)
-        history_messages.extend(sent_content_messages)
-        if self.config.persist_tool_results:
-            history_messages.extend(tool_history_messages)
-        if self.config.persist_tool_image_observations:
-            history_messages.extend(tool_image_history_messages)
-        if assistant_content is not None:
-            history_messages.append(
-                ChatMessage(
-                    role="assistant",
-                    text=assistant_content,
-                    reasoning_content=assistant_reasoning_content,
-                )
-            )
         log_event(
             level="DEBUG",
             event="ai_group_chat.context.persist",
@@ -904,13 +826,15 @@ class GroupChatToolLoop:
             stripped_turn_image_count=stripped_turn_image_count,
             sent_content_messages_count=len(sent_content_messages),
             tool_history_messages_count=len(tool_history_messages),
-            tool_image_history_messages_count=len(tool_image_history_messages),
+            vision_history_messages_count=len(vision_history_messages),
             persisted_messages_count=len(history_messages),
-            persist_tool_results=self.config.persist_tool_results,
-            persist_tool_image_observations=self.config.persist_tool_image_observations,
+            retain_tool_results=self.config.retain_tool_results,
+            retain_vision_descriptions=(
+                self.config.vision.retain_descriptions
+                if self.config.vision is not None
+                else False
+            ),
             replace_existing_history=replace_existing_history,
-            assistant_content_chars=len(assistant_content or ""),
-            assistant_reasoning_chars=len(assistant_reasoning_content or ""),
         )
         if replace_existing_history:
             chat_handler.replace_history(messages=[])
@@ -965,7 +889,7 @@ class GroupChatToolLoop:
                 memory_reasoning_content=memory_reasoning_content,
             )
         reasoning_text = self._normalize_content(reasoning_content)
-        if not self.config.output_reasoning_content or reasoning_text is None:
+        if not self.config.show_reasoning or reasoning_text is None:
             return ReplyContent(
                 visible_content=content,
                 memory_content=content,
@@ -989,6 +913,6 @@ class GroupChatToolLoop:
         self, reasoning_content: str | None
     ) -> str | None:
         """按配置决定是否把模型原生思维链作为结构化字段回传给后续请求。"""
-        if not self.config.pass_back_reasoning_content:
+        if not self.config.retain_reasoning:
             return None
         return self._normalize_content(reasoning_content)

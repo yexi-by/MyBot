@@ -214,12 +214,13 @@ class NapCatMessageTextFormatter:
 
     def _format_forward_segment(self, *, segment: Forward, depth: int) -> str:
         """格式化合并转发消息段，优先展开已随事件携带的内容。"""
-        header = f"（合并转发消息，ID: {segment.data.id}）"
+        header = "（合并转发消息）"
         if segment.data.content is None:
             return (
                 f"{header}\n"
                 "（未包含可展开内容；如需阅读完整聊天记录，"
-                f"应主动调用 qq__get_forward_message，参数 message_id=\"{segment.data.id}\"。）"
+                "应主动调用 qq__get_forward_message，并把该 Forward 所在群消息"
+                "元数据中的“消息 ID”作为 message_id。）"
             )
         if depth >= FORWARD_MAX_DEPTH:
             return f"{header}\n（合并转发展开达到深度上限，剩余内容已省略）"

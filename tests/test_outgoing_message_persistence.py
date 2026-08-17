@@ -1,30 +1,22 @@
-"""机器人出站消息持久化测试。"""
+"""机器人出站群消息持久化测试。"""
 
 import asyncio
+import base64
 import tempfile
 import unittest
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import cast, override
+from unittest.mock import AsyncMock, patch
 
-import httpx
-from redis.asyncio import Redis
+from fastapi import WebSocket
 
 from app.api.mixins.message import MessageMixin, NapCatSendMessageError
-from app.database import RedisDatabaseManager
-from app.models import (
-    Forward,
-    GroupMessage,
-    Image,
-    MessageSegment,
-    NapCatId,
-    Node,
-    Response,
-    Sender,
-    Text,
-    to_json_value,
-)
-from app.models.common import JsonObject
+from app.database import GroupDataScope
+from app.models import Forward, Image, JsonObject, MessageSegment, Node, Response, Text
+from app.services.napcat import ImageStore, InlineImageArchiver
 
 
 PNG_BASE64 = (
@@ -33,89 +25,59 @@ PNG_BASE64 = (
 )
 
 
-class FakePipeline:
-    """测试用 Redis pipeline。"""
-
-    def __init__(self, redis: "FakeRedis") -> None:
-        """初始化 pipeline 暂存区。"""
-        self.redis = redis
-        self.hash_items: list[tuple[str, str, str, bool]] = []
-        self.zset_items: list[tuple[str, dict[str, int | float]]] = []
-
-    def hset(self, key: str, field: str, value: str) -> None:
-        """暂存 Hash 写入。"""
-        self.hash_items.append((key, field, value, False))
-
-    def hsetnx(self, key: str, field: str, value: str) -> None:
-        """暂存仅在字段不存在时生效的 Hash 写入。"""
-        self.hash_items.append((key, field, value, True))
-
-    def zadd(self, key: str, mapping: dict[str, int | float]) -> None:
-        """暂存 ZSet 写入。"""
-        self.zset_items.append((key, mapping))
-
-    async def execute(self) -> list[object]:
-        """提交暂存写入。"""
-        for key, field, value, only_if_missing in self.hash_items:
-            target_hash = self.redis.hashes.setdefault(key, {})
-            if only_if_missing and field in target_hash:
-                continue
-            target_hash[field] = value
-        for key, mapping in self.zset_items:
-            self.redis.zsets.setdefault(key, {}).update(mapping)
-        return []
-
-
-class FakeRedis:
-    """测试用 Redis 客户端。"""
-
-    def __init__(self) -> None:
-        """初始化内存存储。"""
-        self.hashes: dict[str, dict[str, str]] = {}
-        self.zsets: dict[str, dict[str, int | float]] = {}
-
-    def pipeline(self) -> FakePipeline:
-        """创建测试 pipeline。"""
-        return FakePipeline(redis=self)
-
-
-@dataclass
+@dataclass(frozen=True, slots=True)
 class OutgoingRecord:
-    """记录一次出站消息保存调用。"""
+    """一次出站群消息记录调用。"""
 
-    self_id: NapCatId
-    message_id: NapCatId
-    group_id: NapCatId | None
-    user_id: NapCatId | None
-    message_segments: list[MessageSegment]
+    scope: GroupDataScope
+    message_id: str
+    segments: tuple[MessageSegment, ...]
+    occurred_at: datetime | None
 
 
-class RecordingDatabase:
-    """测试用出站消息数据库。"""
+class FakeSentMessageRecorder:
+    """可注入失败并记录调用的出站消息仓库。"""
 
-    def __init__(self) -> None:
-        """初始化调用记录。"""
-        self.records: list[OutgoingRecord] = []
+    def __init__(self, failures: Sequence[Exception] = ()) -> None:
+        """初始化预置失败和调用记录。"""
+        self.failures: list[Exception] = list(failures)
+        self.calls: list[OutgoingRecord] = []
 
-    async def store_outgoing_message(
+    async def record_sent(
         self,
         *,
-        self_id: NapCatId,
-        message_id: NapCatId,
-        message_segments: list[MessageSegment],
-        group_id: NapCatId | None = None,
-        user_id: NapCatId | None = None,
+        scope: GroupDataScope,
+        message_id: str,
+        segments: Sequence[MessageSegment],
+        occurred_at: datetime | None = None,
     ) -> None:
-        """记录出站消息保存调用。"""
-        self.records.append(
-            OutgoingRecord(
-                self_id=self_id,
-                message_id=message_id,
-                group_id=group_id,
-                user_id=user_id,
-                message_segments=message_segments,
-            )
+        """记录调用，并按顺序抛出预置异常。"""
+        record = OutgoingRecord(
+            scope=scope,
+            message_id=message_id,
+            segments=tuple(segments),
+            occurred_at=occurred_at,
         )
+        self.calls.append(record)
+        if self.failures:
+            raise self.failures.pop(0)
+
+
+class FakeWebSocket:
+    """记录发送和关闭操作的 WebSocket。"""
+
+    def __init__(self) -> None:
+        """初始化记录。"""
+        self.sent_texts: list[str] = []
+        self.close_calls: list[tuple[int, str | None]] = []
+
+    async def send_text(self, data: str) -> None:
+        """记录 Action 载荷。"""
+        self.sent_texts.append(data)
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        """记录会话关闭原因。"""
+        self.close_calls.append((code, reason))
 
 
 class FakeMessageClient(MessageMixin):
@@ -123,23 +85,36 @@ class FakeMessageClient(MessageMixin):
 
     def __init__(
         self,
-        database: RecordingDatabase,
-        responses: list[Response | Exception] | None = None,
+        *,
+        recorder: FakeSentMessageRecorder,
+        image_root: Path,
+        responses: Sequence[Response | Exception] = (),
     ) -> None:
-        """初始化假客户端。"""
-        self.database = cast(RedisDatabaseManager, database)
+        """初始化录制器、WebSocket 和 NapCat 响应。"""
+        self.sent_message_recorder = recorder
+        self.inline_image_archiver = InlineImageArchiver(
+            store=ImageStore(root=image_root, max_image_bytes=1024 * 1024)
+        )
         self.boot_id = "10000"
+        self.fake_websocket = FakeWebSocket()
+        self.websocket = cast(WebSocket, self.fake_websocket)
+        self.persistence_failed_event = asyncio.Event()
+        self.echo_dict: dict[str, asyncio.Future[Response]] = {}
+        self.stream_dict: dict[str, asyncio.Queue[Response]] = {}
         self.sent_actions: list[tuple[str, JsonObject | None]] = []
-        self.responses = responses or [
+        self.responses: list[Response | Exception] = list(responses) or [
             Response(status="ok", retcode=0, data={"message_id": 90000})
         ]
-        self.send_retry_count = 3
-        self.send_retry_delay = 0
+        self.send_max_attempts = 3
+        self.send_retry_delay_seconds = 0
+        self.timeout = 1
 
+    @override
     async def _call_action(
         self, action: str, params: JsonObject | None = None
     ) -> Response:
-        """按预置序列模拟 NapCat 响应。"""
+        """在会话健康时按预置顺序返回 NapCat 响应。"""
+        self._ensure_persistence_healthy()
         self.sent_actions.append((action, params))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
@@ -148,133 +123,104 @@ class FakeMessageClient(MessageMixin):
 
 
 class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
-    """验证机器人自己发送的消息会进入后续引用检索链路。"""
+    """验证只有 NapCat 确认发送的群消息会写入仓库。"""
 
-    async def test_message_mixin_records_successful_sent_group_message(self) -> None:
-        """send_msg 成功后会把群消息交给数据库保存。"""
-        database = RecordingDatabase()
-        client = FakeMessageClient(database=database)
+    def setUp(self) -> None:
+        """为每个用例创建独立的图片归档目录。"""
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.image_root = Path(self._temp_dir.name)
+
+    def tearDown(self) -> None:
+        """删除测试图片目录。"""
+        self._temp_dir.cleanup()
+
+    async def test_successful_group_message_is_recorded(self) -> None:
+        """群消息发送成功后写入正确的 bot 和群范围。"""
+        recorder = FakeSentMessageRecorder()
+        client = FakeMessageClient(recorder=recorder, image_root=self.image_root)
 
         response = await client.send_msg(group_id="40000", text="你好")
 
         self.assertEqual(response.status, "ok")
-        self.assertEqual(len(database.records), 1)
-        record = database.records[0]
-        self.assertEqual(record.self_id, "10000")
+        self.assertEqual(len(recorder.calls), 1)
+        record = recorder.calls[0]
+        self.assertEqual(record.scope, GroupDataScope(bot_id="10000", group_id="40000"))
         self.assertEqual(record.message_id, "90000")
-        self.assertEqual(record.group_id, "40000")
-        self.assertIsNone(record.user_id)
-        self.assertEqual([segment.type for segment in record.message_segments], ["text"])
+        self.assertEqual([segment.type for segment in record.segments], ["text"])
 
-    async def test_message_mixin_retries_failed_send_then_records_success(
-        self,
-    ) -> None:
-        """send_msg 首次失败后重试，成功时只保存一次出站消息。"""
-        database = RecordingDatabase()
-        client = FakeMessageClient(
-            database=database,
-            responses=[
-                Response(status="failed", retcode=500, message="temporary failure"),
-                Response(status="ok", retcode=0, data={"message_id": 90001}),
-            ],
-        )
+    async def test_private_message_is_not_recorded(self) -> None:
+        """私聊发送成功也不写入群消息仓库。"""
+        recorder = FakeSentMessageRecorder()
+        client = FakeMessageClient(recorder=recorder, image_root=self.image_root)
 
-        response = await client.send_msg(group_id="40000", text="你好")
+        response = await client.send_msg(user_id="50000", text="你好")
 
         self.assertEqual(response.status, "ok")
-        self.assertEqual(len(client.sent_actions), 2)
-        self.assertEqual(len(database.records), 1)
-        self.assertEqual(database.records[0].message_id, "90001")
+        self.assertEqual(recorder.calls, [])
 
-    async def test_message_mixin_does_not_retry_action_timeout(self) -> None:
-        """等待 send_msg 回包超时时不重试，避免消息实际已发出后重复发送。"""
-        database = RecordingDatabase()
-        client = FakeMessageClient(
-            database=database,
-            responses=[
-                TimeoutError("等待 NapCat 响应超时"),
-                Response(status="ok", retcode=0, data={"message_id": 90002}),
-            ],
-        )
+    async def test_persistence_retries_once_after_250ms(self) -> None:
+        """首次 PostgreSQL 写入失败时等待 250ms 后只重试一次。"""
+        recorder = FakeSentMessageRecorder(failures=[RuntimeError("第一次失败")])
+        client = FakeMessageClient(recorder=recorder, image_root=self.image_root)
+        sleep_mock = AsyncMock()
 
-        with self.assertRaises(NapCatSendMessageError) as raised:
-            _ = await client.send_msg(group_id="40000", text="你好")
+        with patch("app.api.mixins.message.asyncio.sleep", sleep_mock):
+            response = await client.send_msg(group_id="40000", text="你好")
 
-        self.assertIn("发送状态不确定", str(raised.exception))
-        self.assertEqual(len(client.sent_actions), 1)
-        self.assertEqual(database.records, [])
+        self.assertEqual(response.status, "ok")
+        self.assertEqual(len(recorder.calls), 2)
+        sleep_mock.assert_awaited_once_with(0.25)
+        self.assertEqual(client.fake_websocket.close_calls, [])
 
-    async def test_message_mixin_does_not_retry_napcat_send_msg_timeout(
+    async def test_repeated_persistence_failure_closes_session_but_keeps_send_success(
         self,
     ) -> None:
-        """NapCat sendMsg 内部超时时不重试，避免同一正文重复出现在群里。"""
-        database = RecordingDatabase()
-        client = FakeMessageClient(
-            database=database,
-            responses=[
-                Response(
-                    status="failed",
-                    retcode=1200,
-                    message=(
-                        "Timeout: NTEvent serviceAndMethod:"
-                        "NodeIKernelMsgService/sendMsg "
-                        "ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate"
-                    ),
-                    wording=(
-                        "Timeout: NTEvent serviceAndMethod:"
-                        "NodeIKernelMsgService/sendMsg "
-                        "ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate"
-                    ),
-                ),
-                Response(status="ok", retcode=0, data={"message_id": 90003}),
-            ],
+        """连续写入失败不伪装 QQ 发送失败，但终止当前会话。"""
+        recorder = FakeSentMessageRecorder(
+            failures=[RuntimeError("第一次失败"), RuntimeError("第二次失败")]
         )
+        client = FakeMessageClient(recorder=recorder, image_root=self.image_root)
 
-        with self.assertRaises(NapCatSendMessageError) as raised:
-            _ = await client.send_msg(group_id="40000", text="你好")
+        with patch("app.api.mixins.message.asyncio.sleep", AsyncMock()):
+            response = await client.send_msg(group_id="40000", text="已发出")
 
-        self.assertIn("发送状态不确定", str(raised.exception))
-        self.assertEqual(len(client.sent_actions), 1)
-        self.assertEqual(database.records, [])
-
-    async def test_message_mixin_raises_after_send_retries_exhausted(self) -> None:
-        """send_msg 连续失败时抛出显式发送异常，不保存出站消息。"""
-        database = RecordingDatabase()
-        client = FakeMessageClient(
-            database=database,
-            responses=[
-                Response(status="failed", retcode=500, message="temporary failure"),
-                Response(status="failed", retcode=500, message="temporary failure"),
-            ],
+        self.assertEqual(response.status, "ok")
+        self.assertEqual(len(recorder.calls), 2)
+        self.assertEqual(
+            client.fake_websocket.close_calls,
+            [(1011, "PostgreSQL 持久化失败")],
         )
-        client.send_retry_count = 2
+        self.assertTrue(client.persistence_failed_event.is_set())
+        with self.assertRaisesRegex(RuntimeError, "PostgreSQL 持久化失败"):
+            await client.delete_msg("90000")
 
-        with self.assertRaises(NapCatSendMessageError) as raised:
-            _ = await client.send_msg(group_id="40000", text="你好")
-
-        self.assertIn("NapCat 发送消息失败", str(raised.exception))
-        self.assertEqual(len(client.sent_actions), 2)
-        self.assertEqual(database.records, [])
-
-    async def test_message_mixin_does_not_retry_missing_message_id(self) -> None:
-        """发送成功但缺少 message_id 时不重试，避免实际已发送消息重复出现。"""
-        database = RecordingDatabase()
+    async def test_missing_message_id_closes_session_but_keeps_send_success(
+        self,
+    ) -> None:
+        """NapCat 成功响应无 message_id 时无法记录，终止当前会话。"""
+        recorder = FakeSentMessageRecorder()
         client = FakeMessageClient(
-            database=database,
+            recorder=recorder,
+            image_root=self.image_root,
             responses=[Response(status="ok", retcode=0, data={})],
         )
 
-        response = await client.send_msg(group_id="40000", text="你好")
+        response = await client.send_msg(group_id="40000", text="已发出")
 
         self.assertEqual(response.status, "ok")
-        self.assertEqual(len(client.sent_actions), 1)
-        self.assertEqual(database.records, [])
+        self.assertEqual(recorder.calls, [])
+        self.assertEqual(
+            client.fake_websocket.close_calls,
+            [(1011, "PostgreSQL 持久化失败")],
+        )
+        self.assertTrue(client.persistence_failed_event.is_set())
 
-    async def test_group_forward_send_records_forward_segment(self) -> None:
-        """send_group_forward_msg 成功后保存可直接展开的合并转发段。"""
-        database = RecordingDatabase()
+    async def test_group_forward_message_is_recorded(self) -> None:
+        """群合并转发成功后保存带节点内容的 Forward 段。"""
+        recorder = FakeSentMessageRecorder()
         client = FakeMessageClient(
-            database=database,
+            recorder=recorder,
+            image_root=self.image_root,
             responses=[
                 Response(
                     status="ok",
@@ -283,118 +229,96 @@ class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
-
-        forward_nodes = [
+        nodes = [
             Node.new(
                 user_id="10000",
                 nickname="机器人",
                 content=[Text.new("长回复正文")],
             )
         ]
+
         response = await client.send_group_forward_msg(
             group_id="40000",
-            messages=forward_nodes,
+            messages=nodes,
         )
 
         self.assertEqual(response.status, "ok")
-        self.assertEqual(len(database.records), 1)
-        record = database.records[0]
+        self.assertEqual(len(recorder.calls), 1)
+        record = recorder.calls[0]
         self.assertEqual(record.message_id, "90004")
-        self.assertEqual(record.group_id, "40000")
-        self.assertEqual([segment.type for segment in record.message_segments], ["forward"])
-        forward_segment = record.message_segments[0]
-        self.assertIsInstance(forward_segment, Forward)
-        forward_segment = cast(Forward, forward_segment)
-        self.assertEqual(forward_segment.data.id, "forward-90004")
-        self.assertEqual(forward_segment.data.content, to_json_value(forward_nodes))
+        self.assertEqual(record.scope.group_id, "40000")
+        self.assertEqual(len(record.segments), 1)
+        segment = record.segments[0]
+        self.assertIsInstance(segment, Forward)
+        forward = cast(Forward, segment)
+        self.assertEqual(forward.data.id, "forward-90004")
+        self.assertIsNotNone(forward.data.content)
 
-    async def test_sparse_sent_event_preserves_cached_forward_content(self) -> None:
-        """后到的 ID-only message_sent 事件不得覆盖完整转发节点。"""
-        fake_redis = FakeRedis()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            manager = RedisDatabaseManager(
-                client=cast(httpx.AsyncClient, object()),
-                path=temp_dir,
-                redis_client=cast(Redis, fake_redis),
-                consumers_count=1,
-            )
-            forward_nodes = [
+    async def test_missing_forward_id_closes_session_but_keeps_send_success(
+        self,
+    ) -> None:
+        """合并转发成功但无 forward_id 时无法保存节点语义，终止会话。"""
+        recorder = FakeSentMessageRecorder()
+        client = FakeMessageClient(
+            recorder=recorder,
+            image_root=self.image_root,
+            responses=[
+                Response(status="ok", retcode=0, data={"message_id": 90005})
+            ],
+        )
+
+        response = await client.send_group_forward_msg(
+            group_id="40000",
+            messages=[
                 Node.new(
                     user_id="10000",
                     nickname="机器人",
-                    content=[Text.new("需要保留的长回复")],
+                    content=[Text.new("长回复正文")],
                 )
-            ]
-            try:
-                await manager.store_outgoing_message(
-                    self_id="10000",
-                    group_id="40000",
-                    message_id="90004",
-                    message_segments=[
-                        Forward.new(
-                            "forward-90004",
-                            content=to_json_value(forward_nodes),
-                        )
-                    ],
-                )
-                sparse_event = GroupMessage(
-                    time=1_777_132_901,
-                    self_id="10000",
-                    post_type="message_sent",
-                    message_type="group",
-                    sub_type="normal",
-                    user_id="10000",
-                    message_id="90004",
-                    group_id="40000",
-                    message=[Forward.new("forward-90004")],
-                    raw_message="[合并转发]",
-                    sender=Sender(user_id="10000", nickname="机器人"),
-                )
-                await manager.add_to_queue(sparse_event)
-                await asyncio.wait_for(manager.task_queue.join(), timeout=1)
-            finally:
-                await manager.stop_consumers()
+            ],
+        )
 
-            key = "bot:10000:group:40000:msg_data"
-            stored_message = GroupMessage.model_validate_json(
-                fake_redis.hashes[key]["90004"]
-            )
-            stored_forward = stored_message.message[0]
-            self.assertIsInstance(stored_forward, Forward)
-            stored_forward = cast(Forward, stored_forward)
-            self.assertEqual(
-                stored_forward.data.content,
-                to_json_value(forward_nodes),
-            )
+        self.assertEqual(response.status, "ok")
+        self.assertEqual(recorder.calls, [])
+        self.assertEqual(
+            client.fake_websocket.close_calls,
+            [(1011, "PostgreSQL 持久化失败")],
+        )
 
-    async def test_database_stores_outgoing_base64_image_as_cached_group_message(
-        self,
-    ) -> None:
-        """Base64 出站图片会落成本地文件，并以 message_sent 写入 Redis。"""
-        fake_redis = FakeRedis()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            manager = RedisDatabaseManager(
-                client=cast(httpx.AsyncClient, object()),
-                path=temp_dir,
-                redis_client=cast(Redis, fake_redis),
-                consumers_count=0,
-            )
-            await manager.store_outgoing_message(
-                self_id="10000",
-                group_id="40000",
-                message_id="90000",
-                message_segments=[Image.new(f"base64://{PNG_BASE64}")],
-            )
+    async def test_send_failure_does_not_write_database(self) -> None:
+        """NapCat 发送连续失败时不写入数据库。"""
+        recorder = FakeSentMessageRecorder()
+        client = FakeMessageClient(
+            recorder=recorder,
+            image_root=self.image_root,
+            responses=[
+                Response(status="failed", retcode=500, message="temporary failure"),
+                Response(status="failed", retcode=500, message="temporary failure"),
+            ],
+        )
+        client.send_max_attempts = 2
 
-            key = "bot:10000:group:40000:msg_data"
-            raw_message = fake_redis.hashes[key]["90000"]
-            stored_message = GroupMessage.model_validate_json(raw_message)
-            stored_segment = stored_message.message[0]
+        with self.assertRaises(NapCatSendMessageError):
+            _ = await client.send_msg(group_id="40000", text="你好")
 
-            self.assertEqual(stored_message.post_type, "message_sent")
-            self.assertEqual(stored_message.user_id, "10000")
-            self.assertIsInstance(stored_segment, Image)
-            stored_image = cast(Image, stored_segment)
-            self.assertFalse(stored_image.data.file.startswith("base64://"))
-            self.assertIsNotNone(stored_image.data.path)
-            self.assertTrue(Path(stored_image.data.path or "").is_file())
+        self.assertEqual(recorder.calls, [])
+
+    async def test_base64_group_image_is_archived_before_recording(self) -> None:
+        """出站 base64 图片先写入内容寻址文件，持久化副本补入路径。"""
+        recorder = FakeSentMessageRecorder()
+        client = FakeMessageClient(recorder=recorder, image_root=self.image_root)
+        source = f"base64://{PNG_BASE64}"
+
+        response = await client.send_msg(group_id="40000", image=source)
+
+        self.assertEqual(response.status, "ok")
+        self.assertEqual(len(recorder.calls), 1)
+        segment = recorder.calls[0].segments[0]
+        self.assertIsInstance(segment, Image)
+        image = cast(Image, segment)
+        self.assertEqual(image.data.file, source)
+        self.assertIsNotNone(image.data.path)
+        archived_path = Path(image.data.path or "")
+        self.assertTrue(archived_path.is_file())
+        self.assertEqual(archived_path.read_bytes(), base64.b64decode(PNG_BASE64))
+        self.assertTrue(archived_path.is_relative_to(self.image_root.resolve()))

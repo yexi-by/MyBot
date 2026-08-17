@@ -1,15 +1,11 @@
 """NapCat 群聊合并转发图片信息工具。"""
 
-import asyncio
-import base64
-import binascii
 from dataclasses import dataclass
-from pathlib import Path
 
-import aiofiles
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
+from app.database import GroupMessageReader
 from app.models import (
     Forward,
     GroupMessage,
@@ -18,17 +14,27 @@ from app.models import (
     JsonValue,
     MessageSegment,
     NapCatId,
-    Response,
     to_json_value,
 )
 from app.services.llm.tools import (
+    LLMImageArtifact,
+    LLMImageError,
     LLMToolExecutionResult,
-    LLMToolImageArtifact,
     LLMToolRegistry,
+)
+from app.services.napcat.image_reader import (
+    NapCatImageReader,
+    NapCatImageReadResult,
+    NapCatImageResource,
 )
 from app.utils.log import log_event
 
 from .arguments import GetForwardMessageImagesArgs
+from .forward_reference import (
+    ActiveForwardReference,
+    ActiveForwardReferenceError,
+    resolve_active_forward_reference,
+)
 from .protocols import NapCatGroupToolBot
 
 
@@ -36,7 +42,7 @@ from .protocols import NapCatGroupToolBot
 class ForwardImageTarget:
     """描述合并转发中的一张图片。"""
 
-    message_id: NapCatId
+    forward_id: NapCatId
     message_index: int
     image_index: int
     file: str | None
@@ -63,6 +69,7 @@ class GroupForwardImageToolset:
         self,
         *,
         bot: NapCatGroupToolBot,
+        group_messages: GroupMessageReader,
         event: GroupMessage,
         max_images_per_call: int,
         max_all_images: int,
@@ -72,12 +79,16 @@ class GroupForwardImageToolset:
     ) -> None:
         """绑定当前群事件和读取配置。"""
         self.bot: NapCatGroupToolBot = bot
+        self.group_messages: GroupMessageReader = group_messages
         self.event: GroupMessage = event
         self.max_images_per_call: int = max_images_per_call
         self.max_all_images: int = max_all_images
-        self.fetch_concurrency: int = fetch_concurrency
-        self.download_timeout_seconds: float = download_timeout_seconds
-        self.http_client: httpx.AsyncClient | None = http_client
+        self.image_reader: NapCatImageReader = NapCatImageReader(
+            bot=bot,
+            http_client=http_client,
+            fetch_concurrency=fetch_concurrency,
+            download_timeout_seconds=download_timeout_seconds,
+        )
         self.segments_adapter: TypeAdapter[list[MessageSegment]] = TypeAdapter(
             list[MessageSegment]
         )
@@ -88,7 +99,8 @@ class GroupForwardImageToolset:
             name="qq__get_forward_message_images",
             description=(
                 "信息工具：读取合并转发消息中的图片内容。"
-                "当你需要查看当前群收到的合并转发聊天记录里的图片时，应主动调用此工具。"
+                "当你拿到当前群中含合并转发的外层消息 ID，"
+                "并需要查看其中聊天记录里的图片时，应主动调用此工具。"
                 "支持 single 单张、message 某条消息内全部图片、all 整个合并转发图片；"
                 "all 模式会按配置上限截断，避免一次读取过多图片。"
                 "此工具只返回图片元信息和内部图片附件，不发送群消息。"
@@ -102,68 +114,86 @@ class GroupForwardImageToolset:
     ) -> LLMToolExecutionResult:
         """读取合并转发中的目标图片，并返回模型可见附件。"""
         args = GetForwardMessageImagesArgs.model_validate(arguments)
-        root_messages = await self._load_root_forward_messages(message_id=args.message_id)
+        reference = await resolve_active_forward_reference(
+            group_messages=self.group_messages,
+            event=self.event,
+            group_message_id=args.message_id,
+        )
+        if isinstance(reference, ActiveForwardReferenceError):
+            return LLMToolExecutionResult(
+                result=self._build_reference_error_result(reference=reference)
+            )
+        root_messages = await self._load_root_forward_messages(
+            forward_id=reference.forward_id
+        )
         if root_messages is None:
             return LLMToolExecutionResult(
-                result=self._build_root_error_result(message_id=args.message_id)
+                result=self._build_root_error_result(reference=reference)
             )
         all_targets = self._collect_image_targets(
-            message_id=args.message_id,
+            forward_id=reference.forward_id,
             raw_messages=root_messages,
         )
         self._log_collected_targets(
-            message_id=args.message_id,
+            group_message_id=reference.group_message_id,
+            forward_id=reference.forward_id,
             mode=args.mode,
             targets=all_targets,
         )
         selected_targets = self._select_targets(args=args, targets=all_targets)
-        limited_targets, truncated = self._limit_targets(
+        limited_targets, truncated_count = self._limit_targets(
             args=args,
             targets=selected_targets,
         )
         fetch_results = await self._fetch_targets(targets=limited_targets)
         self._log_fetch_results(
-            message_id=args.message_id,
+            group_message_id=reference.group_message_id,
+            forward_id=reference.forward_id,
             mode=args.mode,
             results=fetch_results,
-            truncated=truncated,
+            truncated=truncated_count > 0,
         )
         images = [result.metadata for result in fetch_results if result.error is None]
         errors: list[JsonObject] = []
         for result in fetch_results:
             if result.error is not None:
                 errors.append(result.error)
-        artifacts = [
-            self._build_artifact(result=result)
+        image_items = [
+            (
+                self._build_artifact(result=result)
+                if result.error is None and result.image_bytes is not None
+                else self._build_artifact_error(result=result)
+            )
             for result in fetch_results
-            if result.error is None and result.image_bytes is not None
         ]
         return LLMToolExecutionResult(
             result={
                 "ok": True,
                 "action": "get_forward_message_images",
                 "group_id": to_json_value(self.event.group_id),
-                "message_id": args.message_id,
+                "message_id": reference.group_message_id,
+                "forward_id": to_json_value(reference.forward_id),
                 "mode": args.mode,
                 "total_images": len(selected_targets),
                 "returned_count": len(images),
-                "truncated": truncated,
+                "truncated": truncated_count > 0,
                 "images": to_json_value(images),
                 "errors": to_json_value(errors),
                 "message": self._build_result_message(
                     returned_count=len(images),
                     errors_count=len(errors),
-                    truncated=truncated,
+                    truncated=truncated_count > 0,
                 ),
             },
-            image_artifacts=artifacts,
+            image_items=image_items,
+            truncated_image_count=truncated_count,
         )
 
     async def _load_root_forward_messages(
-        self, *, message_id: NapCatId
+        self, *, forward_id: NapCatId
     ) -> list[JsonValue] | None:
         """调用 NapCat 读取合并转发根消息列表。"""
-        response = await self.bot.get_forward_msg(message_id=message_id)
+        response = await self.bot.get_forward_msg(message_id=forward_id)
         if response.status != "ok" or response.retcode != 0:
             return None
         data = response.data
@@ -175,7 +205,7 @@ class GroupForwardImageToolset:
         return [to_json_value(message) for message in raw_messages]
 
     def _collect_image_targets(
-        self, *, message_id: NapCatId, raw_messages: list[JsonValue]
+        self, *, forward_id: NapCatId, raw_messages: list[JsonValue]
     ) -> list[ForwardImageTarget]:
         """从合并转发消息列表中收集图片定位信息。"""
         targets: list[ForwardImageTarget] = []
@@ -187,7 +217,7 @@ class GroupForwardImageToolset:
                     image_index += 1
                     targets.append(
                         ForwardImageTarget(
-                            message_id=message_id,
+                            forward_id=forward_id,
                             message_index=message_index,
                             image_index=image_index,
                             file=segment.data.file,
@@ -201,7 +231,7 @@ class GroupForwardImageToolset:
                 if isinstance(segment, Forward) and segment.data.content is not None:
                     targets.extend(
                         self._collect_embedded_forward_targets(
-                            parent_message_id=message_id,
+                            parent_forward_id=forward_id,
                             parent_message_index=message_index,
                             segment=segment,
                         )
@@ -211,7 +241,7 @@ class GroupForwardImageToolset:
     def _collect_embedded_forward_targets(
         self,
         *,
-        parent_message_id: NapCatId,
+        parent_forward_id: NapCatId,
         parent_message_index: int,
         segment: Forward,
     ) -> list[ForwardImageTarget]:
@@ -220,12 +250,12 @@ class GroupForwardImageToolset:
         if not isinstance(content, list):
             return []
         nested_targets = self._collect_image_targets(
-            message_id=segment.data.id or parent_message_id,
+            forward_id=segment.data.id or parent_forward_id,
             raw_messages=[to_json_value(item) for item in content],
         )
         return [
             ForwardImageTarget(
-                message_id=target.message_id,
+                forward_id=target.forward_id,
                 message_index=parent_message_index,
                 image_index=target.image_index,
                 file=target.file,
@@ -286,7 +316,7 @@ class GroupForwardImageToolset:
 
     def _limit_targets(
         self, *, args: GetForwardMessageImagesArgs, targets: list[ForwardImageTarget]
-    ) -> tuple[list[ForwardImageTarget], bool]:
+    ) -> tuple[list[ForwardImageTarget], int]:
         """按模式和配置限制本次读取图片数量。"""
         configured_limit = (
             self.max_all_images if args.mode == "all" else self.max_images_per_call
@@ -295,181 +325,88 @@ class GroupForwardImageToolset:
             limit = configured_limit
         else:
             limit = min(args.max_images, configured_limit)
-        return targets[:limit], len(targets) > limit
+        return targets[:limit], max(0, len(targets) - limit)
 
     async def _fetch_targets(
         self, *, targets: list[ForwardImageTarget]
     ) -> list[ForwardImageFetchResult]:
-        """并发读取目标图片。"""
-        semaphore = asyncio.Semaphore(self.fetch_concurrency)
+        """使用共用 NapCat 图片服务并发读取目标图片。"""
+        resources = [self._build_image_resource(target=target) for target in targets]
+        read_results = await self.image_reader.read_many(resources=resources)
+        return [
+            self._build_fetch_result(target=target, read_result=read_result)
+            for target, read_result in zip(targets, read_results, strict=True)
+        ]
 
-        async def fetch_one(target: ForwardImageTarget) -> ForwardImageFetchResult:
-            async with semaphore:
-                return await self._fetch_target(target=target)
-
-        return await asyncio.gather(*(fetch_one(target) for target in targets))
-
-    async def _fetch_target(
+    def _build_image_resource(
         self, *, target: ForwardImageTarget
+    ) -> NapCatImageResource:
+        """把合并转发目标转换为共用图片资源。"""
+        return NapCatImageResource(
+            label=(
+                f"合并转发第 {target.message_index} 条消息"
+                f"第 {target.image_index} 张图片"
+            ),
+            file=target.file,
+            file_id=target.file_id,
+            path=target.path,
+            url=target.url,
+        )
+
+    def _build_fetch_result(
+        self,
+        *,
+        target: ForwardImageTarget,
+        read_result: NapCatImageReadResult,
     ) -> ForwardImageFetchResult:
-        """读取单张图片并整理为附件和元信息。"""
-        metadata = self._build_image_metadata(target=target, source=None)
-        direct_error: JsonObject | None = None
-        try:
-            direct_image = await self._load_direct_image_bytes(target=target)
-        except Exception as exc:
-            direct_error = self._build_image_error(
+        """把共用读取结果转换为群工具现有结果结构。"""
+        error: JsonObject | None = None
+        if not read_result.ok:
+            error = self._build_image_error(
                 target=target,
-                error_type=type(exc).__name__,
-                error=f"直接读取图片失败: {exc}",
-            )
-        else:
-            if direct_image is not None:
-                image_bytes, source = direct_image
-                return ForwardImageFetchResult(
-                    target=target,
-                    image_bytes=image_bytes,
-                    metadata=self._build_image_metadata(
-                        target=target,
-                        source=source,
-                    ),
-                    error=None,
-                )
-        if target.file is None and target.file_id is None:
-            return ForwardImageFetchResult(
-                target=target,
-                image_bytes=None,
-                metadata=metadata,
-                error=direct_error
-                or self._build_image_error(
-                    target=target,
-                    error_type="MissingImageIdentifier",
-                    error="图片段缺少 file 和 file_id",
-                ),
-            )
-        try:
-            response = await self._refresh_image_info(target=target)
-        except Exception as exc:
-            return ForwardImageFetchResult(
-                target=target,
-                image_bytes=None,
-                metadata=metadata,
-                error=self._build_image_error(
-                    target=target,
-                    error_type=type(exc).__name__,
-                    error=f"NapCat 刷新图片信息失败: {exc}",
-                ),
-            )
-        if response.status != "ok" or response.retcode != 0:
-            return ForwardImageFetchResult(
-                target=target,
-                image_bytes=None,
-                metadata=metadata,
-                error=self._build_image_error(
-                    target=target,
-                    error_type="NapCatActionFailed",
-                    error=response.message or response.wording or "NapCat 返回失败",
-                ),
-            )
-        try:
-            image_bytes = await self._load_image_bytes(response=response, target=target)
-        except Exception as exc:
-            return ForwardImageFetchResult(
-                target=target,
-                image_bytes=None,
-                metadata=metadata,
-                error=self._build_image_error(
-                    target=target,
-                    error_type=type(exc).__name__,
-                    error=f"读取 NapCat 图片响应失败: {exc}",
-                ),
-            )
-        if image_bytes is None:
-            return ForwardImageFetchResult(
-                target=target,
-                image_bytes=None,
-                metadata=metadata,
-                error=self._build_image_error(
-                    target=target,
-                    error_type="ImageContentUnavailable",
-                    error="NapCat 返回的图片信息没有可读取内容",
-                ),
+                error_type=read_result.error_type or "ImageContentUnavailable",
+                error=read_result.error or "图片没有可读取内容",
             )
         return ForwardImageFetchResult(
             target=target,
-            image_bytes=image_bytes,
+            image_bytes=read_result.image_bytes,
             metadata=self._build_image_metadata(
                 target=target,
-                source="napcat_refresh",
+                source=read_result.source,
             ),
-            error=None,
+            error=error,
         )
 
-    async def _load_direct_image_bytes(
-        self, *, target: ForwardImageTarget
-    ) -> tuple[bytes, str] | None:
-        """优先从合并转发图片段自身携带的本地路径或 URL 读取图片。"""
-        if target.path is not None:
-            path = Path(target.path)
-            if path.is_file():
-                async with aiofiles.open(path, mode="rb") as file:
-                    return await file.read(), "direct_path"
-        if target.url is not None and self.http_client is not None:
-            return await self._download_url(url=target.url), "direct_url"
-        return None
-
-    async def _refresh_image_info(self, *, target: ForwardImageTarget) -> Response:
-        """通过 NapCat 刷新图片信息，作为直接下载不可用时的后备路径。"""
-        if target.file is not None:
-            return await self.bot.get_image(file=target.file)
-        return await self.bot.get_image(file_id=target.file_id)
-
-    async def _load_image_bytes(
-        self, *, response: Response, target: ForwardImageTarget
-    ) -> bytes | None:
-        """从 NapCat 图片响应或原始图片段中读取图片字节。"""
-        data = response.data if isinstance(response.data, dict) else {}
-        raw_base64 = data.get("base64")
-        if isinstance(raw_base64, str) and raw_base64.strip():
-            try:
-                return base64.b64decode(raw_base64, validate=True)
-            except binascii.Error:
-                return None
-        for key in ("path", "file"):
-            value = data.get(key)
-            if isinstance(value, str):
-                path = Path(value)
-                if path.is_file():
-                    async with aiofiles.open(path, mode="rb") as file:
-                        return await file.read()
-        url = data.get("url")
-        if not isinstance(url, str):
-            url = target.url
-        if isinstance(url, str) and self.http_client is not None:
-            return await self._download_url(url=url)
-        return None
-
-    async def _download_url(self, *, url: str) -> bytes:
-        """通过本地 HTTP 客户端下载图片字节。"""
-        if self.http_client is None:
-            raise RuntimeError("合并转发图片 URL 下载需要配置 HTTP 客户端")
-        response = await self.http_client.get(
-            url,
-            timeout=self.download_timeout_seconds,
-        )
-        response.raise_for_status()
-        return response.content
-
-    def _build_artifact(self, *, result: ForwardImageFetchResult) -> LLMToolImageArtifact:
+    def _build_artifact(self, *, result: ForwardImageFetchResult) -> LLMImageArtifact:
         """把成功读取的图片整理为模型内部附件。"""
         if result.image_bytes is None:
             raise ValueError("构造图片附件时 image_bytes 不能为空")
         target = result.target
         label = f"合并转发第 {target.message_index} 条消息第 {target.image_index} 张图片"
-        return LLMToolImageArtifact(
+        return LLMImageArtifact(
             label=label,
             image_bytes=result.image_bytes,
-            metadata=result.metadata,
+        )
+
+    def _build_artifact_error(
+        self, *, result: ForwardImageFetchResult
+    ) -> LLMImageError:
+        """把失败结果整理为来源无关的内部图片错误。"""
+        error = result.error
+        if error is None:
+            raise ValueError("构造图片错误时 error 不能为空")
+        error_type = error.get("error_type")
+        error_text = error.get("error")
+        target = result.target
+        return LLMImageError(
+            label=(
+                f"合并转发第 {target.message_index} 条消息"
+                f"第 {target.image_index} 张图片"
+            ),
+            error_type=(
+                error_type if isinstance(error_type, str) else "ImageContentUnavailable"
+            ),
+            error=error_text if isinstance(error_text, str) else "图片没有可读取内容",
         )
 
     def _build_image_metadata(
@@ -477,7 +414,7 @@ class GroupForwardImageToolset:
     ) -> JsonObject:
         """生成模型可读的图片元信息。"""
         return {
-            "message_id": to_json_value(target.message_id),
+            "forward_id": to_json_value(target.forward_id),
             "message_index": target.message_index,
             "image_index": target.image_index,
             "file": target.file,
@@ -491,7 +428,8 @@ class GroupForwardImageToolset:
     def _log_collected_targets(
         self,
         *,
-        message_id: NapCatId,
+        group_message_id: str,
+        forward_id: NapCatId,
         mode: str,
         targets: list[ForwardImageTarget],
     ) -> None:
@@ -502,12 +440,13 @@ class GroupForwardImageToolset:
             category="napcat_tools",
             message="已收集合并转发图片段字段",
             group_id=to_json_value(self.event.group_id),
-            message_id=to_json_value(message_id),
+            message_id=group_message_id,
+            forward_id=to_json_value(forward_id),
             mode=mode,
             image_count=len(targets),
             images=[
                 {
-                    "message_id": to_json_value(target.message_id),
+                    "forward_id": to_json_value(target.forward_id),
                     "message_index": target.message_index,
                     "image_index": target.image_index,
                     "file": target.file,
@@ -524,7 +463,8 @@ class GroupForwardImageToolset:
     def _log_fetch_results(
         self,
         *,
-        message_id: NapCatId,
+        group_message_id: str,
+        forward_id: NapCatId,
         mode: str,
         results: list[ForwardImageFetchResult],
         truncated: bool,
@@ -536,7 +476,8 @@ class GroupForwardImageToolset:
             category="napcat_tools",
             message="合并转发图片读取完成",
             group_id=to_json_value(self.event.group_id),
-            message_id=to_json_value(message_id),
+            message_id=group_message_id,
+            forward_id=to_json_value(forward_id),
             mode=mode,
             requested_count=len(results),
             returned_count=sum(1 for result in results if result.error is None),
@@ -544,7 +485,7 @@ class GroupForwardImageToolset:
             truncated=truncated,
             images=[
                 {
-                    "message_id": to_json_value(result.target.message_id),
+                    "forward_id": to_json_value(result.target.forward_id),
                     "message_index": result.target.message_index,
                     "image_index": result.target.image_index,
                     "file": result.target.file,
@@ -574,25 +515,50 @@ class GroupForwardImageToolset:
     ) -> JsonObject:
         """生成单张图片读取失败信息。"""
         return {
-            "message_id": to_json_value(target.message_id),
+            "forward_id": to_json_value(target.forward_id),
             "message_index": target.message_index,
             "image_index": target.image_index,
             "error_type": error_type,
             "error": error,
         }
 
-    def _build_root_error_result(self, *, message_id: str) -> JsonObject:
+    def _build_root_error_result(
+        self, *, reference: ActiveForwardReference
+    ) -> JsonObject:
         """构造根合并转发读取失败时的可恢复错误。"""
         return {
             "ok": False,
             "is_error": True,
             "action": "get_forward_message_images",
             "group_id": to_json_value(self.event.group_id),
-            "message_id": message_id,
+            "message_id": reference.group_message_id,
+            "forward_id": to_json_value(reference.forward_id),
             "complete": False,
             "error_type": "NapCatActionFailed",
             "error": "合并转发消息读取失败",
             "message": "合并转发图片读取失败。请根据错误信息修正 message_id 或改用其他回复方式。",
+            "images": [],
+            "errors": [],
+        }
+
+    def _build_reference_error_result(
+        self, *, reference: ActiveForwardReferenceError
+    ) -> JsonObject:
+        """构造外层群消息不可用时的可恢复错误。"""
+        return {
+            "ok": False,
+            "is_error": True,
+            "action": "get_forward_message_images",
+            "group_id": to_json_value(self.event.group_id),
+            "message_id": reference.group_message_id,
+            "forward_id": None,
+            "complete": False,
+            "error_type": reference.error_type,
+            "error": reference.error,
+            "message": (
+                "合并转发图片不可读取。请使用当前群中未撤回、"
+                "且恰好含一个顶层合并转发段的外层消息 ID。"
+            ),
             "images": [],
             "errors": [],
         }

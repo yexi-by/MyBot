@@ -15,15 +15,10 @@ from .arguments import (
     ListGroupRootFilesArgs,
 )
 from .executor import NapCatGroupToolExecutor
-from .protocols import (
-    CachedNapCatMessage,
-    NapCatGroupHistoryDatabase,
-    NapCatGroupToolBot,
-)
+from .protocols import NapCatGroupToolBot
 
 __all__ = [
     "BEIJING_TIMEZONE",
-    "CachedNapCatMessage",
     "GetForwardMessageArgs",
     "GetForwardMessageImagesArgs",
     "ForwardImageQueryMode",
@@ -35,7 +30,6 @@ __all__ = [
     "ListGroupRootFilesArgs",
     "MAX_HISTORY_LIMIT",
     "MENTION_ALL",
-    "NapCatGroupHistoryDatabase",
     "NapCatGroupToolBot",
     "NapCatGroupToolExecutor",
 ]

@@ -7,8 +7,9 @@ import asyncio
 
 from fastapi import WebSocket
 
-from app.database import RedisDatabaseManager
+from app.database import SentMessageRecorder
 from app.models import AllEvent, NapCatId, Response
+from app.services.napcat import InlineImageArchiver
 
 from .mixins import (
     AccountMixin,
@@ -46,26 +47,30 @@ class BOTClient(
     def __init__(
         self,
         websocket: WebSocket,
-        database: RedisDatabaseManager,
-        send_retry_count: int = 3,
-        send_retry_delay: int = 1,
+        sent_message_recorder: SentMessageRecorder,
+        inline_image_archiver: InlineImageArchiver,
+        send_max_attempts: int = 5,
+        send_retry_delay_seconds: float = 0,
     ) -> None:
         """初始化 BOTClient
 
         Args:
             websocket: WebSocket 连接实例
-            database: Redis 数据库管理器实例
-            send_retry_count: NapCat send_msg 发送总尝试次数
-            send_retry_delay: NapCat send_msg 发送初始退避秒数
+            sent_message_recorder: 出站群消息记录接口
+            inline_image_archiver: 出站内联图片归档服务
+            send_max_attempts: NapCat send_msg 发送总尝试次数
+            send_retry_delay_seconds: NapCat send_msg 发送初始退避秒数
         """
         self.websocket: WebSocket = websocket
-        self.database: RedisDatabaseManager = database
+        self.sent_message_recorder: SentMessageRecorder = sent_message_recorder
+        self.inline_image_archiver: InlineImageArchiver = inline_image_archiver
         self.echo_dict: dict[str, asyncio.Future[Response]] = {}
         self.stream_dict: dict[str, asyncio.Queue[Response]] = {}
+        self.persistence_failed_event: asyncio.Event = asyncio.Event()
         self.boot_id: NapCatId = ""
         self.timeout: int = 120
-        self.send_retry_count: int = send_retry_count
-        self.send_retry_delay: int = send_retry_delay
+        self.send_max_attempts: int = send_max_attempts
+        self.send_retry_delay_seconds: float = send_retry_delay_seconds
 
     def get_self_qq_id(self, msg: AllEvent) -> None:
         """从 NapCat 事件中刷新机器人自身 QQ 号。"""

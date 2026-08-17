@@ -4,7 +4,6 @@ from .llm import (
     ChatMessage,
     CompositeToolExecutor,
     ContextHandler,
-    LLMConfig,
     LLMContextConfig,
     LLMHandler,
     LLMResponse,
@@ -17,16 +16,18 @@ from .llm import (
     MCPToolManager,
 )
 from .napcat import (
-    NapCatGroupHistoryDatabase,
     NapCatGroupToolBot,
     NapCatGroupToolExecutor,
+    NapCatImageBot,
+    NapCatImageReader,
+    NapCatImageReadResult,
+    NapCatImageResource,
 )
 
 __all__ = [
     "ChatMessage",
     "CompositeToolExecutor",
     "ContextHandler",
-    "LLMConfig",
     "LLMContextConfig",
     "LLMHandler",
     "LLMResponse",
@@ -37,7 +38,10 @@ __all__ = [
     "MCPConfig",
     "MCPServerConfig",
     "MCPToolManager",
-    "NapCatGroupHistoryDatabase",
     "NapCatGroupToolBot",
     "NapCatGroupToolExecutor",
+    "NapCatImageBot",
+    "NapCatImageReader",
+    "NapCatImageReadResult",
+    "NapCatImageResource",
 ]

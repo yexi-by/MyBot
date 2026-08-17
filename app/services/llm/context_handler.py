@@ -1,10 +1,8 @@
 """LLM 对话上下文管理。"""
 
-from typing import Literal, Self, overload
+from typing import Literal, overload
 
 from app.utils.encoding import base64_to_bytes
-from app.utils.files import read_text_file_async
-
 from .schemas import ChatMessage
 
 ChatRole = Literal["system", "user", "assistant"]
@@ -22,12 +20,6 @@ class ContextHandler:
         )
         self._messages_lst: list[ChatMessage] = [self.system_prompt]
         self.max_context_tokens: int = max_context_tokens
-
-    @classmethod
-    async def new(cls, path: str, max_context_tokens: int) -> Self:
-        """从系统提示词文件创建上下文管理器。"""
-        system_prompt = await read_text_file_async(path)
-        return cls(system_prompt=system_prompt, max_context_tokens=max_context_tokens)
 
     @property
     def messages_lst(self) -> list[ChatMessage]:

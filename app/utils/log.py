@@ -18,7 +18,9 @@ from app.models.common import JsonValue
 if TYPE_CHECKING:
     from loguru import Logger, Record
 
-LogLevel = Literal["DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR"]
+LogLevel = Literal[
+    "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"
+]
 
 DEFAULT_LOG_DIR_NAME = "logs"
 APP_LOG_PATTERN = "{time:YYYY-MM-DD}_app.log"

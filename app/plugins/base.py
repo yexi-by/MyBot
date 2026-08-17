@@ -4,31 +4,21 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, ABCMeta, abstractmethod
-from collections.abc import Awaitable, Callable
-from typing import ClassVar, Protocol, cast
+from collections.abc import Callable
+from typing import ClassVar, cast
 
 import httpx
 
+from app.config import PluginConfigView
 from app.api import BOTClient
-from app.database import RedisDatabaseManager
+from app.database import (
+    GroupMessageReader,
+    PluginRepositoryBuilder,
+    validate_plugin_id,
+)
 from app.models import AllEvent
 from app.services import LLMHandler, MCPToolManager
-from app.config import Settings
 from app.utils.log import log_event, log_exception
-
-
-class PluginControllerProtocol(Protocol):
-    """插件控制器在插件基类中需要使用的最小接口。"""
-
-    def register_listener(
-        self, event_name: str, callback: Callable[..., Awaitable[object]]
-    ) -> None:
-        """注册插件内部事件监听器。"""
-
-    async def broadcast(
-        self, event_name: str, kwargs: dict[str, object]
-    ) -> list[object | BaseException] | None:
-        """广播插件内部事件并返回监听器结果。"""
 
 
 PLUGINS: list[type["BasePlugin[AllEvent]"]] = []
@@ -47,6 +37,7 @@ class PluginMeta(ABCMeta):
         cls = super().__new__(mcs, name, bases, attrs)
         if bases and name != "BasePlugin":
             plugin_name = getattr(cls, "name", None)
+            plugin_id = getattr(cls, "plugin_id", None)
             consumers_count = getattr(cls, "consumers_count", None)
             priority = getattr(cls, "priority", None)
             if "__init__" in attrs:
@@ -55,6 +46,12 @@ class PluginMeta(ABCMeta):
                 )
             if not plugin_name:
                 raise ValueError(f"{name}插件缺少 name 属性,请重新定义")
+            if not isinstance(plugin_id, str):
+                raise ValueError(f"{name}插件缺少合法 plugin_id")
+            try:
+                _ = validate_plugin_id(plugin_id)
+            except ValueError as exc:
+                raise ValueError(f"{name}插件的 {exc}") from exc
             if consumers_count is None:
                 raise ValueError(
                     f"{name}插件缺少 consumers_count(最大并发数量) 属性,请重新定义"
@@ -66,6 +63,10 @@ class PluginMeta(ABCMeta):
                     raise ValueError(
                         f"已存在同名插件: {plugin_name},请修改插件 name 属性"
                     )
+                if plugin.plugin_id == plugin_id:
+                    raise ValueError(
+                        f"已存在相同 plugin_id: {plugin_id},请修改插件标识"
+                    )
             PLUGINS.append(cast(type["BasePlugin[AllEvent]"], cls))
         return cls
 
@@ -75,22 +76,34 @@ class Context:
 
     def __init__(
         self,
-        settings: Settings,
         bot: BOTClient,
-        database: RedisDatabaseManager,
+        group_messages: GroupMessageReader,
+        plugin_id: str,
+        repository_builder: PluginRepositoryBuilder,
         direct_httpx: httpx.AsyncClient,
         proxy_httpx: httpx.AsyncClient | None = None,
         llm: LLMHandler | None = None,
         mcp_tool_manager: MCPToolManager | None = None,
     ) -> None:
         """保存插件运行期可用服务。"""
-        self.settings: Settings = settings
         self.bot: BOTClient = bot
-        self.database: RedisDatabaseManager = database
+        self.group_messages: GroupMessageReader = group_messages
+        self.plugin_id: str = plugin_id
+        self._repository_builder: PluginRepositoryBuilder = repository_builder
         self.direct_httpx: httpx.AsyncClient = direct_httpx
         self._llm: LLMHandler | None = llm
         self._mcp_tool_manager: MCPToolManager | None = mcp_tool_manager
         self._proxy_httpx: httpx.AsyncClient | None = proxy_httpx
+
+    def create_repository[RepositoryT](
+        self,
+        repository_type: Callable[..., RepositoryT],
+    ) -> RepositoryT:
+        """构造只绑定当前插件 schema 的类型化 repository。"""
+        return self._repository_builder.create(
+            plugin_id=self.plugin_id,
+            repository_type=repository_type,
+        )
 
     @property
     def llm(self) -> LLMHandler:
@@ -118,44 +131,25 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
     """所有插件的异步队列消费基类。"""
 
     name: ClassVar[str]
+    plugin_id: ClassVar[str]
+    migration_package: ClassVar[str | None] = None
     consumers_count: ClassVar[int]
     priority: ClassVar[int]
 
     def __init__(
         self,
         context: Context,
+        plugin_config: PluginConfigView,
     ) -> None:
         """初始化插件上下文、任务队列和消费者。"""
         self.context: Context = context
+        self.plugin_config: PluginConfigView = plugin_config
         self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
         self.consumers: list[asyncio.Task[None]] = []
         self._active_futures: set[asyncio.Future[bool]] = set()
         self._stopped = False
-        self.controller: PluginControllerProtocol | None = None
-        self._pending_listeners: list[
-            tuple[str, Callable[..., Awaitable[object]]]
-        ] = []
         self.register_consumers()
         self.setup()
-
-    def pending_listeners(self) -> list[tuple[str, Callable[..., Awaitable[object]]]]:
-        """返回插件 setup 阶段暂存的内部事件监听器。"""
-        return list(self._pending_listeners)
-
-    def set_controller(self, controller: PluginControllerProtocol) -> None:
-        """绑定插件控制器并补注册 setup 阶段声明的监听器。"""
-        self.controller = controller
-        for event, func in self._pending_listeners:
-            self.controller.register_listener(event_name=event, callback=func)
-
-    async def emit(self, event_name: str, **kwargs: object) -> object | None:
-        """向插件内部事件总线发送事件。"""
-        if self.controller:
-            results = await self.controller.broadcast(
-                event_name=event_name, kwargs=kwargs
-            )
-            if results:
-                return results
 
     async def add_to_queue(self, msg: T) -> bool:
         """将事件放入插件队列并等待消费结果。"""
@@ -238,7 +232,7 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
 
     @abstractmethod
     def setup(self) -> None:
-        """注册插件内部状态与监听器。"""
+        """初始化插件运行所需的状态与服务。"""
         raise NotImplementedError
 
     @abstractmethod

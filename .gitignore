@@ -12,10 +12,16 @@ wheels/
 venv/
 env/
 
+# Node.js 本地依赖
+node_modules/
+*.tsbuildinfo
+.playwright-cli/
+
 # 真实配置、密钥与个人隐私
 AGENTS.md
 setting.toml
 setting.local.toml
+/config/
 *.secret.toml
 .env
 .env.*
@@ -25,6 +31,7 @@ setting.local.toml
 *.crt
 *.p12
 *.pfx
+secrets/
 
 # 插件真实配置包含群号、提示词和私有开关，禁止提交
 plugins_config/
@@ -34,6 +41,7 @@ logs/
 debug/
 data/
 image/
+images/
 tmp/
 *.log
 *.trace
@@ -53,4 +61,4 @@ archived_plugins_config/
 Thumbs.db
 
 # 保留可提交的示例配置
-!setting.example.toml
+!config.example.toml

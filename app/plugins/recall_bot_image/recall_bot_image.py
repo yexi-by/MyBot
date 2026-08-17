@@ -2,6 +2,8 @@
 
 from typing import ClassVar, Final, override
 
+from app.database import GroupDataScope, StoredGroupMessage
+from app.config import EmptyPluginConfig
 from app.models import GroupMessage, Image, NapCatId, Reply, Response, Text
 from app.plugins.base import BasePlugin
 from app.utils.log import log_event, log_exception
@@ -15,6 +17,7 @@ MAX_FAILURE_DETAIL_LENGTH: Final[int] = 160
 class RecallBotImagePlugin(BasePlugin[GroupMessage]):
     """撤回当前机器人在本群发送的被引用图片消息。"""
 
+    plugin_id: ClassVar[str] = "recall_bot_image"
     name: ClassVar[str] = "机器人图片撤回插件"
     consumers_count: ClassVar[int] = CONSUMERS_COUNT
     priority: ClassVar[int] = PRIORITY
@@ -26,6 +29,8 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
     @override
     async def run(self, msg: GroupMessage) -> bool:
         """识别引用撤回指令，校验目标归属并尝试撤回图片。"""
+        if self.plugin_config.get(EmptyPluginConfig) is None:
+            return False
         if msg.post_type != "message" or self._extract_plain_text(msg=msg) != RECALL_COMMAND:
             return False
 
@@ -38,9 +43,11 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
             return True
 
         try:
-            stored_message = await self.context.database.search_messages(
-                self_id=msg.self_id,
-                group_id=msg.group_id,
+            stored_message = await self.context.group_messages.get_active(
+                scope=GroupDataScope(
+                    bot_id=msg.self_id,
+                    group_id=msg.group_id,
+                ),
                 message_id=reply_id,
             )
         except Exception as exc:
@@ -60,12 +67,12 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
             )
             return True
 
-        if not isinstance(stored_message, GroupMessage):
+        if stored_message is None:
             await self._reject_target(
                 msg=msg,
                 target_message_id=reply_id,
                 reason="not_found",
-                feedback="找不到被引用的消息，消息缓存可能已经失效。",
+                feedback="找不到被引用的消息，或该消息已撤回。",
             )
             return True
 
@@ -78,7 +85,7 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
             )
             return True
 
-        if not any(isinstance(segment, Image) for segment in stored_message.message):
+        if not any(isinstance(segment, Image) for segment in stored_message.segments):
             await self._reject_target(
                 msg=msg,
                 target_message_id=reply_id,
@@ -109,15 +116,14 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
         return None
 
     def _is_current_bot_message(
-        self, *, msg: GroupMessage, target: GroupMessage
+        self, *, msg: GroupMessage, target: StoredGroupMessage
     ) -> bool:
         """严格判断目标是否为当前机器人在当前群保存的出站消息。"""
         return (
-            target.group_id == msg.group_id
-            and target.self_id == msg.self_id
-            and target.post_type == "message_sent"
-            and target.user_id == msg.self_id
-            and target.sender.user_id == msg.self_id
+            target.scope.group_id == msg.group_id
+            and target.scope.bot_id == msg.self_id
+            and target.direction == "outgoing"
+            and target.sender_id == msg.self_id
         )
 
     async def _reject_target(

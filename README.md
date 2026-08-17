@@ -1,205 +1,205 @@
 # MyBot
 
-MyBot 是面向 QQ 群聊场景的机器人服务。服务通过 FastAPI 承载 NapCat 反向 WebSocket 连接，使用 Redis 保存消息缓存和媒体索引，并通过 OpenAI Chat Completions 协议接入文本、工具调用与图片生成能力。
+MyBot 是面向 QQ 群聊的机器人服务。它通过 FastAPI 接收 NapCat 反向 WebSocket 事件，使用 PostgreSQL 保存群消息、撤回记录和群图片，并通过 OpenAI Chat Completions 协议连接语言模型。
 
-项目使用 Python 3.13+ 和 `uv` 管理依赖。配置、插件开关、日志目录和运行数据均与业务代码分离。
+项目要求 Python 3.13+，依赖由 `uv` 管理。
 
-## 功能范围
+## 主要功能
 
-- 接收 NapCat 反向 WebSocket 事件，并按事件类型分发给插件。
-- 自动加载插件配置，使用 Pydantic 严格校验配置字段。
-- 缓存群消息、引用消息、撤回事件和媒体文件，供插件在后续回合查询。
-- 为 AI 群聊插件提供长期上下文、上下文压缩、工具调用循环和调试转储。
-- 通过 MCP stdio 连接外部工具，并按 `mcp__{server}__{tool}` 暴露给 LLM。
-- 提供 NapCat 群聊本地信息工具，支持群文件查询、群文件下载链接查询和群历史消息查询。
-- 解析模型回复中的 `<Reply>` 与 `<At>` 标记，并在发送层转换为 NapCat 消息段。
+- 按事件类型把 NapCat 消息交给内置插件。
+- 保存入站和出站群消息；撤回后普通查询不可见，但原文和图片仍保留。
+- 提供 AI 群聊、上下文压缩、视觉描述、MCP 和 NapCat 群聊工具。
+- 用唯一配置文件管理服务、模型和插件；插件配置和引用的文本文件支持自动热加载。
+- 提供同端口 WebUI，用表单编辑配置和 prompt，并自动校验、保存改动。
+- 解析模型回复中的 `<Reply>` 与 `<At>` 标记，并转换为 NapCat 消息段。
 
 ## 本地运行
 
-1. 安装依赖：
-
 ```bash
 uv sync
+mkdir config
+cp config.example.toml config/mybot.toml
 ```
 
-2. 准备配置：
+编辑 `config/mybot.toml`，并把其中引用的 prompt、知识库文件放到 `config/` 下。随后启动 PostgreSQL、执行 migration 并运行服务：
 
 ```bash
-cp setting.example.toml setting.toml
-```
-
-3. 按运行环境编辑 `setting.toml`，并按需创建 `plugins_config/plugins.toml`。
-
-4. 启动服务：
-
-```bash
+uv run python -m app.database.migrations upgrade
 uv run python -m app.main
 ```
 
-NapCat 反向 WebSocket 地址示例：
+NapCat 反向 WebSocket 地址通常是：
 
 ```text
 ws://<本机局域网 IP>:6055/ws/napcat
 ```
 
-NapCat 侧的 Bearer Token 来自 `setting.toml` 中的 `[napcat].websocket_token`。
+配置 `[napcat].websocket_token` 时校验 Bearer Token；省略或留空时不校验。
+
+## WebUI
+
+主服务会在 `http://<主机>:6055/` 提供配置控制台，API 与页面使用同一端口。控制台面向可信内网，不含登录功能，并会明文读取和写回配置中的密钥。
+
+前端开发时分别启动后端和 Vite：
+
+```bash
+uv run python -m app.webui.dev
+cd webui
+npm ci
+npm run dev
+```
+
+开发页面位于 `http://127.0.0.1:5173/`，Vite 会把 `/api` 转发到 6056。配置字段停止编辑 800ms 后自动校验和保存，文本文件停止编辑 1 秒后自动保存；非法值、空的必填 prompt 和内容哈希冲突都不会覆盖磁盘文件。文本编辑器只允许读写 `config/` 内的 `.md` 和 `.txt` 文件。
 
 ## Docker
 
+Compose 使用 `postgres:18.4-bookworm`，PostgreSQL 不向宿主机公开端口。容器内配置必须使用 `database.host = "postgres"` 和 `database.password_file = "/run/secrets/postgres_password"`。
+
 ```bash
+umask 077
+mkdir -p config secrets images logs
+cp config.example.toml config/mybot.toml
+# 编辑 config/mybot.toml，并向 secrets/postgres_password 写入数据库密码。
 docker compose up -d
 ```
 
-默认挂载：
+主要挂载如下：
 
-- `./setting.toml:/app/setting.toml`
-- `./plugins_config:/app/plugins_config`
-- `./data:/app/data`
+- `./config:/app/config:rw`（MyBot 在线保存配置）
+- `./images:/app/images`
 - `./logs:/app/logs`
-- `mybot-venv:/app/.venv`
-- `mybot-uv-cache:/app/.uv-cache`
+- `mybot-postgres-data:/var/lib/postgresql`
 
-镜像提供 Python、uv/uvx、Node/npm/pnpm/yarn、Docker CLI、Git 和常用证书环境。容器启动时执行 `uv run --frozen --no-dev python -m app.main`，依赖版本由 `uv.lock` 固定，虚拟环境与 uv 缓存写入命名卷。
+`migrate` 会等待 PostgreSQL 健康后执行 migration，成功后 MyBot 才启动。应用启动时只检查 migration 版本，不会自动修改 schema。数据库和图片没有自动过期或备份机制。
 
-MCP server 的命令、参数和密钥属于部署配置，应写入部署机的 `setting.toml`。
+默认 Compose 允许 MyBot 通过 WebUI 在线保存 `config/`，`migrate` 服务仍保持只读挂载。WebUI 面向可信内网使用，不应直接暴露到公网。
 
 ## 配置
 
-全局配置放在 `setting.toml`，示例见 `setting.example.toml`。插件配置放在 `plugins_config/plugins.toml`，由各插件自己的 Pydantic 模型解析。未知字段会触发校验错误，防止拼写错误静默失效。
+唯一配置文件是 `config/mybot.toml`，完整字段见 [config.example.toml](config.example.toml)。所有配置模型都禁止未知字段。
 
-LLM 服务通过 OpenAI Chat Completions 协议接入：
+### 热加载范围
+
+应用自动监听 `config/`，连续文件变化会合并处理：
+
+- `[plugins.*]`、这些配置引用的 prompt、知识库和通用要求文件会热加载。
+- 插件配置节存在即启用；删除该节即停用。当前事件继续使用取得时的旧配置，下一条相关事件使用新配置。
+- TOML 不完整、字段无效或引用文件不可读时，整次重载失败，现有配置继续生效。
+- `[app]`、`[server]`、`[napcat]`、`[storage]`、`[network]`、`[logging]`、`[llm]`、`[mcp]` 和 `[database]` 只在启动时生效。运行中修改这些节会记录需要重启，但同一次保存中的有效插件变化仍会应用。
+- 新增 LLM provider 必须重启。热加载期间，插件只能引用进程启动时已经注册的 provider。
+
+配置引用文件必须使用相对于 `config/` 的路径。绝对路径、越出目录的 `..` 和指向目录外的符号链接都会被拒绝。system、vision 和通用要求文件不能为空；知识库可以省略或留空。
+
+### LLM provider 与模型引用
+
+Provider ID 直接使用表名：
 
 ```toml
-[llm]
-
-[[llm.providers]]
-api_key = "sk-xxx"
+[llm.providers.deepseek]
+api_key = "sk-CHANGE_ME"
 base_url = "https://api.deepseek.com"
-model_vendors = "deepseek"
-provider_type = "openai"
-retry_count = 3
-retry_delay = 1
+max_attempts = 5
+retry_delay_seconds = 0
 ```
 
-MCP 配置采用 `mcpServers` 结构。每个 server 使用 stdio 启动，工具名称会加上稳定前缀，避免与本地工具重名：
+无鉴权的 OpenAI 兼容服务可以省略 `api_key`。未配置 key 时不会发送 `Authorization` 请求头。
+
+插件使用 `{ provider, name }` 引用模型，例如：
+
+```toml
+model = { provider = "deepseek", name = "deepseek-chat" }
+```
+
+### MCP
+
+MCP server 使用 stdio 启动，工具名会转换为 `mcp__{server}__{tool}`：
 
 ```toml
 [mcp]
 enabled = true
 
-[mcp.mcpServers.example]
+[mcp.servers.example]
 command = "npx"
 args = ["-y", "your-mcp-server"]
 env = { EXAMPLE_API_KEY = "CHANGE_ME" }
 disabled = false
 ```
 
-镜像已固定预装 `firecrawl-mcp`，使用 `npx -y firecrawl-mcp` 不需要在容器启动时下载依赖。MCP 子进程会继承容器中的 HTTP、HTTPS、ALL、NO_PROXY 及 npm 代理变量；server 自身 `env` 中的同名值优先。
+MCP 命令、环境变量和密钥属于部署配置，不应提交到仓库。
+镜像内已包含 `/app/node_modules/.bin/firecrawl-mcp`、`/app/node_modules/.bin/mcp-searxng` 和 `/usr/local/bin/github-mcp-server`，部署配置可以直接使用这些 stdio 命令，不需要运行时下载安装。
 
-AI 群聊插件的主模型不支持图片输入时，需要配置多模态备用模型。当前消息或引用消息包含图片时，本轮正式回复请求会切到备用模型：
+### AI 群聊与视觉描述
 
-```toml
-[ai_group_chat]
-model_name = "deepseek-v4-pro"
-model_vendors = "deepseek"
-supports_multimodal = false
-multimodal_fallback_model_name = "gpt-5.5"
-multimodal_fallback_model_vendors = "openai"
-```
-
-合并转发里的图片可以通过本地工具批量读取。图片工具结果默认只服务于本轮回复，不进入长期上下文；如果需要让后续对话记住图片观察摘要，可以显式打开 `persist_tool_image_observations`。
+AI 群聊始终由主模型生成正式回复。主模型支持图片时，图片直接交给主模型，并且不得配置 `[plugins.ai_group_chat.vision]`。主模型不支持图片时必须配置 vision；视觉模型只接收当前问题、图片和视觉提示词，不接收角色、历史或工具。
 
 ```toml
-[ai_group_chat]
-forward_image_tool_enabled = true
-forward_image_max_images_per_call = 6
-forward_image_max_all_images = 12
-forward_image_fetch_concurrency = 4
-forward_image_download_timeout_seconds = 15.0
-tool_image_delivery_mode = "auto"
-tool_image_summary_max_images = 6
-persist_tool_image_observations = false
-tool_image_observation_system_prompt_path = "plugins_config/ai_group_chat/prompts/vision/system.md"
-tool_image_observation_user_prompt_path = "plugins_config/ai_group_chat/prompts/vision/user.md"
+[plugins.ai_group_chat]
+model = { provider = "deepseek", name = "deepseek-chat", supports_images = false }
+extra_requirements_file = "ai_group_chat/prompts/extra_requirements.md"
+show_reasoning = false
+retain_reasoning = false
+
+[plugins.ai_group_chat.vision]
+model = { provider = "vision", name = "vision-model" }
+system_prompt_file = "ai_group_chat/prompts/vision/system.md"
+user_prompt_file = "ai_group_chat/prompts/vision/user.md"
+max_attempts = 5
+retry_delay_seconds = 0.25
+retain_descriptions = true
+
+[[plugins.ai_group_chat.groups]]
+id = "123456789"
+system_prompt_file = "ai_group_chat/prompts/roles/default.md"
+knowledge_base_file = "ai_group_chat/knowledge/default.md"
+max_context_tokens = 64000
 ```
 
-视觉摘要请求是独立请求，不复用群聊 system prompt、长期上下文、当前用户正文或工具历史。`tool_image_observation_system_prompt_path` 用于定义纯图片观察边界，`tool_image_observation_user_prompt_path` 用于定义观察任务和输出粒度；需要视觉摘要时必须显式配置这两个非空提示词文件，不支持内联提示词，也不存在代码内置默认提示词。
+图片读取依次尝试已有路径、现有 URL 和 NapCat `get_image` 刷新。视觉描述可以保留在当前进程的对话上下文，图片字节不会进入上下文；进程重启后上下文仍会丢失。同群请求串行执行，不同群可以并行。prompt、知识库或通用要求内容变化后，只清空受影响群的内存上下文。
 
 ### Neavo 群聊图像插件
 
-Neavo 群聊图像插件使用新版 `/text_to_image` 与 `/image_to_text` 异步任务 API，同时支持文生图和 Florence-2 图片反推。群成员使用以下格式触发文生图：
-
-```text
-#生图 一只戴耳机的橘猫
-```
-
-图片反推使用独立命令 `#反推`，既可以在同一条消息中携带图片，也可以回复一条包含图片的群消息：
-
-```text
-#反推
-```
-
-反推只接受 JPEG、PNG 或 WebP，单张图片最大 10 MiB。机器人会返回图片的自然语言描述与标签文本；该结果不能还原原始模型、Seed 或工作流参数。
-
-插件配置放在 `plugins_config/plugins.toml`：
+群成员使用 `#生图 提示词` 触发文生图，使用 `#反推` 加图片或回复含图消息进行图片反推。反推接受 JPEG、PNG 或 WebP，单图最大值由 `max_image_bytes` 控制。
 
 ```toml
-[neavo_image_generate]
-group_ids = ["123456789"]
+[plugins.neavo_image_generate]
+groups = ["123456789"]
 base_url = "https://image-api.example.com"
 api_token = "CHANGE_ME"
-poll_interval_seconds = 3.0
-generation_timeout_seconds = 600.0
-request_timeout_seconds = 30.0
+poll_interval_seconds = 3
+generation_timeout_seconds = 600
+request_timeout_seconds = 30
 max_image_bytes = 20971520
 ```
 
-`api_token` 属于部署密钥，不得提交到仓库或写入日志。生产环境应使用 HTTPS；使用明文 HTTP 时，Bearer Token、提示词和反推图片不会受到传输加密保护。两类任务共用 5 个消费者，超过上限的请求会等待空闲消费者。插件使用最高群聊路由优先级，命中 `#生图` 或 `#反推` 后不会继续进入 AI 群聊插件。
+省略整个插件节即可停用；Neavo 服务不要求鉴权时可以省略 `api_token`。实际 Token 不得提交或写入日志。
 
 ## 运行边界
 
-- `app/api/` 负责 NapCat Action 调用封装，不放插件业务逻辑。
-- `app/models/` 负责 NapCat 入站事件、消息段和 JSON 边界模型。
-- `app/services/napcat/` 负责可复用的 NapCat 本地工具集，工具说明写在工具 definition 和参数模型中。
-- `app/plugins/` 负责编排具体业务流程，例如 AI 群聊、群通知、生图和撤回清理。
-- `app/services/llm/` 负责模型服务路由、OpenAI 协议转换、工具注册和 MCP 工具适配。
+- `app/api/`：NapCat Action 封装。
+- `app/models/`：NapCat 协议模型和 JSON 边界类型。
+- `app/services/napcat/`：可复用的 NapCat 本地工具和图片读取服务。
+- `app/services/llm/`：模型路由、OpenAI 协议、MCP 和工具注册。
+- `app/plugins/`：插件业务编排。
+- `app/database/`：PostgreSQL、migration、群消息 repository 和图片任务；不保存图片字节。
+- `app/config/`：唯一配置模型、加载器、配置版本和目录监听。
+- `app/webui/`：配置控制台 API、保留 TOML 注释的写回和 SPA 静态文件挂载。
 
-更完整的运行流程见 [docs/runtime_architecture.md](docs/runtime_architecture.md)。
+插件必须声明稳定的 ASCII `plugin_id`。每个插件只获得绑定自身 ID 的类型化配置视图，不能通过公共接口读取启动配置或其他插件配置。插件私有关系数据使用 `plugin_<plugin_id>` schema、自有 migration 和类型化 repository；插件不直接持有 `AsyncSession`，也不通过通用 JSONB KV 保存状态。插件之间不导入、调用或订阅彼此，需要共用的能力放入公共模块。
 
-## 日志与失败策略
+## 失败策略
 
-日志统一通过 `app.utils.log` 输出。终端日志展示阶段进展、关键决策、告警和错误摘要；文件日志记录运行参数、结构化字段、异常链和结束汇总。
-
-配置缺失、协议不一致、上下文压缩后仍超预算等不可恢复问题会直接抛错。工具调用参数错误、content 标记错误、图片读取失败等可恢复问题会返回结构化信息，让模型或插件在本轮内继续处理。
-
-## 代码结构
-
-```text
-app/
-├── api/                  # NapCat WebSocket Action 封装
-├── config/               # 全局配置和插件配置加载
-├── core/                 # FastAPI 服务、DI、事件分发、插件控制器
-├── database/             # Redis 消息存储和媒体缓存
-├── models/               # NapCat 协议模型和 JSON 边界类型
-├── plugins/              # 插件实现
-│   ├── ai_group_chat/    # AI 群聊插件
-│   ├── auto_unban/       # 自动解禁插件
-│   ├── delete_recalled_message/
-│   ├── group_notice/
-│   ├── image_generate/
-│   └── neavo_image_generate/
-├── services/
-│   ├── llm/              # LLM 路由、OpenAI 协议转换、MCP 和工具注册
-│   └── napcat/           # NapCat 本地工具集
-└── utils/                # 日志、重试、文件和编码工具
-```
+配置缺失、协议不一致、PostgreSQL 不可用或 migration 版本不匹配会直接失败。群消息持久化第二次失败后不再分发该事件，并以 1011 关闭当前 NapCat 会话。工具参数、回复标记或图片读取等可恢复错误会返回结构化信息，让模型或插件继续处理。
 
 ## 开发检查
 
 ```bash
+uv lock --check
+docker compose config --quiet
+uv run pytest
 uv run basedpyright
-uv run python -m unittest discover -s tests
 uv run python -m compileall app
+cd webui && npm run build
+git diff --check
 ```
 
-交付前需要保持 `uv run basedpyright` 输出 `0 errors, 0 warnings`。
+`basedpyright` 必须保持 `0 errors, 0 warnings`。详细流程见 [运行架构](docs/runtime_architecture.md)。

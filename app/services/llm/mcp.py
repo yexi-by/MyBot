@@ -7,9 +7,9 @@ from typing import cast, override
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, TextContent, Tool
-from pydantic import Field
 
-from app.models import JsonObject, JsonValue, StrictModel, to_json_value
+from app.config.schemas import MCPConfig, MCPServerConfig
+from app.models import JsonObject, JsonValue, to_json_value
 
 from .schemas import LLMToolDefinition, LLMToolExecutor
 
@@ -28,23 +28,6 @@ _INHERITED_PROXY_ENV_NAMES = (
 _INHERITED_PROXY_ENV_NAMES_CASEFOLDED = frozenset(
     name.casefold() for name in _INHERITED_PROXY_ENV_NAMES
 )
-
-
-class MCPServerConfig(StrictModel):
-    """单个 MCP stdio 服务配置。"""
-
-    command: str
-    args: list[str] = Field(default_factory=list)
-    env: dict[str, str] | None = None
-    cwd: str | None = None
-    disabled: bool = False
-
-
-class MCPConfig(StrictModel):
-    """MCP 总配置，读取 mcpServers 结构。"""
-
-    enabled: bool = False
-    mcpServers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
 class MCPToolManager(LLMToolExecutor):
@@ -73,7 +56,7 @@ class MCPToolManager(LLMToolExecutor):
             return
         self._exit_stack = AsyncExitStack()
         _ = await self._exit_stack.__aenter__()
-        for server_name, server_config in self.config.mcpServers.items():
+        for server_name, server_config in self.config.servers.items():
             if server_config.disabled:
                 continue
             await self._connect_server(
@@ -116,7 +99,7 @@ class MCPToolManager(LLMToolExecutor):
             raise RuntimeError("MCP exit stack 尚未初始化")
         server_params = StdioServerParameters(
             command=server_config.command,
-            args=server_config.args,
+            args=list(server_config.args),
             env=build_mcp_server_environment(server_config.env),
             cwd=server_config.cwd,
         )

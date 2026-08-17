@@ -1,18 +1,30 @@
-"""AI 群聊工具循环测试。"""
+"""AI 群聊工具循环与视觉工具集成测试。"""
 
-import tempfile
 import unittest
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Protocol, cast
 
 import httpx
 
 from app.api.mixins.message import NapCatSendMessageError
-from app.models import GroupMessage, JsonObject, MessageSegment, Node, Response, Sender, Text
-from app.plugins.ai_group_chat.ai_group_chat import AIGroupChatPlugin
-from app.plugins.ai_group_chat.config import AIGroupChatConfig
+from app.config import AIGroupChatConfig, MaterializedAIGroupChatConfig
+from app.database import GroupDataScope, StoredGroupMessage
+from app.models import (
+    Forward,
+    GroupMessage,
+    JsonObject,
+    MessageSegment,
+    Node,
+    Response,
+    Sender,
+    Text,
+)
 from app.plugins.ai_group_chat.debug_dump import AIGroupChatDebugDumper
-from app.plugins.ai_group_chat.tool_loop import ActiveModelConfig, GroupChatToolLoop
+from app.plugins.ai_group_chat.tool_loop import GroupChatToolLoop
+from app.plugins.ai_group_chat.vision_tool import (
+    VisionDescriptionTool,
+    VisionTurnState,
+)
 from app.plugins.base import Context
 from app.services import ChatMessage, ContextHandler
 from app.services.llm.schemas import (
@@ -21,59 +33,197 @@ from app.services.llm.schemas import (
     LLMToolChoice,
     LLMToolDefinition,
 )
-from app.services.llm.tools import LLMToolExecutionResult, LLMToolImageArtifact
+from app.services.llm.tools import (
+    LLMImageArtifact,
+    LLMImageError,
+    LLMToolExecutionResult,
+)
 
 VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
 VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
+TOOL_NAME = "mcp__fake__inspect"
 
 
 class FakeLLMProtocol(Protocol):
-    """描述测试用 LLM 需要提供的异步响应接口。"""
+    """描述工具循环测试所需的 LLM 接口。"""
 
     async def get_ai_text_response(
         self,
         messages: list[ChatMessage],
-        model_vendors: str,
+        provider: str,
         model_name: str,
+        max_attempts: int | None = None,
+        retry_delay_seconds: float | None = None,
     ) -> str:
-        """返回测试用纯文本响应。"""
+        """返回纯文本响应。"""
         ...
 
     async def get_ai_response_with_tools(
         self,
         messages: list[ChatMessage],
-        model_vendors: str,
+        provider: str,
         model_name: str,
         tools: list[LLMToolDefinition],
         tool_choice: LLMToolChoice = "auto",
         parallel_tool_calls: bool = True,
     ) -> LLMResponse:
-        """返回测试用结构化模型响应。"""
+        """返回带可选工具调用的结构化响应。"""
         ...
 
 
-class FakeMCPToolManagerProtocol(Protocol):
-    """描述测试用工具管理器需要提供的接口。"""
+class RecordingLLM:
+    """按队列返回正式响应，并记录正式请求和独立文本请求。"""
+
+    def __init__(
+        self,
+        *,
+        responses: list[LLMResponse],
+        text_response: str = "画面里有白底黑字。",
+    ) -> None:
+        """保存响应队列。"""
+        self.responses: list[LLMResponse] = responses
+        self.text_response: str = text_response
+        self.formal_requests: list[list[ChatMessage]] = []
+        self.formal_models: list[tuple[str, str]] = []
+        self.text_requests: list[list[ChatMessage]] = []
+        self.text_models: list[tuple[str, str]] = []
+
+    async def get_ai_text_response(
+        self,
+        messages: list[ChatMessage],
+        provider: str,
+        model_name: str,
+        max_attempts: int | None = None,
+        retry_delay_seconds: float | None = None,
+    ) -> str:
+        """记录视觉或压缩请求并返回固定文本。"""
+        _ = (max_attempts, retry_delay_seconds)
+        self.text_requests.append(messages[:])
+        self.text_models.append((provider, model_name))
+        return self.text_response
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        provider: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        """记录正式请求并弹出下一条响应。"""
+        _ = (tools, tool_choice, parallel_tool_calls)
+        self.formal_requests.append(messages[:])
+        self.formal_models.append((provider, model_name))
+        if not self.responses:
+            raise AssertionError("正式响应队列已耗尽")
+        return self.responses.pop(0)
+
+
+class FakeToolManager:
+    """暴露一个可返回内部图片附件的信息工具。"""
+
+    def __init__(
+        self,
+        *,
+        image_bytes: bytes | None = None,
+        image_errors: list[LLMImageError] | None = None,
+        truncated_image_count: int = 0,
+    ) -> None:
+        """保存可选图片内容。"""
+        self.image_bytes: bytes | None = image_bytes
+        self.image_errors: list[LLMImageError] = image_errors or []
+        self.truncated_image_count: int = truncated_image_count
+        self.calls: list[tuple[str, JsonObject]] = []
 
     def list_tools(self) -> list[LLMToolDefinition]:
-        """返回测试用工具定义。"""
-        ...
+        """返回固定工具定义。"""
+        return [
+            LLMToolDefinition(
+                name=TOOL_NAME,
+                description="读取测试信息。",
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            )
+        ]
 
-    async def call_tool(self, name: str, arguments: JsonObject) -> JsonObject:
-        """执行测试用工具调用。"""
-        ...
+    async def call_tool_with_artifacts(
+        self, name: str, arguments: JsonObject
+    ) -> LLMToolExecutionResult:
+        """返回 JSON 结果和可选图片附件。"""
+        self.calls.append((name, arguments))
+        artifacts = (
+            [
+                LLMImageArtifact(
+                    label="工具图片 1",
+                    image_bytes=self.image_bytes,
+                )
+            ]
+            if self.image_bytes is not None
+            else []
+        )
+        return LLMToolExecutionResult(
+            result={"ok": True, "value": "工具结果"},
+            image_items=[*artifacts, *self.image_errors],
+            truncated_image_count=self.truncated_image_count,
+        )
+
+
+class EmptyGroupMessageReader:
+    """测试中不实际读取历史消息。"""
+
+    def __init__(self) -> None:
+        """初始化当前群未撤回消息映射。"""
+        self.active_messages: dict[tuple[str, str, str], StoredGroupMessage] = {}
+
+    def add_forward(
+        self,
+        *,
+        scope: GroupDataScope,
+        message_id: str,
+        forward_id: str,
+    ) -> None:
+        """加入一条含单个顶层合并转发段的未撤回群消息。"""
+        self.active_messages[(scope.bot_id, scope.group_id, message_id)] = (
+            StoredGroupMessage(
+                row_id=1,
+                scope=scope,
+                message_id=message_id,
+                group_name="测试群",
+                sender_id="20000",
+                sender_name="夜袭",
+                sender_role="member",
+                occurred_at=datetime(2026, 8, 16, tzinfo=UTC),
+                direction="incoming",
+                segments=(Forward.new(forward_id),),
+                images=(),
+            )
+        )
+
+    async def get_active(
+        self,
+        *,
+        scope: GroupDataScope,
+        message_id: str,
+    ) -> StoredGroupMessage | None:
+        """只返回当前机器人和当前群显式加入的未撤回消息。"""
+        return self.active_messages.get((scope.bot_id, scope.group_id, message_id))
 
 
 class FakeBot:
-    """测试用 Bot，记录发出的群文本。"""
+    """记录发出的群文本和合并转发。"""
 
     def __init__(self) -> None:
         """初始化发送记录。"""
         self.boot_id = "10000"
         self.sent_texts: list[str] = []
         self.sent_segment_types: list[list[str]] = []
+        self.sent_forwards: list[tuple[str, list[MessageSegment]]] = []
         self.forward_responses: dict[str, Response] = {}
-        self.sent_forward_messages: list[tuple[str, list[MessageSegment]]] = []
         self.image_responses: dict[str, Response] = {}
         self.forward_calls: list[str] = []
         self.image_calls: list[tuple[str | None, str | None]] = []
@@ -85,56 +235,51 @@ class FakeBot:
         text: str | None = None,
         message_segment: list[MessageSegment] | None = None,
     ) -> Response:
-        """记录发送文本并返回成功响应。"""
+        """记录普通消息。"""
         _ = group_id
-        if message_segment is not None:
-            self.sent_segment_types.append(
-                [message_segment_item.type for message_segment_item in message_segment]
-            )
-            self.sent_texts.append(self._extract_text(message_segment=message_segment))
-            return Response(status="ok", retcode=0)
         if text is not None:
             self.sent_texts.append(text)
+        if message_segment is not None:
+            self.sent_segment_types.append(
+                [segment.type for segment in message_segment]
+            )
+            self.sent_texts.append(
+                "".join(
+                    segment.data.text
+                    for segment in message_segment
+                    if isinstance(segment, Text)
+                )
+            )
         return Response(status="ok", retcode=0)
 
     async def send_group_forward_msg(
         self, *, group_id: str, messages: list[MessageSegment]
     ) -> Response:
-        """记录合并转发发送动作并返回成功响应。"""
-        self.sent_forward_messages.append((group_id, messages))
-        return Response(
-            status="ok",
-            retcode=0,
-            data={"message_id": "90000", "forward_id": "forward-90000"},
-        )
+        """记录合并转发消息。"""
+        self.sent_forwards.append((group_id, messages))
+        return Response(status="ok", retcode=0)
 
     async def get_forward_msg(self, *, message_id: str) -> Response:
-        """返回预置合并转发响应。"""
+        """返回预置的合并转发响应。"""
         self.forward_calls.append(message_id)
-        if message_id in self.forward_responses:
-            return self.forward_responses[message_id]
-        return Response(status="failed", retcode=404, message="合并转发不存在")
+        return self.forward_responses.get(
+            message_id,
+            Response(status="failed", retcode=404, message="合并转发不存在"),
+        )
 
     async def get_image(
-        self, *, file_id: str | None = None, file: str | None = None
+        self, file_id: str | None = None, file: str | None = None
     ) -> Response:
-        """返回预置图片响应。"""
+        """返回预置的图片刷新响应。"""
         self.image_calls.append((file_id, file))
-        key = file_id if file_id is not None else file
+        key = file if file is not None else file_id
         if key is not None and key in self.image_responses:
             return self.image_responses[key]
         return Response(status="failed", retcode=404, message="图片不存在")
 
-    def _extract_text(self, *, message_segment: list[MessageSegment]) -> str:
-        """从消息段里提取文本，便于断言发送内容。"""
-        text_parts = [
-            segment.data.text for segment in message_segment if isinstance(segment, Text)
-        ]
-        return "".join(text_parts)
-
 
 class FakeSendFailureBot(FakeBot):
-    """测试用 Bot，模拟 NapCat 发送层最终失败。"""
+    """模拟 NapCat 发送层最终失败。"""
 
     async def send_msg(
         self,
@@ -143,555 +288,69 @@ class FakeSendFailureBot(FakeBot):
         text: str | None = None,
         message_segment: list[MessageSegment] | None = None,
     ) -> Response:
-        """模拟发送重试耗尽后的显式异常。"""
+        """抛出发送层显式异常。"""
         _ = (group_id, text, message_segment)
         raise NapCatSendMessageError("NapCat 发送消息失败: send timeout")
 
 
 class FakeContext:
-    """测试用插件上下文，只提供本测试需要的 Bot。"""
+    """只提供工具循环实际消费的上下文成员。"""
 
     def __init__(
         self,
         *,
-        llm: FakeLLMProtocol | None = None,
-        mcp_tool_manager: FakeMCPToolManagerProtocol | None = None,
+        llm: RecordingLLM,
+        tool_manager: FakeToolManager | None = None,
     ) -> None:
-        """初始化测试依赖。"""
-        self.bot: FakeBot = FakeBot()
-        self.database: FakeDatabase = FakeDatabase()
-        self.direct_httpx: httpx.AsyncClient = cast(httpx.AsyncClient, object())
-        self.llm: FakeLLMProtocol = llm if llm is not None else FakeLLM()
-        self.mcp_tool_manager: FakeMCPToolManagerProtocol = (
-            mcp_tool_manager
-            if mcp_tool_manager is not None
-            else FakeMCPToolManager()
+        """保存测试依赖。"""
+        self.bot = FakeBot()
+        self.group_messages = EmptyGroupMessageReader()
+        self.direct_httpx = cast(httpx.AsyncClient, object())
+        self.llm: FakeLLMProtocol = llm
+        self.mcp_tool_manager = (
+            tool_manager if tool_manager is not None else FakeToolManager()
         )
-
-
-class FakeDatabase:
-    """测试用空数据库。"""
-
-
-class FakeLLM:
-    """测试用 LLM，总是返回带思维链的正式回复。"""
-
-    async def get_ai_text_response(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-    ) -> str:
-        """测试中默认不会触发纯文本压缩请求。"""
-        _ = (messages, model_vendors, model_name)
-        return "压缩摘要"
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """返回无工具调用的模型响应。"""
-        _ = (messages, model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
-        return LLMResponse(content="正式回复", reasoning_content="模型思考")
-
-
-class FakeLongReplyLLM(FakeLLM):
-    """测试用 LLM，返回超过普通发送阈值的正文。"""
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """返回无工具调用的长正文。"""
-        _ = (messages, model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
-        return LLMResponse(content="这是一段很长的正式回复", reasoning_content=None)
-
-
-class FakeMCPToolManager:
-    """测试用 MCP 管理器，不暴露任何工具。"""
-
-    def list_tools(self) -> list[LLMToolDefinition]:
-        """返回空工具列表。"""
-        return []
-
-    async def call_tool(self, name: str, arguments: JsonObject) -> JsonObject:
-        """测试中不会调用工具。"""
-        _ = (name, arguments)
-        return {"ok": True}
-
-
-class FakeInfoToolManager:
-    """测试用信息工具管理器，用于触发工具调用续问流程。"""
-
-    def list_tools(self) -> list[LLMToolDefinition]:
-        """返回一个测试信息工具。"""
-        return [
-            LLMToolDefinition(
-                name="test__lookup",
-                description="查询测试信息。",
-                parameters={
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False,
-                },
-            )
-        ]
-
-    async def call_tool(self, name: str, arguments: JsonObject) -> JsonObject:
-        """返回固定工具结果。"""
-        _ = (name, arguments)
-        return {"ok": True, "value": "查到了"}
-
-
-class FakeImageToolManager:
-    """测试用图片工具管理器，返回一张工具图片附件。"""
-
-    def list_tools(self) -> list[LLMToolDefinition]:
-        """返回测试图片工具定义。"""
-        return [
-            LLMToolDefinition(
-                name="test__image_lookup",
-                description="查询测试图片。",
-                parameters={
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False,
-                },
-            )
-        ]
-
-    async def call_tool(self, name: str, arguments: JsonObject) -> JsonObject:
-        """兼容普通工具协议。"""
-        _ = (name, arguments)
-        return {"ok": True, "returned_count": 1}
-
-    async def call_tool_with_artifacts(
-        self, name: str, arguments: JsonObject
-    ) -> LLMToolExecutionResult:
-        """返回带图片附件的工具结果。"""
-        _ = (name, arguments)
-        return LLMToolExecutionResult(
-            result={"ok": True, "returned_count": 1},
-            image_artifacts=[
-                LLMToolImageArtifact(
-                    label="测试图片",
-                    image_bytes=b"tool-image",
-                    metadata={"message_index": 1, "image_index": 1},
-                )
-            ],
-        )
-
-
-class FakeToolCallLLM:
-    """测试用 LLM，先调用信息工具，再给出最终回复。"""
-
-    def __init__(self) -> None:
-        """初始化请求记录。"""
-        self.received_messages: list[list[ChatMessage]] = []
-
-    async def get_ai_text_response(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-    ) -> str:
-        """测试中不会触发纯文本压缩请求。"""
-        _ = (messages, model_vendors, model_name)
-        return "压缩摘要"
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """第一轮返回工具调用，第二轮返回最终正文。"""
-        _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
-        self.received_messages.append(messages[:])
-        if len(self.received_messages) == 1:
-            return LLMResponse(
-                content="我先查一下",
-                reasoning_content="工具前思考",
-                tool_calls=[
-                    LLMToolCall(id="call-1", name="test__lookup", arguments={})
-                ],
-            )
-        return LLMResponse(content="工具后回复", reasoning_content="最终思考")
-
-
-class FakeMultiRoundToolCallLLM:
-    """测试用 LLM，连续两轮调用信息工具后再给出最终回复。"""
-
-    def __init__(self) -> None:
-        """初始化请求记录。"""
-        self.received_messages: list[list[ChatMessage]] = []
-
-    async def get_ai_text_response(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-    ) -> str:
-        """测试中不会触发纯文本压缩请求。"""
-        _ = (messages, model_vendors, model_name)
-        return "压缩摘要"
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """前两轮分别调用信息工具，第三轮给出最终正文。"""
-        _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
-        self.received_messages.append(messages[:])
-        if len(self.received_messages) == 1:
-            return LLMResponse(
-                content="第一次先查一下",
-                tool_calls=[
-                    LLMToolCall(id="call-1", name="test__lookup", arguments={})
-                ],
-            )
-        if len(self.received_messages) == 2:
-            return LLMResponse(
-                content="我再补查一下",
-                tool_calls=[
-                    LLMToolCall(id="call-2", name="test__lookup", arguments={})
-                ],
-            )
-        return LLMResponse(content="两次工具结果都看完了")
-
-
-class FakeMarkedContentLLM:
-    """测试用 LLM，在 content 中输出引用和艾特标记。"""
-
-    async def get_ai_text_response(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-    ) -> str:
-        """测试中不会触发纯文本压缩请求。"""
-        _ = (messages, model_vendors, model_name)
-        return "压缩摘要"
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """返回带 `<Reply>` 和 `<At>` 标记的正文。"""
-        _ = (messages, model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
-        return LLMResponse(content="<Reply>\n<At>20000</At>\n收到喵")
-
-
-class FakeInvalidDirectiveThenReplyLLM:
-    """测试用 LLM，先输出非法标记，收到错误后改写正文。"""
-
-    def __init__(self) -> None:
-        """初始化请求记录。"""
-        self.received_messages: list[list[ChatMessage]] = []
-
-    async def get_ai_text_response(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-    ) -> str:
-        """测试中不会触发纯文本压缩请求。"""
-        _ = (messages, model_vendors, model_name)
-        return "压缩摘要"
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """第一轮使用被禁用的 @全体，第二轮改成合法引用。"""
-        _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
-        self.received_messages.append(messages[:])
-        if len(self.received_messages) == 1:
-            return LLMResponse(content="<At>all</At>\n大家看这里")
-        return LLMResponse(content="<Reply>\n我在喵~ 已经改成合法标记了！")
-
-
-class FakeNoToolLLM:
-    """测试用 LLM，输出无工具正文后应由插件自动结束。"""
-
-    def __init__(self) -> None:
-        """初始化请求记录。"""
-        self.received_messages: list[list[ChatMessage]] = []
-
-    async def get_ai_text_response(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-    ) -> str:
-        """测试中不会触发纯文本压缩请求。"""
-        _ = (messages, model_vendors, model_name)
-        return "压缩摘要"
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """返回无工具正文并记录请求。"""
-        _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
-        self.received_messages.append(messages[:])
-        return LLMResponse(content="第一句")
-
-
-class FakeEmptyLLM:
-    """测试用 LLM，返回空响应后应由插件静默结束。"""
-
-    def __init__(self) -> None:
-        """初始化请求记录。"""
-        self.received_messages: list[list[ChatMessage]] = []
-
-    async def get_ai_text_response(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-    ) -> str:
-        """测试中不会触发纯文本压缩请求。"""
-        _ = (messages, model_vendors, model_name)
-        return "压缩摘要"
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """返回空响应并记录请求。"""
-        _ = (model_vendors, model_name, tools, tool_choice, parallel_tool_calls)
-        self.received_messages.append(messages[:])
-        return LLMResponse()
-
-
-class FakeCompressionLLM:
-    """测试用 LLM，先压缩上下文，再返回最终回复。"""
-
-    def __init__(self) -> None:
-        """初始化请求记录。"""
-        self.compression_messages: list[ChatMessage] = []
-        self.received_messages: list[list[ChatMessage]] = []
-        self.compression_model_calls: list[tuple[str, str]] = []
-        self.formal_model_calls: list[tuple[str, str]] = []
-
-    async def get_ai_text_response(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-    ) -> str:
-        """记录压缩请求并返回固定摘要。"""
-        self.compression_model_calls.append((model_vendors, model_name))
-        self.compression_messages = messages[:]
-        return "历史上下文摘要：用户在讨论上下文压缩。"
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """记录正式请求并返回最终正文。"""
-        _ = (tools, tool_choice, parallel_tool_calls)
-        self.formal_model_calls.append((model_vendors, model_name))
-        self.received_messages.append(messages[:])
-        return LLMResponse(content="压缩后回复")
-
-
-class FakeRoutingLLM:
-    """测试用 LLM，记录正式请求使用的模型。"""
-
-    def __init__(self) -> None:
-        """初始化请求记录。"""
-        self.received_messages: list[list[ChatMessage]] = []
-        self.formal_model_calls: list[tuple[str, str]] = []
-
-    async def get_ai_text_response(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-    ) -> str:
-        """测试中不会触发纯文本压缩请求。"""
-        _ = (messages, model_vendors, model_name)
-        return "压缩摘要"
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """记录正式请求模型并返回正文。"""
-        _ = (tools, tool_choice, parallel_tool_calls)
-        self.formal_model_calls.append((model_vendors, model_name))
-        self.received_messages.append(messages[:])
-        return LLMResponse(content="路由回复")
-
-
-class FakeToolImageLLM:
-    """测试用 LLM，先请求图片工具，再基于图片观察结果回复。"""
-
-    def __init__(self) -> None:
-        """初始化请求记录。"""
-        self.received_messages: list[list[ChatMessage]] = []
-        self.formal_model_calls: list[tuple[str, str]] = []
-        self.summary_messages: list[ChatMessage] = []
-        self.summary_model_calls: list[tuple[str, str]] = []
-
-    async def get_ai_text_response(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-    ) -> str:
-        """记录独立图片摘要请求并返回固定观察结果。"""
-        self.summary_model_calls.append((model_vendors, model_name))
-        self.summary_messages = messages[:]
-        return "图片观察结果：画面里有白底黑字。"
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """第一轮调用图片工具，第二轮输出最终正文。"""
-        _ = (tools, tool_choice, parallel_tool_calls)
-        self.formal_model_calls.append((model_vendors, model_name))
-        self.received_messages.append(messages[:])
-        if len(self.received_messages) == 1:
-            return LLMResponse(
-                content="我先看一下图片",
-                tool_calls=[
-                    LLMToolCall(
-                        id="call-image",
-                        name="test__image_lookup",
-                        arguments={},
-                    )
-                ],
-            )
-        return LLMResponse(content="看完图片了")
-
-
-class FakeForwardOnlyImageLLM(FakeToolImageLLM):
-    """测试用 LLM，只主动读取合并转发，不主动调用图片工具。"""
-
-    async def get_ai_response_with_tools(
-        self,
-        messages: list[ChatMessage],
-        model_vendors: str,
-        model_name: str,
-        tools: list[LLMToolDefinition],
-        tool_choice: LLMToolChoice = "auto",
-        parallel_tool_calls: bool = True,
-    ) -> LLMResponse:
-        """第一轮只调用合并转发工具，第二轮基于自动图片观察回复。"""
-        _ = (tools, tool_choice, parallel_tool_calls)
-        self.formal_model_calls.append((model_vendors, model_name))
-        self.received_messages.append(messages[:])
-        if len(self.received_messages) == 1:
-            return LLMResponse(
-                content="我先拆一下合并转发",
-                tool_calls=[
-                    LLMToolCall(
-                        id="call-forward",
-                        name="qq__get_forward_message",
-                        arguments={"message_id": "root-forward"},
-                    )
-                ],
-            )
-        return LLMResponse(content="看完合并转发图片了")
 
 
 def build_config(
     *,
-    output_reasoning_content: bool,
-    pass_back_reasoning_content: bool = False,
-    model_name: str = "gpt-5.5",
-    model_vendors: str = "CLIProxyAPI",
-    supports_multimodal: bool = False,
-    context_compression_notice: str = "上下文有点长，我先整理一下记忆，稍等我几秒喵~",
+    supports_images: bool = False,
+    model_name: str = "main-model",
+    provider: str = "main-vendor",
+    show_reasoning: bool = False,
+    retain_reasoning: bool = False,
+    retain_vision_descriptions: bool = True,
     max_reply_chars: int = 100,
+    context_compression_notice: str = "正在整理上下文",
 ) -> AIGroupChatConfig:
-    """构造测试用 AI 群聊配置。"""
-    return AIGroupChatConfig(
-        model_name=model_name,
-        model_vendors=model_vendors,
-        supports_multimodal=supports_multimodal,
-        multimodal_fallback_model_name="gpt-5.5-vision",
-        multimodal_fallback_model_vendors="CLIProxyAPI",
-        output_reasoning_content=output_reasoning_content,
-        pass_back_reasoning_content=pass_back_reasoning_content,
-        context_compression_notice=context_compression_notice,
-        max_reply_chars=max_reply_chars,
-        tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
-        tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
-        group_config=[],
-    )
-
-
-def configure_deepseek_v4_prompts(
-    *, config: AIGroupChatConfig, prompt_root: Path
-) -> None:
-    """给测试配置写入 DeepSeek V4 Depth 0 提示词文件。"""
-    extra_path = prompt_root / "extra_requirements.md"
-    roleplay_path = prompt_root / "roleplay_instruct.md"
-    extra_path.write_text("群聊动作偏好：需要引用或艾特时必须说完整的话。", encoding="utf-8")
-    roleplay_path.write_text("【角色沉浸要求】保持第一人称内心独白。", encoding="utf-8")
-    config.enable_deepseek_v4_roleplay_instruct = True
-    config.extra_requirements_path = str(extra_path)
-    config.deepseek_v4_roleplay_instruct_path = str(roleplay_path)
+    """按主模型能力构造有效配置。"""
+    values: dict[str, object] = {
+        "model": {
+            "provider": provider,
+            "name": model_name,
+            "supports_images": supports_images,
+        },
+        "show_reasoning": show_reasoning,
+        "retain_reasoning": retain_reasoning,
+        "max_reply_chars": max_reply_chars,
+        "context_compression_notice": context_compression_notice,
+        "groups": [],
+    }
+    if not supports_images:
+        values.update(
+            {
+                "vision": {
+                    "model": {
+                        "provider": "vision-vendor",
+                        "name": "vision-model",
+                    },
+                    "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
+                    "user_prompt_file": VISION_USER_PROMPT_PATH,
+                    "retain_descriptions": retain_vision_descriptions,
+                }
+            }
+        )
+    return AIGroupChatConfig.model_validate(values)
 
 
 def build_message() -> GroupMessage:
@@ -712,65 +371,117 @@ def build_message() -> GroupMessage:
     )
 
 
+def build_tool_call(call_id: str = "call-1") -> LLMToolCall:
+    """构造固定信息工具调用。"""
+    return LLMToolCall(id=call_id, name=TOOL_NAME, arguments={})
+
+
+def materialize_config(config: AIGroupChatConfig) -> MaterializedAIGroupChatConfig:
+    """为视觉工具补齐已经由统一加载器读取的提示词。"""
+    return MaterializedAIGroupChatConfig(
+        source=config,
+        groups=(),
+        vision_system_prompt=(
+            "只描述可见事实。" if config.vision is not None else None
+        ),
+        vision_user_prompt=(
+            "结合当前问题描述图片。" if config.vision is not None else None
+        ),
+    )
+
+
+def build_loop(
+    *, config: AIGroupChatConfig, context: FakeContext
+) -> GroupChatToolLoop:
+    """构造使用真实视觉工具的工具循环。"""
+    typed_context = cast(Context, context)
+    return GroupChatToolLoop(
+        config=config,
+        context=typed_context,
+        debug_dumper=AIGroupChatDebugDumper(config=config),
+        vision_tool=VisionDescriptionTool(
+            config=materialize_config(config),
+            context=typed_context,
+        ),
+    )
+
+
+async def run_turn(
+    *,
+    loop: GroupChatToolLoop,
+    chat_handler: ContextHandler,
+    question: str = "请根据图片回答",
+    turn_messages: list[ChatMessage] | None = None,
+    input_vision_messages: list[ChatMessage] | None = None,
+    input_vision_history_messages: list[ChatMessage] | None = None,
+    vision_turn_state: VisionTurnState | None = None,
+) -> None:
+    """用空的输入视觉结果执行一轮工具循环。"""
+    await loop.run(
+        msg=build_message(),
+        chat_handler=chat_handler,
+        turn_messages=(
+            turn_messages
+            if turn_messages is not None
+            else [ChatMessage(role="user", text=question)]
+        ),
+        input_vision_messages=input_vision_messages or [],
+        input_vision_history_messages=input_vision_history_messages or [],
+        question=question,
+        vision_turn_state=(
+            vision_turn_state if vision_turn_state is not None else VisionTurnState()
+        ),
+    )
+
+
 class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
-    """验证 AI 群聊回复展示和上下文写入策略。"""
+    """验证主模型路由、视觉隔离、思维字段和上下文保存。"""
 
-    def test_plugin_selects_fallback_model_when_image_exists(self) -> None:
-        """主模型不支持多模态且本轮有图片时选择备用模型。"""
-        plugin = object.__new__(AIGroupChatPlugin)
-        plugin.config = build_config(output_reasoning_content=False)
-
-        active_model = plugin.select_active_model(contains_image=True)
-
-        self.assertEqual(active_model.model_name, "gpt-5.5-vision")
-        self.assertEqual(active_model.model_vendors, "CLIProxyAPI")
-        self.assertTrue(active_model.supports_multimodal)
-        self.assertTrue(active_model.used_multimodal_fallback)
-
-    def test_plugin_keeps_main_model_when_no_image_exists(self) -> None:
-        """主模型不支持多模态但本轮无图片时仍使用主模型。"""
-        plugin = object.__new__(AIGroupChatPlugin)
-        plugin.config = build_config(output_reasoning_content=False)
-
-        active_model = plugin.select_active_model(contains_image=False)
-
-        self.assertEqual(active_model.model_name, "gpt-5.5")
-        self.assertFalse(active_model.supports_multimodal)
-        self.assertFalse(active_model.used_multimodal_fallback)
-
-    def test_plugin_keeps_multimodal_main_model_when_image_exists(self) -> None:
-        """主模型支持多模态时不切换备用模型。"""
-        plugin = object.__new__(AIGroupChatPlugin)
-        plugin.config = build_config(
-            output_reasoning_content=False,
-            supports_multimodal=True,
+    async def test_reasoning_is_hidden_but_can_be_passed_back(self) -> None:
+        """群内只显示 content，结构化 reasoning 可写回后续上下文。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(content="正式回复", reasoning_content="模型思考")
+            ]
+        )
+        context = FakeContext(llm=llm)
+        config = build_config(retain_reasoning=True)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
         )
 
-        active_model = plugin.select_active_model(contains_image=True)
-
-        self.assertEqual(active_model.model_name, "gpt-5.5")
-        self.assertTrue(active_model.supports_multimodal)
-        self.assertFalse(active_model.used_multimodal_fallback)
-
-    async def test_reasoning_output_is_visible_but_not_persisted(self) -> None:
-        """开启思维链展示时，长期上下文只保存正式回复。"""
-        fake_context = FakeContext()
-        config = build_config(output_reasoning_content=True)
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
-        )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
-
-        await tool_loop.run(
-            msg=build_message(),
+        await run_turn(
+            loop=build_loop(config=config, context=context),
             chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="用户消息")],
+        )
+
+        self.assertEqual(context.bot.sent_texts, ["正式回复"])
+        self.assertEqual(chat_handler.messages_lst[-1].text, "正式回复")
+        self.assertEqual(
+            chat_handler.messages_lst[-1].reasoning_content,
+            "模型思考",
+        )
+
+    async def test_reasoning_output_option_only_changes_visible_reply(self) -> None:
+        """开启展示能力时群内可见思维内容，长期正文仍保持干净。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(content="正式回复", reasoning_content="模型思考")
+            ]
+        )
+        context = FakeContext(llm=llm)
+        config = build_config(show_reasoning=True)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
         )
 
         self.assertEqual(
-            fake_context.bot.sent_texts,
+            context.bot.sent_texts,
             [
                 "【模型原生思维链】\n"
                 "---\n"
@@ -780,163 +491,331 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
                 "正式回复"
             ],
         )
-        self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
         self.assertEqual(chat_handler.messages_lst[-1].text, "正式回复")
         self.assertIsNone(chat_handler.messages_lst[-1].reasoning_content)
 
-    async def test_long_reply_is_sent_as_group_forward_message(self) -> None:
-        """超过字数阈值的 AI 回复会作为单节点合并转发发送。"""
-        fake_context = FakeContext(llm=FakeLongReplyLLM())
-        config = build_config(output_reasoning_content=False, max_reply_chars=5)
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
+    async def test_input_image_description_is_used_before_main_request(self) -> None:
+        """当前消息图片先生成描述，再由固定主模型完成正式回复。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="最终回复")])
+        context = FakeContext(llm=llm)
+        config = build_config()
+        typed_context = cast(Context, context)
+        vision_tool = VisionDescriptionTool(
+            config=materialize_config(config),
+            context=typed_context,
         )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
-
-        await tool_loop.run(
-            msg=build_message(),
-            chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="用户消息")],
-        )
-
-        self.assertEqual(fake_context.bot.sent_texts, [])
-        self.assertEqual(len(fake_context.bot.sent_forward_messages), 1)
-        group_id, messages = fake_context.bot.sent_forward_messages[0]
-        self.assertEqual(group_id, "40000")
-        self.assertEqual(len(messages), 1)
-        node = messages[0]
-        self.assertIsInstance(node, Node)
-        node = cast(Node, node)
-        self.assertIsInstance(node.data.content, list)
-        content = cast(list[MessageSegment], node.data.content)
-        self.assertEqual([segment.type for segment in content], ["text"])
-        text_segment = cast(Text, content[0])
-        self.assertEqual(text_segment.data.text, "这是一段很长的正式回复")
-        self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
-        self.assertEqual(chat_handler.messages_lst[-1].text, "这是一段很长的正式回复")
-
-    async def test_reasoning_can_be_passed_back_as_structured_field(self) -> None:
-        """开启思维链回传时，长期上下文写入结构化字段且正文干净。"""
-        fake_context = FakeContext()
-        config = build_config(
-            output_reasoning_content=False,
-            pass_back_reasoning_content=True,
-        )
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
-        )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
-
-        await tool_loop.run(
-            msg=build_message(),
-            chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="用户消息")],
-        )
-
-        self.assertEqual(fake_context.bot.sent_texts, ["正式回复"])
-        self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
-        self.assertEqual(chat_handler.messages_lst[-1].text, "正式回复")
-        self.assertEqual(
-            chat_handler.messages_lst[-1].reasoning_content,
-            "模型思考",
-        )
-
-    async def test_tool_call_reasoning_is_passed_back_when_enabled(self) -> None:
-        """开启思维链回传时，工具调用续问也携带上一轮结构化思维链。"""
-        fake_llm = FakeToolCallLLM()
-        fake_context = FakeContext(
-            llm=fake_llm,
-            mcp_tool_manager=FakeInfoToolManager(),
-        )
-        config = build_config(
-            output_reasoning_content=False,
-            pass_back_reasoning_content=True,
-        )
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
-        )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
-
-        await tool_loop.run(
-            msg=build_message(),
-            chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="用户消息")],
-        )
-
-        second_request_messages = fake_llm.received_messages[1]
-        tool_call_message = next(
-            message for message in second_request_messages if message.tool_calls
-        )
-        self.assertEqual(tool_call_message.role, "assistant")
-        self.assertEqual(tool_call_message.reasoning_content, "工具前思考")
-        self.assertEqual(fake_context.bot.sent_texts, ["我先查一下", "工具后回复"])
-        self.assertEqual(chat_handler.messages_lst[2].text, "我先查一下")
-        self.assertEqual(chat_handler.messages_lst[3].text, "工具后回复")
-
-    async def test_tool_image_uses_isolated_vision_summary_for_text_model(self) -> None:
-        """主模型不支持多模态时，工具图片用独立备用视觉请求生成摘要。"""
-        fake_llm = FakeToolImageLLM()
-        fake_context = FakeContext(
-            llm=fake_llm,
-            mcp_tool_manager=FakeImageToolManager(),
-        )
-        config = build_config(
-            output_reasoning_content=False,
-            model_vendors="main-vendor",
-        )
-        config.multimodal_fallback_model_name = "vision-model"
-        config.multimodal_fallback_model_vendors = "vision-vendor"
-        config.persist_tool_image_observations = False
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
+        state = VisionTurnState()
+        delivery = await vision_tool.deliver(
+            items=[
+                LLMImageArtifact(
+                    label="当前消息第 1 张图片",
+                    image_bytes=b"current-image",
+                )
+            ],
+            truncated_count=0,
+            question="图片里写了什么？",
+            source_name="当前消息和引用消息",
+            turn_state=state,
         )
         chat_handler = ContextHandler(
-            system_prompt="群聊系统提示词不能进入视觉摘要",
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+            question="图片里写了什么？",
+            input_vision_messages=delivery.working_messages,
+            input_vision_history_messages=delivery.history_messages,
+            vision_turn_state=state,
+        )
+
+        self.assertEqual(llm.text_models, [("vision-vendor", "vision-model")])
+        self.assertEqual(llm.formal_models, [("main-vendor", "main-model")])
+        formal_text = "\n".join(
+            message.text or "" for message in llm.formal_requests[0]
+        )
+        self.assertIn("系统生成，不是用户原话", formal_text)
+        self.assertIn("画面里有白底黑字", formal_text)
+        self.assertTrue(
+            all(message.image is None for message in chat_handler.messages_lst)
+        )
+
+    async def test_tool_round_passes_back_reasoning_field(self) -> None:
+        """工具续问会带回上一轮 assistant 的结构化 reasoning。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(
+                    content="我先查一下",
+                    reasoning_content="工具前思考",
+                    tool_calls=[build_tool_call()],
+                ),
+                LLMResponse(content="工具后回复"),
+            ]
+        )
+        context = FakeContext(llm=llm)
+        config = build_config(retain_reasoning=True)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+        )
+
+        assistant_tool_message = next(
+            message for message in llm.formal_requests[1] if message.tool_calls
+        )
+        self.assertEqual(assistant_tool_message.reasoning_content, "工具前思考")
+        self.assertEqual(context.bot.sent_texts, ["我先查一下", "工具后回复"])
+
+    async def test_deepseek_named_model_gets_no_temporary_prompt(self) -> None:
+        """模型名称不再触发 DSV4 临时 user 消息。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="正常回复")])
+        context = FakeContext(llm=llm)
+        config = build_config(
+            model_name="deepseek-v4-pro",
+            provider="deepseek",
+        )
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词\n通用群聊要求",
             max_context_tokens=1000000,
         )
 
-        await tool_loop.run(
-            msg=build_message(),
+        await run_turn(
+            loop=build_loop(config=config, context=context),
             chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="当前用户正文不能进入视觉摘要")],
-            active_model=ActiveModelConfig(
-                model_name="main-model",
-                model_vendors="main-vendor",
-                supports_multimodal=False,
+            question="用户消息",
+        )
+
+        self.assertEqual(
+            [message.role for message in llm.formal_requests[0]],
+            ["system", "user"],
+        )
+        self.assertEqual(
+            llm.formal_models,
+            [("deepseek", "deepseek-v4-pro")],
+        )
+
+    async def test_tool_image_uses_isolated_vision_model_then_main_model(self) -> None:
+        """文本主模型只收到视觉描述，正式回复两轮都使用主模型。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(tool_calls=[build_tool_call()]),
+                LLMResponse(content="看完图片了"),
+            ]
+        )
+        manager = FakeToolManager(image_bytes=b"tool-image")
+        context = FakeContext(llm=llm, tool_manager=manager)
+        config = build_config()
+        chat_handler = ContextHandler(
+            system_prompt="群聊角色与长期历史不能进入视觉请求",
+            max_context_tokens=1000000,
+        )
+        chat_handler.build_chatmessage(
+            message_lst=[ChatMessage(role="assistant", text="长期历史")]
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+            question="图片里的文字是什么？",
+        )
+
+        self.assertEqual(
+            llm.formal_models,
+            [("main-vendor", "main-model"), ("main-vendor", "main-model")],
+        )
+        self.assertEqual(llm.text_models, [("vision-vendor", "vision-model")])
+        self.assertEqual(len(llm.text_requests), 1)
+        vision_messages = llm.text_requests[0]
+        self.assertEqual([message.role for message in vision_messages], ["system", "user"])
+        vision_text = "\n".join(message.text or "" for message in vision_messages)
+        self.assertIn("图片里的文字是什么？", vision_text)
+        self.assertNotIn("群聊角色", vision_text)
+        self.assertNotIn("长期历史", vision_text)
+        self.assertEqual(vision_messages[1].image, [b"tool-image"])
+        second_text = "\n".join(
+            message.text or "" for message in llm.formal_requests[1]
+        )
+        self.assertIn("系统生成，不是用户原话", second_text)
+        self.assertIn("画面里有白底黑字", second_text)
+        persisted_text = "\n".join(
+            message.text or "" for message in chat_handler.messages_lst
+        )
+        self.assertIn("画面里有白底黑字", persisted_text)
+        persisted_texts = [message.text or "" for message in chat_handler.messages_lst]
+        self.assertLess(
+            next(
+                index
+                for index, text in enumerate(persisted_texts)
+                if "画面里有白底黑字" in text
+            ),
+            persisted_texts.index("看完图片了"),
+        )
+        self.assertTrue(
+            all(message.image is None for message in chat_handler.messages_lst)
+        )
+
+    async def test_vision_description_can_be_excluded_from_history(self) -> None:
+        """关闭持久化后，视觉描述只参与当前工具轮次。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(tool_calls=[build_tool_call()]),
+                LLMResponse(content="本轮回答"),
+            ]
+        )
+        context = FakeContext(
+            llm=llm,
+            tool_manager=FakeToolManager(image_bytes=b"tool-image"),
+        )
+        config = build_config(retain_vision_descriptions=False)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+        )
+
+        persisted_text = "\n".join(
+            message.text or "" for message in chat_handler.messages_lst
+        )
+        self.assertNotIn("画面里有白底黑字", persisted_text)
+        self.assertIn("画面里有白底黑字", "\n".join(
+            message.text or "" for message in llm.formal_requests[1]
+        ))
+
+    async def test_multimodal_main_model_receives_tool_image_directly(self) -> None:
+        """多模态主模型直接收到工具图片，不发起独立视觉请求。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(tool_calls=[build_tool_call()]),
+                LLMResponse(content="直接看完图片"),
+            ]
+        )
+        context = FakeContext(
+            llm=llm,
+            tool_manager=FakeToolManager(image_bytes=b"tool-image"),
+        )
+        config = build_config(supports_images=True)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+        )
+
+        self.assertEqual(llm.text_requests, [])
+        image_messages = [
+            message
+            for message in llm.formal_requests[1]
+            if message.image is not None
+        ]
+        self.assertEqual(len(image_messages), 1)
+        self.assertEqual(image_messages[0].image, [b"tool-image"])
+        self.assertTrue(
+            all(message.image is None for message in chat_handler.messages_lst)
+        )
+
+    async def test_tool_image_failures_are_returned_to_main_model(self) -> None:
+        """工具图片全部失败或截断时，主模型仍收到结构化可恢复观察。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(tool_calls=[build_tool_call()]),
+                LLMResponse(content="根据文字继续回答"),
+            ]
+        )
+        context = FakeContext(
+            llm=llm,
+            tool_manager=FakeToolManager(
+                image_errors=[
+                    LLMImageError(
+                        label="工具图片 1",
+                        error_type="ReadTimeout",
+                        error="下载超时",
+                    )
+                ],
+                truncated_image_count=2,
             ),
         )
-
-        self.assertEqual(fake_llm.summary_model_calls, [("vision-vendor", "vision-model")])
-        self.assertEqual(len(fake_llm.summary_messages), 2)
-        summary_system = fake_llm.summary_messages[0]
-        summary_user = fake_llm.summary_messages[1]
-        self.assertEqual(summary_system.role, "system")
-        self.assertIn("独立图片观察任务", summary_system.text or "")
-        self.assertNotIn("群聊系统提示词", summary_system.text or "")
-        self.assertEqual(summary_user.role, "user")
-        self.assertIn("请按图片顺序输出简洁观察摘要", summary_user.text or "")
-        self.assertNotIn("当前用户正文", summary_user.text or "")
-        self.assertEqual(summary_user.image, [b"tool-image"])
-        second_request_text = "\n".join(
-            message.text or "" for message in fake_llm.received_messages[1]
+        config = build_config()
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
         )
-        self.assertIn("图片观察结果：画面里有白底黑字。", second_request_text)
-        persisted_text = "\n".join(message.text or "" for message in chat_handler.messages_lst)
-        self.assertNotIn("图片观察结果：画面里有白底黑字。", persisted_text)
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+        )
+
+        self.assertEqual(llm.text_requests, [])
+        second_text = "\n".join(
+            message.text or "" for message in llm.formal_requests[1]
+        )
+        self.assertIn("图片内容不可用", second_text)
+        self.assertIn("下载超时", second_text)
+        self.assertIn("未观察图片数：2", second_text)
+
+    async def test_repeated_tool_image_is_observed_once_per_turn(self) -> None:
+        """同一问题下重复返回相同图片时不重复请求视觉模型。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(tool_calls=[build_tool_call("call-1")]),
+                LLMResponse(tool_calls=[build_tool_call("call-2")]),
+                LLMResponse(content="最终回答"),
+            ]
+        )
+        context = FakeContext(
+            llm=llm,
+            tool_manager=FakeToolManager(image_bytes=b"same-image"),
+        )
+        config = build_config()
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+            question="这是什么？",
+        )
+
+        self.assertEqual(len(llm.text_requests), 1)
+        final_observations = [
+            message
+            for message in llm.formal_requests[-1]
+            if "视觉工具观察结果" in (message.text or "")
+        ]
+        self.assertEqual(len(final_observations), 1)
 
     async def test_forward_tool_auto_fetches_images_for_text_model(self) -> None:
-        """模型只读取合并转发时，系统会自动补取其中图片并生成视觉摘要。"""
-        fake_llm = FakeForwardOnlyImageLLM()
-        fake_context = FakeContext(llm=fake_llm)
-        fake_context.bot.forward_responses["root-forward"] = Response(
+        """只读取合并转发时会自动补取其中图片并生成视觉描述。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(
+                    tool_calls=[
+                        LLMToolCall(
+                            id="call-forward",
+                            name="qq__get_forward_message",
+                            arguments={"message_id": "outer-forward"},
+                        )
+                    ]
+                ),
+                LLMResponse(content="看完合并转发了"),
+            ]
+        )
+        context = FakeContext(llm=llm)
+        context.group_messages.add_forward(
+            scope=GroupDataScope(bot_id="10000", group_id="40000"),
+            message_id="outer-forward",
+            forward_id="root-forward",
+        )
+        context.bot.forward_responses["root-forward"] = Response(
             status="ok",
             retcode=0,
             data={
@@ -958,195 +837,133 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
                 ]
             },
         )
-        fake_context.bot.image_responses["a.jpg"] = Response(
+        context.bot.image_responses["a.jpg"] = Response(
             status="ok",
             retcode=0,
-            data={"file": "a.jpg", "base64": "dG9vbC1pbWFnZQ=="},
+            data={"base64": "dG9vbC1pbWFnZQ=="},
         )
-        config = build_config(
-            output_reasoning_content=False,
-            model_vendors="main-vendor",
+        config = build_config()
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
         )
-        config.multimodal_fallback_model_name = "vision-model"
-        config.multimodal_fallback_model_vendors = "vision-vendor"
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
-        )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
 
-        await tool_loop.run(
-            msg=build_message(),
+        await run_turn(
+            loop=build_loop(config=config, context=context),
             chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="评价这个合并转发")],
-            active_model=ActiveModelConfig(
-                model_name="main-model",
-                model_vendors="main-vendor",
-                supports_multimodal=False,
-            ),
+            question="评价这个合并转发",
         )
 
-        self.assertEqual(fake_context.bot.forward_calls, ["root-forward", "root-forward"])
-        self.assertEqual(fake_context.bot.image_calls, [(None, "a.jpg")])
-        self.assertEqual(fake_llm.summary_model_calls, [("vision-vendor", "vision-model")])
-        self.assertEqual(fake_llm.summary_messages[1].image, [b"tool-image"])
+        self.assertEqual(
+            context.bot.forward_calls,
+            ["root-forward", "root-forward"],
+        )
+        self.assertEqual(context.bot.image_calls, [(None, "a.jpg")])
+        self.assertEqual(llm.text_models, [("vision-vendor", "vision-model")])
+        self.assertEqual(llm.text_requests[0][1].image, [b"tool-image"])
         second_request_text = "\n".join(
-            message.text or "" for message in fake_llm.received_messages[1]
+            message.text or "" for message in llm.formal_requests[1]
         )
-        self.assertIn("图片观察结果：画面里有白底黑字。", second_request_text)
+        self.assertIn("画面里有白底黑字", second_request_text)
+        self.assertEqual(
+            llm.formal_models,
+            [("main-vendor", "main-model"), ("main-vendor", "main-model")],
+        )
 
-    async def test_tool_image_is_passed_directly_when_active_model_is_multimodal(
+    async def test_content_directives_are_sent_as_message_segments(self) -> None:
+        """content 中的引用与艾特标记会转换为 NapCat 消息段。"""
+        content = "<Reply>\n<At>20000</At>\n收到喵"
+        llm = RecordingLLM(responses=[LLMResponse(content=content)])
+        context = FakeContext(llm=llm)
+        config = build_config()
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+            question="回复我",
+        )
+
+        self.assertEqual(context.bot.sent_segment_types, [["reply", "at", "text"]])
+        self.assertIn("收到喵", context.bot.sent_texts[0])
+        self.assertEqual(chat_handler.messages_lst[-1].text, content)
+
+    async def test_invalid_content_directive_is_corrected_before_sending(
         self,
     ) -> None:
-        """active model 支持多模态时，工具图片直接进入下一轮正式请求。"""
-        fake_llm = FakeToolImageLLM()
-        fake_context = FakeContext(
-            llm=fake_llm,
-            mcp_tool_manager=FakeImageToolManager(),
+        """非法 content 标记不会发送，并会要求主模型重写。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(content="<At>all</At>\n大家好"),
+                LLMResponse(content="<Reply>\n我在喵~ 已改成合法标记。"),
+            ]
         )
-        config = build_config(
-            output_reasoning_content=False,
-            model_vendors="vision-vendor",
-            supports_multimodal=True,
+        context = FakeContext(llm=llm)
+        config = build_config()
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
         )
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
-        )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
 
-        await tool_loop.run(
-            msg=build_message(),
+        await run_turn(
+            loop=build_loop(config=config, context=context),
             chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="需要看图")],
-            active_model=ActiveModelConfig(
-                model_name="vision-model",
-                model_vendors="vision-vendor",
-                supports_multimodal=True,
-            ),
+            question="还活着吗？",
         )
 
-        self.assertEqual(fake_llm.summary_model_calls, [])
-        second_request_images = [
-            message.image
-            for message in fake_llm.received_messages[1]
-            if message.image is not None
-        ]
-        self.assertEqual(second_request_images, [[b"tool-image"]])
-
-    async def test_content_directives_are_sent_with_message_segments(self) -> None:
-        """content 中的 `<Reply>` / `<At>` 会转换成消息段，长期上下文写入原文。"""
-        fake_context = FakeContext(llm=FakeMarkedContentLLM())
-        config = build_config(output_reasoning_content=False)
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
+        self.assertEqual(context.bot.sent_segment_types, [["reply", "text"]])
+        self.assertEqual(len(llm.formal_requests), 2)
+        retry_text = "\n".join(
+            message.text or "" for message in llm.formal_requests[1]
         )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
-
-        await tool_loop.run(
-            msg=build_message(),
-            chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="回复我")],
-        )
-
-        self.assertEqual(fake_context.bot.sent_texts, [" 收到喵"])
-        self.assertEqual(fake_context.bot.sent_segment_types, [["reply", "at", "text"]])
-        self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
+        self.assertIn("标记格式有误", retry_text)
+        self.assertIn("@全体", retry_text)
         self.assertEqual(
             chat_handler.messages_lst[-1].text,
-            "<Reply>\n<At>20000</At>\n收到喵",
+            "<Reply>\n我在喵~ 已改成合法标记。",
         )
 
-    async def test_invalid_content_directive_returns_error_and_retries(self) -> None:
-        """非法 content 标记不会发群，会追加纠错消息让模型重试。"""
-        fake_llm = FakeInvalidDirectiveThenReplyLLM()
-        fake_context = FakeContext(llm=fake_llm)
-        config = build_config(output_reasoning_content=False)
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
+    async def test_plain_content_sends_once_and_finishes(self) -> None:
+        """无工具正文只发送一次并结束本轮。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="第一句")])
+        context = FakeContext(llm=llm)
+        config = build_config()
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
         )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
 
-        await tool_loop.run(
-            msg=build_message(),
+        await run_turn(
+            loop=build_loop(config=config, context=context),
             chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="还活着?")],
+            question="继续说",
         )
 
-        self.assertEqual(
-            fake_context.bot.sent_texts,
-            ["我在喵~ 已经改成合法标记了！"],
-        )
-        self.assertEqual(fake_context.bot.sent_segment_types, [["reply", "text"]])
-        self.assertEqual(len(fake_llm.received_messages), 2)
-        retry_messages = fake_llm.received_messages[1]
-        directive_error_message = next(
-            message
-            for message in retry_messages
-            if message.role == "user" and "标记格式有误" in (message.text or "")
-        )
-        self.assertIn("@全体", directive_error_message.text or "")
-        self.assertEqual(chat_handler.messages_lst[-1].role, "assistant")
-        self.assertEqual(
-            chat_handler.messages_lst[-1].text,
-            "<Reply>\n我在喵~ 已经改成合法标记了！",
-        )
-
-    async def test_plain_content_without_tools_sends_once_and_finishes(self) -> None:
-        """无工具正文会发群一次，然后自动结束本轮。"""
-        fake_llm = FakeNoToolLLM()
-        fake_context = FakeContext(llm=fake_llm)
-        config = build_config(output_reasoning_content=False)
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
-        )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
-
-        await tool_loop.run(
-            msg=build_message(),
-            chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="继续说")],
-        )
-
-        self.assertEqual(fake_context.bot.sent_texts, ["第一句"])
-        self.assertEqual(len(fake_llm.received_messages), 1)
+        self.assertEqual(context.bot.sent_texts, ["第一句"])
+        self.assertEqual(len(llm.formal_requests), 1)
         self.assertEqual(chat_handler.messages_lst[-1].text, "第一句")
 
-    async def test_send_failure_persists_system_status_without_assistant_content(
+    async def test_send_failure_persists_status_without_assistant_content(
         self,
     ) -> None:
-        """发送层失败时不把未发出的正文当成 assistant 历史。"""
-        fake_llm = FakeNoToolLLM()
-        fake_context = FakeContext(llm=fake_llm)
-        fake_context.bot = FakeSendFailureBot()
-        config = build_config(output_reasoning_content=False)
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
+        """发送失败时只记录运行状态，不伪装成已发出的 assistant。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="第一句")])
+        context = FakeContext(llm=llm)
+        context.bot = FakeSendFailureBot()
+        config = build_config()
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
         )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
 
-        await tool_loop.run(
-            msg=build_message(),
+        await run_turn(
+            loop=build_loop(config=config, context=context),
             chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="继续说")],
+            question="继续说",
         )
 
-        self.assertEqual(len(fake_llm.received_messages), 1)
         self.assertEqual(
             [message.role for message in chat_handler.messages_lst],
             ["system", "user", "system"],
         )
-        self.assertEqual(chat_handler.messages_lst[1].text, "继续说")
         failure_status = chat_handler.messages_lst[-1].text or ""
         self.assertIn("没有发送到群内", failure_status)
         self.assertIn("NapCat 发送消息失败", failure_status)
@@ -1156,72 +973,35 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_empty_content_without_tools_finishes_silently(self) -> None:
-        """无工具且无正文时不发送群消息，但当前用户消息仍进入长期上下文。"""
-        fake_llm = FakeEmptyLLM()
-        fake_context = FakeContext(llm=fake_llm)
-        config = build_config(output_reasoning_content=False)
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
+        """没有正文或工具时不发送消息，但仍保存本轮用户输入。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="  ")])
+        context = FakeContext(llm=llm)
+        config = build_config()
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
         )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
 
-        await tool_loop.run(
-            msg=build_message(),
+        await run_turn(
+            loop=build_loop(config=config, context=context),
             chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="不用回复")],
+            question="不用回复",
         )
 
-        self.assertEqual(fake_context.bot.sent_texts, [])
-        self.assertEqual(len(fake_llm.received_messages), 1)
+        self.assertEqual(context.bot.sent_texts, [])
         self.assertEqual(
             [message.role for message in chat_handler.messages_lst],
             ["system", "user"],
         )
         self.assertEqual(chat_handler.messages_lst[-1].text, "不用回复")
 
-    async def test_formal_requests_use_active_model(self) -> None:
-        """正式请求使用本轮 active model。"""
-        fake_llm = FakeRoutingLLM()
-        fake_context = FakeContext(llm=fake_llm)
-        config = build_config(output_reasoning_content=False)
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
+    async def test_history_image_bytes_are_never_replayed(self) -> None:
+        """历史图片字节会在正式请求前清理，也不会再次持久化。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="下一轮回复")])
+        context = FakeContext(llm=llm)
+        config = build_config()
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
         )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
-
-        await tool_loop.run(
-            msg=build_message(),
-            chat_handler=chat_handler,
-            turn_messages=[
-                ChatMessage(role="user", text="图片消息", image=[b"image-bytes"])
-            ],
-            active_model=ActiveModelConfig(
-                model_name="gpt-5.5-vision",
-                model_vendors="vision-vendor",
-                supports_multimodal=True,
-                used_multimodal_fallback=True,
-            ),
-        )
-
-        self.assertEqual(fake_llm.formal_model_calls, [("vision-vendor", "gpt-5.5-vision")])
-        self.assertEqual(fake_llm.received_messages[0][1].image, [b"image-bytes"])
-        self.assertIsNone(chat_handler.messages_lst[1].image)
-
-    async def test_history_images_are_not_replayed_to_next_turn(self) -> None:
-        """历史上下文中的图片字节不会跨轮次进入普通模型请求。"""
-        fake_llm = FakeRoutingLLM()
-        fake_context = FakeContext(llm=fake_llm)
-        config = build_config(output_reasoning_content=False)
-        tool_loop = GroupChatToolLoop(
-            config=config,
-            context=cast(Context, fake_context),
-            debug_dumper=AIGroupChatDebugDumper(config=config),
-        )
-        chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
         chat_handler.build_chatmessage(
             message_lst=[
                 ChatMessage(role="user", text="上一轮图片", image=[b"old-image"]),
@@ -1229,288 +1009,88 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        await tool_loop.run(
-            msg=build_message(),
+        await run_turn(
+            loop=build_loop(config=config, context=context),
             chat_handler=chat_handler,
-            turn_messages=[ChatMessage(role="user", text="这一轮没有图片")],
-            active_model=ActiveModelConfig(
-                model_name="gpt-5.5",
-                model_vendors="text-vendor",
-                supports_multimodal=False,
-            ),
+            question="这一轮没有图片",
         )
 
-        first_request_messages = fake_llm.received_messages[0]
-        self.assertEqual(fake_llm.formal_model_calls, [("text-vendor", "gpt-5.5")])
+        self.assertTrue(
+            all(
+                message.image is None
+                for message in llm.formal_requests[0]
+            )
+        )
+        self.assertTrue(
+            all(message.image is None for message in chat_handler.messages_lst)
+        )
+
+    async def test_context_compression_and_formal_reply_use_main_model(self) -> None:
+        """上下文压缩与压缩后的正式请求都固定使用主模型。"""
+        llm = RecordingLLM(
+            responses=[LLMResponse(content="压缩后回复")],
+            text_response="历史上下文摘要",
+        )
+        context = FakeContext(llm=llm)
+        config = build_config(
+            model_name="deepseek-v4-pro",
+            provider="main-vendor",
+            context_compression_notice="我先整理一下记忆",
+        )
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=9000
+        )
+        chat_handler.build_chatmessage(
+            message_lst=[
+                ChatMessage(role="user", text="历史消息一" * 100),
+                ChatMessage(role="assistant", text="历史回复一" * 100),
+            ]
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+            question="当前新消息",
+        )
+
+        self.assertEqual(llm.text_models, [("main-vendor", "deepseek-v4-pro")])
+        self.assertEqual(llm.formal_models, [("main-vendor", "deepseek-v4-pro")])
+        compression_text = llm.text_requests[0][1].text or ""
+        self.assertIn("历史消息一", compression_text)
+        self.assertNotIn("当前新消息", compression_text)
         self.assertEqual(
-            [len(message.image or []) for message in first_request_messages],
-            [0, 0, 0, 0],
+            [message.role for message in llm.formal_requests[0]],
+            ["system", "user"],
         )
-        self.assertEqual(chat_handler.messages_lst[1].text, "上一轮图片")
-        self.assertIsNone(chat_handler.messages_lst[1].image)
+        rebuilt_text = llm.formal_requests[0][1].text or ""
+        self.assertIn("历史上下文摘要", rebuilt_text)
+        self.assertIn("当前新消息", rebuilt_text)
+        self.assertEqual(
+            context.bot.sent_texts,
+            ["我先整理一下记忆", "压缩后回复"],
+        )
 
-    async def test_deepseek_v4_depth_zero_prompt_is_added_to_each_formal_request(
-        self,
-    ) -> None:
-        """DeepSeek V4 正式请求每次都追加 Depth 0 user prompt。"""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            fake_llm = FakeToolCallLLM()
-            fake_context = FakeContext(
-                llm=fake_llm,
-                mcp_tool_manager=FakeInfoToolManager(),
-            )
-            config = build_config(
-                output_reasoning_content=False,
-                model_name="deepseek-v4-pro",
-            )
-            configure_deepseek_v4_prompts(
-                config=config,
-                prompt_root=Path(temp_dir),
-            )
-            tool_loop = GroupChatToolLoop(
-                config=config,
-                context=cast(Context, fake_context),
-                debug_dumper=AIGroupChatDebugDumper(config=config),
-            )
-            chat_handler = ContextHandler(
-                system_prompt="系统提示词",
-                max_context_tokens=1000000,
-            )
+    async def test_long_reply_still_uses_group_forward_sender(self) -> None:
+        """超过普通发送阈值的 content 仍通过单节点合并转发发送。"""
+        llm = RecordingLLM(
+            responses=[LLMResponse(content="这是一段很长的正式回复")]
+        )
+        context = FakeContext(llm=llm)
+        config = build_config(max_reply_chars=5)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
 
-            await tool_loop.run(
-                msg=build_message(),
-                chat_handler=chat_handler,
-                turn_messages=[ChatMessage(role="user", text="用户消息")],
-            )
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+        )
 
-            self.assertEqual(len(fake_llm.received_messages), 2)
-            for request_messages in fake_llm.received_messages:
-                depth_zero_message = request_messages[-1]
-                depth_zero_text = depth_zero_message.text or ""
-                self.assertEqual(depth_zero_message.role, "user")
-                self.assertIn("<其他需求>", depth_zero_text)
-                self.assertIn("<角色沉浸式扮演需求>", depth_zero_text)
-            first_real_user_text = fake_llm.received_messages[0][1].text or ""
-            self.assertNotIn("<角色沉浸式扮演需求>", first_real_user_text)
-            persisted_text = "\n".join(
-                message.text or "" for message in chat_handler.messages_lst
-            )
-            self.assertNotIn("<其他需求>", persisted_text)
-            self.assertNotIn("<角色沉浸式扮演需求>", persisted_text)
+        self.assertEqual(context.bot.sent_texts, [])
+        self.assertEqual(len(context.bot.sent_forwards), 1)
+        _, segments = context.bot.sent_forwards[0]
+        self.assertIsInstance(segments[0], Node)
 
-    async def test_deepseek_v4_depth_zero_prompt_follows_accumulated_tool_results(
-        self,
-    ) -> None:
-        """多轮信息工具续问时，每次请求都以累积工具结果加 Depth 0 结尾。"""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            fake_llm = FakeMultiRoundToolCallLLM()
-            fake_context = FakeContext(
-                llm=fake_llm,
-                mcp_tool_manager=FakeInfoToolManager(),
-            )
-            config = build_config(
-                output_reasoning_content=False,
-                model_name="deepseek-v4-pro",
-            )
-            configure_deepseek_v4_prompts(
-                config=config,
-                prompt_root=Path(temp_dir),
-            )
-            tool_loop = GroupChatToolLoop(
-                config=config,
-                context=cast(Context, fake_context),
-                debug_dumper=AIGroupChatDebugDumper(config=config),
-            )
-            chat_handler = ContextHandler(
-                system_prompt="系统提示词",
-                max_context_tokens=1000000,
-            )
 
-            await tool_loop.run(
-                msg=build_message(),
-                chat_handler=chat_handler,
-                turn_messages=[ChatMessage(role="user", text="连续查两次")],
-            )
-
-            self.assertEqual(len(fake_llm.received_messages), 3)
-            first_request = fake_llm.received_messages[0]
-            second_request = fake_llm.received_messages[1]
-            third_request = fake_llm.received_messages[2]
-            self.assertEqual([message.role for message in first_request], ["system", "user", "user"])
-            self.assertEqual(
-                [message.role for message in second_request],
-                ["system", "user", "assistant", "tool", "user"],
-            )
-            self.assertEqual(
-                [message.role for message in third_request],
-                ["system", "user", "assistant", "tool", "assistant", "tool", "user"],
-            )
-            self.assertEqual(second_request[-2].tool_call_id, "call-1")
-            self.assertIn("<角色沉浸式扮演需求>", second_request[-1].text or "")
-            self.assertEqual(third_request[-4].tool_call_id, "call-1")
-            self.assertEqual(third_request[-2].tool_call_id, "call-2")
-            self.assertIn("<角色沉浸式扮演需求>", third_request[-1].text or "")
-
-    async def test_active_deepseek_v4_prompt_skips_extra_when_system_has_it(
-        self,
-    ) -> None:
-        """备用 DeepSeek V4 请求在 system 已含通用要求时只注入角色沉浸提示。"""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            fake_llm = FakeRoutingLLM()
-            fake_context = FakeContext(llm=fake_llm)
-            config = build_config(
-                output_reasoning_content=False,
-                model_name="gpt-5.5",
-            )
-            configure_deepseek_v4_prompts(
-                config=config,
-                prompt_root=Path(temp_dir),
-            )
-            tool_loop = GroupChatToolLoop(
-                config=config,
-                context=cast(Context, fake_context),
-                debug_dumper=AIGroupChatDebugDumper(config=config),
-            )
-            chat_handler = ContextHandler(
-                system_prompt="系统提示词\n群聊动作偏好：需要引用或艾特时必须说完整的话。",
-                max_context_tokens=1000000,
-            )
-
-            await tool_loop.run(
-                msg=build_message(),
-                chat_handler=chat_handler,
-                turn_messages=[ChatMessage(role="user", text="用户消息")],
-                active_model=ActiveModelConfig(
-                    model_name="deepseek-v4-pro",
-                    model_vendors="deepseek",
-                    supports_multimodal=True,
-                    used_multimodal_fallback=True,
-                ),
-            )
-
-            prompt_text = fake_llm.received_messages[0][-1].text or ""
-            self.assertNotIn("<其他需求>", prompt_text)
-            self.assertIn("<角色沉浸式扮演需求>", prompt_text)
-            self.assertIn("【角色沉浸要求】", prompt_text)
-
-    async def test_context_compression_excludes_current_message_then_rebuilds(
-        self,
-    ) -> None:
-        """上下文超预算时，压缩请求不注入 Depth 0，正式请求才注入。"""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            fake_llm = FakeCompressionLLM()
-            fake_context = FakeContext(llm=fake_llm)
-            config = build_config(
-                output_reasoning_content=False,
-                model_name="deepseek-v4-pro",
-                context_compression_notice="我先整理一下记忆喵~",
-            )
-            configure_deepseek_v4_prompts(
-                config=config,
-                prompt_root=Path(temp_dir),
-            )
-            tool_loop = GroupChatToolLoop(
-                config=config,
-                context=cast(Context, fake_context),
-                debug_dumper=AIGroupChatDebugDumper(config=config),
-            )
-            chat_handler = ContextHandler(
-                system_prompt="系统提示词",
-                max_context_tokens=9000,
-            )
-            chat_handler.build_chatmessage(
-                message_lst=[
-                    ChatMessage(role="user", text="历史消息一" * 100),
-                    ChatMessage(role="assistant", text="历史回复一" * 100),
-                ]
-            )
-
-            await tool_loop.run(
-                msg=build_message(),
-                chat_handler=chat_handler,
-                turn_messages=[ChatMessage(role="user", text="当前新消息")],
-            )
-
-            compression_user_text = fake_llm.compression_messages[1].text or ""
-            self.assertIn("历史消息一", compression_user_text)
-            self.assertNotIn("当前新消息", compression_user_text)
-            self.assertNotIn("<角色沉浸式扮演需求>", compression_user_text)
-            self.assertEqual(
-                fake_context.bot.sent_texts,
-                ["我先整理一下记忆喵~", "压缩后回复"],
-            )
-            final_messages = fake_llm.received_messages[0]
-            self.assertEqual(
-                [message.role for message in final_messages],
-                ["system", "user", "user"],
-            )
-            rebuilt_user_text = final_messages[1].text or ""
-            depth_zero_text = final_messages[2].text or ""
-            self.assertIn("历史上下文摘要", rebuilt_user_text)
-            self.assertIn("当前新消息", rebuilt_user_text)
-            self.assertNotIn("【角色沉浸要求】", rebuilt_user_text)
-            self.assertIn("<其他需求>", depth_zero_text)
-            self.assertIn("<角色沉浸式扮演需求>", depth_zero_text)
-            self.assertEqual(len(chat_handler.messages_lst), 3)
-            self.assertEqual(chat_handler.messages_lst[1].text, rebuilt_user_text)
-            self.assertEqual(chat_handler.messages_lst[2].text, "压缩后回复")
-
-    async def test_context_compression_uses_main_model_before_active_model(
-        self,
-    ) -> None:
-        """上下文压缩使用主模型，压缩后的正式请求使用 active model。"""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            fake_llm = FakeCompressionLLM()
-            fake_context = FakeContext(llm=fake_llm)
-            config = build_config(
-                output_reasoning_content=False,
-                model_name="deepseek-v4-pro",
-                model_vendors="main-vendor",
-                context_compression_notice="我先整理一下记忆喵~",
-            )
-            configure_deepseek_v4_prompts(
-                config=config,
-                prompt_root=Path(temp_dir),
-            )
-            tool_loop = GroupChatToolLoop(
-                config=config,
-                context=cast(Context, fake_context),
-                debug_dumper=AIGroupChatDebugDumper(config=config),
-            )
-            chat_handler = ContextHandler(
-                system_prompt="系统提示词",
-                max_context_tokens=10000,
-            )
-            chat_handler.build_chatmessage(
-                message_lst=[
-                    ChatMessage(role="user", text="历史消息一" * 100),
-                    ChatMessage(role="assistant", text="历史回复一" * 100),
-                ]
-            )
-
-            await tool_loop.run(
-                msg=build_message(),
-                chat_handler=chat_handler,
-                turn_messages=[
-                    ChatMessage(role="user", text="当前图片", image=[b"image-bytes"])
-                ],
-                active_model=ActiveModelConfig(
-                    model_name="gpt-5.5-vision",
-                    model_vendors="vision-vendor",
-                    supports_multimodal=True,
-                    used_multimodal_fallback=True,
-                ),
-            )
-
-            self.assertEqual(
-                fake_llm.compression_model_calls,
-                [("main-vendor", "deepseek-v4-pro")],
-            )
-            self.assertEqual(
-                fake_llm.formal_model_calls,
-                [("vision-vendor", "gpt-5.5-vision")],
-            )
-            final_messages = fake_llm.received_messages[0]
-            self.assertEqual(final_messages[1].image, [b"image-bytes"])
-            self.assertIn("<其他需求>", final_messages[-1].text or "")
-            self.assertNotIn("<角色沉浸式扮演需求>", final_messages[-1].text or "")
+if __name__ == "__main__":
+    unittest.main()

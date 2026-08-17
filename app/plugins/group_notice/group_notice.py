@@ -1,9 +1,10 @@
 """群成员变动和加群申请提醒插件。"""
 
 import base64
+from dataclasses import dataclass
 from typing import ClassVar, Final, override
 
-from app.config.plugin_config import load_plugin_config
+from app.config import GroupNoticeConfig
 from app.models import (
     GroupDecreaseEvent,
     GroupIncreaseEvent,
@@ -12,24 +13,23 @@ from app.models import (
     MessageSegment,
     NapCatId,
     Response,
-    StrictModel,
     Text,
 )
 from app.plugins.base import BasePlugin
 from app.utils.log import log_event
 
-CONFIG_SECTION: Final[str] = "group_notice"
 AVATAR_URL_TEMPLATE: Final[str] = "https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
 UNKNOWN_NICKNAME: Final[str] = "未知用户"
 CONSUMERS_COUNT: Final[int] = 5
 PRIORITY: Final[int] = 10
 
 
-class GroupNoticeConfig(StrictModel):
-    """群成员变动提醒插件配置。"""
+@dataclass(frozen=True, slots=True)
+class _GroupNoticeRuntime:
+    """单次配置版本对应的运行对象。"""
 
-    group_ids: list[NapCatId]
-    send_avatar: bool = True
+    config: GroupNoticeConfig
+    groups: frozenset[NapCatId]
 
 
 class GroupNoticePlugin(
@@ -38,30 +38,50 @@ class GroupNoticePlugin(
     """把加群申请和成员变动通知发送到对应群聊。"""
 
     name: ClassVar[str] = "群成员变动提醒插件"
+    plugin_id: ClassVar[str] = "group_notice"
     consumers_count: ClassVar[int] = CONSUMERS_COUNT
     priority: ClassVar[int] = PRIORITY
 
     @override
     def setup(self) -> None:
-        """读取启用群列表。"""
-        self.config: GroupNoticeConfig = load_plugin_config(
-            section_name=CONFIG_SECTION,
-            model_cls=GroupNoticeConfig,
+        """初始化延迟构造的配置运行对象。"""
+        self._runtime_revision = 0
+        self._runtime: _GroupNoticeRuntime | None = None
+
+    def _current_runtime(self) -> _GroupNoticeRuntime | None:
+        """为当前插件配置版本构造一次运行对象。"""
+        revision = self.plugin_config.revision
+        if self._runtime_revision == revision:
+            return self._runtime
+        config = self.plugin_config.get(GroupNoticeConfig)
+        runtime = (
+            None
+            if config is None
+            else _GroupNoticeRuntime(
+                config=config,
+                groups=frozenset(config.groups),
+            )
         )
-        self.group_ids: set[NapCatId] = set(self.config.group_ids)
+        self._runtime = runtime
+        self._runtime_revision = revision
+        return runtime
 
     @override
     async def run(
         self, msg: GroupRequestEvent | GroupIncreaseEvent | GroupDecreaseEvent
     ) -> bool:
         """处理群成员变动相关事件。"""
-        if msg.group_id not in self.group_ids:
+        runtime = self._current_runtime()
+        if runtime is None or msg.group_id not in runtime.groups:
             return False
         text_content = await self._build_notice_text(msg=msg)
         if text_content is None:
             return False
         message_segments: list[MessageSegment] = [Text.new(text_content)]
-        avatar_segment = await self._build_avatar_segment(user_id=msg.user_id)
+        avatar_segment = await self._build_avatar_segment(
+            user_id=msg.user_id,
+            send_avatar=runtime.config.send_avatar,
+        )
         if avatar_segment is not None:
             message_segments.append(avatar_segment)
         _ = await self.context.bot.send_msg(
@@ -178,9 +198,11 @@ class GroupNoticePlugin(
             return None
         return cleaned_nickname
 
-    async def _build_avatar_segment(self, *, user_id: NapCatId) -> Image | None:
+    async def _build_avatar_segment(
+        self, *, user_id: NapCatId, send_avatar: bool
+    ) -> Image | None:
         """下载 QQ 头像并转换为图片消息段。"""
-        if not self.config.send_avatar:
+        if not send_avatar:
             return None
         avatar_url = AVATAR_URL_TEMPLATE.format(user_id=user_id)
         try:

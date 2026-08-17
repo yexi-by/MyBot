@@ -6,6 +6,11 @@ from typing import cast
 
 from app.models import AllEvent, GroupMessage, Sender, Text
 from app.plugins.base import PLUGINS, BasePlugin, Context
+from tests.config_helpers import (
+    FakeConfigManager,
+    build_plugin_snapshot,
+    plugin_config_view,
+)
 
 
 def build_group_message(message_id: str) -> GroupMessage:
@@ -30,6 +35,7 @@ class LifecyclePlugin(BasePlugin[AllEvent]):
     """通过事件控制运行时机的测试插件。"""
 
     name = "消费者生命周期测试插件"
+    plugin_id = "lifecycle_test"
     consumers_count = 1
     priority = 0
 
@@ -60,7 +66,13 @@ class PluginLifecycleTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         """为每个用例创建独立插件实例。"""
-        self.plugin = LifecyclePlugin(context=cast(Context, object()))
+        self.plugin = LifecyclePlugin(
+            context=cast(Context, object()),
+            plugin_config=plugin_config_view(
+                FakeConfigManager(build_plugin_snapshot()),
+                plugin_id="lifecycle_test",
+            ),
+        )
 
     async def asyncTearDown(self) -> None:
         """确保用例结束后没有残留消费者任务。"""

@@ -1,142 +1,80 @@
-"""AI 群聊插件配置校验测试。"""
+"""AI 群聊统一配置模型测试。"""
 
 import unittest
 
-from app.plugins.ai_group_chat.config import AIGroupChatConfig
+from app.config import AIGroupChatConfig
 
-VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
-VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
+
+def build_config(**overrides: object) -> AIGroupChatConfig:
+    """构造默认使用独立视觉模型的测试配置。"""
+    values: dict[str, object] = {
+        "model": {
+            "provider": "main-provider",
+            "name": "main-model",
+            "supports_images": False,
+        },
+        "vision": {
+            "model": {"provider": "vision-provider", "name": "vision-model"},
+            "system_prompt_file": "vision/system.md",
+            "user_prompt_file": "vision/user.md",
+        },
+        "groups": [],
+    }
+    values.update(overrides)
+    return AIGroupChatConfig.model_validate(values)
 
 
 class AIGroupChatConfigTest(unittest.TestCase):
-    """验证 AI 群聊插件配置的关键约束。"""
+    """验证模型能力、视觉配置和群配置约束。"""
 
-    def test_non_multimodal_main_model_requires_fallback_model(self) -> None:
-        """主模型不支持多模态时必须配置备用多模态模型。"""
-        with self.assertRaisesRegex(ValueError, "multimodal_fallback_model_name"):
-            _ = AIGroupChatConfig(
-                model_name="deepseek-v4-pro",
-                model_vendors="deepseek",
-                supports_multimodal=False,
-                group_config=[],
-            )
-
-    def test_non_multimodal_main_model_accepts_complete_fallback_model(self) -> None:
-        """主模型不支持多模态且备用模型完整时配置合法。"""
-        config = AIGroupChatConfig(
-            model_name="deepseek-v4-pro",
-            model_vendors="deepseek",
-            supports_multimodal=False,
-            multimodal_fallback_model_name="gpt-5.5",
-            multimodal_fallback_model_vendors="openai",
-            tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
-            tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
-            group_config=[],
-        )
-
-        self.assertEqual(config.multimodal_fallback_model_name, "gpt-5.5")
-
-    def test_multimodal_main_model_does_not_require_fallback_model(self) -> None:
-        """主模型支持多模态时不要求配置备用模型。"""
-        config = AIGroupChatConfig(
-            model_name="gpt-5.5",
-            model_vendors="openai",
-            supports_multimodal=True,
-            group_config=[],
-        )
-
-        self.assertIsNone(config.multimodal_fallback_model_name)
-
-    def test_forward_image_tool_defaults_are_valid(self) -> None:
-        """合并转发图片工具数量配置有明确边界。"""
-        config = AIGroupChatConfig(
-            model_name="deepseek-v4-pro",
-            model_vendors="deepseek",
-            supports_multimodal=False,
-            multimodal_fallback_model_name="gpt-5.5-vision",
-            multimodal_fallback_model_vendors="openai",
-            tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
-            tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
-            group_config=[],
-        )
-
-        self.assertTrue(config.forward_image_tool_enabled)
-        self.assertEqual(config.forward_image_max_images_per_call, 6)
-        self.assertEqual(config.forward_image_max_all_images, 12)
-        self.assertEqual(config.forward_image_fetch_concurrency, 4)
-        self.assertEqual(config.forward_image_download_timeout_seconds, 15.0)
-        self.assertEqual(config.max_reply_chars, 100)
-        self.assertEqual(config.tool_image_delivery_mode, "auto")
-        self.assertEqual(config.tool_image_summary_max_images, 6)
-        self.assertFalse(config.persist_tool_image_observations)
-        self.assertEqual(
-            config.tool_image_observation_system_prompt_path,
-            VISION_SYSTEM_PROMPT_PATH,
-        )
-        self.assertEqual(
-            config.tool_image_observation_user_prompt_path,
-            VISION_USER_PROMPT_PATH,
-        )
-
-    def test_forward_image_limits_reject_invalid_values(self) -> None:
-        """合并转发图片工具数量和并发配置必须有明确边界。"""
-        with self.assertRaises(ValueError):
-            _ = AIGroupChatConfig(
-                model_name="deepseek-v4-pro",
-                model_vendors="deepseek",
-                supports_multimodal=False,
-                multimodal_fallback_model_name="gpt-5.5-vision",
-                multimodal_fallback_model_vendors="openai",
-                tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
-                tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
-                forward_image_max_images_per_call=0,
-                group_config=[],
-            )
-
-    def test_observation_prompt_requires_explicit_files_for_summary(self) -> None:
-        """需要视觉摘要时，必须显式配置两个提示词文件路径。"""
-        with self.assertRaisesRegex(
-            ValueError, "tool_image_observation_system_prompt_path"
-        ):
-            _ = AIGroupChatConfig(
-                model_name="deepseek-v4-pro",
-                model_vendors="deepseek",
-                supports_multimodal=False,
-                multimodal_fallback_model_name="gpt-5.5-vision",
-                multimodal_fallback_model_vendors="openai",
-                group_config=[],
-            )
-
-    def test_max_reply_chars_rejects_invalid_values(self) -> None:
-        """AI 群回复普通发送字数阈值必须大于零。"""
-        with self.assertRaises(ValueError):
-            _ = AIGroupChatConfig(
-                model_name="deepseek-v4-pro",
-                model_vendors="deepseek",
-                supports_multimodal=False,
-                multimodal_fallback_model_name="gpt-5.5-vision",
-                multimodal_fallback_model_vendors="openai",
-                tool_image_observation_system_prompt_path=VISION_SYSTEM_PROMPT_PATH,
-                tool_image_observation_user_prompt_path=VISION_USER_PROMPT_PATH,
-                max_reply_chars=0,
-                group_config=[],
-            )
-
-    def test_inline_observation_prompt_fields_are_rejected(self) -> None:
-        """视觉摘要提示词不允许通过内联配置绕过文件边界。"""
-        with self.assertRaisesRegex(ValueError, "tool_image_observation_system_prompt"):
+    def test_text_model_requires_vision(self) -> None:
+        """主模型不支持图片时必须提供独立视觉模型。"""
+        with self.assertRaisesRegex(ValueError, "必须配置 vision"):
             _ = AIGroupChatConfig.model_validate(
                 {
-                    "model_name": "deepseek-v4-pro",
-                    "model_vendors": "deepseek",
-                    "supports_multimodal": False,
-                    "multimodal_fallback_model_name": "gpt-5.5-vision",
-                    "multimodal_fallback_model_vendors": "openai",
-                    "tool_image_observation_system_prompt_path": (
-                        VISION_SYSTEM_PROMPT_PATH
-                    ),
-                    "tool_image_observation_user_prompt_path": VISION_USER_PROMPT_PATH,
-                    "tool_image_observation_system_prompt": "禁止内联",
-                    "group_config": [],
+                    "model": {
+                        "provider": "main-provider",
+                        "name": "main-model",
+                        "supports_images": False,
+                    }
                 }
             )
+
+    def test_image_model_forbids_vision(self) -> None:
+        """主模型支持图片时不保留不会消费的视觉配置。"""
+        with self.assertRaisesRegex(ValueError, "不能配置 vision"):
+            _ = build_config(
+                model={
+                    "provider": "main-provider",
+                    "name": "main-model",
+                    "supports_images": True,
+                }
+            )
+
+    def test_vision_retry_defaults(self) -> None:
+        """视觉请求默认最多尝试五次并使用短退避。"""
+        config = build_config()
+
+        self.assertIsNotNone(config.vision)
+        assert config.vision is not None
+        self.assertEqual(config.vision.max_attempts, 5)
+        self.assertEqual(config.vision.retry_delay_seconds, 0.25)
+
+    def test_duplicate_groups_are_rejected(self) -> None:
+        """同一个群只能有一份权威配置。"""
+        group = {
+            "id": "40000",
+            "system_prompt_file": "roles/default.md",
+            "max_context_tokens": 64000,
+        }
+        with self.assertRaisesRegex(ValueError, "重复群号"):
+            _ = build_config(groups=[group, group])
+
+    def test_old_flat_fields_are_rejected(self) -> None:
+        """旧模型和视觉字段不作为兼容别名保留。"""
+        with self.assertRaises(ValueError):
+            _ = build_config(model_name="old-model")
+
+
+if __name__ == "__main__":
+    unittest.main()
