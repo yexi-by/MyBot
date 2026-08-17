@@ -1,5 +1,14 @@
 FROM node:24-bookworm-slim AS node_runtime
 
+FROM node_runtime AS webui_build
+
+# WebUI 前端在镜像内构建，产物由 FastAPI 直接伺服。
+WORKDIR /build/webui
+COPY webui/package.json webui/package-lock.json ./
+RUN npm ci
+COPY webui/ ./
+RUN npm run build
+
 FROM python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -51,5 +60,6 @@ RUN uv sync --frozen --no-dev \
     && rm -rf /app/.uv-cache
 COPY alembic.ini ./alembic.ini
 COPY app ./app
+COPY --from=webui_build /build/webui/dist ./webui/dist
 
 CMD ["python", "-m", "app.main"]

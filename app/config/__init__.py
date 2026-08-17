@@ -3,6 +3,7 @@
 from .manager import (
     CONFIG_DIRECTORY,
     CONFIG_FILE,
+    RESTART_ONLY_SECTIONS,
     ConfigIssue,
     ConfigLoadError,
     ConfigManager,
@@ -13,6 +14,9 @@ from .manager import (
     PluginConfigView,
     PluginConfigSnapshot,
     load_config,
+    resolve_config_file,
+    safe_validation_issues,
+    validate_config_model,
 )
 from .schemas import (
     AIGroupChatConfig,
@@ -79,7 +83,11 @@ __all__ = [
     "PluginConfigSnapshot",
     "PluginConfigView",
     "PluginsConfig",
+    "RESTART_ONLY_SECTIONS",
     "ServerConfig",
     "StorageConfig",
     "load_config",
+    "resolve_config_file",
+    "safe_validation_issues",
+    "validate_config_model",
 ]

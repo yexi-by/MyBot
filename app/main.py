@@ -27,7 +27,9 @@ def main() -> None:
     from app.core import NapCatServer, MyProvider
 
     container = make_async_container(MyProvider(config_manager=config_manager))
-    napcat = NapCatServer(container=container, config=config)
+    napcat = NapCatServer(
+        container=container, config=config, config_manager=config_manager
+    )
     uvicorn.run(
         napcat.app,
         host=config.server.host,

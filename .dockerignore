@@ -56,6 +56,11 @@ test.txt
 archived_plugins/
 archived_plugins_config/
 
+# WebUI 前端本地产物（镜像内重新构建）
+webui/node_modules/
+webui/dist/
+.playwright-cli/
+
 # 无需进入镜像上下文的本地说明和脚本
 docs/
 run.bat

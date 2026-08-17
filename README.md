@@ -10,6 +10,7 @@ MyBot 是面向 QQ 群聊的机器人服务。它通过 FastAPI 接收 NapCat �
 - 保存入站和出站群消息；撤回后普通查询不可见，但原文和图片仍保留。
 - 提供 AI 群聊、上下文压缩、视觉描述、MCP 和 NapCat 群聊工具。
 - 用唯一配置文件管理服务、模型和插件；插件配置和引用的文本文件支持自动热加载。
+- 提供同端口 WebUI，用表单编辑配置和 prompt，并在保存前完成完整校验。
 - 解析模型回复中的 `<Reply>` 与 `<At>` 标记，并转换为 NapCat 消息段。
 
 ## 本地运行
@@ -35,6 +36,21 @@ ws://<本机局域网 IP>:6055/ws/napcat
 
 Bearer Token 来自 `[napcat].websocket_token`。
 
+## WebUI
+
+主服务会在 `http://<主机>:6055/` 提供配置控制台，API 与页面使用同一端口。控制台面向可信内网，不含登录功能，并会明文读取和写回配置中的密钥。
+
+前端开发时分别启动后端和 Vite：
+
+```bash
+uv run python -m app.webui.dev
+cd webui
+npm ci
+npm run dev
+```
+
+开发页面位于 `http://127.0.0.1:5173/`，Vite 会把 `/api` 转发到 6056。文本编辑器只允许读写 `config/` 内的 `.md` 和 `.txt` 文件。
+
 ## Docker
 
 Compose 使用 `postgres:18.4-bookworm`，PostgreSQL 不向宿主机公开端口。容器内配置必须使用 `database.host = "postgres"` 和 `database.password_file = "/run/secrets/postgres_password"`。
@@ -55,6 +71,8 @@ docker compose up -d
 - `mybot-postgres-data:/var/lib/postgresql`
 
 `migrate` 会等待 PostgreSQL 健康后执行 migration，成功后 MyBot 才启动。应用启动时只检查 migration 版本，不会自动修改 schema。数据库和图片没有自动过期或备份机制。
+
+默认 Compose 把 `config/` 只读挂载，因此容器内 WebUI 可以查看和校验配置，但保存会失败。只有确认内网访问边界并明确允许在线写配置后，才应把 `mybot` 服务的该挂载改为 `:rw`；`migrate` 仍保持只读。
 
 ## 配置
 
@@ -161,6 +179,7 @@ max_image_bytes = 20971520
 - `app/plugins/`：插件业务编排。
 - `app/database/`：PostgreSQL、migration、群消息 repository 和图片任务；不保存图片字节。
 - `app/config/`：唯一配置模型、加载器、配置版本和目录监听。
+- `app/webui/`：配置控制台 API、保留 TOML 注释的写回和 SPA 静态文件挂载。
 
 插件必须声明稳定的 ASCII `plugin_id`。每个插件只获得绑定自身 ID 的类型化配置视图，不能通过公共接口读取启动配置或其他插件配置。插件私有关系数据使用 `plugin_<plugin_id>` schema、自有 migration 和类型化 repository；插件不直接持有 `AsyncSession`，也不通过通用 JSONB KV 保存状态。插件之间不导入、调用或订阅彼此，需要共用的能力放入公共模块。
 
@@ -176,6 +195,7 @@ docker compose config --quiet
 uv run pytest
 uv run basedpyright
 uv run python -m compileall app
+cd webui && npm run build
 git diff --check
 ```
 

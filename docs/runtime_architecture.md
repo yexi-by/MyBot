@@ -60,8 +60,12 @@ AI 插件为每个群持有独立 `asyncio.Lock`。同群事件串行，不同�
 
 - `config/mybot.toml`：唯一运行配置。
 - `config/`：插件引用的 prompt 和知识库。
+- `webui/`：配置控制台前端工程（React + Vite），构建产物由 FastAPI 伺服。
+- `app/webui/`：WebUI 后端（`/api/*` 配置与文本文件路由、tomlkit 保注释写回、SPA 挂载）。
 - `images/`：永久群图片。
 - `logs/`：日志和 AI 调试转储。
+
+WebUI 与主服务同端口，不另建配置状态。配置 API 使用内容哈希拒绝覆盖并发修改，文本文件接口只允许访问 `config/` 内的 `.md` 和 `.txt`。生产 Compose 默认把配置目录只读挂载；改成可写属于独立的部署权限决定。
 
 ## 关闭顺序
 
@@ -75,5 +79,6 @@ docker compose config --quiet
 uv run pytest
 uv run basedpyright
 uv run python -m compileall app
+cd webui && npm run build
 git diff --check
 ```

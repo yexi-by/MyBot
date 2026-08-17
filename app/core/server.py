@@ -14,7 +14,7 @@ from dishka.integrations.fastapi import FromDishka, inject, setup_dishka
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 
 from app.api import BOTClient
-from app.config import ConfigWatcher, MyBotConfig
+from app.config import ConfigManager, ConfigWatcher, MyBotConfig
 from app.database import (
     DatabaseMigrator,
     GroupDataScope,
@@ -25,6 +25,7 @@ from app.models import GroupMessage, GroupRecallNoticeEvent, Meta, Response
 from app.services import LLMHandler, MCPToolManager
 from app.services.napcat import ImageArchiveWorkerFactory
 from app.utils.log import log_event, log_exception, log_run_end, log_run_start
+from app.webui import create_webui_router, mount_webui_static
 
 from .di import DirectHttpx, ProxyHttpx
 from .dispatcher import EventDispatcher
@@ -41,13 +42,22 @@ class EventPersistenceError(RuntimeError):
 class NapCatServer:
     """承载 NapCat 反向 WebSocket 连接的 FastAPI 服务。"""
 
-    def __init__(self, container: AsyncContainer, config: MyBotConfig) -> None:
+    def __init__(
+        self,
+        container: AsyncContainer,
+        config: MyBotConfig,
+        config_manager: ConfigManager,
+    ) -> None:
         """创建 FastAPI 应用并注册路由。"""
         self.container: AsyncContainer = container
         self.config: MyBotConfig = config
         self.app: FastAPI = FastAPI(lifespan=self.lifespan)
         setup_dishka(self.container, self.app)
+        self.app.include_router(
+            create_webui_router(manager=config_manager, watcher_active=True)
+        )
         self._register_routes()
+        mount_webui_static(self.app)
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     def _track_background_task(self, task: asyncio.Task[None]) -> None:

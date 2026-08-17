@@ -24,7 +24,7 @@ from .schemas import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIRECTORY = PROJECT_ROOT / "config"
 CONFIG_FILE = CONFIG_DIRECTORY / "mybot.toml"
-_RESTART_ONLY_SECTIONS = (
+RESTART_ONLY_SECTIONS = (
     "app",
     "server",
     "napcat",
@@ -137,8 +137,8 @@ class ConfigReloadResult:
     error: ConfigLoadError | None = None
 
 
-def _safe_validation_issues(exc: ValidationError) -> tuple[ConfigIssue, ...]:
-    """只保留 Pydantic 错误位置、类型和说明。"""
+def safe_validation_issues(exc: ValidationError) -> tuple[ConfigIssue, ...]:
+    """只保留 Pydantic 错误位置、类型和说明，不回显原始输入值。"""
     issues: list[ConfigIssue] = []
     for item in exc.errors(
         include_url=False,
@@ -156,10 +156,14 @@ def _safe_validation_issues(exc: ValidationError) -> tuple[ConfigIssue, ...]:
     return tuple(issues)
 
 
-def _resolve_config_file(
-    *, config_root: Path, file_value: str, label: str
+def resolve_config_file(
+    *, config_root: Path, file_value: str, label: str, must_exist: bool = True
 ) -> Path:
-    """把配置文件引用限制在统一配置目录内。"""
+    """把配置文件引用限制在统一配置目录内。
+
+    must_exist 为 False 时允许目标文件尚不存在（供 WebUI 新建文本文件），
+    但仍要求父目录已经存在，且路径解析后不逃出 config 根。
+    """
     candidate = Path(file_value)
     if candidate.is_absolute():
         raise ConfigLoadError(
@@ -167,18 +171,35 @@ def _resolve_config_file(
         )
     try:
         root = config_root.resolve(strict=True)
-        resolved = (root / candidate).resolve(strict=True)
     except OSError as exc:
         raise ConfigLoadError(
-            (ConfigIssue(label, type(exc).__name__, "引用的文件不存在或无法读取"),)
+            (ConfigIssue(label, type(exc).__name__, "配置目录不存在或无法读取"),)
         ) from exc
+    if must_exist:
+        try:
+            resolved = (root / candidate).resolve(strict=True)
+        except OSError as exc:
+            raise ConfigLoadError(
+                (ConfigIssue(label, type(exc).__name__, "引用的文件不存在或无法读取"),)
+            ) from exc
+    else:
+        resolved = (root / candidate).resolve(strict=False)
     if not resolved.is_relative_to(root):
         raise ConfigLoadError(
             (ConfigIssue(label, "path_escape", "引用文件不能位于 config 目录外"),)
         )
-    if not resolved.is_file():
+    if resolved.exists():
+        if not resolved.is_file():
+            raise ConfigLoadError(
+                (ConfigIssue(label, "not_a_file", "引用路径不是普通文件"),)
+            )
+    elif must_exist:
         raise ConfigLoadError(
             (ConfigIssue(label, "not_a_file", "引用路径不是普通文件"),)
+        )
+    elif not resolved.parent.is_dir():
+        raise ConfigLoadError(
+            (ConfigIssue(label, "missing_parent", "父目录不存在，不能新建文件"),)
         )
     return resolved
 
@@ -191,7 +212,7 @@ def _read_config_text(
     require_content: bool,
 ) -> tuple[Path, str]:
     """读取 UTF-8 配置文本，并按消费者要求检查空内容。"""
-    path = _resolve_config_file(
+    path = resolve_config_file(
         config_root=config_root,
         file_value=file_value,
         label=label,
@@ -342,7 +363,7 @@ def _load_config_model(*, config_file: Path) -> MyBotConfig:
     try:
         return MyBotConfig.model_validate(raw_config)
     except ValidationError as exc:
-        raise ConfigLoadError(_safe_validation_issues(exc)) from exc
+        raise ConfigLoadError(safe_validation_issues(exc)) from exc
 
 
 def _candidate_plugin_files(*, config_file: Path) -> frozenset[Path]:
@@ -379,6 +400,30 @@ def _candidate_plugin_files(*, config_file: Path) -> frozenset[Path]:
     return frozenset(candidates)
 
 
+def validate_config_model(
+    *,
+    config: MyBotConfig,
+    config_file: Path,
+    active_provider_ids: frozenset[str] | None = None,
+    revision: int = 0,
+) -> PluginConfigSnapshot:
+    """校验已通过模型校验的完整配置，并读取插件引用的外部文件。
+
+    provider_ids 缺省时取配置自身声明的 LLM providers。
+    """
+    provider_ids = (
+        frozenset(config.llm.providers)
+        if active_provider_ids is None
+        else active_provider_ids
+    )
+    return _materialize_plugins(
+        config=config,
+        config_file=config_file,
+        provider_ids=provider_ids,
+        revision=revision,
+    )
+
+
 def load_config(
     *,
     config_file: Path = CONFIG_FILE,
@@ -387,15 +432,10 @@ def load_config(
 ) -> LoadedConfig:
     """读取唯一 TOML 文件并构造完整配置。"""
     config = _load_config_model(config_file=config_file)
-    provider_ids = (
-        frozenset(config.llm.providers)
-        if active_provider_ids is None
-        else active_provider_ids
-    )
-    plugins = _materialize_plugins(
+    plugins = validate_config_model(
         config=config,
         config_file=config_file,
-        provider_ids=provider_ids,
+        active_provider_ids=active_provider_ids,
         revision=revision,
     )
     return LoadedConfig(config=config, plugins=plugins)
@@ -472,7 +512,7 @@ class ConfigManager:
             )
         restart_required = tuple(
             section
-            for section in _RESTART_ONLY_SECTIONS
+            for section in RESTART_ONLY_SECTIONS
             if getattr(loaded.config, section) != getattr(self.boot_config, section)
         )
         changed_plugins = _changed_plugins(self._plugins, loaded.plugins)
