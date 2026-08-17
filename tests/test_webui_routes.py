@@ -59,6 +59,8 @@ class WebUIRoutesTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(body["valid"])
         self.assertEqual(body["issues"], [])
         self.assertEqual(body["config"]["server"]["port"], 6055)
+        self.assertEqual(body["config"]["server"]["host"], "0.0.0.0")
+        self.assertEqual(body["config"]["napcat"]["websocket_token"], "test-token")
         self.assertEqual(len(body["sha256"]), 64)
         self.assertEqual(body["meta"]["plugin_revision"], 1)
         self.assertFalse(body["meta"]["watcher_active"])
@@ -107,6 +109,7 @@ class WebUIRoutesTest(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(response.status_code, 200)
                 body = response.json()
+                self.assertEqual(body["config"]["server"]["port"], 7000)
                 self.assertEqual(body["restart_required_sections"], ["server"])
 
                 reread = await client.get("/api/config")

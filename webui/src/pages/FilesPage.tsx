@@ -1,8 +1,10 @@
-/** 配置文本编辑页：config/ 内 prompt、知识库等 md/txt 文件的在线编辑。 */
+/** 配置文本编辑页：config/ 内 prompt、知识库等 md/txt 文件的自动保存编辑器。 */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useFormContext } from "react-hook-form";
 import { toast } from "sonner";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -16,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, listFiles, readFile, saveFile } from "@/lib/api";
+import type { MyBotConfigData } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface OpenFile {
@@ -25,6 +28,32 @@ interface OpenFile {
   dirty: boolean;
 }
 
+type FileSaveState =
+  | "idle"
+  | "editing"
+  | "saving"
+  | "saved"
+  | "invalid"
+  | "conflict"
+  | "error";
+
+const TEXT_AUTOSAVE_DELAY_MS = 1000;
+
+function requiredPromptFiles(config: MyBotConfigData): Set<string> {
+  const ai = config.plugins?.ai_group_chat;
+  if (!ai) return new Set();
+  const files = new Set<string>([ai.extra_requirements_file ?? ""]);
+  if (ai.vision) {
+    files.add(ai.vision.system_prompt_file);
+    files.add(ai.vision.user_prompt_file);
+  }
+  for (const group of ai.groups ?? []) {
+    files.add(group.system_prompt_file);
+  }
+  files.delete("");
+  return files;
+}
+
 export default function FilesPage() {
   const [files, setFiles] = useState<string[]>([]);
   const [listError, setListError] = useState<string | null>(null);
@@ -32,6 +61,15 @@ export default function FilesPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [newPath, setNewPath] = useState("");
   const [saving, setSaving] = useState(false);
+  const [saveState, setSaveState] = useState<FileSaveState>("idle");
+  const blockedContent = useRef<string | null>(null);
+  const latestOpenFile = useRef<OpenFile | null>(null);
+  const editVersion = useRef(0);
+  const { getValues } = useFormContext<MyBotConfigData>();
+
+  useEffect(() => {
+    latestOpenFile.current = openFile;
+  }, [openFile]);
 
   const refreshFiles = useCallback(() => {
     listFiles()
@@ -48,48 +86,102 @@ export default function FilesPage() {
     refreshFiles();
   }, [refreshFiles]);
 
+  const loadPath = useCallback((path: string) => {
+    readFile(path)
+      .then((response) => {
+        blockedContent.current = null;
+        editVersion.current = 0;
+        setSaveState("idle");
+        const loadedFile = {
+          path: response.path,
+          content: response.content,
+          sha256: response.sha256,
+          dirty: false,
+        };
+        latestOpenFile.current = loadedFile;
+        setOpenFile(loadedFile);
+      })
+      .catch((error: unknown) => {
+        toast.error(error instanceof Error ? error.message : "读取文件失败");
+      });
+  }, []);
+
   const openPath = useCallback(
     (path: string) => {
+      if (saving) {
+        toast.info("正在自动保存，请稍后再切换文件");
+        return;
+      }
       if (openFile?.dirty) {
-        const confirmed = window.confirm("当前文件有未保存修改，切换后将丢失，继续？");
+        const confirmed = window.confirm("当前文件尚未自动保存，切换后将丢失，继续？");
         if (!confirmed) return;
       }
-      readFile(path)
-        .then((response) => {
-          setOpenFile({
-            path: response.path,
-            content: response.content,
-            sha256: response.sha256,
-            dirty: false,
-          });
-        })
-        .catch((error: unknown) => {
-          toast.error(error instanceof Error ? error.message : "读取文件失败");
-        });
+      loadPath(path);
     },
-    [openFile],
+    [openFile, loadPath, saving],
   );
 
   const onSave = useCallback(async () => {
-    if (!openFile) return;
+    if (!openFile || !openFile.dirty || saving) return;
+    const request = openFile;
+    if (
+      request.content.trim() === "" &&
+      requiredPromptFiles(getValues()).has(request.path)
+    ) {
+      blockedContent.current = request.content;
+      setSaveState("invalid");
+      return;
+    }
+    const saveVersion = editVersion.current;
     setSaving(true);
+    setSaveState("saving");
     try {
-      const result = await saveFile(openFile.path, openFile.content, openFile.sha256);
-      setOpenFile({ ...openFile, sha256: result.sha256, dirty: false });
-      toast.success("文件已保存，热载会自动应用");
+      const result = await saveFile(
+        request.path,
+        request.content,
+        request.sha256,
+      );
+      blockedContent.current = null;
+      const latest = latestOpenFile.current;
+      if (latest?.path === request.path) {
+        const unchangedSinceRequest = editVersion.current === saveVersion;
+        const updatedFile = {
+          ...latest,
+          sha256: result.sha256,
+          dirty: !unchangedSinceRequest,
+        };
+        latestOpenFile.current = updatedFile;
+        setOpenFile(updatedFile);
+        setSaveState(unchangedSinceRequest ? "saved" : "editing");
+      }
     } catch (error) {
+      blockedContent.current = request.content;
       if (error instanceof ApiError && error.status === 409) {
-        const confirmed = window.confirm("文件已被外部修改，是否丢弃本地修改并刷新？");
-        if (confirmed) {
-          openPath(openFile.path);
-        }
+        setSaveState("conflict");
+        toast.error("文件已被外部修改，请重新载入后再编辑");
       } else {
+        setSaveState("error");
         toast.error(error instanceof Error ? error.message : "保存失败");
       }
     } finally {
       setSaving(false);
     }
-  }, [openFile, openPath]);
+  }, [openFile, saving, getValues]);
+
+  useEffect(() => {
+    if (
+      !openFile?.dirty ||
+      saving ||
+      blockedContent.current === openFile.content
+    ) {
+      return;
+    }
+    setSaveState("editing");
+    const timer = window.setTimeout(() => {
+      void onSave();
+    }, TEXT_AUTOSAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [openFile, saving, onSave]);
 
   const onCreate = useCallback(async () => {
     const path = newPath.trim();
@@ -107,11 +199,25 @@ export default function FilesPage() {
       setCreateOpen(false);
       setNewPath("");
       refreshFiles();
-      openPath(path);
+      loadPath(path);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "新建文件失败");
     }
-  }, [newPath, refreshFiles, openPath]);
+  }, [newPath, refreshFiles, loadPath]);
+
+  const reloadCurrentFile = useCallback(() => {
+    const current = latestOpenFile.current;
+    if (!current) return;
+    const confirmed = window.confirm("重新载入会丢失当前本地修改，继续？");
+    if (confirmed) {
+      loadPath(current.path);
+    }
+  }, [loadPath]);
+
+  const retryCurrentFile = useCallback(() => {
+    blockedContent.current = null;
+    void onSave();
+  }, [onSave]);
 
   return (
     <div className="flex h-[calc(100dvh-10.5rem)] min-h-0 flex-col gap-4 md:h-[calc(100dvh-7.5rem)] md:flex-row">
@@ -160,22 +266,51 @@ export default function FilesPage() {
           <>
             <div className="flex items-center justify-between border-b px-4 py-2">
               <span className="font-mono text-sm">{openFile.path}</span>
-              <Button
-                type="button"
-                size="sm"
-                disabled={!openFile.dirty || saving}
-                onClick={onSave}
-              >
-                {saving ? "保存中…" : "保存"}
-              </Button>
+              <div className="flex items-center gap-2">
+                {saveState === "idle" ? (
+                  <Badge variant="outline">自动保存已开启</Badge>
+                ) : null}
+                {saveState === "editing" ? (
+                  <Badge variant="secondary">等待自动保存…</Badge>
+                ) : null}
+                {saveState === "saving" ? (
+                  <Badge variant="secondary">自动保存中…</Badge>
+                ) : null}
+                {saveState === "saved" ? (
+                  <Badge variant="outline">已自动保存</Badge>
+                ) : null}
+                {saveState === "invalid" ? (
+                  <Badge variant="destructive">必填文件不能为空</Badge>
+                ) : null}
+                {saveState === "conflict" ? (
+                  <Button type="button" size="sm" onClick={reloadCurrentFile}>
+                    重新载入
+                  </Button>
+                ) : null}
+                {saveState === "error" ? (
+                  <Button type="button" size="sm" onClick={retryCurrentFile}>
+                    重试
+                  </Button>
+                ) : null}
+              </div>
             </div>
             <Textarea
               aria-label={`编辑 ${openFile.path}`}
               className="min-h-0 flex-1 resize-none rounded-none border-0 font-mono text-sm focus-visible:ring-0"
               value={openFile.content}
-              onChange={(event) =>
-                setOpenFile({ ...openFile, content: event.target.value, dirty: true })
-              }
+              onChange={(event) => {
+                const content = event.target.value;
+                editVersion.current += 1;
+                if (blockedContent.current !== content) {
+                  blockedContent.current = null;
+                }
+                setOpenFile((current) => {
+                  if (!current) return current;
+                  const updatedFile = { ...current, content, dirty: true };
+                  latestOpenFile.current = updatedFile;
+                  return updatedFile;
+                });
+              }}
             />
           </>
         ) : (

@@ -51,7 +51,7 @@ class WebUIConfigIOTest(unittest.TestCase):
         return ConfigManager.create(config_file=root / "mybot.toml")
 
     def test_read_valid_config_returns_payload_and_hash(self) -> None:
-        """合法配置返回原始 dict、哈希且无错误。"""
+        """合法配置返回含默认值和明文密钥的可编辑 dict。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             config_file = Path(temp_dir) / "mybot.toml"
             config_file.write_text(commented_config(), encoding="utf-8")
@@ -62,6 +62,13 @@ class WebUIConfigIOTest(unittest.TestCase):
         self.assertEqual(result.issues, ())
         self.assertIsNotNone(result.parsed)
         self.assertEqual(result.config["server"]["port"], 6055)
+        self.assertEqual(result.config["server"]["host"], "0.0.0.0")
+        self.assertEqual(result.config["storage"]["images"]["directory"], "images")
+        self.assertEqual(result.config["napcat"]["websocket_token"], "test-token")
+        self.assertEqual(
+            result.config["llm"]["providers"]["main"]["api_key"],
+            "test-api-key",
+        )
         self.assertEqual(len(result.sha256), 64)
 
     def test_read_invalid_toml_still_returns_issues(self) -> None:
@@ -103,6 +110,11 @@ class WebUIConfigIOTest(unittest.TestCase):
 
             new_config = dict(payload.config)
             new_config["server"] = {**payload.config["server"], "port": 7000}
+            new_config["database"] = {
+                **payload.config["database"],
+                "password_file": "",
+            }
+            new_config["network"] = {**payload.config["network"], "proxy": ""}
             result = write_config_payload(
                 config_file=config_file,
                 payload=new_config,
@@ -115,8 +127,15 @@ class WebUIConfigIOTest(unittest.TestCase):
         self.assertIn("# 服务监听配置", new_text)
         self.assertIn("# 群通知插件", new_text)
         self.assertIn("port = 7000", new_text)
+        self.assertIn("retry_delay_seconds = 0\n", new_text)
+        self.assertNotIn("retry_delay_seconds = 0.0", new_text)
         self.assertEqual(result.restart_required_sections, ("server",))
-        self.assertEqual(tomllib.loads(new_text)["server"]["port"], 7000)
+        self.assertEqual(result.config["server"]["port"], 7000)
+        written = tomllib.loads(new_text)
+        self.assertEqual(written["server"], {"port": 7000})
+        self.assertEqual(written["database"], {"password": "test-password"})
+        self.assertNotIn("network", written)
+        self.assertNotIn("storage", written)
 
     def test_write_removes_and_adds_plugin_sections(self) -> None:
         """payload 缺失的插件节被删除，新节被追加。"""

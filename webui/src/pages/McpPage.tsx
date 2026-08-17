@@ -52,7 +52,7 @@ export default function McpPage() {
       <Alert>
         <AlertTitle>MCP 改动需要重启进程后生效</AlertTitle>
         <AlertDescription>
-          MCP stdio 服务只在启动时拉起，保存后需重启进程才会应用。
+          MCP stdio 服务只在启动时拉起，自动保存后需重启进程才会应用。
         </AlertDescription>
       </Alert>
 

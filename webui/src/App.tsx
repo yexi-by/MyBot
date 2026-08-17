@@ -1,4 +1,4 @@
-/** MyBot 配置控制台主框架：导航、加载、保存/校验、热生效反馈与冲突处理。 */
+/** MyBot 配置控制台主框架：导航、自动保存、热生效反馈与冲突处理。 */
 
 import {
   lazy,
@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { FormProvider, useForm } from "react-hook-form";
+import { FormProvider, useForm, useWatch } from "react-hook-form";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -85,9 +85,15 @@ function pageFromLocation(): PageKey {
 
 type ApplyState =
   | { kind: "idle" }
+  | { kind: "editing" }
+  | { kind: "saving" }
   | { kind: "watching" }
   | { kind: "applied" }
-  | { kind: "saved" };
+  | { kind: "saved" }
+  | { kind: "invalid" }
+  | { kind: "error" };
+
+const CONFIG_AUTOSAVE_DELAY_MS = 800;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -104,18 +110,24 @@ export default function App() {
   const [conflictOpen, setConflictOpen] = useState(false);
   const pollGeneration = useRef(0);
   const mainContent = useRef<HTMLElement>(null);
+  const editVersion = useRef(0);
+  const blockedVersion = useRef<number | null>(null);
 
   const methods = useForm<MyBotConfigData>({
     values: snapshot?.config ?? ({} as MyBotConfigData),
   });
   const isDirty = methods.formState.isDirty;
+  const watchedConfig = useWatch({ control: methods.control });
 
   const reload = useCallback(async () => {
     const fresh = await getConfig();
+    blockedVersion.current = null;
+    methods.reset(fresh.config);
     setSnapshot(fresh);
     setRestartSections(fresh.meta.restart_required_sections);
     setServerIssues(fresh.issues);
-  }, []);
+    setApplyState({ kind: "idle" });
+  }, [methods]);
 
   useEffect(() => {
     getConfig()
@@ -146,6 +158,12 @@ export default function App() {
   useEffect(() => {
     mainContent.current?.focus();
   }, [page]);
+
+  useEffect(() => {
+    if (isDirty) {
+      editVersion.current += 1;
+    }
+  }, [watchedConfig, isDirty]);
 
   /** 把后端校验错误映射到表单字段，并在顶栏展示完整列表。 */
   const applyIssues = useCallback(
@@ -190,41 +208,75 @@ export default function App() {
   );
 
   const onSave = useCallback(async () => {
-    if (!snapshot) return;
+    if (!snapshot || !isDirty || saving) return;
     const payload = methods.getValues();
     const previousRevision = snapshot.meta.plugin_revision;
+    const saveVersion = editVersion.current;
     setSaving(true);
+    setApplyState({ kind: "saving" });
     try {
       const result = await saveConfig(payload, snapshot.sha256);
-      methods.reset(payload);
+      blockedVersion.current = null;
+      const pluginConfigChanged =
+        JSON.stringify(result.config.plugins ?? {}) !==
+        JSON.stringify(snapshot.config.plugins ?? {});
+      const unchangedSinceRequest = editVersion.current === saveVersion;
+      if (unchangedSinceRequest) {
+        methods.reset(result.config);
+      }
       setServerIssues([]);
       setSnapshot((previous) =>
-        previous ? { ...previous, sha256: result.sha256 } : previous,
+        previous
+          ? {
+              ...previous,
+              config: unchangedSinceRequest ? result.config : previous.config,
+              sha256: result.sha256,
+            }
+          : previous,
       );
       setRestartSections(result.restart_required_sections);
-      if (result.restart_required_sections.length > 0) {
-        toast.warning("部分改动需要重启进程后生效");
-      } else {
-        toast.success("配置已保存");
-      }
-      if (snapshot.meta.watcher_active) {
+      if (!unchangedSinceRequest) {
+        setApplyState({ kind: "editing" });
+      } else if (snapshot.meta.watcher_active && pluginConfigChanged) {
         void pollApply(previousRevision);
       } else {
         setApplyState({ kind: "saved" });
       }
     } catch (error) {
+      blockedVersion.current = saveVersion;
       if (error instanceof ApiError && error.status === 409) {
+        setApplyState({ kind: "error" });
         setConflictOpen(true);
       } else if (error instanceof ApiError && error.issues.length > 0) {
+        setApplyState({ kind: "invalid" });
         applyIssues(error.issues);
         toast.error(`配置校验失败：${error.issues.length} 个问题`);
       } else {
+        setApplyState({ kind: "error" });
         toast.error(error instanceof Error ? error.message : "保存失败");
       }
     } finally {
       setSaving(false);
     }
-  }, [snapshot, methods, applyIssues, pollApply]);
+  }, [snapshot, isDirty, saving, methods, applyIssues, pollApply]);
+
+  useEffect(() => {
+    if (
+      !snapshot ||
+      !isDirty ||
+      saving ||
+      conflictOpen ||
+      blockedVersion.current === editVersion.current
+    ) {
+      return;
+    }
+    pollGeneration.current += 1;
+    setApplyState({ kind: "editing" });
+    const timer = window.setTimeout(() => {
+      void onSave();
+    }, CONFIG_AUTOSAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [watchedConfig, snapshot, isDirty, saving, conflictOpen, onSave]);
 
   const onValidate = useCallback(async () => {
     try {
@@ -342,6 +394,15 @@ export default function App() {
                   </TooltipContent>
                 </Tooltip>
               )}
+              {applyState.kind === "idle" ? (
+                <Badge variant="outline">自动保存已开启</Badge>
+              ) : null}
+              {applyState.kind === "editing" ? (
+                <Badge variant="secondary">等待自动保存…</Badge>
+              ) : null}
+              {applyState.kind === "saving" ? (
+                <Badge variant="secondary">自动保存中…</Badge>
+              ) : null}
               {applyState.kind === "watching" ? (
                 <Badge variant="secondary">等待热生效…</Badge>
               ) : null}
@@ -349,7 +410,13 @@ export default function App() {
                 <Badge className="bg-green-600 text-white">已热生效</Badge>
               ) : null}
               {applyState.kind === "saved" ? (
-                <Badge variant="outline">已保存</Badge>
+                <Badge variant="outline">已自动保存</Badge>
+              ) : null}
+              {applyState.kind === "invalid" ? (
+                <Badge variant="destructive">配置有误，未保存</Badge>
+              ) : null}
+              {applyState.kind === "error" ? (
+                <Badge variant="destructive">自动保存失败</Badge>
               ) : null}
               {restartLabels.length > 0 ? (
                 <Tooltip>
@@ -367,13 +434,6 @@ export default function App() {
             <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" onClick={onValidate}>
                 校验
-              </Button>
-              <Button
-                size="sm"
-                disabled={!isDirty || saving}
-                onClick={onSave}
-              >
-                {saving ? "保存中…" : "保存"}
               </Button>
             </div>
           </header>
@@ -424,7 +484,7 @@ export default function App() {
           <DialogHeader>
             <DialogTitle>配置已被外部修改</DialogTitle>
             <DialogDescription>
-              配置文件在你编辑期间被其他方式修改过。刷新后将丢失当前未保存的修改。
+              自动保存发现配置文件已被其他方式修改。刷新后将丢失当前未保存的修改。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -55,6 +55,7 @@ class ConfigSaveRequest(BaseModel):
 class ConfigSaveResponse(BaseModel):
     """配置保存结果与相对启动配置的待重启节。"""
 
+    config: dict[str, Any]
     sha256: str
     restart_required_sections: list[str]
 

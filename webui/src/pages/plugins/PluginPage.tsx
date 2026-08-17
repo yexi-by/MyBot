@@ -223,7 +223,7 @@ export default function PluginPage({ pluginId }: { pluginId: PluginId }) {
           <DialogHeader>
             <DialogTitle>禁用 {meta.name}？</DialogTitle>
             <DialogDescription>
-              禁用会从配置文件中删除该插件的整个配置节，保存后立即热生效。
+              禁用会从配置文件中删除该插件的整个配置节，自动保存后立即热生效。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

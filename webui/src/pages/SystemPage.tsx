@@ -15,7 +15,7 @@ export default function SystemPage() {
       <Alert>
         <AlertTitle>本页改动需要重启进程后生效</AlertTitle>
         <AlertDescription>
-          保存会立即写入配置文件，但运行中的服务继续使用启动时的配置。
+          停止编辑后会自动写入配置文件，但运行中的服务继续使用启动时的配置。
         </AlertDescription>
       </Alert>
 

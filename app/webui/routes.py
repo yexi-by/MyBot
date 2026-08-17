@@ -123,6 +123,7 @@ def create_webui_router(
                 detail="配置文件不可写，请检查 config 目录挂载权限",
             ) from exc
         return ConfigSaveResponse(
+            config=result.config,
             sha256=result.sha256,
             restart_required_sections=list(result.restart_required_sections),
         )

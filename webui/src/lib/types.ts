@@ -232,6 +232,7 @@ export interface ConfigValidateResponse {
 }
 
 export interface ConfigSaveResponse {
+  config: MyBotConfigData;
   sha256: string;
   restart_required_sections: string[];
 }
