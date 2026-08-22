@@ -17,7 +17,7 @@ from app.database import (
     validate_plugin_id,
 )
 from app.models import AllEvent
-from app.services import LLMHandler, MCPToolManager
+from app.services import ConversationContextStore, LLMHandler, MCPToolManager
 from app.utils.log import log_event, log_exception
 
 
@@ -80,6 +80,7 @@ class Context:
         group_messages: GroupMessageReader,
         plugin_id: str,
         repository_builder: PluginRepositoryBuilder,
+        conversation_contexts: ConversationContextStore,
         direct_httpx: httpx.AsyncClient,
         proxy_httpx: httpx.AsyncClient | None = None,
         llm: LLMHandler | None = None,
@@ -90,6 +91,7 @@ class Context:
         self.group_messages: GroupMessageReader = group_messages
         self.plugin_id: str = plugin_id
         self._repository_builder: PluginRepositoryBuilder = repository_builder
+        self.conversation_contexts: ConversationContextStore = conversation_contexts
         self.direct_httpx: httpx.AsyncClient = direct_httpx
         self._llm: LLMHandler | None = llm
         self._mcp_tool_manager: MCPToolManager | None = mcp_tool_manager

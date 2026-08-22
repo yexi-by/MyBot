@@ -25,7 +25,7 @@ from app.plugins import (
     discover_plugin_migrations,
     load_all_plugins,
 )
-from app.services import LLMHandler, MCPToolManager
+from app.services import ConversationContextStore, LLMHandler, MCPToolManager
 from app.services.napcat import (
     ImageArchiveWorkerFactory,
     ImageStore,
@@ -161,6 +161,11 @@ class MyProvider(Provider):
         return MCPToolManager(config.mcp)
 
     @provide(scope=Scope.APP)
+    def get_conversation_context_store(self) -> ConversationContextStore:
+        """创建当前进程内跨 NapCat 连接复用的对话上下文存储。"""
+        return ConversationContextStore()
+
+    @provide(scope=Scope.APP)
     def get_image_store(self, config: MyBotConfig) -> ImageStore:
         """创建内容寻址的群图片文件存储。"""
         return ImageStore(
@@ -220,6 +225,7 @@ class MyProvider(Provider):
         bot: BOTClient,
         repository: PostgreSQLMessageRepository,
         repository_builder: PluginRepositoryBuilder,
+        conversation_contexts: ConversationContextStore,
         config_manager: ConfigManager,
         directhttpx: DirectHttpx,
         proxy_httpx: ProxyHttpx | None,
@@ -235,6 +241,7 @@ class MyProvider(Provider):
                 group_messages=repository,
                 plugin_id=cls.plugin_id,
                 repository_builder=repository_builder,
+                conversation_contexts=conversation_contexts,
                 llm=llm,
                 mcp_tool_manager=mcp_tool_manager,
                 direct_httpx=directhttpx,

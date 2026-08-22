@@ -256,8 +256,8 @@ export default function AIGroupChatFields() {
         />
         <SwitchField
           path="plugins.ai_group_chat.retain_tool_results"
-          label="工具结果写入长期上下文"
-          description="默认关闭，避免上下文膨胀"
+          label="工具调用摘要写入长期上下文"
+          description="只保留工具名称与成功、失败次数，默认关闭"
         />
       </SectionCard>
 

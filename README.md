@@ -154,7 +154,7 @@ knowledge_base_file = "ai_group_chat/knowledge/default.md"
 max_context_tokens = 64000
 ```
 
-图片读取依次尝试已有路径、现有 URL 和 NapCat `get_image` 刷新。视觉描述可以保留在当前进程的对话上下文，图片字节不会进入上下文；进程重启后上下文仍会丢失。同群请求串行执行，不同群可以并行。prompt、知识库或通用要求内容变化后，只清空受影响群的内存上下文。
+图片读取依次尝试已有路径、现有 URL 和 NapCat `get_image` 刷新。视觉描述可以保留在当前进程的对话上下文，图片字节不会进入上下文；进程重启后上下文仍会丢失，NapCat 断线重连不会清空当前进程内的上下文。同群请求串行执行，不同群可以并行。原始工具参数、结果和工具调用协议消息只服务当前工具循环，不进入长期上下文；`retain_tool_results` 开启时也只保存工具名称及成功、失败次数。`retain_reasoning` 只控制 reasoning 是否跨用户轮次保存，不影响当前工具循环继续使用模型刚返回的 reasoning。prompt、知识库或通用要求内容变化后，只清空受影响群的内存上下文。
 
 ### Neavo 群聊图像插件
 

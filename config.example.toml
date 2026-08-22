@@ -75,6 +75,7 @@ retain_reasoning = false
 debug_dump_messages = false
 extra_requirements_file = "ai_group_chat/prompts/extra_requirements.md"
 allow_mention_all = false
+# 开启后只保留工具名称及成功、失败次数，不保存参数和原始结果。
 retain_tool_results = false
 
 [plugins.ai_group_chat.vision]

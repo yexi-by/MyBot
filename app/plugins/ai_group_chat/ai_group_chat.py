@@ -1,13 +1,12 @@
 """基于工具调用的 AI 智能群聊回复插件。"""
 
-import asyncio
 from dataclasses import dataclass
 from typing import ClassVar, Mapping, override
 
 from app.config import MaterializedAIGroupChatConfig, MaterializedAIGroupConfig
 from app.models import At, GroupMessage, NapCatId
 from app.plugins.base import BasePlugin
-from app.services import ContextHandler
+from app.services import ConversationContextKey, ContextHandler
 from app.utils.log import log_event
 
 from .constants import CONSUMERS_COUNT, PRIORITY
@@ -30,14 +29,6 @@ class _AIGroupChatRuntime:
     tool_loop: GroupChatToolLoop
 
 
-@dataclass(slots=True)
-class _GroupContextEntry:
-    """单群内存上下文及其 system prompt 来源。"""
-
-    handler: ContextHandler
-    system_prompt: str
-
-
 class AIGroupChatPlugin(BasePlugin[GroupMessage]):
     """处理群聊中的 AI 角色扮演回复。"""
 
@@ -48,12 +39,10 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
 
     @override
     def setup(self) -> None:
-        """初始化配置缓存和每群串行锁。"""
+        """初始化配置缓存和调试转储版本。"""
         self._runtime_revision = 0
         self._runtime: _AIGroupChatRuntime | None = None
-        self._group_contexts: dict[str, _GroupContextEntry] = {}
-        self._group_locks: dict[str, asyncio.Lock] = {}
-        self._debug_initialized_revision: dict[str, int] = {}
+        self._debug_initialized_revision: dict[ConversationContextKey, int] = {}
 
     def _current_runtime(self) -> _AIGroupChatRuntime | None:
         """为当前插件配置版本构造一次完整运行对象。"""
@@ -111,18 +100,24 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
 
     def _synchronize_contexts(self, *, runtime: _AIGroupChatRuntime | None) -> None:
         """在群请求结束后删除停用或提示词已变化的上下文。"""
-        for group_id, entry in tuple(self._group_contexts.items()):
-            lock = self._group_locks.get(group_id)
-            if lock is not None and lock.locked():
+        store = self.context.conversation_contexts
+        for key, handler in store.items_for_owner(owner=self.plugin_id):
+            lock = store.lock_for(key=key)
+            if lock.locked():
                 continue
-            group = runtime.groups.get(group_id) if runtime is not None else None
+            group = (
+                runtime.groups.get(key.conversation_id)
+                if runtime is not None
+                else None
+            )
             prompt_changed = (
-                group is not None and entry.system_prompt != group.system_prompt
+                group is not None
+                and handler.system_prompt.text != group.system_prompt
             )
             if group is not None and not prompt_changed:
                 continue
-            self._group_contexts.pop(group_id, None)
-            self._debug_initialized_revision.pop(group_id, None)
+            store.remove(key=key)
+            self._debug_initialized_revision.pop(key, None)
             if group is None:
                 continue
             log_event(
@@ -130,7 +125,8 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 event="ai_group_chat.group_context.reset",
                 category="plugin",
                 message="AI 群聊提示词或知识库变化，已清空本群内存上下文",
-                group_id=group_id,
+                bot_id=key.bot_id,
+                group_id=key.conversation_id,
                 max_context_tokens=group.source.max_context_tokens,
                 system_prompt_chars=len(group.system_prompt),
             )
@@ -140,21 +136,21 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
         *,
         runtime: _AIGroupChatRuntime,
         group: MaterializedAIGroupConfig,
+        key: ConversationContextKey,
     ) -> ContextHandler:
         """在群锁内初始化、重置或更新上下文预算。"""
-        group_id = str(group.source.id)
-        entry = self._group_contexts.get(group_id)
-        reset = entry is not None and entry.system_prompt != group.system_prompt
-        if entry is None or reset:
+        store = self.context.conversation_contexts
+        handler = store.get(key=key)
+        reset = (
+            handler is not None
+            and handler.system_prompt.text != group.system_prompt
+        )
+        if handler is None or reset:
             handler = ContextHandler(
                 system_prompt=group.system_prompt,
                 max_context_tokens=group.source.max_context_tokens,
             )
-            entry = _GroupContextEntry(
-                handler=handler,
-                system_prompt=group.system_prompt,
-            )
-            self._group_contexts[group_id] = entry
+            store.set(key=key, context=handler)
             log_event(
                 level="INFO" if reset else "DEBUG",
                 event=(
@@ -168,34 +164,41 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                     if reset
                     else "AI 群聊上下文初始化完成"
                 ),
-                group_id=group_id,
+                bot_id=key.bot_id,
+                group_id=key.conversation_id,
                 max_context_tokens=group.source.max_context_tokens,
                 system_prompt_chars=len(group.system_prompt),
             )
         else:
-            entry.handler.max_context_tokens = group.source.max_context_tokens
+            handler.max_context_tokens = group.source.max_context_tokens
 
-        if self._debug_initialized_revision.get(group_id) != runtime.revision:
+        if self._debug_initialized_revision.get(key) != runtime.revision:
             dump_path = runtime.debug_dumper.initialize_group(
                 group_config=group.source,
-                messages=entry.handler.messages_lst,
+                messages=handler.messages_lst,
             )
-            self._debug_initialized_revision[group_id] = runtime.revision
+            self._debug_initialized_revision[key] = runtime.revision
             if dump_path is not None:
                 log_event(
                     level="DEBUG",
                     event="ai_group_chat.debug_dump.initialized",
                     category="plugin",
                     message="AI 群聊调试转储已按新配置初始化",
-                    group_id=group_id,
+                    bot_id=key.bot_id,
+                    group_id=key.conversation_id,
                     debug_dump_path=str(dump_path),
                 )
-        return entry.handler
+        return handler
 
     @override
     async def run(self, msg: GroupMessage) -> bool:
         """在机器人被艾特时触发 AI 群聊回复。"""
         group_key = str(msg.group_id)
+        context_key = ConversationContextKey(
+            owner=self.plugin_id,
+            bot_id=str(msg.self_id),
+            conversation_id=group_key,
+        )
         runtime = self._current_runtime()
         if runtime is None or group_key not in runtime.groups:
             return False
@@ -213,17 +216,22 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             )
             return False
 
-        lock = self._group_locks.setdefault(group_key, asyncio.Lock())
+        store = self.context.conversation_contexts
+        lock = store.lock_for(key=context_key)
         async with lock:
             runtime = self._current_runtime()
             if runtime is None:
-                self._group_contexts.pop(group_key, None)
+                store.remove(key=context_key)
                 return False
             group = runtime.groups.get(group_key)
             if group is None:
-                self._group_contexts.pop(group_key, None)
+                store.remove(key=context_key)
                 return False
-            chat_handler = self._get_group_context(runtime=runtime, group=group)
+            chat_handler = self._get_group_context(
+                runtime=runtime,
+                group=group,
+                key=context_key,
+            )
             log_event(
                 level="DEBUG",
                 event="ai_group_chat.event.accepted",
@@ -304,8 +312,8 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
 
         latest_runtime = self._current_runtime()
         if latest_runtime is None or group_key not in latest_runtime.groups:
-            self._group_contexts.pop(group_key, None)
-            self._debug_initialized_revision.pop(group_key, None)
+            store.remove(key=context_key)
+            self._debug_initialized_revision.pop(context_key, None)
         return True
 
     def _is_bot_mentioned(self, *, msg: GroupMessage) -> bool:

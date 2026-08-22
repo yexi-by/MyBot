@@ -319,7 +319,9 @@ def build_config(
     provider: str = "main-vendor",
     show_reasoning: bool = False,
     retain_reasoning: bool = False,
+    retain_tool_results: bool = False,
     retain_vision_descriptions: bool = True,
+    max_tool_rounds: int = 16,
     max_reply_chars: int = 100,
     context_compression_notice: str = "正在整理上下文",
 ) -> AIGroupChatConfig:
@@ -332,6 +334,8 @@ def build_config(
         },
         "show_reasoning": show_reasoning,
         "retain_reasoning": retain_reasoning,
+        "retain_tool_results": retain_tool_results,
+        "max_tool_rounds": max_tool_rounds,
         "max_reply_chars": max_reply_chars,
         "context_compression_notice": context_compression_notice,
         "groups": [],
@@ -542,7 +546,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_tool_round_passes_back_reasoning_field(self) -> None:
-        """工具续问会带回上一轮 assistant 的结构化 reasoning。"""
+        """工具续问带回 reasoning，但关闭长期保留后不跨用户轮次保存。"""
         llm = RecordingLLM(
             responses=[
                 LLMResponse(
@@ -554,7 +558,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         context = FakeContext(llm=llm)
-        config = build_config(retain_reasoning=True)
+        config = build_config(retain_reasoning=False)
         chat_handler = ContextHandler(
             system_prompt="系统提示词", max_context_tokens=1000000
         )
@@ -569,6 +573,82 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(assistant_tool_message.reasoning_content, "工具前思考")
         self.assertEqual(context.bot.sent_texts, ["我先查一下", "工具后回复"])
+        self.assertTrue(
+            all(
+                message.reasoning_content is None
+                for message in chat_handler.messages_lst
+            )
+        )
+
+    async def test_retained_tool_history_is_bounded_summary(self) -> None:
+        """开启工具保留时只保存调用状态，不保存原始结果或重复正文。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(
+                    content="我先查一下",
+                    reasoning_content="工具前思考",
+                    tool_calls=[build_tool_call()],
+                ),
+                LLMResponse(content="工具后回复"),
+            ]
+        )
+        context = FakeContext(llm=llm)
+        config = build_config(retain_tool_results=True)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+        )
+
+        history_text = "\n".join(
+            message.text or "" for message in chat_handler.messages_lst
+        )
+        history_roles = [message.role for message in chat_handler.messages_lst]
+        self.assertNotIn("tool", history_roles)
+        self.assertNotIn("工具结果", history_text)
+        self.assertIn(TOOL_NAME, history_text)
+        self.assertIn("成功 1 次", history_text)
+        self.assertEqual(
+            [message.text for message in chat_handler.messages_lst].count(
+                "我先查一下"
+            ),
+            1,
+        )
+
+    async def test_sent_content_survives_tool_round_exhaustion(self) -> None:
+        """正文发送后即使工具轮数耗尽，后续请求仍能看到该回复。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(
+                    content="已经发到群里的正文",
+                    tool_calls=[build_tool_call()],
+                )
+            ]
+        )
+        context = FakeContext(llm=llm)
+        config = build_config(max_tool_rounds=1)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "超过最大轮数"):
+            await run_turn(
+                loop=build_loop(config=config, context=context),
+                chat_handler=chat_handler,
+            )
+
+        self.assertEqual(context.bot.sent_texts, ["已经发到群里的正文"])
+        self.assertEqual(
+            [message.role for message in chat_handler.messages_lst],
+            ["system", "user", "assistant"],
+        )
+        self.assertEqual(
+            chat_handler.messages_lst[-1].text,
+            "已经发到群里的正文",
+        )
 
     async def test_deepseek_named_model_gets_no_temporary_prompt(self) -> None:
         """模型名称不再触发 DSV4 临时 user 消息。"""
