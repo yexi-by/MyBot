@@ -1,7 +1,15 @@
-/** 配置文本编辑页：config/ 内 prompt、知识库等 md/txt 文件的自动保存编辑器。 */
+/** 配置文本编辑页：config/ 内 prompt、知识库等 md/txt 文件的自动保存编辑器，md 支持语法高亮与实时预览。 */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useFormContext } from "react-hook-form";
+import { Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,7 +24,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Textarea } from "@/components/ui/textarea";
 import { ApiError, listFiles, readFile, saveFile } from "@/lib/api";
 import type { MyBotConfigData } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -38,6 +45,16 @@ type FileSaveState =
   | "error";
 
 const TEXT_AUTOSAVE_DELAY_MS = 1000;
+
+const MarkdownEditor = lazy(async () => {
+  const module = await import("@/components/MarkdownEditor");
+  return { default: module.MarkdownEditor };
+});
+
+const MarkdownPreview = lazy(async () => {
+  const module = await import("@/components/MarkdownPreview");
+  return { default: module.MarkdownPreview };
+});
 
 function requiredPromptFiles(config: MyBotConfigData): Set<string> {
   const ai = config.plugins?.ai_group_chat;
@@ -62,6 +79,7 @@ export default function FilesPage() {
   const [newPath, setNewPath] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<FileSaveState>("idle");
+  const [previewOn, setPreviewOn] = useState(false);
   const blockedContent = useRef<string | null>(null);
   const latestOpenFile = useRef<OpenFile | null>(null);
   const editVersion = useRef(0);
@@ -267,6 +285,23 @@ export default function FilesPage() {
             <div className="flex items-center justify-between border-b px-4 py-2">
               <span className="font-mono text-sm">{openFile.path}</span>
               <div className="flex items-center gap-2">
+                {openFile.path.toLowerCase().endsWith(".md") ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-pressed={previewOn}
+                    aria-controls="markdown-live-preview"
+                    onClick={() => setPreviewOn((current) => !current)}
+                  >
+                    {previewOn ? (
+                      <EyeOff className="mr-1 h-4 w-4" />
+                    ) : (
+                      <Eye className="mr-1 h-4 w-4" />
+                    )}
+                    {previewOn ? "关闭预览" : "预览"}
+                  </Button>
+                ) : null}
                 {saveState === "idle" ? (
                   <Badge variant="outline">自动保存已开启</Badge>
                 ) : null}
@@ -294,24 +329,62 @@ export default function FilesPage() {
                 ) : null}
               </div>
             </div>
-            <Textarea
-              aria-label={`编辑 ${openFile.path}`}
-              className="min-h-0 flex-1 resize-none rounded-none border-0 font-mono text-sm focus-visible:ring-0"
-              value={openFile.content}
-              onChange={(event) => {
-                const content = event.target.value;
-                editVersion.current += 1;
-                if (blockedContent.current !== content) {
-                  blockedContent.current = null;
-                }
-                setOpenFile((current) => {
-                  if (!current) return current;
-                  const updatedFile = { ...current, content, dirty: true };
-                  latestOpenFile.current = updatedFile;
-                  return updatedFile;
-                });
-              }}
-            />
+            <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+              <div
+                className={cn(
+                  "min-h-0 min-w-0 flex-1 overflow-hidden",
+                  previewOn &&
+                    openFile.path.toLowerCase().endsWith(".md") &&
+                    "border-b md:border-r md:border-b-0",
+                )}
+              >
+                <Suspense
+                  fallback={
+                    <div
+                      className="flex h-full items-center justify-center text-sm text-muted-foreground"
+                      role="status"
+                    >
+                      正在加载编辑器…
+                    </div>
+                  }
+                >
+                  <MarkdownEditor
+                    ariaLabel={`编辑 ${openFile.path}`}
+                    value={openFile.content}
+                    onChange={(content) => {
+                      editVersion.current += 1;
+                      if (blockedContent.current !== content) {
+                        blockedContent.current = null;
+                      }
+                      setOpenFile((current) => {
+                        if (!current) return current;
+                        const updatedFile = { ...current, content, dirty: true };
+                        latestOpenFile.current = updatedFile;
+                        return updatedFile;
+                      });
+                    }}
+                  />
+                </Suspense>
+              </div>
+              {previewOn && openFile.path.toLowerCase().endsWith(".md") ? (
+                <div
+                  id="markdown-live-preview"
+                  aria-label="Markdown 实时预览"
+                  className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4"
+                  role="region"
+                >
+                  <Suspense
+                    fallback={
+                      <p className="text-sm text-muted-foreground" role="status">
+                        正在生成预览…
+                      </p>
+                    }
+                  >
+                    <MarkdownPreview content={openFile.content} />
+                  </Suspense>
+                </div>
+              ) : null}
+            </div>
           </>
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">

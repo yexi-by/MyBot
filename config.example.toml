@@ -72,7 +72,7 @@ context_compression_notice = "上下文有点长，我先整理一下记忆，�
 max_reply_chars = 1000
 show_reasoning = false
 retain_reasoning = false
-debug_dump_messages = false
+debug_dump_messages = true
 extra_requirements_file = "ai_group_chat/prompts/extra_requirements.md"
 allow_mention_all = false
 # 开启后只保留工具名称及成功、失败次数，不保存参数和原始结果。

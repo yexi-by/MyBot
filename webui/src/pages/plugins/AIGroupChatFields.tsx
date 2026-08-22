@@ -248,7 +248,7 @@ export default function AIGroupChatFields() {
         <SwitchField
           path="plugins.ai_group_chat.debug_dump_messages"
           label="调试消息转储"
-          description="写入 logs/ai_group_chat_debug/"
+          description="默认开启，写入 logs/ai_group_chat_debug/"
         />
         <SwitchField
           path="plugins.ai_group_chat.allow_mention_all"

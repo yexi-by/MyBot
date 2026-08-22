@@ -19,7 +19,6 @@ from app.models import (
     Sender,
     Text,
 )
-from app.plugins.ai_group_chat.debug_dump import AIGroupChatDebugDumper
 from app.plugins.ai_group_chat.tool_loop import GroupChatToolLoop
 from app.plugins.ai_group_chat.vision_tool import (
     VisionDescriptionTool,
@@ -402,7 +401,6 @@ def build_loop(
     return GroupChatToolLoop(
         config=config,
         context=typed_context,
-        debug_dumper=AIGroupChatDebugDumper(config=config),
         vision_tool=VisionDescriptionTool(
             config=materialize_config(config),
             context=typed_context,

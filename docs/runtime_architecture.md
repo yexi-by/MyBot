@@ -54,7 +54,7 @@ AI 群聊由以下组件组成：
 - `GroupChatContextCompressor`：请求超预算时压缩历史。
 - `AIGroupChatDebugDumper`：向 `logs/ai_group_chat_debug/` 写调试记录，不参与恢复。
 
-AI 插件为每个群持有独立 `asyncio.Lock`。同群事件串行，不同群并行。system prompt、知识库或通用要求变化时，在当前请求结束后清空对应群上下文；其他配置变化保留上下文，并在下一轮使用新值。
+AI 插件为每个群保留一把只保护长期上下文快照、提交和重置的 `asyncio.Lock`。同群事件使用各自的临时上下文并发执行，完成后短暂持锁，按完成顺序提交整轮消息。并发压缩只能在其基础版本未变化时替换历史，否则只追加当前轮，不能覆盖先完成的请求。system prompt、知识库或通用要求变化后，旧配置下尚未完成的请求不会写入新上下文；其他配置变化保留上下文，并在下一轮使用新值。
 
 ## 目录
 
@@ -65,7 +65,7 @@ AI 插件为每个群持有独立 `asyncio.Lock`。同群事件串行，不同�
 - `images/`：永久群图片。
 - `logs/`：日志和 AI 调试转储。
 
-WebUI 与主服务同端口，不另建配置状态。配置表单停止编辑 800ms 后自动校验并写回，文本文件停止编辑 1 秒后自动写回；每次请求都使用读取时的内容哈希，外部修改发生后不会被静默覆盖。文本文件接口只允许访问 `config/` 内的 `.md` 和 `.txt`。生产 Compose 允许 MyBot 写入配置目录，migration 服务仍使用只读挂载。
+WebUI 与主服务同端口，不另建配置状态。配置表单停止编辑 800ms 后自动校验并写回，文本文件停止编辑 1 秒后自动写回；每次请求都使用读取时的内容哈希，外部修改发生后不会被静默覆盖。文本文件接口只允许访问 `config/` 内的 `.md` 和 `.txt`；Markdown 文件使用语法高亮编辑器，并可并排实时预览 GFM 渲染结果。生产 Compose 允许 MyBot 写入配置目录，migration 服务仍使用只读挂载。
 
 WebUI 还提供 `POST /api/system/restart` 与 `POST /api/system/shutdown` 电源端点：`PowerController` 延迟触发 uvicorn 优雅停机，重启/关机在进程级行为一致，是否重新拉起由外部守护策略决定（`docker-compose.yml` 的 mybot 服务是 `restart: unless-stopped`，容器内两种操作都会被重新拉起）。
 

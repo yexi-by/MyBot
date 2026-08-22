@@ -1,6 +1,6 @@
 """AI 群聊插件的工具调用循环。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.api.mixins.message import NapCatSendMessageError
 from app.config import AIGroupChatConfig
@@ -22,7 +22,6 @@ from app.services.llm.tools import (
 from app.utils.log import log_event
 
 from .context_compressor import GroupChatContextCompressor
-from .debug_dump import AIGroupChatDebugDumper
 from .forward_image_auto_fetch import (
     FORWARD_MESSAGE_IMAGES_TOOL_NAME,
     ForwardImageAutoFetcher,
@@ -55,7 +54,24 @@ class PreparedTurnContext:
 
     working_messages: list[ChatMessage]
     persisted_turn_messages: list[ChatMessage]
+    fallback_turn_messages: list[ChatMessage]
     replace_existing_history: bool
+
+
+@dataclass
+class TurnContextState:
+    """记录一次临时上下文完成后需要提交的边界和统计。"""
+
+    fallback_turn_messages: list[ChatMessage] = field(default_factory=list)
+    persisted_prefix_count: int | None = None
+    replace_existing_history: bool = False
+    commit_requested: bool = False
+    title: str = "异常结束后的长期上下文"
+    turn_messages_count: int = 0
+    sent_content_messages_count: int = 0
+    tool_history_messages_count: int = 0
+    tool_summary_messages_count: int = 0
+    vision_history_messages_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -94,13 +110,11 @@ class GroupChatToolLoop:
         *,
         config: AIGroupChatConfig,
         context: Context,
-        debug_dumper: AIGroupChatDebugDumper,
         vision_tool: VisionDescriptionTool,
     ) -> None:
         """保存工具循环所需的配置和运行上下文。"""
         self.config: AIGroupChatConfig = config
         self.context: Context = context
-        self.debug_dumper: AIGroupChatDebugDumper = debug_dumper
         self.vision_tool: VisionDescriptionTool = vision_tool
         self.token_estimator: ConservativeTokenEstimator = ConservativeTokenEstimator(
             safety_factor=config.token_safety_factor
@@ -122,8 +136,10 @@ class GroupChatToolLoop:
         input_vision_history_messages: list[ChatMessage],
         question: str,
         vision_turn_state: VisionTurnState,
+        turn_context_state: TurnContextState | None = None,
     ) -> None:
         """执行群聊专用工具调用循环。"""
+        context_state = turn_context_state or TurnContextState()
         tool_history_messages: list[ChatMessage] = []
         vision_history_messages: list[ChatMessage] = []
         sent_content_messages_count = 0
@@ -165,6 +181,11 @@ class GroupChatToolLoop:
             turn_messages=persisted_turn_messages,
             replace_existing_history=replace_existing_history,
         )
+        context_state.fallback_turn_messages = (
+            prepared_context.fallback_turn_messages
+        )
+        context_state.persisted_prefix_count = len(chat_handler.messages_lst)
+        context_state.replace_existing_history = replace_existing_history
         log_event(
             level="DEBUG",
             event="ai_group_chat.tool_loop.start",
@@ -244,6 +265,7 @@ class GroupChatToolLoop:
                             message=send_result.failure_status_message
                         )
                         snapshot_title = "群消息发送失败后的长期上下文"
+                        context_state.commit_requested = True
                         return
                     content_sent = send_result.content_sent
                     if content_sent:
@@ -266,6 +288,7 @@ class GroupChatToolLoop:
 
                 if content_sent:
                     snapshot_title = "无工具调用自动结束后的长期上下文"
+                    context_state.commit_requested = True
                     return
 
                 log_event(
@@ -278,22 +301,22 @@ class GroupChatToolLoop:
                     round_index=round_index,
                 )
                 snapshot_title = "空响应自动结束后的长期上下文"
+                context_state.commit_requested = True
                 return
             snapshot_title = "工具轮数耗尽后的长期上下文"
             raise RuntimeError(
                 f"AI 群聊工具调用超过最大轮数: {self.config.max_tool_rounds}"
             )
         finally:
-            await self._record_turn_context(
-                msg=msg,
-                chat_handler=chat_handler,
-                title=snapshot_title,
-                turn_messages_count=len(persisted_turn_messages),
-                sent_content_messages_count=sent_content_messages_count,
-                tool_history_messages_count=len(tool_history_messages),
-                tool_summary_messages_count=tool_summary_messages_count,
-                vision_history_messages_count=len(vision_history_messages),
-                replace_existing_history=replace_existing_history,
+            context_state.title = snapshot_title
+            context_state.turn_messages_count = len(persisted_turn_messages)
+            context_state.sent_content_messages_count = sent_content_messages_count
+            if sent_content_messages_count > 0:
+                context_state.commit_requested = True
+            context_state.tool_history_messages_count = len(tool_history_messages)
+            context_state.tool_summary_messages_count = tool_summary_messages_count
+            context_state.vision_history_messages_count = len(
+                vision_history_messages
             )
 
     async def _prepare_turn_context(
@@ -327,6 +350,9 @@ class GroupChatToolLoop:
             *turn_messages,
             *input_vision_history_messages,
         ]
+        fallback_turn_messages = self._strip_history_images(
+            messages=current_persisted_messages
+        )
         candidate_messages = [*history_messages, *current_working_messages]
         budget = self.token_estimator.check_request(
             messages=candidate_messages,
@@ -353,6 +379,7 @@ class GroupChatToolLoop:
             return PreparedTurnContext(
                 working_messages=candidate_messages,
                 persisted_turn_messages=current_persisted_messages,
+                fallback_turn_messages=fallback_turn_messages,
                 replace_existing_history=False,
             )
         _ = await self.context.bot.send_msg(
@@ -408,6 +435,7 @@ class GroupChatToolLoop:
         return PreparedTurnContext(
             working_messages=rebuilt_working_messages,
             persisted_turn_messages=[rebuilt_persisted_user_message],
+            fallback_turn_messages=fallback_turn_messages,
             replace_existing_history=True,
         )
 
@@ -523,43 +551,6 @@ class GroupChatToolLoop:
         if replace_existing_history:
             chat_handler.replace_history(messages=[])
         chat_handler.build_chatmessage(message_lst=sanitized_messages)
-
-    async def _record_turn_context(
-        self,
-        *,
-        msg: GroupMessage,
-        chat_handler: ContextHandler,
-        title: str,
-        turn_messages_count: int,
-        sent_content_messages_count: int,
-        tool_history_messages_count: int,
-        tool_summary_messages_count: int,
-        vision_history_messages_count: int,
-        replace_existing_history: bool,
-    ) -> None:
-        """记录本轮长期上下文结果，并在异常结束时也写调试快照。"""
-        log_event(
-            level="DEBUG",
-            event="ai_group_chat.context.persist",
-            category="plugin",
-            message="AI 群聊本轮消息已写入长期上下文",
-            group_id=msg.group_id,
-            message_id=msg.message_id,
-            title=title,
-            turn_messages_count=turn_messages_count,
-            sent_content_messages_count=sent_content_messages_count,
-            tool_history_messages_count=tool_history_messages_count,
-            tool_summary_messages_count=tool_summary_messages_count,
-            vision_history_messages_count=vision_history_messages_count,
-            retain_tool_results=self.config.retain_tool_results,
-            replace_existing_history=replace_existing_history,
-            current_messages_count=len(chat_handler.messages_lst),
-        )
-        await self.debug_dumper.append_context_snapshot(
-            group_id=msg.group_id,
-            title=title,
-            messages=chat_handler.messages_lst,
-        )
 
     async def _send_reply_content(
         self,

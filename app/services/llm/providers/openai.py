@@ -65,9 +65,9 @@ class OpenAIService(LLMProvider):
                 continue
 
             content_items: list[dict[str, object]] = []
-            if msg.text:
-                content_items.append({"type": "text", "text": msg.text})
             if msg.image:
+                if msg.text:
+                    content_items.append({"type": "text", "text": msg.text})
                 for image_bytes in msg.image:
                     mime_type = detect_mime_type(image_bytes)
                     image_data = base64.b64encode(image_bytes).decode("utf-8")
@@ -80,7 +80,7 @@ class OpenAIService(LLMProvider):
                     )
             raw_message: dict[str, object] = {
                 "role": msg.role,
-                "content": content_items if content_items else msg.text,
+                "content": content_items if msg.image else msg.text,
             }
             if msg.tool_calls:
                 raw_message["tool_calls"] = [

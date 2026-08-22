@@ -8,7 +8,13 @@ from typing import cast
 
 from sqlalchemy import make_url
 
-from app.config import DatabaseConfig, LLMProviderConfig, MyBotConfig, NapCatConfig
+from app.config import (
+    AIGroupChatConfig,
+    DatabaseConfig,
+    LLMProviderConfig,
+    MyBotConfig,
+    NapCatConfig,
+)
 
 
 def load_example() -> dict[str, object]:
@@ -32,7 +38,23 @@ class SettingsConfigTest(unittest.TestCase):
         self.assertEqual(tuple(config.llm.providers), ("deepseek",))
         self.assertNotIn("firecrawl", config.mcp.servers)
         self.assertIsNotNone(config.plugins.ai_group_chat)
+        assert config.plugins.ai_group_chat is not None
+        self.assertTrue(config.plugins.ai_group_chat.debug_dump_messages)
         self.assertIsNotNone(config.plugins.recall_bot_image)
+
+    def test_ai_context_markdown_dump_is_enabled_by_default(self) -> None:
+        """省略开关时仍持续写入群聊长期上下文 Markdown。"""
+        config = AIGroupChatConfig.model_validate(
+            {
+                "model": {
+                    "provider": "main",
+                    "name": "chat",
+                    "supports_images": True,
+                }
+            }
+        )
+
+        self.assertTrue(config.debug_dump_messages)
 
     def test_database_rejects_two_password_sources(self) -> None:
         """数据库内联密码和 secret 文件不能同时配置。"""

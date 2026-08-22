@@ -356,7 +356,7 @@ class AIGroupChatConfig(ConfigModel):
     max_reply_chars: int = Field(default=1000, ge=1)
     show_reasoning: bool = False
     retain_reasoning: bool = False
-    debug_dump_messages: bool = False
+    debug_dump_messages: bool = True
     extra_requirements_file: str = "ai_group_chat/prompts/extra_requirements.md"
     allow_mention_all: bool = False
     retain_tool_results: bool = False
