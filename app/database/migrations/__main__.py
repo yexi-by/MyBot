@@ -5,6 +5,7 @@ import asyncio
 import sys
 
 from app.database.migration import DatabaseMigrator, PluginMigrationRegistry
+from app.utils.log import configure_logging
 
 
 async def _run(
@@ -16,6 +17,14 @@ async def _run(
     from app.plugins import discover_plugin_migrations
 
     config = ConfigManager.create().boot_config
+    configure_logging(
+        log_dir=config.logging.directory,
+        console_level=config.logging.console_level,
+        file_level=config.logging.file_level,
+        retention=config.logging.retention,
+        rotation=config.logging.rotation,
+        compression=config.logging.compression,
+    )
     actual_registry = plugin_registry
     if actual_registry is None:
         actual_registry = PluginMigrationRegistry()

@@ -1,9 +1,13 @@
 """PostgreSQL migration 和插件 session 基础集成测试。"""
 
+from collections.abc import Awaitable, Callable
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -19,9 +23,70 @@ from app.database import (
     plugin_schema_name,
     validate_plugin_id,
 )
+from app.database.migrations import __main__ as migration_cli
 from app.plugins.base import PluginMeta
 
 TEST_DATABASE_ENV = "MYBOT_TEST_DATABASE_URL"
+
+
+class MigrationCliTest(unittest.IsolatedAsyncioTestCase):
+    """验证独立 migration 入口在加载插件前建立日志配置。"""
+
+    async def test_logging_is_configured_before_plugin_discovery(self) -> None:
+        """migration 不能依赖日志模块的隐式兜底配置。"""
+        events: list[str] = []
+        logging = SimpleNamespace(
+            directory="logs",
+            console_level="INFO",
+            file_level="DEBUG",
+            retention="30 days",
+            rotation="50 MB",
+            compression="gz",
+        )
+        database = SimpleNamespace(
+            build_url=Mock(return_value="postgresql+asyncpg://example")
+        )
+        manager = SimpleNamespace(
+            boot_config=SimpleNamespace(logging=logging, database=database)
+        )
+        migrator = SimpleNamespace(
+            upgrade_all=AsyncMock(),
+            assert_current=AsyncMock(),
+        )
+
+        def configure(**_kwargs: object) -> None:
+            events.append("logging")
+
+        def discover() -> tuple[PluginMigrationSpec, ...]:
+            events.append("plugins")
+            return ()
+
+        with (
+            patch("app.config.ConfigManager.create", return_value=manager),
+            patch(
+                "app.database.migrations.__main__.configure_logging",
+                side_effect=configure,
+            ),
+            patch(
+                "app.plugins.discover_plugin_migrations",
+                side_effect=discover,
+            ),
+            patch(
+                "app.database.migrations.__main__.DatabaseMigrator",
+                return_value=migrator,
+            ),
+        ):
+            run_command = cast(
+                Callable[
+                    [str, PluginMigrationRegistry | None],
+                    Awaitable[None],
+                ],
+                getattr(migration_cli, "_run"),
+            )
+            await run_command("check", None)
+
+        self.assertEqual(events, ["logging", "plugins"])
+        migrator.assert_current.assert_awaited_once_with()
 
 
 class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
