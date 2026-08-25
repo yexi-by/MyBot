@@ -19,6 +19,7 @@ from app.services.llm.tools import (
     LLMImageItem,
     build_tool_result_message,
 )
+from app.services.napcat.message_formatter import NapCatMessageTextFormatter
 from app.utils.log import log_event
 
 from .context_compressor import GroupChatContextCompressor
@@ -70,7 +71,7 @@ class TurnContextState:
     turn_messages_count: int = 0
     sent_content_messages_count: int = 0
     tool_history_messages_count: int = 0
-    tool_summary_messages_count: int = 0
+    retained_tool_messages_count: int = 0
     vision_history_messages_count: int = 0
 
 
@@ -116,8 +117,17 @@ class GroupChatToolLoop:
         self.config: AIGroupChatConfig = config
         self.context: Context = context
         self.vision_tool: VisionDescriptionTool = vision_tool
+        token_config = config.token_estimator
         self.token_estimator: ConservativeTokenEstimator = ConservativeTokenEstimator(
-            safety_factor=config.token_safety_factor
+            safety_factor=config.token_safety_factor,
+            request_overhead_tokens=token_config.request_overhead_tokens,
+            message_overhead_tokens=token_config.message_overhead_tokens,
+            tool_call_overhead_tokens=token_config.tool_call_overhead_tokens,
+            image_tokens=token_config.image_tokens,
+            ascii_tokens_per_character=token_config.ascii_tokens_per_character,
+            non_ascii_tokens_per_character=(
+                token_config.non_ascii_tokens_per_character
+            ),
         )
         self.context_compressor: GroupChatContextCompressor = (
             GroupChatContextCompressor()
@@ -143,7 +153,16 @@ class GroupChatToolLoop:
         tool_history_messages: list[ChatMessage] = []
         vision_history_messages: list[ChatMessage] = []
         sent_content_messages_count = 0
-        tool_summary_messages_count = 0
+        retained_tool_messages_count = 0
+        formatting = self.config.formatting
+        message_formatter = NapCatMessageTextFormatter(
+            field_text_limit=formatting.field_text_limit,
+            json_text_limit=formatting.json_text_limit,
+            markdown_text_limit=formatting.markdown_text_limit,
+            forward_max_items=formatting.forward_max_items,
+            forward_max_depth=formatting.forward_max_depth,
+            nested_text_search_max_depth=formatting.nested_text_search_max_depth,
+        )
         napcat_executor = NapCatGroupToolExecutor(
             bot=self.context.bot,
             group_messages=self.context.group_messages,
@@ -153,13 +172,40 @@ class GroupChatToolLoop:
             forward_image_max_images_per_call=(
                 self.config.images.forward_max_per_call
             ),
-            forward_image_max_all_images=self.config.images.forward_max_per_turn,
+            forward_image_max_images_per_turn=(
+                self.config.images.forward_max_per_turn
+            ),
             image_fetch_concurrency=self.config.images.fetch_concurrency,
             image_download_timeout_seconds=(
                 self.config.images.download_timeout_seconds
             ),
-            max_reply_chars=self.config.max_reply_chars,
+            image_max_bytes=(
+                None
+                if self.config.images.oversize_behavior == "describe"
+                else self.config.images.max_image_bytes or None
+            ),
+            forward_reply_threshold_chars=(
+                self.config.forward_reply_threshold_chars
+            ),
             http_client=self.context.direct_httpx,
+            message_formatter=message_formatter,
+            history_default_limit=self.config.history.default_limit,
+            history_max_per_call=self.config.history.max_per_call,
+            history_default_before_count=(
+                self.config.history.default_before_count
+            ),
+            history_default_after_count=self.config.history.default_after_count,
+            file_default_count=self.config.files.default_count,
+            file_max_per_call=self.config.files.max_per_call,
+            remaining_image_delivery_slots=lambda: (
+                None
+                if self.config.images.max_per_turn == 0
+                else max(
+                    0,
+                    self.config.images.max_per_turn
+                    - vision_turn_state.consumed_image_slots,
+                )
+            ),
         )
         tool_executor = CompositeToolExecutor(
             [napcat_executor, self.context.mcp_tool_manager]
@@ -174,6 +220,12 @@ class GroupChatToolLoop:
             tools=tools,
         )
         working_messages = prepared_context.working_messages
+        if self.config.images.delivery_mode == "direct":
+            vision_turn_state.consumed_image_bytes = sum(
+                len(image)
+                for message in working_messages
+                for image in message.image or []
+            )
         persisted_turn_messages = prepared_context.persisted_turn_messages
         replace_existing_history = prepared_context.replace_existing_history
         self._persist_turn_input(
@@ -196,6 +248,7 @@ class GroupChatToolLoop:
             model_name=self.config.model.name,
             provider=self.config.model.provider,
             supports_images=self.config.model.supports_images,
+            image_delivery_mode=self.config.images.delivery_mode,
             working_messages_count=len(working_messages),
             tools_count=len(tools),
             tool_names=[tool.name for tool in tools],
@@ -272,7 +325,8 @@ class GroupChatToolLoop:
                         sent_content_messages_count += 1
 
                 if response.tool_calls:
-                    tool_summary_messages_count += await self._handle_tool_response(
+                    napcat_executor.begin_image_delivery_batch()
+                    retained_tool_messages_count += await self._handle_tool_response(
                         msg=msg,
                         chat_handler=chat_handler,
                         working_messages=working_messages,
@@ -314,7 +368,7 @@ class GroupChatToolLoop:
             if sent_content_messages_count > 0:
                 context_state.commit_requested = True
             context_state.tool_history_messages_count = len(tool_history_messages)
-            context_state.tool_summary_messages_count = tool_summary_messages_count
+            context_state.retained_tool_messages_count = retained_tool_messages_count
             context_state.vision_history_messages_count = len(
                 vision_history_messages
             )
@@ -331,8 +385,22 @@ class GroupChatToolLoop:
     ) -> PreparedTurnContext:
         """在请求模型前按 token 预算决定是否压缩历史上下文。"""
         stored_messages = chat_handler.messages_lst
-        stripped_history_image_count = self._count_images(messages=stored_messages)
-        history_messages = self._strip_history_images(messages=stored_messages)
+        if self.config.images.retain_images:
+            history_messages = list(stored_messages)
+            stripped_history_image_count = 0
+        else:
+            stripped_history_image_count = self._count_images(
+                messages=stored_messages
+            )
+            history_messages = self._strip_history_images(messages=stored_messages)
+        current_working_messages = [*turn_messages, *input_vision_messages]
+        history_messages, byte_limit_stripped_count = (
+            self._fit_history_images_to_byte_limit(
+                history_messages=history_messages,
+                current_messages=current_working_messages,
+            )
+        )
+        stripped_history_image_count += byte_limit_stripped_count
         if stripped_history_image_count > 0:
             chat_handler.replace_history(messages=history_messages[1:])
             log_event(
@@ -345,13 +413,14 @@ class GroupChatToolLoop:
                 stripped_image_count=stripped_history_image_count,
                 history_messages_count=len(history_messages),
             )
-        current_working_messages = [*turn_messages, *input_vision_messages]
         current_persisted_messages = [
             *turn_messages,
             *input_vision_history_messages,
         ]
-        fallback_turn_messages = self._strip_history_images(
-            messages=current_persisted_messages
+        fallback_turn_messages = (
+            list(current_persisted_messages)
+            if self.config.images.retain_images
+            else self._strip_history_images(messages=current_persisted_messages)
         )
         candidate_messages = [*history_messages, *current_working_messages]
         budget = self.token_estimator.check_request(
@@ -499,7 +568,7 @@ class GroupChatToolLoop:
         question: str,
         vision_turn_state: VisionTurnState,
     ) -> int:
-        """把原始工具结果留在本轮，并按配置保存有界调用摘要。"""
+        """把原始工具结果留在本轮，并按配置决定长期保存形式。"""
         log_event(
             level="DEBUG",
             event="ai_group_chat.tool_response.handle",
@@ -510,6 +579,7 @@ class GroupChatToolLoop:
             round_index=round_index,
             tool_names=[tool_call.name for tool_call in response.tool_calls],
         )
+        history_start = len(tool_history_messages)
         tool_history_messages.extend(
             self._append_tool_call_response(
                 working_messages=working_messages,
@@ -528,16 +598,21 @@ class GroupChatToolLoop:
             vision_turn_state=vision_turn_state,
         )
         tool_history_messages.extend(tool_result_history)
-        summary_count = 0
-        if self.config.retain_tool_results and tool_statuses:
+        retained_count = 0
+        if self.config.tool_result_retention == "summary" and tool_statuses:
             chat_handler.build_chatmessage(
                 message=self._build_tool_status_summary(statuses=tool_statuses)
             )
-            summary_count = 1
+            retained_count = 1
+        elif self.config.tool_result_retention == "full":
+            retained_messages = tool_history_messages[history_start:]
+            if retained_messages:
+                chat_handler.build_chatmessage(message_lst=retained_messages)
+                retained_count = len(retained_messages)
         new_vision_messages = vision_history_messages[previous_vision_count:]
         if new_vision_messages:
             chat_handler.build_chatmessage(message_lst=new_vision_messages)
-        return summary_count
+        return retained_count
 
     def _persist_turn_input(
         self,
@@ -547,7 +622,11 @@ class GroupChatToolLoop:
         replace_existing_history: bool,
     ) -> None:
         """在请求模型前提交本轮用户输入和输入图片描述。"""
-        sanitized_messages = self._strip_history_images(messages=turn_messages)
+        sanitized_messages = (
+            list(turn_messages)
+            if self.config.images.retain_images
+            else self._strip_history_images(messages=turn_messages)
+        )
         if replace_existing_history:
             chat_handler.replace_history(messages=[])
         chat_handler.build_chatmessage(message_lst=sanitized_messages)
@@ -663,7 +742,17 @@ class GroupChatToolLoop:
             tool_calls=tool_calls,
         )
         working_messages.append(assistant_message)
-        return [assistant_message]
+        return [
+            ChatMessage(
+                role="assistant",
+                reasoning_content=(
+                    self._normalize_content(response.reasoning_content)
+                    if self.config.retain_reasoning
+                    else None
+                ),
+                tool_calls=tool_calls,
+            )
+        ]
 
     async def _execute_tool_call_results(
         self,
@@ -681,10 +770,13 @@ class GroupChatToolLoop:
         statuses: list[ToolCallStatus] = []
         image_items: list[LLMImageItem] = []
         truncated_image_count = 0
-        explicit_forward_image_call = any(
-            tool_call.name == FORWARD_MESSAGE_IMAGES_TOOL_NAME
+        explicit_forward_image_message_ids = {
+            message_id
             for tool_call in tool_calls
-        )
+            if tool_call.name == FORWARD_MESSAGE_IMAGES_TOOL_NAME
+            for message_id in [tool_call.arguments.get("message_id")]
+            if isinstance(message_id, str)
+        }
         for tool_call in tool_calls:
             log_event(
                 level="DEBUG",
@@ -700,7 +792,9 @@ class GroupChatToolLoop:
                 tool_call=tool_call,
                 tool_executor=tool_executor,
                 group_id=group_id,
-                explicit_forward_image_call=explicit_forward_image_call,
+                explicit_forward_image_message_ids=(
+                    explicit_forward_image_message_ids
+                ),
             )
             working_messages.append(outcome.message)
             history_messages.append(outcome.message)
@@ -800,7 +894,7 @@ class GroupChatToolLoop:
         tool_call: LLMToolCall,
         tool_executor: CompositeToolExecutor,
         group_id: str,
-        explicit_forward_image_call: bool,
+        explicit_forward_image_message_ids: set[str],
     ) -> ToolCallResultForModel:
         """调用工具并把成功或失败结果都整理为模型可读的 tool 消息。"""
         result: JsonValue
@@ -817,7 +911,9 @@ class GroupChatToolLoop:
             if self.forward_image_auto_fetcher.should_fetch(
                 tool_call=tool_call,
                 result=result,
-                explicit_forward_image_call=explicit_forward_image_call,
+                explicit_forward_image_message_ids=(
+                    explicit_forward_image_message_ids
+                ),
             ):
                 auto_image_result = await self.forward_image_auto_fetcher.fetch(
                     forward_result=result,
@@ -882,6 +978,44 @@ class GroupChatToolLoop:
     def _count_images(self, *, messages: list[ChatMessage]) -> int:
         """统计消息列表中仍携带的图片字节数量。"""
         return sum(len(message.image or []) for message in messages)
+
+    def _fit_history_images_to_byte_limit(
+        self,
+        *,
+        history_messages: list[ChatMessage],
+        current_messages: list[ChatMessage],
+    ) -> tuple[list[ChatMessage], int]:
+        """需要时从最旧历史开始移除图片，使当前请求符合总字节配置。"""
+        byte_limit = self.config.images.max_total_bytes_per_request
+        if byte_limit == 0:
+            return history_messages, 0
+        current_bytes = sum(
+            len(image)
+            for message in current_messages
+            for image in message.image or []
+        )
+        history_bytes = sum(
+            len(image)
+            for message in history_messages
+            for image in message.image or []
+        )
+        if current_bytes + history_bytes <= byte_limit:
+            return history_messages, 0
+        if self.config.images.oversize_behavior == "error":
+            raise ValueError(
+                "历史与当前图片总字节超过 images.max_total_bytes_per_request"
+            )
+        fitted = list(history_messages)
+        stripped_count = 0
+        for index, message in enumerate(fitted):
+            if current_bytes + history_bytes <= byte_limit:
+                break
+            if not message.image:
+                continue
+            history_bytes -= sum(len(image) for image in message.image)
+            stripped_count += len(message.image)
+            fitted[index] = self._strip_message_images(message=message)
+        return fitted, stripped_count
 
     def _normalize_content(self, content: str | None) -> str | None:
         """清理模型文本输出，空白内容视为无回复。"""

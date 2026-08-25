@@ -58,7 +58,12 @@ class RecordingClient(BOTClient):
                     max_image_bytes=1024 * 1024,
                 )
             ),
+            action_timeout_seconds=120,
+            send_max_attempts=5,
             send_retry_delay_seconds=0,
+            send_retry_max_delay_seconds=10,
+            response_summary_max_chars=500,
+            persistence_retry_delays_seconds=(0.25,),
         )
         self.boot_id = "10000"
         self.action_calls: list[tuple[str, JsonObject | None]] = []

@@ -9,7 +9,6 @@ from app.plugins.base import BasePlugin
 from app.services import ConversationContextKey, ContextHandler
 from app.utils.log import log_event
 
-from .constants import CONSUMERS_COUNT, PRIORITY
 from .debug_dump import AIGroupChatDebugDumper
 from .message_builder import GroupChatMessageBuilder
 from .tool_loop import GroupChatToolLoop, TurnContextState
@@ -34,9 +33,6 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
 
     name: ClassVar[str] = "AI智能群聊回复插件"
     plugin_id: ClassVar[str] = "ai_group_chat"
-    consumers_count: ClassVar[int] = CONSUMERS_COUNT
-    priority: ClassVar[int] = PRIORITY
-
     @override
     def setup(self) -> None:
         """初始化配置缓存和调试转储版本。"""
@@ -267,7 +263,11 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 state.replace_existing_history
                 and current_context.revision == base_revision
             )
-            stripped_history_image_count = current_context.remove_history_images()
+            stripped_history_image_count = (
+                0
+                if latest_runtime.config.source.images.retain_images
+                else current_context.remove_history_images()
+            )
             if can_replace_history:
                 current_context.replace_history(messages=temporary_messages[1:])
                 commit_mode = "replace_compressed_history"
@@ -294,9 +294,11 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 turn_messages_count=state.turn_messages_count,
                 sent_content_messages_count=state.sent_content_messages_count,
                 tool_history_messages_count=state.tool_history_messages_count,
-                tool_summary_messages_count=state.tool_summary_messages_count,
+                retained_tool_messages_count=state.retained_tool_messages_count,
                 vision_history_messages_count=state.vision_history_messages_count,
-                retain_tool_results=latest_runtime.config.source.retain_tool_results,
+                tool_result_retention=(
+                    latest_runtime.config.source.tool_result_retention
+                ),
                 replace_existing_history=can_replace_history,
                 stripped_history_image_count=stripped_history_image_count,
                 current_messages_count=len(committed_messages),

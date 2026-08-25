@@ -1,4 +1,4 @@
-/** 插件元信息与启用时的默认配置（默认值与 app/config/schemas.py 对齐）。 */
+/** 插件元信息与启用时写入的完整初始配置。 */
 
 import type {
   AIGroupChatConfig,
@@ -42,7 +42,7 @@ export const PLUGIN_METAS: PluginMeta[] = [
   {
     id: "recall_bot_image",
     name: "撤回图片",
-    description: "撤回机器人发送的图片，无额外配置项",
+    description: "撤回机器人发送的图片，可配置命令和失败详情长度",
   },
 ];
 
@@ -54,7 +54,7 @@ export function pluginMeta(id: PluginId): PluginMeta {
   return meta;
 }
 
-/** 生成 AI 群聊默认配置；第一个 provider 作为模型默认引用。 */
+/** 生成 AI 群聊完整初始配置；第一个 provider 作为模型初始引用。 */
 function defaultAIGroupChat(config: MyBotConfigData): AIGroupChatConfig {
   const providerIds = Object.keys(config.llm?.providers ?? {});
   const provider = providerIds[0] ?? "";
@@ -64,13 +64,70 @@ function defaultAIGroupChat(config: MyBotConfigData): AIGroupChatConfig {
       model: { provider, name: "" },
       system_prompt_file: "ai_group_chat/prompts/vision/system.md",
       user_prompt_file: "ai_group_chat/prompts/vision/user.md",
+      max_attempts: 5,
+      retry_delay_seconds: 0.25,
+      retry_max_delay_seconds: 0,
+      retain_descriptions: true,
     },
-    images: {},
+    images: {
+      max_per_turn: 0,
+      fetch_concurrency: 16,
+      download_timeout_seconds: 20,
+      max_image_bytes: 0,
+      max_total_bytes_per_request: 0,
+      max_width: 0,
+      max_height: 0,
+      allowed_mime_types: [],
+      delivery_mode: "vision",
+      oversize_behavior: "skip",
+      image_detail: "auto",
+      retain_images: false,
+      forward_tool_enabled: true,
+      forward_max_per_call: 0,
+      forward_max_per_turn: 0,
+    },
+    formatting: {
+      field_text_limit: 0,
+      json_text_limit: 0,
+      markdown_text_limit: 0,
+      forward_max_items: 0,
+      forward_max_depth: -1,
+      nested_text_search_max_depth: -1,
+    },
+    history: {
+      default_limit: 20,
+      max_per_call: 0,
+      default_before_count: 10,
+      default_after_count: 10,
+    },
+    files: {
+      default_count: 50,
+      max_per_call: 0,
+    },
+    token_estimator: {
+      request_overhead_tokens: 128,
+      message_overhead_tokens: 16,
+      tool_call_overhead_tokens: 64,
+      image_tokens: 1024,
+      ascii_tokens_per_character: 1,
+      non_ascii_tokens_per_character: 2,
+    },
+    max_tool_rounds: 16,
+    token_safety_factor: 1.05,
+    context_compression_notice: "上下文有点长，我先整理一下记忆，稍等我几秒喵~",
+    forward_reply_threshold_chars: 1000,
+    show_reasoning: false,
+    retain_reasoning: false,
+    debug_dump_messages: true,
+    debug_dump_directory: "logs/ai_group_chat_debug",
+    extra_requirements_file: "ai_group_chat/prompts/extra_requirements.md",
+    allow_mention_all: false,
+    tool_result_retention: "off",
     groups: [],
   };
 }
 
-/** 返回指定插件启用时的默认配置节。 */
+/** 返回指定插件启用时写入的完整配置节。 */
 export function defaultPluginConfig(
   id: PluginId,
   config: MyBotConfigData,
@@ -84,7 +141,15 @@ export function defaultPluginConfig(
       return { protected_users: [] };
     case "image_generate": {
       const provider = Object.keys(config.llm?.providers ?? {})[0] ?? "";
-      return { groups: [], model: { provider, name: "" } };
+      return {
+        groups: [],
+        model: { provider, name: "" },
+        fetch_concurrency: 16,
+        download_timeout_seconds: 20,
+        max_input_image_bytes: 0,
+        command: "/生图",
+        help_command: "/help生图",
+      };
     }
     case "neavo_image_generate":
       return {
@@ -94,10 +159,16 @@ export function defaultPluginConfig(
         poll_interval_seconds: 3,
         generation_timeout_seconds: 600,
         request_timeout_seconds: 30,
-        max_image_bytes: 20971520,
+        max_prompt_chars: 4096,
+        max_input_image_bytes: 10485760,
+        max_output_image_bytes: 20971520,
+        allowed_input_mime_types: ["image/jpeg", "image/png", "image/webp"],
+        max_consecutive_poll_errors: 3,
+        generate_command: "#生图",
+        describe_command: "#反推",
       };
     case "recall_bot_image":
-      return {};
+      return { command: "#撤回", failure_detail_max_chars: 160 };
   }
 }
 
@@ -112,4 +183,5 @@ export const SECTION_LABELS: Record<string, string> = {
   llm: "LLM Providers",
   mcp: "MCP 服务",
   database: "数据库",
+  plugin_execution: "插件执行",
 };

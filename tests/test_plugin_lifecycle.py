@@ -72,6 +72,8 @@ class PluginLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 FakeConfigManager(build_plugin_snapshot()),
                 plugin_id="lifecycle_test",
             ),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
 
     async def asyncTearDown(self) -> None:

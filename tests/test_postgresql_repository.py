@@ -39,13 +39,20 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
         if database_url is None:
             self.skipTest(f"未配置 {TEST_DATABASE_ENV}，跳过 PostgreSQL 集成测试")
         await DatabaseMigrator(database_url=database_url).upgrade_all()
-        self.runtime = PostgreSQLRuntime.create(database_url=database_url)
+        self.runtime = PostgreSQLRuntime.create(
+            database_url=database_url,
+            pool_size=20,
+            max_overflow=20,
+            pool_timeout_seconds=2,
+            statement_timeout_seconds=5,
+        )
         self.bot_id = f"testbot-{uuid4().hex}"
         self.scope = GroupDataScope(bot_id=self.bot_id, group_id="group-1")
         self.image_root = Path("test-images")
         self.repository = PostgreSQLMessageRepository(
             session_factory=self.runtime.session_factory,
             image_root=self.image_root,
+            image_max_attempts=4,
         )
         archive_repository: ImageArchiveTaskRepository = self.repository
         self.assertIs(archive_repository, self.repository)

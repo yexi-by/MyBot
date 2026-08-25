@@ -15,6 +15,7 @@ class ChatMessage(StrictModel):
     text: str | None = None
     reasoning_content: str | None = None
     image: list[bytes] | None = None
+    image_detail: Literal["auto", "low", "high"] | None = None
     tool_calls: list["LLMToolCall"] | None = None
     tool_call_id: str | None = None
 
@@ -52,6 +53,7 @@ class LLMProviderProtocol(Protocol):
         model: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
         """获取文本响应，并允许当前请求覆盖供应商重试参数。"""
         ...

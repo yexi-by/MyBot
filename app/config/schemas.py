@@ -22,6 +22,10 @@ type UvicornLogLevel = Literal[
 type LogLevelName = Literal[
     "TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"
 ]
+type ImageDetail = Literal["omit", "auto", "low", "high"]
+type ImageOversizeBehavior = Literal["error", "skip", "describe"]
+type ImageDeliveryMode = Literal["direct", "vision"]
+type ToolResultRetention = Literal["off", "summary", "full"]
 
 
 class ConfigModel(StrictModel):
@@ -33,18 +37,22 @@ class ConfigModel(StrictModel):
 class AppConfig(ConfigModel):
     """应用自身元信息配置。"""
 
-    name: str = "MyBot"
-    environment: AppEnvironment = "production"
+    name: str
+    environment: AppEnvironment
 
 
 class ServerConfig(ConfigModel):
     """HTTP 与 WebSocket 服务监听配置。"""
 
-    host: str = "0.0.0.0"
-    port: int = Field(default=6055, ge=1, le=65535)
-    websocket_path_prefix: str = "/ws"
-    access_log: bool = False
-    log_level: UvicornLogLevel = "info"
+    host: str
+    port: int = Field(ge=1, le=65535)
+    websocket_path_prefix: str
+    access_log: bool
+    log_level: UvicornLogLevel
+    config_watch_debounce_ms: int = Field(ge=0)
+    config_watch_step_ms: int = Field(ge=1)
+    config_watcher_stop_timeout_seconds: float = Field(gt=0)
+    power_action_delay_seconds: float = Field(ge=0)
 
     @field_validator("websocket_path_prefix")
     @classmethod
@@ -62,8 +70,21 @@ class NapCatConfig(ConfigModel):
     """NapCat 反向 WebSocket 连接配置。"""
 
     websocket_token: SecretStr | None = None
-    send_max_attempts: int = Field(default=5, ge=1)
-    send_retry_delay_seconds: float = Field(default=0, ge=0)
+    action_timeout_seconds: float = Field(gt=0)
+    send_max_attempts: int = Field(ge=1)
+    send_retry_delay_seconds: float = Field(ge=0)
+    send_retry_max_delay_seconds: float = Field(ge=0)
+    response_summary_max_chars: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_retry_delays(self) -> "NapCatConfig":
+        """最大退避不能小于初始退避。"""
+        if (
+            self.send_retry_max_delay_seconds > 0
+            and self.send_retry_max_delay_seconds < self.send_retry_delay_seconds
+        ):
+            raise ValueError("send_retry_max_delay_seconds 不能小于初始重试延迟")
+        return self
 
     @field_validator("websocket_token")
     @classmethod
@@ -79,12 +100,14 @@ class NapCatConfig(ConfigModel):
 class ImageStorageConfig(ConfigModel):
     """群图片归档配置。"""
 
-    directory: str = "images"
-    download_concurrency: int = Field(default=16, ge=1)
-    download_timeout_seconds: float = Field(default=20, gt=0)
-    max_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
-    retry_delays_seconds: tuple[float, float, float] = (1, 5, 20)
-    lease_seconds: float = Field(default=45, gt=0)
+    directory: str
+    download_concurrency: int = Field(ge=1)
+    download_timeout_seconds: float = Field(gt=0)
+    max_bytes: int = Field(ge=1)
+    retry_delays_seconds: tuple[float, ...]
+    lease_seconds: float = Field(gt=0)
+    worker_poll_interval_seconds: float = Field(gt=0)
+    worker_stop_timeout_seconds: float = Field(gt=0)
 
     @field_validator("directory")
     @classmethod
@@ -98,33 +121,44 @@ class ImageStorageConfig(ConfigModel):
     @field_validator("retry_delays_seconds")
     @classmethod
     def validate_retry_delays(
-        cls, value: tuple[float, float, float]
-    ) -> tuple[float, float, float]:
-        """确保三次图片重试延迟均为正数。"""
-        if any(delay <= 0 for delay in value):
-            raise ValueError("图片重试延迟必须全部大于 0")
+        cls, value: tuple[float, ...]
+    ) -> tuple[float, ...]:
+        """确保图片重试延迟均为非负数；空列表表示不重试。"""
+        if any(delay < 0 for delay in value):
+            raise ValueError("图片重试延迟不能小于 0")
         return value
 
 
 class StorageConfig(ConfigModel):
     """文件存储配置。"""
 
-    images: ImageStorageConfig = Field(default_factory=ImageStorageConfig)
+    images: ImageStorageConfig
 
 
 class DatabaseConfig(ConfigModel):
     """PostgreSQL 连接池和超时配置。"""
 
-    host: str = "localhost"
-    port: int = Field(default=5432, ge=1, le=65535)
-    name: str = "mybot"
-    user: str = "mybot"
+    host: str
+    port: int = Field(ge=1, le=65535)
+    name: str
+    user: str
     password: SecretStr | None = None
     password_file: str | None = None
-    pool_size: int = Field(default=20, ge=1)
-    max_overflow: int = Field(default=20, ge=0)
-    pool_timeout_seconds: float = Field(default=2, gt=0)
-    statement_timeout_seconds: float = Field(default=5, gt=0)
+    pool_size: int = Field(ge=1)
+    max_overflow: int = Field(ge=0)
+    pool_timeout_seconds: float = Field(gt=0)
+    statement_timeout_seconds: float = Field(ge=0)
+    persistence_retry_delays_seconds: tuple[float, ...]
+
+    @field_validator("persistence_retry_delays_seconds")
+    @classmethod
+    def validate_persistence_retry_delays(
+        cls, value: tuple[float, ...]
+    ) -> tuple[float, ...]:
+        """允许用空列表关闭重试，并拒绝负延迟。"""
+        if any(delay < 0 for delay in value):
+            raise ValueError("PostgreSQL 持久化重试延迟不能小于 0")
+        return value
 
     @field_validator("host", "name", "user")
     @classmethod
@@ -190,7 +224,7 @@ class NetworkConfig(ConfigModel):
     """项目通用网络访问配置。"""
 
     proxy: str | None = None
-    timeout_seconds: float = Field(default=15, gt=0)
+    timeout_seconds: float = Field(gt=0)
 
     @field_validator("proxy")
     @classmethod
@@ -205,12 +239,12 @@ class NetworkConfig(ConfigModel):
 class LoggingConfig(ConfigModel):
     """日志输出与归档策略配置。"""
 
-    directory: str = "logs"
-    console_level: LogLevelName = "INFO"
-    file_level: LogLevelName = "DEBUG"
-    rotation: str = "50 MB"
-    retention: str = "30 days"
-    compression: str = "gz"
+    directory: str
+    console_level: LogLevelName
+    file_level: LogLevelName
+    rotation: str
+    retention: str
+    compression: str
 
 
 class LLMProviderConfig(ConfigModel):
@@ -218,8 +252,12 @@ class LLMProviderConfig(ConfigModel):
 
     api_key: SecretStr | None = None
     base_url: str | None = None
-    max_attempts: int = Field(default=5, ge=1)
-    retry_delay_seconds: float = Field(default=0, ge=0)
+    proxy: str | None = None
+    inherit_network_proxy: bool
+    timeout_seconds: float = Field(ge=0)
+    max_attempts: int = Field(ge=1)
+    retry_delay_seconds: float = Field(ge=0)
+    retry_max_delay_seconds: float = Field(ge=0)
 
     @field_validator("api_key")
     @classmethod
@@ -238,11 +276,30 @@ class LLMProviderConfig(ConfigModel):
         normalized = value.strip().rstrip("/")
         return normalized or None
 
+    @field_validator("proxy")
+    @classmethod
+    def normalize_proxy(cls, value: str | None) -> str | None:
+        """空代理表示继承全局网络配置。"""
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_retry_delays(self) -> "LLMProviderConfig":
+        """最大退避不能小于初始退避。"""
+        if (
+            self.retry_max_delay_seconds > 0
+            and self.retry_max_delay_seconds < self.retry_delay_seconds
+        ):
+            raise ValueError("retry_max_delay_seconds 不能小于初始重试延迟")
+        return self
+
 
 class LLMServiceConfig(ConfigModel):
     """具名 LLM provider 配置。"""
 
-    providers: dict[str, LLMProviderConfig] = Field(default_factory=dict)
+    providers: dict[str, LLMProviderConfig]
 
     @field_validator("providers")
     @classmethod
@@ -260,17 +317,17 @@ class MCPServerConfig(ConfigModel):
     """单个 MCP stdio 服务配置。"""
 
     command: str
-    args: tuple[str, ...] = ()
+    args: tuple[str, ...]
     env: dict[str, str] | None = None
     cwd: str | None = None
-    disabled: bool = False
+    disabled: bool
 
 
 class MCPConfig(ConfigModel):
     """MCP 总配置。"""
 
-    enabled: bool = False
-    servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    enabled: bool
+    servers: dict[str, MCPServerConfig]
 
 
 class ModelRef(ConfigModel):
@@ -292,7 +349,7 @@ class ModelRef(ConfigModel):
 class ChatModelRef(ModelRef):
     """引用聊天模型及其图片输入能力。"""
 
-    supports_images: bool = False
+    supports_images: bool
 
 
 class AIGroupConfig(ConfigModel):
@@ -328,20 +385,89 @@ class AIVisionConfig(ConfigModel):
     model: ModelRef
     system_prompt_file: str
     user_prompt_file: str
-    max_attempts: int = Field(default=5, ge=1, le=10)
-    retry_delay_seconds: float = Field(default=0.25, gt=0, le=10)
-    retain_descriptions: bool = True
+    max_attempts: int = Field(ge=1)
+    retry_delay_seconds: float = Field(ge=0)
+    retry_max_delay_seconds: float = Field(ge=0)
+    retain_descriptions: bool
+
+    @model_validator(mode="after")
+    def validate_retry_delays(self) -> "AIVisionConfig":
+        """最大退避不能小于初始退避。"""
+        if (
+            self.retry_max_delay_seconds > 0
+            and self.retry_max_delay_seconds < self.retry_delay_seconds
+        ):
+            raise ValueError("retry_max_delay_seconds 不能小于初始重试延迟")
+        return self
 
 
 class AIImageConfig(ConfigModel):
     """AI 群聊图片读取和合并转发配置。"""
 
-    max_per_turn: int = Field(default=20, ge=1, le=20)
-    fetch_concurrency: int = Field(default=16, ge=1, le=32)
-    download_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
-    forward_tool_enabled: bool = True
-    forward_max_per_call: int = Field(default=20, ge=1, le=20)
-    forward_max_per_turn: int = Field(default=50, ge=1, le=50)
+    max_per_turn: int = Field(ge=0)
+    fetch_concurrency: int = Field(ge=1)
+    download_timeout_seconds: float = Field(gt=0)
+    max_image_bytes: int = Field(ge=0)
+    max_total_bytes_per_request: int = Field(ge=0)
+    max_width: int = Field(ge=0)
+    max_height: int = Field(ge=0)
+    allowed_mime_types: tuple[str, ...]
+    delivery_mode: ImageDeliveryMode
+    oversize_behavior: ImageOversizeBehavior
+    image_detail: ImageDetail
+    retain_images: bool
+    forward_tool_enabled: bool
+    forward_max_per_call: int = Field(ge=0)
+    forward_max_per_turn: int = Field(ge=0)
+
+    @field_validator("allowed_mime_types")
+    @classmethod
+    def normalize_allowed_mime_types(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """规范化用户声明的 MIME 类型并拒绝空项。"""
+        normalized = tuple(item.strip().lower() for item in value)
+        if any(item == "" for item in normalized):
+            raise ValueError("allowed_mime_types 不能包含空值")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("allowed_mime_types 不能包含重复值")
+        return normalized
+
+
+class AIMessageFormattingConfig(ConfigModel):
+    """模型可读消息文本化策略；0 表示不在格式化阶段截断。"""
+
+    field_text_limit: int = Field(ge=0)
+    json_text_limit: int = Field(ge=0)
+    markdown_text_limit: int = Field(ge=0)
+    forward_max_items: int = Field(ge=0)
+    forward_max_depth: int = Field(ge=-1)
+    nested_text_search_max_depth: int = Field(ge=-1)
+
+
+class AIHistoryConfig(ConfigModel):
+    """群历史工具的默认分页大小和可选单页上限。"""
+
+    default_limit: int = Field(ge=1)
+    max_per_call: int = Field(ge=0)
+    default_before_count: int = Field(ge=0)
+    default_after_count: int = Field(ge=0)
+
+
+class AIFileToolConfig(ConfigModel):
+    """群文件工具的默认返回数量和可选单次上限。"""
+
+    default_count: int = Field(ge=1)
+    max_per_call: int = Field(ge=0)
+
+
+class AITokenEstimatorConfig(ConfigModel):
+    """无 tokenizer 时使用的可调 token 估算参数。"""
+
+    request_overhead_tokens: int = Field(ge=0)
+    message_overhead_tokens: int = Field(ge=0)
+    tool_call_overhead_tokens: int = Field(ge=0)
+    image_tokens: int = Field(ge=0)
+    ascii_tokens_per_character: float = Field(ge=0, allow_inf_nan=False)
+    non_ascii_tokens_per_character: float = Field(ge=0, allow_inf_nan=False)
 
 
 class AIGroupChatConfig(ConfigModel):
@@ -349,31 +475,53 @@ class AIGroupChatConfig(ConfigModel):
 
     model: ChatModelRef
     vision: AIVisionConfig | None = None
-    images: AIImageConfig = Field(default_factory=AIImageConfig)
-    max_tool_rounds: int = Field(default=16, ge=1)
-    token_safety_factor: float = Field(default=1.05, ge=1)
-    context_compression_notice: str = "上下文有点长，我先整理一下记忆，稍等我几秒喵~"
-    max_reply_chars: int = Field(default=1000, ge=1)
-    show_reasoning: bool = False
-    retain_reasoning: bool = False
-    debug_dump_messages: bool = True
-    extra_requirements_file: str = "ai_group_chat/prompts/extra_requirements.md"
-    allow_mention_all: bool = False
-    retain_tool_results: bool = False
-    groups: tuple[AIGroupConfig, ...] = ()
+    images: AIImageConfig
+    formatting: AIMessageFormattingConfig
+    history: AIHistoryConfig
+    files: AIFileToolConfig
+    token_estimator: AITokenEstimatorConfig
+    max_tool_rounds: int = Field(ge=1)
+    token_safety_factor: float = Field(gt=0, allow_inf_nan=False)
+    context_compression_notice: str
+    forward_reply_threshold_chars: int = Field(ge=0)
+    show_reasoning: bool
+    retain_reasoning: bool
+    debug_dump_messages: bool
+    debug_dump_directory: str
+    extra_requirements_file: str
+    allow_mention_all: bool
+    tool_result_retention: ToolResultRetention
+    groups: tuple[AIGroupConfig, ...]
 
     @model_validator(mode="after")
     def validate_vision_and_groups(self) -> "AIGroupChatConfig":
         """确保视觉配置与主模型能力一致，并拒绝重复群号。"""
-        if self.model.supports_images and self.vision is not None:
-            raise ValueError("主模型支持图片时不能配置 vision")
-        if not self.model.supports_images and self.vision is None:
-            raise ValueError("主模型不支持图片时必须配置 vision")
+        delivery_mode = self.images.delivery_mode
+        oversize_behavior = self.images.oversize_behavior
+        if delivery_mode == "direct" and not self.model.supports_images:
+            raise ValueError("主模型不支持图片时 images.delivery_mode 不能为 direct")
+        if delivery_mode == "vision" and self.vision is None:
+            raise ValueError("images.delivery_mode 为 vision 时必须配置 vision")
+        if oversize_behavior == "describe":
+            if delivery_mode != "direct":
+                raise ValueError("oversize_behavior=describe 只用于 direct 模式")
+            if self.vision is None:
+                raise ValueError("oversize_behavior=describe 时必须配置 vision")
+        if (
+            self.vision is not None
+            and delivery_mode != "vision"
+            and oversize_behavior != "describe"
+        ):
+            raise ValueError("当前图片策略不会使用 vision，请删除该配置或调整图片策略")
+        if self.images.retain_images and delivery_mode != "direct":
+            raise ValueError("retain_images 只适用于 direct 模式")
         group_ids = [item.id for item in self.groups]
         if len(group_ids) != len(set(group_ids)):
             raise ValueError("AI 群聊 groups 不能包含重复群号")
         if self.extra_requirements_file.strip() == "":
             raise ValueError("extra_requirements_file 不能为空")
+        if self.debug_dump_directory.strip() == "":
+            raise ValueError("debug_dump_directory 不能为空")
         return self
 
 
@@ -386,8 +534,8 @@ def _validate_unique_ids(values: tuple[NapCatId, ...], *, label: str) -> None:
 class GroupNoticeConfig(ConfigModel):
     """群成员变动提醒插件配置。"""
 
-    groups: tuple[NapCatId, ...] = ()
-    send_avatar: bool = True
+    groups: tuple[NapCatId, ...]
+    send_avatar: bool
 
     @field_validator("groups")
     @classmethod
@@ -399,7 +547,7 @@ class GroupNoticeConfig(ConfigModel):
 class AutoUnbanConfig(ConfigModel):
     """自动解禁插件配置。"""
 
-    protected_users: tuple[NapCatId, ...] = ()
+    protected_users: tuple[NapCatId, ...]
 
     @field_validator("protected_users")
     @classmethod
@@ -413,10 +561,13 @@ class AutoUnbanConfig(ConfigModel):
 class ImageGenerateConfig(ConfigModel):
     """OpenAI Images 生图插件配置。"""
 
-    groups: tuple[NapCatId, ...] = ()
+    groups: tuple[NapCatId, ...]
     model: ModelRef
-    fetch_concurrency: int = Field(default=16, ge=1)
-    download_timeout_seconds: float = Field(default=20.0, gt=0)
+    fetch_concurrency: int = Field(ge=1)
+    download_timeout_seconds: float = Field(gt=0)
+    max_input_image_bytes: int = Field(ge=0)
+    command: str
+    help_command: str
 
     @field_validator("groups")
     @classmethod
@@ -424,23 +575,67 @@ class ImageGenerateConfig(ConfigModel):
         _validate_unique_ids(value, label="image_generate.groups")
         return value
 
+    @field_validator("command", "help_command")
+    @classmethod
+    def validate_commands(cls, value: str) -> str:
+        """拒绝空白命令。"""
+        command = value.strip()
+        if command == "":
+            raise ValueError("生图命令不能为空")
+        return command
+
+    @model_validator(mode="after")
+    def validate_distinct_commands(self) -> "ImageGenerateConfig":
+        """执行命令和帮助命令不能相同。"""
+        if self.command == self.help_command:
+            raise ValueError("command 与 help_command 不能相同")
+        return self
+
 
 class NeavoImageGenerateConfig(ConfigModel):
     """Neavo 群聊图像插件配置。"""
 
-    groups: tuple[NapCatId, ...] = ()
+    groups: tuple[NapCatId, ...]
     base_url: str
     api_token: SecretStr | None = None
-    poll_interval_seconds: float = Field(ge=2.0, le=5.0, allow_inf_nan=False)
+    poll_interval_seconds: float = Field(gt=0, allow_inf_nan=False)
     generation_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
     request_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
-    max_image_bytes: int = Field(gt=0)
+    max_prompt_chars: int = Field(ge=0)
+    max_input_image_bytes: int = Field(ge=0)
+    max_output_image_bytes: int = Field(ge=0)
+    allowed_input_mime_types: tuple[str, ...]
+    max_consecutive_poll_errors: int = Field(ge=0)
+    generate_command: str
+    describe_command: str
+
+    @field_validator("allowed_input_mime_types")
+    @classmethod
+    def normalize_allowed_input_mime_types(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """规范化可选输入 MIME 白名单；空列表表示不限制。"""
+        normalized = tuple(item.strip().lower() for item in value)
+        if any(item == "" for item in normalized):
+            raise ValueError("allowed_input_mime_types 不能包含空值")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("allowed_input_mime_types 不能包含重复值")
+        return normalized
 
     @field_validator("groups")
     @classmethod
     def validate_groups(cls, value: tuple[NapCatId, ...]) -> tuple[NapCatId, ...]:
         _validate_unique_ids(value, label="neavo_image_generate.groups")
         return value
+
+    @field_validator("generate_command", "describe_command")
+    @classmethod
+    def validate_commands(cls, value: str) -> str:
+        """拒绝空白命令。"""
+        command = value.strip()
+        if command == "":
+            raise ValueError("Neavo 命令不能为空")
+        return command
 
     @field_validator("base_url")
     @classmethod
@@ -465,9 +660,60 @@ class NeavoImageGenerateConfig(ConfigModel):
             return None
         return SecretStr(token)
 
+    @model_validator(mode="after")
+    def validate_distinct_commands(self) -> "NeavoImageGenerateConfig":
+        """两种 Neavo 操作必须使用不同命令。"""
+        if self.generate_command == self.describe_command:
+            raise ValueError("generate_command 与 describe_command 不能相同")
+        return self
 
-class EmptyPluginConfig(ConfigModel):
-    """只通过配置节是否存在控制启停的插件配置。"""
+
+class RecallBotImageConfig(ConfigModel):
+    """机器人图片撤回插件配置。"""
+
+    command: str
+    failure_detail_max_chars: int = Field(ge=0)
+
+    @field_validator("command")
+    @classmethod
+    def validate_command(cls, value: str) -> str:
+        """拒绝空白撤回命令。"""
+        command = value.strip()
+        if command == "":
+            raise ValueError("撤回命令不能为空")
+        return command
+
+
+class PluginRuntimeConfig(ConfigModel):
+    """单个插件的消费者数量与事件路由优先级。"""
+
+    consumers_count: int = Field(ge=1)
+    priority: int
+
+
+class PluginExecutionConfig(ConfigModel):
+    """需要在进程启动时应用的插件执行参数。"""
+
+    stop_timeout_seconds: float = Field(gt=0)
+    plugins: dict[str, PluginRuntimeConfig]
+
+    @field_validator("plugins")
+    @classmethod
+    def validate_plugin_ids(
+        cls, value: dict[str, PluginRuntimeConfig]
+    ) -> dict[str, PluginRuntimeConfig]:
+        """配置键必须是可按字面匹配的非空插件 ID。"""
+        for plugin_id in value:
+            if plugin_id.strip() == "" or plugin_id != plugin_id.strip():
+                raise ValueError("plugin_execution.plugins 的插件 ID 不能为空或包含首尾空格")
+        return value
+
+    def for_plugin(self, plugin_id: str) -> PluginRuntimeConfig:
+        """按稳定插件 ID 返回启动期执行参数。"""
+        try:
+            return self.plugins[plugin_id]
+        except KeyError as exc:
+            raise KeyError(f"插件没有执行配置: {plugin_id}") from exc
 
 
 class PluginsConfig(ConfigModel):
@@ -478,19 +724,20 @@ class PluginsConfig(ConfigModel):
     auto_unban: AutoUnbanConfig | None = None
     image_generate: ImageGenerateConfig | None = None
     neavo_image_generate: NeavoImageGenerateConfig | None = None
-    recall_bot_image: EmptyPluginConfig | None = None
+    recall_bot_image: RecallBotImageConfig | None = None
 
 
 class MyBotConfig(ConfigModel):
     """MyBot 唯一配置文件的完整模型。"""
 
-    app: AppConfig = Field(default_factory=AppConfig)
-    server: ServerConfig = Field(default_factory=ServerConfig)
+    app: AppConfig
+    server: ServerConfig
     napcat: NapCatConfig
-    storage: StorageConfig = Field(default_factory=StorageConfig)
-    network: NetworkConfig = Field(default_factory=NetworkConfig)
-    logging: LoggingConfig = Field(default_factory=LoggingConfig)
-    llm: LLMServiceConfig = Field(default_factory=LLMServiceConfig)
-    mcp: MCPConfig = Field(default_factory=MCPConfig)
+    storage: StorageConfig
+    network: NetworkConfig
+    logging: LoggingConfig
+    llm: LLMServiceConfig
+    mcp: MCPConfig
     database: DatabaseConfig
+    plugin_execution: PluginExecutionConfig
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)

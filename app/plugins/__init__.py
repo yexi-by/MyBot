@@ -2,7 +2,6 @@
 
 import importlib.util
 import sys
-from operator import attrgetter
 from pathlib import Path
 
 from app.database import PluginMigrationSpec
@@ -46,9 +45,6 @@ def load_all_plugins() -> None:
             message="插件模块加载成功",
             module_name=module_name,
         )
-
-    PLUGINS.sort(key=attrgetter("priority"), reverse=True)
-
 
 def discover_plugin_migrations() -> tuple[PluginMigrationSpec, ...]:
     """读取启用插件明确声明的 Alembic migration package。"""

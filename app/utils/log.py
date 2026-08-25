@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -22,17 +21,16 @@ LogLevel = Literal[
     "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"
 ]
 
-DEFAULT_LOG_DIR_NAME = "logs"
 APP_LOG_PATTERN = "{time:YYYY-MM-DD}_app.log"
 ERROR_LOG_PATTERN = "{time:YYYY-MM-DD}_error.log"
 STRUCTURED_LOG_PATTERN = "{time:YYYY-MM-DD}_structured.json"
 
-_log_dir = Path(DEFAULT_LOG_DIR_NAME)
-_console_level = os.getenv("LOG_CONSOLE_LEVEL", "INFO")
-_file_level = os.getenv("LOG_FILE_LEVEL", "DEBUG")
-_log_retention = os.getenv("LOG_RETENTION", "30 days")
-_log_rotation = os.getenv("LOG_ROTATION", "50 MB")
-_log_compression = os.getenv("LOG_COMPRESSION", "gz")
+_log_dir: Path | None = None
+_console_level: str | None = None
+_file_level: str | None = None
+_log_retention: str | None = None
+_log_rotation: str | None = None
+_log_compression: str | None = None
 _logger_configured = False
 
 CONSOLE_FORMAT = (
@@ -71,12 +69,12 @@ def _console_filter(record: "Record") -> bool:
 
 def configure_logging(
     *,
-    log_dir: str = DEFAULT_LOG_DIR_NAME,
-    console_level: str = "INFO",
-    file_level: str = "DEBUG",
-    retention: str = "30 days",
-    rotation: str = "50 MB",
-    compression: str = "gz",
+    log_dir: str,
+    console_level: str,
+    file_level: str,
+    retention: str,
+    rotation: str,
+    compression: str,
 ) -> None:
     """按配置初始化终端日志、文本文件日志和结构化日志。"""
     global _console_level
@@ -108,26 +106,34 @@ def configure_logging(
 
 
 def _ensure_logger_configured() -> None:
-    """在测试或脚本直接调用日志门面时启用默认日志配置。"""
+    """拒绝在正式日志配置建立前静默采用另一套运行参数。"""
     if _logger_configured:
         return
-    configure_logging(
-        log_dir=DEFAULT_LOG_DIR_NAME,
-        console_level=os.getenv("LOG_CONSOLE_LEVEL", "INFO"),
-        file_level=os.getenv("LOG_FILE_LEVEL", "DEBUG"),
-        retention=os.getenv("LOG_RETENTION", "30 days"),
-        rotation=os.getenv("LOG_ROTATION", "50 MB"),
-        compression=os.getenv("LOG_COMPRESSION", "gz"),
-    )
+    raise RuntimeError("日志系统尚未按 logging 配置初始化")
 
 
 def _configure_logger() -> "Logger":
     """配置终端、文本文件和结构化文件三类日志 sink。"""
+    log_dir = _log_dir
+    console_level = _console_level
+    file_level = _file_level
+    retention = _log_retention
+    rotation = _log_rotation
+    compression = _log_compression
+    if (
+        log_dir is None
+        or console_level is None
+        or file_level is None
+        or retention is None
+        or rotation is None
+        or compression is None
+    ):
+        raise RuntimeError("日志配置字段尚未完整写入")
     _logger.remove()
     _ = _logger.add(
         sys.stderr,
         format=CONSOLE_FORMAT,
-        level=_console_level,
+        level=console_level,
         colorize=True,
         enqueue=True,
         backtrace=False,
@@ -135,35 +141,35 @@ def _configure_logger() -> "Logger":
         filter=_console_filter,
     )
     _ = _logger.add(
-        _log_dir / APP_LOG_PATTERN,
+        log_dir / APP_LOG_PATTERN,
         format=FILE_FORMAT,
-        level=_file_level,
-        rotation=_log_rotation,
-        retention=_log_retention,
-        compression=_log_compression,
+        level=file_level,
+        rotation=rotation,
+        retention=retention,
+        compression=compression,
         encoding="utf-8",
         enqueue=True,
         backtrace=True,
         diagnose=False,
     )
     _ = _logger.add(
-        _log_dir / ERROR_LOG_PATTERN,
+        log_dir / ERROR_LOG_PATTERN,
         format=FILE_FORMAT,
         level="ERROR",
-        rotation=_log_rotation,
-        retention=_log_retention,
-        compression=_log_compression,
+        rotation=rotation,
+        retention=retention,
+        compression=compression,
         encoding="utf-8",
         enqueue=True,
         backtrace=True,
         diagnose=True,
     )
     _ = _logger.add(
-        _log_dir / STRUCTURED_LOG_PATTERN,
-        level=_file_level,
-        rotation=_log_rotation,
-        retention=_log_retention,
-        compression=_log_compression,
+        log_dir / STRUCTURED_LOG_PATTERN,
+        level=file_level,
+        rotation=rotation,
+        retention=retention,
+        compression=compression,
         encoding="utf-8",
         enqueue=True,
         serialize=True,
@@ -223,6 +229,9 @@ def log_exception(
 
 def log_run_start(*, message: str, **fields: JsonValue) -> None:
     """记录一次应用运行开始事件。"""
+    _ensure_logger_configured()
+    if _log_dir is None or _console_level is None or _file_level is None:
+        raise RuntimeError("日志系统状态不完整")
     log_event(
         level="INFO",
         event="app.run.start",
@@ -247,7 +256,6 @@ def log_run_end(*, message: str, **fields: JsonValue) -> None:
 
 
 __all__ = [
-    "DEFAULT_LOG_DIR_NAME",
     "LogLevel",
     "configure_logging",
     "format_log_fields",

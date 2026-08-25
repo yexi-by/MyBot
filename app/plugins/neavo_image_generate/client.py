@@ -16,14 +16,6 @@ from app.utils.file_type import detect_mime_type
 type NeavoRequestStage = Literal["submit", "poll", "validate"]
 type SleepFunction = Callable[[float], Awaitable[None]]
 
-MAX_CONSECUTIVE_POLL_RETRIES = 3
-MAX_INSTRUCTION_LENGTH = 4096
-MAX_INPUT_IMAGE_BYTES = 10 * 1024 * 1024
-SUPPORTED_INPUT_MIME_TYPES = frozenset(
-    {"image/jpeg", "image/png", "image/webp"}
-)
-
-
 class NeavoImageError(RuntimeError):
     """Neavo 图像任务的可预期失败。"""
 
@@ -138,9 +130,12 @@ class NeavoImageClient:
 
     async def submit_text_to_image(self, *, prompt: str) -> UUID:
         """提交文生图任务；网络状态不明时不重试 POST。"""
-        if not 1 <= len(prompt) <= MAX_INSTRUCTION_LENGTH:
+        if not prompt or (
+            self._config.max_prompt_chars > 0
+            and len(prompt) > self._config.max_prompt_chars
+        ):
             raise NeavoProtocolError(
-                f"Neavo 生图指令长度必须为 1～{MAX_INSTRUCTION_LENGTH} 个字符",
+                "Neavo 生图指令不能为空，且不能超过配置的字符限制",
                 stage="submit",
             )
         return await self._submit_job(
@@ -244,7 +239,7 @@ class NeavoImageClient:
         job_id: UUID,
         request_result: Callable[[], Awaitable[T | None]],
     ) -> T:
-        """按固定间隔轮询；GET 瞬断连续超过三次后失败。"""
+        """按配置间隔轮询，并应用显式的连续网络错误上限。"""
         consecutive_network_errors = 0
         while True:
             await self._sleep(self._config.poll_interval_seconds)
@@ -252,7 +247,8 @@ class NeavoImageClient:
                 result = await request_result()
             except httpx.RequestError as exc:
                 consecutive_network_errors += 1
-                if consecutive_network_errors <= MAX_CONSECUTIVE_POLL_RETRIES:
+                configured_limit = self._config.max_consecutive_poll_errors
+                if configured_limit == 0 or consecutive_network_errors <= configured_limit:
                     continue
                 raise NeavoTransportError(
                     "轮询 Neavo 图像任务时连续网络请求失败",
@@ -354,7 +350,8 @@ class NeavoImageClient:
         content_length = self._parse_content_length(response=response)
         if (
             content_length is not None
-            and content_length > self._config.max_image_bytes
+            and self._config.max_output_image_bytes > 0
+            and content_length > self._config.max_output_image_bytes
         ):
             raise NeavoProtocolError(
                 "Neavo 返回的图片超过大小限制",
@@ -366,7 +363,10 @@ class NeavoImageClient:
         image_buffer = bytearray()
         async for chunk in response.aiter_bytes():
             image_buffer.extend(chunk)
-            if len(image_buffer) > self._config.max_image_bytes:
+            if (
+                self._config.max_output_image_bytes > 0
+                and len(image_buffer) > self._config.max_output_image_bytes
+            ):
                 raise NeavoProtocolError(
                     "Neavo 返回的图片超过大小限制",
                     stage="validate",
@@ -405,11 +405,14 @@ class NeavoImageClient:
         image_bytes: bytes,
         mime_type: str,
     ) -> str:
-        """校验反推图片类型、签名与 10 MiB 固定上限。"""
+        """校验反推图片类型、签名与用户配置的大小限制。"""
         normalized_mime_type = mime_type.partition(";")[0].strip().lower()
-        if normalized_mime_type not in SUPPORTED_INPUT_MIME_TYPES:
+        if (
+            self._config.allowed_input_mime_types
+            and normalized_mime_type not in self._config.allowed_input_mime_types
+        ):
             raise NeavoProtocolError(
-                "Neavo 图片反推只支持 JPEG、PNG 或 WebP",
+                f"Neavo 图片反推不允许输入 {normalized_mime_type}",
                 stage="validate",
             )
         if not image_bytes:
@@ -417,9 +420,13 @@ class NeavoImageClient:
                 "Neavo 图片反推输入不能为空",
                 stage="validate",
             )
-        if len(image_bytes) > MAX_INPUT_IMAGE_BYTES:
+        if (
+            self._config.max_input_image_bytes > 0
+            and len(image_bytes) > self._config.max_input_image_bytes
+        ):
             raise NeavoProtocolError(
-                "Neavo 图片反推输入超过 10 MiB",
+                "Neavo 图片反推输入超过配置上限 "
+                f"{self._config.max_input_image_bytes} 字节",
                 stage="validate",
             )
         try:
@@ -456,10 +463,6 @@ class NeavoImageClient:
 
 
 __all__ = [
-    "MAX_CONSECUTIVE_POLL_RETRIES",
-    "MAX_INPUT_IMAGE_BYTES",
-    "MAX_INSTRUCTION_LENGTH",
-    "SUPPORTED_INPUT_MIME_TYPES",
     "NeavoCaptionResult",
     "NeavoGenerationTimeoutError",
     "NeavoImageClient",

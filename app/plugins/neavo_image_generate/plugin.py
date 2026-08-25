@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import ClassVar, Final, Literal, override
+from typing import ClassVar, Literal, override
 
 from app.config import NeavoImageGenerateConfig
 from app.database import GroupDataScope
@@ -25,19 +25,10 @@ from app.utils.file_type import detect_mime_type
 from app.utils.log import log_event
 
 from .client import (
-    MAX_INPUT_IMAGE_BYTES,
-    MAX_INSTRUCTION_LENGTH,
-    SUPPORTED_INPUT_MIME_TYPES,
     NeavoGenerationTimeoutError,
     NeavoImageClient,
     NeavoImageError,
 )
-
-COMMAND_TOKEN: Final[str] = "#生图"
-REVERSE_COMMAND_TOKEN: Final[str] = "#反推"
-MAX_PROMPT_LENGTH: Final[int] = MAX_INSTRUCTION_LENGTH
-CONSUMERS_COUNT: Final[int] = 5
-PRIORITY: Final[int] = 100
 
 type NeavoOperation = Literal["text_to_image", "image_to_text"]
 
@@ -80,25 +71,30 @@ def _extract_plain_text(msg: GroupMessage) -> str:
     ).strip()
 
 
-def extract_prompt(msg: GroupMessage) -> str | None:
+def extract_prompt(msg: GroupMessage, *, command_token: str) -> str | None:
     """提取独立 ``#生图`` 令牌后的提示词。"""
     text = _extract_plain_text(msg)
-    if text == COMMAND_TOKEN:
+    if text == command_token:
         return ""
-    if not text.startswith(COMMAND_TOKEN):
+    if not text.startswith(command_token):
         return None
-    remainder = text[len(COMMAND_TOKEN) :]
+    remainder = text[len(command_token) :]
     if not remainder or not remainder[0].isspace():
         return None
     return remainder.strip()
 
 
-def extract_command(msg: GroupMessage) -> NeavoCommand | None:
+def extract_command(
+    msg: GroupMessage,
+    *,
+    generate_command: str,
+    describe_command: str,
+) -> NeavoCommand | None:
     """识别文生图或图片反推命令，近似文本不会触发。"""
-    prompt = extract_prompt(msg)
+    prompt = extract_prompt(msg, command_token=generate_command)
     if prompt is not None:
         return NeavoCommand(operation="text_to_image", prompt=prompt)
-    if _extract_plain_text(msg) == REVERSE_COMMAND_TOKEN:
+    if _extract_plain_text(msg) == describe_command:
         return NeavoCommand(operation="image_to_text")
     return None
 
@@ -108,9 +104,6 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
 
     plugin_id: ClassVar[str] = "neavo_image_generate"
     name: ClassVar[str] = "neavo群聊生图插件"
-    consumers_count: ClassVar[int] = CONSUMERS_COUNT
-    priority: ClassVar[int] = PRIORITY
-
     @override
     def setup(self) -> None:
         """初始化延迟构造的配置运行对象。"""
@@ -136,9 +129,9 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
                 image_reader=NapCatImageReader(
                     bot=self.context.bot,
                     http_client=self.context.direct_httpx,
-                    fetch_concurrency=1,
+                    fetch_concurrency=None,
                     download_timeout_seconds=config.request_timeout_seconds,
-                    max_image_bytes=MAX_INPUT_IMAGE_BYTES,
+                    max_image_bytes=config.max_input_image_bytes or None,
                 ),
             )
         )
@@ -153,7 +146,11 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
         if (
             runtime is None
             or msg.group_id not in runtime.groups
-            or extract_command(msg) is None
+            or extract_command(
+                msg,
+                generate_command=runtime.config.generate_command,
+                describe_command=runtime.config.describe_command,
+            ) is None
         ):
             return False
         return await super().add_to_queue(msg)
@@ -164,7 +161,11 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
         runtime = self._current_runtime()
         if runtime is None or msg.group_id not in runtime.groups:
             return False
-        command = extract_command(msg)
+        command = extract_command(
+            msg,
+            generate_command=runtime.config.generate_command,
+            describe_command=runtime.config.describe_command,
+        )
         if command is None:
             return False
         if command.operation == "text_to_image":
@@ -183,14 +184,20 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
             await self._send_text(
                 group_id=msg.group_id,
                 user_id=msg.user_id,
-                text=" 请在 #生图 后填写图片描述。",
+                text=f" 请在 {runtime.config.generate_command} 后填写图片描述。",
             )
             return True
-        if len(prompt) > MAX_PROMPT_LENGTH:
+        if (
+            runtime.config.max_prompt_chars > 0
+            and len(prompt) > runtime.config.max_prompt_chars
+        ):
             await self._send_text(
                 group_id=msg.group_id,
                 user_id=msg.user_id,
-                text=f" 图片描述不能超过 {MAX_PROMPT_LENGTH} 个字符。",
+                text=(
+                    " 图片描述不能超过 "
+                    f"{runtime.config.max_prompt_chars} 个字符。"
+                ),
             )
             return True
 
@@ -251,7 +258,10 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
             await self._send_text(
                 group_id=msg.group_id,
                 user_id=msg.user_id,
-                text=" 请携带一张图片，或回复一条含图片的消息后发送 #反推。",
+                text=(
+                    " 请携带一张图片，或回复一条含图片的消息后发送 "
+                    f"{runtime.config.describe_command}。"
+                ),
             )
             return True
         try:
@@ -259,6 +269,7 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
                 segment=image_segment,
                 message_id=msg.message_id,
                 image_reader=runtime.image_reader,
+                config=runtime.config,
             )
         except NeavoInputImageError as exc:
             log_event(
@@ -279,7 +290,10 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
             await self._send_text(
                 group_id=msg.group_id,
                 user_id=msg.user_id,
-                text=" 读取图片失败，请重新发送 JPEG、PNG 或 WebP 图片。",
+                text=(
+                    " 读取图片失败，请按 allowed_input_mime_types 配置"
+                    "重新发送图片。"
+                ),
             )
             return True
 
@@ -372,6 +386,7 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
         segment: Image,
         message_id: NapCatId,
         image_reader: NapCatImageReader,
+        config: NeavoImageGenerateConfig,
     ) -> LoadedInputImage:
         """按本地路径、原始 URL、NapCat 刷新的顺序读取输入图片。"""
         data = segment.data
@@ -391,6 +406,7 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
         loaded = self._validate_loaded_image(
             image_bytes=read_result.image_bytes,
             source=read_result.source,
+            config=config,
         )
 
         log_event(
@@ -414,18 +430,27 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
         *,
         image_bytes: bytes,
         source: ImageReadSource,
+        config: NeavoImageGenerateConfig,
     ) -> LoadedInputImage:
         """根据文件签名校验反推图片类型。"""
         if not image_bytes:
             raise NeavoInputImageError("图片内容为空")
-        if len(image_bytes) > MAX_INPUT_IMAGE_BYTES:
-            raise NeavoInputImageError("图片超过 10 MiB")
+        if (
+            config.max_input_image_bytes > 0
+            and len(image_bytes) > config.max_input_image_bytes
+        ):
+            raise NeavoInputImageError(
+                f"图片超过配置上限 {config.max_input_image_bytes} 字节"
+            )
         try:
             mime_type = detect_mime_type(image_bytes)
         except ValueError as exc:
             raise NeavoInputImageError("无法识别图片格式") from exc
-        if mime_type not in SUPPORTED_INPUT_MIME_TYPES:
-            raise NeavoInputImageError("反推只支持 JPEG、PNG 或 WebP")
+        if (
+            config.allowed_input_mime_types
+            and mime_type not in config.allowed_input_mime_types
+        ):
+            raise NeavoInputImageError(f"反推不允许输入 {mime_type}")
         return LoadedInputImage(
             image_bytes=image_bytes,
             mime_type=mime_type,
@@ -507,13 +532,8 @@ class NeavoImageGeneratePlugin(BasePlugin[GroupMessage]):
 
 
 __all__ = [
-    "COMMAND_TOKEN",
-    "CONSUMERS_COUNT",
-    "MAX_PROMPT_LENGTH",
     "NeavoCommand",
     "NeavoImageGeneratePlugin",
-    "PRIORITY",
-    "REVERSE_COMMAND_TOKEN",
     "extract_command",
     "extract_prompt",
 ]

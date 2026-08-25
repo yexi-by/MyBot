@@ -10,7 +10,6 @@ from typing import cast
 import httpx
 
 from app.config import (
-    AIGroupChatConfig,
     AIGroupConfig,
     ConfigManager,
     MaterializedAIGroupChatConfig,
@@ -38,6 +37,7 @@ from app.services import (
     ConversationContextStore,
 )
 from app.services.llm.schemas import LLMResponse, LLMToolChoice, LLMToolDefinition
+from tests.config_helpers import build_ai_group_chat_config
 
 
 class SmokeBot:
@@ -125,8 +125,9 @@ class SmokeLLM:
         model_name: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
-        _ = (max_attempts, retry_delay_seconds)
+        _ = (max_attempts, retry_delay_seconds, retry_max_delay_seconds)
         self.vision_models.append((provider, model_name))
         if [message.role for message in messages] != ["system", "user"]:
             raise AssertionError("视觉请求不应携带群聊历史")
@@ -251,6 +252,8 @@ def build_snapshot(
     model_name: str = "main-model",
     include_second_group: bool = False,
     debug_dump_messages: bool = False,
+    supports_images: bool = False,
+    retain_images: bool = False,
 ) -> PluginConfigSnapshot:
     """构造已经读取提示词文件的 AI 配置快照。"""
     group = AIGroupConfig(
@@ -267,23 +270,31 @@ def build_snapshot(
                 max_context_tokens=max_context_tokens,
             )
         )
-    source = AIGroupChatConfig.model_validate(
-        {
-            "model": {
-            "provider": "main-vendor",
-            "name": model_name,
-            "supports_images": False,
-        },
-            "vision": {
-            "model": {"provider": "vision-vendor", "name": "vision-model"},
-            "system_prompt_file": "vision/system.md",
-            "user_prompt_file": "vision/user.md",
-            "retain_descriptions": True,
-        },
+    source = build_ai_group_chat_config(
+        supports_images=supports_images,
+        provider="main-vendor",
+        model_name=model_name,
+        overrides={
+            **(
+                {
+                    "vision": {
+                        "model": {
+                            "provider": "vision-vendor",
+                            "name": "vision-model",
+                        },
+                        "system_prompt_file": "vision/system.md",
+                        "user_prompt_file": "vision/user.md",
+                        "retain_descriptions": True,
+                    }
+                }
+                if not supports_images
+                else {}
+            ),
+            "images": {"retain_images": retain_images},
             "show_reasoning": False,
             "debug_dump_messages": debug_dump_messages,
             "groups": group_configs,
-        }
+        },
     )
     materialized = MaterializedAIGroupChatConfig(
         source=source,
@@ -294,8 +305,12 @@ def build_snapshot(
             )
             for group_config in group_configs
         ),
-        vision_system_prompt="只描述可见事实。",
-        vision_user_prompt="结合当前问题描述图片。",
+        vision_system_prompt=(
+            "只描述可见事实。" if source.vision is not None else None
+        ),
+        vision_user_prompt=(
+            "结合当前问题描述图片。" if source.vision is not None else None
+        ),
     )
     return PluginConfigSnapshot(
         revision=revision,
@@ -352,6 +367,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         plugin = AIGroupChatPlugin(
             context=cast(Context, smoke_context),
             plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         try:
             handled = await plugin.run(build_event())
@@ -375,6 +392,46 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("图片中写着“测试成功”", request_text)
         self.assertEqual(smoke_context.bot.sent_texts, ["图片里写着测试成功。"])
 
+    async def test_direct_multimodal_image_can_remain_in_persistent_context(
+        self,
+    ) -> None:
+        """direct + retain_images 把原始字节交给主模型并原样提交长期上下文。"""
+        smoke_context = SmokeContext()
+        plugin = AIGroupChatPlugin(
+            context=cast(Context, smoke_context),
+            plugin_config=ai_plugin_config(
+                FakeConfigManager(
+                    build_snapshot(supports_images=True, retain_images=True)
+                )
+            ),
+            consumers_count=1,
+            stop_timeout_seconds=1,
+        )
+        try:
+            handled = await plugin.run(build_event())
+        finally:
+            await plugin.stop_consumers()
+
+        self.assertTrue(handled)
+        self.assertEqual(smoke_context.llm.vision_models, [])
+        direct_message = next(
+            message
+            for message in smoke_context.llm.formal_messages[0]
+            if message.image
+        )
+        self.assertEqual(direct_message.image, [b"smoke-image"])
+        committed = smoke_context.conversation_contexts.get(
+            key=conversation_key()
+        )
+        self.assertIsNotNone(committed)
+        assert committed is not None
+        self.assertTrue(
+            any(
+                message.image == [b"smoke-image"]
+                for message in committed.messages_lst
+            )
+        )
+
     async def test_same_group_requests_use_isolated_context_and_commit_by_completion(
         self,
     ) -> None:
@@ -391,6 +448,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
             plugin_config=ai_plugin_config(
                 FakeConfigManager(build_snapshot(debug_dump_messages=True))
             ),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         dump_directory = tempfile.TemporaryDirectory()
         self.addCleanup(dump_directory.cleanup)
@@ -489,6 +548,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
             plugin_config=ai_plugin_config(
                 FakeConfigManager(build_snapshot(include_second_group=True))
             ),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         first = asyncio.create_task(plugin.run(build_event("30005")))
         second = asyncio.create_task(
@@ -516,6 +577,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         plugin = AIGroupChatPlugin(
             context=cast(Context, smoke_context),
             plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         key = conversation_key()
         runtime = plugin._current_runtime()  # pyright: ignore[reportPrivateUsage]
@@ -604,6 +667,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         plugin = AIGroupChatPlugin(
             context=cast(Context, SmokeContext()),
             plugin_config=ai_plugin_config(manager),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         try:
             first_runtime = plugin._current_runtime()  # pyright: ignore[reportPrivateUsage]
@@ -662,6 +727,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         plugin = AIGroupChatPlugin(
             context=cast(Context, smoke_context),
             plugin_config=ai_plugin_config(manager),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         first = asyncio.create_task(plugin.run(build_event("30003")))
         try:
@@ -698,6 +765,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         first_plugin = AIGroupChatPlugin(
             context=cast(Context, first_context),
             plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         try:
             self.assertTrue(await first_plugin.run(build_event("30007")))
@@ -708,6 +777,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         second_plugin = AIGroupChatPlugin(
             context=cast(Context, second_context),
             plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         try:
             self.assertTrue(await second_plugin.run(build_event("30008")))
@@ -732,6 +803,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         first_plugin = AIGroupChatPlugin(
             context=cast(Context, first_context),
             plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         try:
             self.assertTrue(
@@ -746,6 +819,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         second_plugin = AIGroupChatPlugin(
             context=cast(Context, second_context),
             plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         try:
             self.assertTrue(

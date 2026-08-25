@@ -107,6 +107,9 @@ class FakeMessageClient(MessageMixin):
         ]
         self.send_max_attempts = 3
         self.send_retry_delay_seconds = 0
+        self.send_retry_max_delay_seconds = 10
+        self.response_summary_max_chars = 500
+        self.persistence_retry_delays_seconds = (0.25,)
         self.timeout = 1
 
     @override

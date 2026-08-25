@@ -5,9 +5,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.core.server import EventPersistenceError, NapCatServer
+from app.config import MyBotConfig
 from app.database import GroupDataScope, PostgreSQLMessageRepository
 from app.models import GroupMessage, GroupRecallNoticeEvent, Sender, Text
 
@@ -124,7 +126,16 @@ def _recall_event() -> GroupRecallNoticeEvent:
 
 def _server() -> PersistenceHarness:
     """创建只用于测试无状态持久化方法的实例。"""
-    return object.__new__(PersistenceHarness)
+    server = object.__new__(PersistenceHarness)
+    server.config = cast(
+        MyBotConfig,
+        SimpleNamespace(
+            database=SimpleNamespace(
+                persistence_retry_delays_seconds=(0.25,)
+            )
+        ),
+    )
+    return server
 
 
 def _repository(fake: FakeMessageRepository) -> PostgreSQLMessageRepository:

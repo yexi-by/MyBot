@@ -72,10 +72,13 @@ class OpenAIService(LLMProvider):
                     mime_type = detect_mime_type(image_bytes)
                     image_data = base64.b64encode(image_bytes).decode("utf-8")
                     base64_image = f"data:{mime_type};base64,{image_data}"
+                    image_url: dict[str, object] = {"url": base64_image}
+                    if msg.image_detail is not None:
+                        image_url["detail"] = msg.image_detail
                     content_items.append(
                         {
                             "type": "image_url",
-                            "image_url": {"url": base64_image, "detail": "auto"},
+                            "image_url": image_url,
                         }
                     )
             raw_message: dict[str, object] = {

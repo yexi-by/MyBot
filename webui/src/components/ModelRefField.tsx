@@ -9,9 +9,14 @@ interface ModelRefFieldProps {
   path: string;
   /** 是否展示 supports_images 开关（ChatModelRef）。 */
   withSupportsImages?: boolean;
+  onSupportsImagesChange?: (checked: boolean) => void;
 }
 
-export function ModelRefField({ path, withSupportsImages }: ModelRefFieldProps) {
+export function ModelRefField({
+  path,
+  withSupportsImages,
+  onSupportsImagesChange,
+}: ModelRefFieldProps) {
   const { watch } = useFormContext<MyBotConfigData>();
   const providerIds = Object.keys(watch("llm.providers") ?? {});
   return (
@@ -32,7 +37,8 @@ export function ModelRefField({ path, withSupportsImages }: ModelRefFieldProps) 
         <SwitchField
           path={`${path}.supports_images`}
           label="支持图片输入"
-          description="开启后不再使用视觉描述工具；注意与视觉模型配置互斥"
+          description="只声明模型能力；实际使用 direct 还是 vision 由图片交付方式决定"
+          onCheckedChange={onSupportsImagesChange}
         />
       ) : null}
     </>

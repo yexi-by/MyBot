@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import ClassVar, Final, override
+from typing import ClassVar, override
 
 from app.config import ImageGenerateConfig, ModelRef
 from app.database import GroupDataScope, StoredGroupMessage
@@ -18,20 +18,6 @@ from app.plugins.base import BasePlugin
 from app.services import ChatMessage, NapCatImageReader, NapCatImageResource
 from app.utils.log import log_event, log_exception
 
-TEXT_IMAGE_TOKEN: Final[str] = "/生图"
-HELP_TOKEN: Final[str] = "/help生图"
-HELP_TEXT: Final[str] = """生图插件使用指南
-
-文生图:
-发送 /生图 图片描述
-
-图生图:
-发送图片并附带 /生图 修改要求
-也可以回复一条包含图片的消息，再发送 /生图 修改要求
-
-只带文字时走文生图；当前消息或引用消息里包含图片时走图生图。"""
-CONSUMERS_COUNT: Final[int] = 5
-PRIORITY: Final[int] = 40
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,9 +34,6 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
 
     plugin_id: ClassVar[str] = "image_generate"
     name: ClassVar[str] = "生图插件"
-    consumers_count: ClassVar[int] = CONSUMERS_COUNT
-    priority: ClassVar[int] = PRIORITY
-
     @override
     def setup(self) -> None:
         """初始化延迟构造的配置运行对象。"""
@@ -74,6 +57,7 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
                     http_client=self.context.direct_httpx,
                     fetch_concurrency=config.fetch_concurrency,
                     download_timeout_seconds=config.download_timeout_seconds,
+                    max_image_bytes=config.max_input_image_bytes or None,
                 ),
             )
         )
@@ -88,21 +72,21 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
         if runtime is None or msg.group_id not in runtime.groups:
             return False
         text = self._extract_plain_text(msg=msg)
-        if text == HELP_TOKEN:
+        if text == runtime.config.help_command:
             _ = await self.context.bot.send_msg(
                 group_id=msg.group_id,
                 at=msg.user_id,
-                text=HELP_TEXT,
+                text=self._build_help_text(config=runtime.config),
             )
             return True
-        prompt = self._extract_prompt(text=text)
+        prompt = self._extract_prompt(text=text, command=runtime.config.command)
         if prompt is None:
             return False
         if prompt == "":
             _ = await self.context.bot.send_msg(
                 group_id=msg.group_id,
                 at=msg.user_id,
-                text="请在 /生图 后填写图片描述或修改要求。",
+                text=f"请在 {runtime.config.command} 后填写图片描述或修改要求。",
             )
             return True
         try:
@@ -142,11 +126,24 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
         ]
         return "".join(text_parts).strip()
 
-    def _extract_prompt(self, *, text: str) -> str | None:
-        """从文本中提取 /生图 后的提示词。"""
-        if not text.startswith(TEXT_IMAGE_TOKEN):
+    def _extract_prompt(self, *, text: str, command: str) -> str | None:
+        """从配置命令后的文本中提取提示词。"""
+        if not text.startswith(command):
             return None
-        return text.removeprefix(TEXT_IMAGE_TOKEN).strip()
+        return text.removeprefix(command).strip()
+
+    def _build_help_text(self, *, config: ImageGenerateConfig) -> str:
+        """按当前命令配置生成帮助文本。"""
+        return (
+            "生图插件使用指南\n\n"
+            "文生图:\n"
+            f"发送 {config.command} 图片描述\n\n"
+            "图生图:\n"
+            f"发送图片并附带 {config.command} 修改要求\n"
+            f"也可以回复一条包含图片的消息，再发送 {config.command} 修改要求\n\n"
+            "只带文字时走文生图；当前消息或引用消息里包含图片时走图生图。\n"
+            f"再次查看本说明请发送 {config.help_command}。"
+        )
 
     async def _collect_input_images(
         self, *, msg: GroupMessage, image_reader: NapCatImageReader

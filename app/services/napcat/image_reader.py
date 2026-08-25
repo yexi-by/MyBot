@@ -66,12 +66,12 @@ class NapCatImageReader:
         *,
         bot: NapCatImageBot,
         http_client: httpx.AsyncClient | None,
-        fetch_concurrency: int,
+        fetch_concurrency: int | None,
         download_timeout_seconds: float,
-        max_image_bytes: int | None = None,
+        max_image_bytes: int | None,
     ) -> None:
-        """保存读取图片所需依赖和并发边界。"""
-        if fetch_concurrency < 1:
+        """保存读取图片所需依赖；单图读取不需要批量并发配置。"""
+        if fetch_concurrency is not None and fetch_concurrency < 1:
             raise ValueError("图片读取并发数必须大于等于 1")
         if download_timeout_seconds <= 0:
             raise ValueError("图片下载超时必须大于 0")
@@ -79,7 +79,7 @@ class NapCatImageReader:
             raise ValueError("图片大小上限必须大于等于 1")
         self.bot: NapCatImageBot = bot
         self.http_client: httpx.AsyncClient | None = http_client
-        self.fetch_concurrency: int = fetch_concurrency
+        self.fetch_concurrency: int | None = fetch_concurrency
         self.download_timeout_seconds: float = download_timeout_seconds
         self.max_image_bytes: int | None = max_image_bytes
 
@@ -87,6 +87,8 @@ class NapCatImageReader:
         self, *, resources: list[NapCatImageResource]
     ) -> list[NapCatImageReadResult]:
         """并发读取图片并保持输入顺序。"""
+        if self.fetch_concurrency is None:
+            raise RuntimeError("批量读取图片时必须显式配置 fetch_concurrency")
         semaphore = asyncio.Semaphore(self.fetch_concurrency)
 
         async def read_one(resource: NapCatImageResource) -> NapCatImageReadResult:

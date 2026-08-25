@@ -27,7 +27,6 @@ from app.utils.retry_utils import create_retry_manager
 
 from .base import BaseMixin
 
-_PERSISTENCE_RETRY_DELAY_SECONDS = 0.25
 
 
 class NapCatSendMessageError(RuntimeError):
@@ -39,7 +38,9 @@ class NapCatSendMessageError(RuntimeError):
         self.response: Response | None = response
 
     @classmethod
-    def from_response(cls, *, response: Response) -> "NapCatSendMessageError":
+    def from_response(
+        cls, *, response: Response, summary_max_chars: int
+    ) -> "NapCatSendMessageError":
         """根据 NapCat 失败响应构造异常。"""
         error_class: type[NapCatSendMessageError]
         prefix: str
@@ -50,7 +51,11 @@ class NapCatSendMessageError(RuntimeError):
             error_class = NapCatRetryableSendMessageError
             prefix = "NapCat 发送消息失败"
         return error_class(
-            _build_response_error_message(prefix=prefix, response=response),
+            _build_response_error_message(
+                prefix=prefix,
+                response=response,
+                summary_max_chars=summary_max_chars,
+            ),
             response=response,
         )
 
@@ -71,7 +76,9 @@ class NapCatSendStatusUncertainError(NapCatSendMessageError):
     """NapCat send_msg 是否已实际发出无法确认，禁止自动重试。"""
 
 
-def _build_response_error_message(*, prefix: str, response: Response) -> str:
+def _build_response_error_message(
+    *, prefix: str, response: Response, summary_max_chars: int
+) -> str:
     """构造包含 NapCat 响应摘要的发送错误文案。"""
     return (
         f"{prefix}: "
@@ -79,7 +86,7 @@ def _build_response_error_message(*, prefix: str, response: Response) -> str:
         f"retcode={response.retcode} "
         f"message={response.message!r} "
         f"wording={response.wording!r} "
-        f"data={_summarize_response_data(response.data)}"
+        f"data={_summarize_response_data(response.data, max_chars=summary_max_chars)}"
     )
 
 
@@ -91,13 +98,12 @@ def _is_uncertain_send_response(*, response: Response) -> bool:
     return "timeout" in response_text and "sendmsg" in response_text
 
 
-def _summarize_response_data(data: JsonValue) -> str:
+def _summarize_response_data(data: JsonValue, *, max_chars: int) -> str:
     """把 NapCat 响应 data 压缩成适合日志与异常的短文本。"""
     summary = repr(data)
-    max_length = 500
-    if len(summary) <= max_length:
+    if max_chars == 0 or len(summary) <= max_chars:
         return summary
-    return f"{summary[:max_length]}..."
+    return f"{summary[:max_chars]}..."
 
 
 class MessageMixin(BaseMixin):
@@ -236,6 +242,7 @@ class MessageMixin(BaseMixin):
             error_types=(NapCatRetryableSendMessageError,),
             max_attempts=self.send_max_attempts,
             retry_delay_seconds=self.send_retry_delay_seconds,
+            retry_max_delay_seconds=self.send_retry_max_delay_seconds,
         )
         async for attempt in retrier:
             with attempt:
@@ -244,7 +251,10 @@ class MessageMixin(BaseMixin):
                 except TimeoutError as exc:
                     raise NapCatSendMessageError.from_timeout(error=exc) from exc
                 if response.status != "ok" or response.retcode != 0:
-                    raise NapCatSendMessageError.from_response(response=response)
+                    raise NapCatSendMessageError.from_response(
+                        response=response,
+                        summary_max_chars=self.response_summary_max_chars,
+                    )
                 return response
         raise RuntimeError("NapCat send_msg 重试流程异常结束")
 
@@ -282,7 +292,8 @@ class MessageMixin(BaseMixin):
             bot_id=str(self.boot_id),
             group_id=str(group_id),
         )
-        for attempt_number in (1, 2):
+        retry_delays = self.persistence_retry_delays_seconds
+        for attempt_index in range(len(retry_delays) + 1):
             try:
                 persisted_segments = await self._archive_inline_images(
                     message_segment=message_segment
@@ -294,18 +305,21 @@ class MessageMixin(BaseMixin):
                 )
                 return
             except Exception as exc:
-                if attempt_number == 1:
+                if attempt_index < len(retry_delays):
+                    retry_delay = retry_delays[attempt_index]
                     log_event(
                         level="WARNING",
                         event="napcat.sent_message.persistence_retry",
                         category="napcat_api",
-                        message="群消息已发送，但 PostgreSQL 记录失败，250ms 后重试一次",
+                        message="群消息已发送，但 PostgreSQL 记录失败，等待后重试",
                         group_id=group_id,
                         message_id=message_id,
                         error_type=type(exc).__name__,
                         error=str(exc),
+                        retry_delay_seconds=retry_delay,
+                        retry_number=attempt_index + 1,
                     )
-                    await asyncio.sleep(_PERSISTENCE_RETRY_DELAY_SECONDS)
+                    await asyncio.sleep(retry_delay)
                     continue
                 log_exception(
                     event="napcat.sent_message.persistence_failed",

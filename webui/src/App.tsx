@@ -80,7 +80,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   },
   {
     title: "配置文本",
-    items: [{ key: "files", label: "Prompt 与知识库" }],
+    items: [{ key: "files", label: "配置文本文件" }],
   },
 ];
 
@@ -150,6 +150,7 @@ export default function App() {
     setRestartSections(fresh.meta.restart_required_sections);
     setServerIssues(fresh.issues);
     setApplyState({ kind: "idle" });
+    setLoadError(null);
   }, [methods]);
 
   useEffect(() => {
@@ -193,7 +194,17 @@ export default function App() {
     (issues: ConfigIssuePayload[]) => {
       methods.clearErrors();
       for (const issue of issues) {
-        methods.setError(issue.location as never, {
+        const isDynamicRecordPath =
+          (issue.path[0] === "llm" && issue.path[1] === "providers") ||
+          (issue.path[0] === "mcp" && issue.path[1] === "servers");
+        const canMapToField =
+          !isDynamicRecordPath &&
+          issue.path.length > 0 &&
+          issue.path.every(
+            (part) => typeof part === "number" || !part.includes("."),
+          );
+        if (!canMapToField) continue;
+        methods.setError(issue.path.join(".") as never, {
           type: issue.error_type,
           message: issue.message,
         });
@@ -383,12 +394,43 @@ export default function App() {
 
   if (loadError) {
     return (
-      <div className="flex h-screen items-center justify-center">
-        <Alert variant="destructive" className="max-w-md">
-          <AlertTitle>配置加载失败</AlertTitle>
-          <AlertDescription>{loadError}</AlertDescription>
-        </Alert>
-      </div>
+      <FormProvider {...methods}>
+        <div className="flex h-dvh flex-col gap-4 bg-background p-4 md:p-6">
+          <Alert variant="destructive">
+            <AlertTitle>配置加载失败，可直接修复原文件</AlertTitle>
+            <AlertDescription className="space-y-3">
+              <p>{loadError}</p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  void reload().catch((error: unknown) => {
+                    setLoadError(
+                      error instanceof Error ? error.message : "加载配置失败",
+                    );
+                  });
+                }}
+              >
+                重新加载配置
+              </Button>
+            </AlertDescription>
+          </Alert>
+          <div className="min-h-0 flex-1">
+            <Suspense
+              fallback={
+                <p className="text-sm text-muted-foreground">正在加载原始配置编辑器…</p>
+              }
+            >
+              <FilesPage initialPath="mybot.toml" />
+            </Suspense>
+          </div>
+          <Toaster
+            richColors
+            position="top-center"
+            theme={resolvedTheme === "dark" ? "dark" : "light"}
+          />
+        </div>
+      </FormProvider>
     );
   }
   if (!snapshot) {
@@ -573,8 +615,12 @@ export default function App() {
               <AlertDescription>
                 <ul className="list-disc pl-4">
                   {serverIssues.map((issue) => (
-                    <li key={`${issue.location}:${issue.message}`}>
-                      <code className="text-xs">{issue.location}</code>：
+                    <li key={`${JSON.stringify(issue.path)}:${issue.message}`}>
+                      <code className="text-xs">
+                        {issue.path.length > 0
+                          ? JSON.stringify(issue.path)
+                          : issue.location}
+                      </code>：
                       {issue.message}
                     </li>
                   ))}

@@ -3,7 +3,7 @@
 import unittest
 from typing import cast
 
-from app.config import AIGroupChatConfig, MaterializedAIGroupChatConfig
+from app.config import MaterializedAIGroupChatConfig
 from app.plugins.ai_group_chat.vision_tool import (
     VisionDescriptionTool,
     VisionTurnState,
@@ -11,6 +11,7 @@ from app.plugins.ai_group_chat.vision_tool import (
 from app.plugins.base import Context
 from app.services import ChatMessage
 from app.services.llm.tools import LLMImageArtifact, LLMImageError
+from tests.config_helpers import build_ai_group_chat_config
 
 VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
 VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
@@ -33,10 +34,12 @@ class RecordingVisionLLM:
         model_name: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
         """记录隔离请求并返回描述或抛出异常。"""
         self.requests.append(messages[:])
         self.models.append((provider, model_name))
+        _ = retry_max_delay_seconds
         self.retry_settings.append((max_attempts, retry_delay_seconds))
         if self.failure is not None:
             raise self.failure
@@ -56,32 +59,34 @@ def build_config(
     supports_images: bool = False,
     retain_descriptions: bool = True,
     max_per_turn: int = 6,
+    vision_enabled: bool | None = None,
+    image_overrides: dict[str, object] | None = None,
 ) -> MaterializedAIGroupChatConfig:
     """按能力构造视觉配置。"""
-    values: dict[str, object] = {
-        "model": {
-            "provider": "main-vendor",
-            "name": "main-model",
-            "supports_images": supports_images,
-        },
-        "images": {"max_per_turn": max_per_turn},
-        "groups": [],
-    }
-    if not supports_images:
-        values.update(
-            {
-                "vision": {
-                    "model": {
-                        "provider": "vision-vendor",
-                        "name": "vision-model",
-                    },
-                    "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
-                    "user_prompt_file": VISION_USER_PROMPT_PATH,
-                    "retain_descriptions": retain_descriptions,
+    source = build_ai_group_chat_config(
+        supports_images=supports_images,
+        vision_enabled=vision_enabled,
+        provider="main-vendor",
+        model_name="main-model",
+        overrides={
+            "images": {"max_per_turn": max_per_turn, **(image_overrides or {})},
+            **(
+                {
+                    "vision": {
+                        "model": {
+                            "provider": "vision-vendor",
+                            "name": "vision-model",
+                        },
+                        "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
+                        "user_prompt_file": VISION_USER_PROMPT_PATH,
+                        "retain_descriptions": retain_descriptions,
+                    }
                 }
-            }
-        )
-    source = AIGroupChatConfig.model_validate(values)
+                if (not supports_images or vision_enabled is True)
+                else {}
+            ),
+        },
+    )
     return MaterializedAIGroupChatConfig(
         source=source,
         groups=(),
@@ -172,6 +177,102 @@ class VisionDescriptionToolTest(unittest.IsolatedAsyncioTestCase):
             "系统生成，不是用户原话",
             delivery.working_messages[0].text or "",
         )
+
+    async def test_zero_limits_send_original_image_directly(self) -> None:
+        """所有图片限制为 0 时，原始字节不经其他模型直接交给主模型。"""
+        llm = RecordingVisionLLM()
+        tool = build_tool(
+            config=build_config(
+                supports_images=True,
+                image_overrides={
+                    "max_image_bytes": 0,
+                    "max_total_bytes_per_request": 0,
+                    "max_width": 0,
+                    "max_height": 0,
+                    "image_detail": "omit",
+                },
+            ),
+            llm=llm,
+        )
+        original = b"original-unmodified-image-bytes"
+
+        delivery = await tool.deliver(
+            items=[artifact("原图", original)],
+            truncated_count=0,
+            question="查看原图",
+            source_name="当前消息",
+            turn_state=VisionTurnState(),
+        )
+
+        self.assertEqual(delivery.working_messages[0].image, [original])
+        self.assertIsNone(delivery.working_messages[0].image_detail)
+        self.assertEqual(llm.requests, [])
+
+    async def test_configured_oversize_behaviors_are_explicit(self) -> None:
+        """超限图片可明确选择跳过、报错或交给已配置视觉模型。"""
+        skipped_tool = build_tool(
+            config=build_config(
+                supports_images=True,
+                image_overrides={
+                    "max_image_bytes": 3,
+                    "oversize_behavior": "skip",
+                },
+            ),
+            llm=RecordingVisionLLM(),
+        )
+        skipped = await skipped_tool.deliver(
+            items=[artifact("超限图", b"1234")],
+            truncated_count=0,
+            question="看图",
+            source_name="当前消息",
+            turn_state=VisionTurnState(),
+        )
+        assert skipped.result is not None
+        self.assertEqual(skipped.result.observed_count, 0)
+        self.assertEqual(skipped.result.errors[0].error_type, "ImageReadTooLargeError")
+
+        error_tool = build_tool(
+            config=build_config(
+                supports_images=True,
+                image_overrides={
+                    "max_image_bytes": 3,
+                    "oversize_behavior": "error",
+                },
+            ),
+            llm=RecordingVisionLLM(),
+        )
+        with self.assertRaisesRegex(ValueError, "超过配置上限"):
+            _ = await error_tool.deliver(
+                items=[artifact("超限图", b"1234")],
+                truncated_count=0,
+                question="看图",
+                source_name="当前消息",
+                turn_state=VisionTurnState(),
+            )
+
+        fallback_llm = RecordingVisionLLM()
+        fallback_tool = build_tool(
+            config=build_config(
+                supports_images=True,
+                vision_enabled=True,
+                image_overrides={
+                    "delivery_mode": "direct",
+                    "max_image_bytes": 3,
+                    "oversize_behavior": "describe",
+                },
+            ),
+            llm=fallback_llm,
+        )
+        described = await fallback_tool.deliver(
+            items=[artifact("超限图", b"1234")],
+            truncated_count=0,
+            question="看图",
+            source_name="当前消息",
+            turn_state=VisionTurnState(),
+        )
+        assert described.result is not None
+        self.assertIsNotNone(described.result.description)
+        self.assertEqual(fallback_llm.models, [("vision-vendor", "vision-model")])
 
     async def test_all_image_reads_failed_is_recoverable(self) -> None:
         """没有成功图片时不请求视觉模型，并把错误交给主模型。"""
@@ -289,8 +390,8 @@ class VisionDescriptionToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.result.truncated_count, 1)
         self.assertIn("未观察图片数：1", second.working_messages[0].text or "")
 
-    async def test_limit_preserves_failure_and_success_order(self) -> None:
-        """读取失败也占用原位置，不能让后面的成功图片越过单轮上限。"""
+    async def test_read_failures_do_not_consume_successful_image_slots(self) -> None:
+        """读取失败作为错误返回，后续成功图片仍可使用配置额度。"""
         llm = RecordingVisionLLM()
         tool = build_tool(
             config=build_config(
@@ -318,10 +419,10 @@ class VisionDescriptionToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(delivery.result)
         if delivery.result is None:
             raise AssertionError("应返回失败与截断结果")
-        self.assertEqual(delivery.result.observed_count, 0)
-        self.assertEqual(delivery.result.truncated_count, 1)
+        self.assertEqual(delivery.result.observed_count, 1)
+        self.assertEqual(delivery.result.truncated_count, 0)
         self.assertEqual(delivery.result.errors[0].label, "当前消息第 1 张图片")
-        self.assertIsNone(delivery.working_messages[0].image)
+        self.assertEqual(delivery.working_messages[0].image, [b"second-image"])
 
     async def test_same_image_content_is_deduplicated_even_if_label_changes(self) -> None:
         """同一问题下相同图片内容只请求一次视觉模型。"""

@@ -2,13 +2,20 @@
 
 from dataclasses import dataclass, field
 from hashlib import sha256
+from io import BytesIO
+from typing import Literal
+
+from PIL import Image as PillowImage
+from PIL import UnidentifiedImageError
 
 from app.config import MaterializedAIGroupChatConfig
 from app.models import StrictModel
 from app.plugins.base import Context
 from app.services import ChatMessage
 from app.services.llm.tools import LLMImageArtifact, LLMImageError, LLMImageItem
+from app.utils.file_type import detect_mime_type
 from app.utils.log import log_event
+
 
 class VisionDescriptionResult(StrictModel):
     """描述内部视觉工具生成的结构化结果。"""
@@ -28,6 +35,7 @@ class VisionTurnState:
 
     delivered_image_keys: set[str] = field(default_factory=set)
     consumed_image_slots: int = 0
+    consumed_image_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -58,14 +66,18 @@ class VisionDescriptionTool:
         source_name: str,
         turn_state: VisionTurnState,
     ) -> VisionDelivery:
-        """按主模型能力生成直接图片消息或文字观察消息。"""
+        """按显式图片策略生成直接图片消息或视觉描述消息。"""
         supplied_artifact_count = sum(
             isinstance(item, LLMImageArtifact) for item in items
         )
+        prepared_items, description_fallback_artifacts = self._prepare_items(
+            items=items
+        )
         unique_items: list[LLMImageItem] = []
+        unique_fallback_artifacts: list[LLMImageArtifact] = []
         pending_image_keys: set[str] = set()
         duplicate_count = 0
-        for item in items:
+        for item in prepared_items:
             if not isinstance(item, LLMImageArtifact):
                 unique_items.append(item)
                 continue
@@ -78,6 +90,16 @@ class VisionDescriptionTool:
                 continue
             pending_image_keys.add(image_key)
             unique_items.append(item)
+        for item in description_fallback_artifacts:
+            image_key = self._build_image_key(artifact=item)
+            if (
+                image_key in turn_state.delivered_image_keys
+                or image_key in pending_image_keys
+            ):
+                duplicate_count += 1
+                continue
+            pending_image_keys.add(image_key)
+            unique_fallback_artifacts.append(item)
         if duplicate_count > 0:
             log_event(
                 level="DEBUG",
@@ -87,25 +109,64 @@ class VisionDescriptionTool:
                 source_name=source_name,
                 duplicate_count=duplicate_count,
             )
-        if not unique_items and truncated_count == 0:
+        if (
+            not unique_items
+            and not unique_fallback_artifacts
+            and truncated_count == 0
+        ):
             return VisionDelivery([], [], None)
-        remaining_slots = max(
-            0,
-            self.config.source.images.max_per_turn - turn_state.consumed_image_slots,
+        image_limit = self.config.source.images.max_per_turn
+        remaining_slots = (
+            None
+            if image_limit == 0
+            else max(0, image_limit - turn_state.consumed_image_slots)
         )
-        selected_items = unique_items[:remaining_slots]
-        selected_artifacts = [
-            item for item in selected_items if isinstance(item, LLMImageArtifact)
+        pending_artifacts = [
+            item for item in unique_items if isinstance(item, LLMImageArtifact)
         ]
         selected_errors = [
-            item for item in selected_items if isinstance(item, LLMImageError)
+            item for item in unique_items if isinstance(item, LLMImageError)
         ]
-        consumed_count = len(selected_items)
-        turn_state.consumed_image_slots += consumed_count
-        total_truncated_count = truncated_count + max(
-            0,
-            len(unique_items) - consumed_count,
+        tagged_artifacts = [
+            (False, artifact) for artifact in pending_artifacts
+        ] + [(True, artifact) for artifact in unique_fallback_artifacts]
+        selected_tagged_artifacts = (
+            tagged_artifacts
+            if remaining_slots is None
+            else tagged_artifacts[:remaining_slots]
         )
+        selected_artifacts = [
+            artifact
+            for is_fallback, artifact in selected_tagged_artifacts
+            if not is_fallback
+        ]
+        selected_fallback_artifacts = [
+            artifact
+            for is_fallback, artifact in selected_tagged_artifacts
+            if is_fallback
+        ]
+        total_truncated_count = truncated_count + max(
+            0, len(tagged_artifacts) - len(selected_tagged_artifacts)
+        )
+        selected_artifacts, total_byte_errors, total_byte_fallback = (
+            self._apply_total_byte_limit(
+                artifacts=selected_artifacts,
+                consumed_bytes=(
+                    turn_state.consumed_image_bytes
+                    if self.config.source.images.delivery_mode == "direct"
+                    else 0
+                ),
+            )
+        )
+        selected_errors.extend(total_byte_errors)
+        total_truncated_count += len(total_byte_errors)
+        selected_fallback_artifacts.extend(total_byte_fallback)
+        selected_count = len(selected_artifacts) + len(selected_fallback_artifacts)
+        turn_state.consumed_image_slots += selected_count
+        if self.config.source.images.delivery_mode == "direct":
+            turn_state.consumed_image_bytes += sum(
+                len(artifact.image_bytes) for artifact in selected_artifacts
+            )
         log_event(
             level="DEBUG" if total_truncated_count == 0 else "WARNING",
             event="ai_group_chat.vision.delivery_prepared",
@@ -117,18 +178,32 @@ class VisionDescriptionTool:
             supplied_error_count=sum(
                 isinstance(item, LLMImageError) for item in items
             ),
-            observed_image_count=len(selected_artifacts),
+            observed_image_count=selected_count,
+            direct_image_count=len(selected_artifacts),
+            description_fallback_image_count=len(selected_fallback_artifacts),
             retained_error_count=len(selected_errors),
             truncated_count=total_truncated_count,
             consumed_image_slots=turn_state.consumed_image_slots,
+            consumed_image_bytes=turn_state.consumed_image_bytes,
             max_image_slots=self.config.source.images.max_per_turn,
         )
-        if self.config.source.model.supports_images:
-            delivery = self._build_direct_delivery(
+        if self.config.source.images.delivery_mode == "direct":
+            direct_delivery = self._build_direct_delivery(
                 artifacts=selected_artifacts,
                 errors=selected_errors,
                 truncated_count=total_truncated_count,
                 source_name=source_name,
+            )
+            fallback_delivery = await self._build_description_delivery(
+                artifacts=selected_fallback_artifacts,
+                errors=[],
+                truncated_count=0,
+                question=question,
+                source_name=f"{source_name}中超过主模型限制的图片",
+            )
+            delivery = self._merge_deliveries(
+                first=direct_delivery,
+                second=fallback_delivery,
             )
         else:
             delivery = await self._build_description_delivery(
@@ -141,9 +216,46 @@ class VisionDescriptionTool:
         if delivery.working_messages:
             turn_state.delivered_image_keys.update(
                 self._build_image_key(artifact=artifact)
-                for artifact in selected_artifacts
+                for artifact in [
+                    *selected_artifacts,
+                    *selected_fallback_artifacts,
+                ]
             )
         return delivery
+
+    def _merge_deliveries(
+        self, *, first: VisionDelivery, second: VisionDelivery
+    ) -> VisionDelivery:
+        """合并同一来源的直接图片和显式视觉回退结果。"""
+        results = [
+            result for result in (first.result, second.result) if result is not None
+        ]
+        if not results:
+            result = None
+        elif len(results) == 1:
+            result = results[0]
+        else:
+            result = VisionDescriptionResult(
+                ok=all(item.ok for item in results),
+                is_error=any(item.is_error for item in results),
+                description=next(
+                    (
+                        item.description
+                        for item in reversed(results)
+                        if item.description is not None
+                    ),
+                    None,
+                ),
+                observed_count=sum(item.observed_count for item in results),
+                truncated_count=sum(item.truncated_count for item in results),
+                errors=[error for item in results for error in item.errors],
+                message=" ".join(item.message for item in results),
+            )
+        return VisionDelivery(
+            working_messages=[*first.working_messages, *second.working_messages],
+            history_messages=[*first.history_messages, *second.history_messages],
+            result=result,
+        )
 
     def _build_direct_delivery(
         self,
@@ -181,8 +293,13 @@ class VisionDescriptionTool:
                 source_name=source_name,
             ),
             image=[artifact.image_bytes for artifact in artifacts],
+            image_detail=self._request_image_detail(),
         )
-        return VisionDelivery([message], [], result)
+        return VisionDelivery(
+            [message],
+            [message] if self.config.source.images.retain_images else [],
+            result,
+        )
 
     async def _build_description_delivery(
         self,
@@ -307,6 +424,7 @@ class VisionDescriptionTool:
                 role="user",
                 text=prompt,
                 image=[artifact.image_bytes for artifact in artifacts],
+                image_detail=self._request_image_detail(),
             ),
         ]
         response = await self.context.llm.get_ai_text_response(
@@ -315,6 +433,7 @@ class VisionDescriptionTool:
             model_name=vision.model.name,
             max_attempts=vision.max_attempts,
             retry_delay_seconds=vision.retry_delay_seconds,
+            retry_max_delay_seconds=vision.retry_max_delay_seconds,
         )
         description = response.strip()
         if description == "":
@@ -376,7 +495,7 @@ class VisionDescriptionTool:
             for index, artifact in enumerate(artifacts, start=1)
         )
         if truncated_count > 0:
-            lines.append(f"另有 {truncated_count} 张图片因数量上限未附带。")
+            lines.append(f"另有 {truncated_count} 张图片因配置限制未附带。")
         if errors:
             lines.append("部分图片读取失败：")
             lines.extend(
@@ -400,9 +519,142 @@ class VisionDescriptionTool:
             return []
         return [message]
 
+    def _prepare_items(
+        self, *, items: list[LLMImageItem]
+    ) -> tuple[list[LLMImageItem], list[LLMImageArtifact]]:
+        """检查主模型限制，并分离用户明确要求交给视觉模型的图片。"""
+        validated: list[LLMImageItem] = []
+        description_fallback: list[LLMImageArtifact] = []
+        image_config = self.config.source.images
+        for item in items:
+            if isinstance(item, LLMImageError):
+                if (
+                    image_config.oversize_behavior == "error"
+                    and item.error_type == "ImageReadTooLargeError"
+                ):
+                    raise ValueError(f"{item.label}: {item.error}")
+                validated.append(item)
+                continue
+            error = self._validate_artifact(artifact=item)
+            if error is None:
+                validated.append(item)
+                continue
+            if image_config.oversize_behavior == "error":
+                raise ValueError(f"{error.label}: {error.error}")
+            if image_config.oversize_behavior == "describe":
+                description_fallback.append(item)
+                continue
+            validated.append(error)
+        return validated, description_fallback
+
+    def _validate_artifact(
+        self, *, artifact: LLMImageArtifact
+    ) -> LLMImageError | None:
+        """检查工具附件也遵守 AIChat 图片配置，而不只检查 NapCat 下载。"""
+        image_config = self.config.source.images
+        image_bytes = artifact.image_bytes
+        if (
+            image_config.max_image_bytes > 0
+            and len(image_bytes) > image_config.max_image_bytes
+        ):
+            return LLMImageError(
+                label=artifact.label,
+                error_type="ImageReadTooLargeError",
+                error=(
+                    f"图片大小 {len(image_bytes)} 字节超过配置上限 "
+                    f"{image_config.max_image_bytes} 字节"
+                ),
+            )
+        if image_config.allowed_mime_types:
+            try:
+                mime_type = detect_mime_type(image_bytes)
+            except ValueError as exc:
+                return LLMImageError(
+                    label=artifact.label,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+            if mime_type not in image_config.allowed_mime_types:
+                return LLMImageError(
+                    label=artifact.label,
+                    error_type="UnsupportedImageType",
+                    error=f"图片格式 {mime_type} 不在配置允许列表中",
+                )
+        if image_config.max_width == 0 and image_config.max_height == 0:
+            return None
+        try:
+            with PillowImage.open(BytesIO(image_bytes)) as image:
+                width, height = image.size
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            return LLMImageError(
+                label=artifact.label,
+                error_type=type(exc).__name__,
+                error=f"无法读取图片尺寸: {exc}",
+            )
+        if image_config.max_width > 0 and width > image_config.max_width:
+            return LLMImageError(
+                label=artifact.label,
+                error_type="ImageDimensionsExceeded",
+                error=f"图片宽度 {width} 超过配置上限 {image_config.max_width}",
+            )
+        if image_config.max_height > 0 and height > image_config.max_height:
+            return LLMImageError(
+                label=artifact.label,
+                error_type="ImageDimensionsExceeded",
+                error=f"图片高度 {height} 超过配置上限 {image_config.max_height}",
+            )
+        return None
+
+    def _apply_total_byte_limit(
+        self,
+        *,
+        artifacts: list[LLMImageArtifact],
+        consumed_bytes: int,
+    ) -> tuple[
+        list[LLMImageArtifact],
+        list[LLMImageError],
+        list[LLMImageArtifact],
+    ]:
+        """按单次主模型或视觉模型请求执行图片总字节配置。"""
+        total_limit = self.config.source.images.max_total_bytes_per_request
+        if total_limit == 0:
+            return artifacts, [], []
+        selected: list[LLMImageArtifact] = []
+        errors: list[LLMImageError] = []
+        description_fallback: list[LLMImageArtifact] = []
+        current_bytes = consumed_bytes
+        for artifact in artifacts:
+            next_bytes = current_bytes + len(artifact.image_bytes)
+            if next_bytes <= total_limit:
+                selected.append(artifact)
+                current_bytes = next_bytes
+                continue
+            error = LLMImageError(
+                label=artifact.label,
+                error_type="ImageRequestBytesExceeded",
+                error=(
+                    f"加入该图片后本轮图片总字节为 {next_bytes}，"
+                    f"超过配置上限 {total_limit}"
+                ),
+            )
+            if self.config.source.images.oversize_behavior == "error":
+                raise ValueError(f"{error.label}: {error.error}")
+            if self.config.source.images.oversize_behavior == "describe":
+                description_fallback.append(artifact)
+                continue
+            errors.append(error)
+        return selected, errors, description_fallback
+
     def _build_image_key(self, *, artifact: LLMImageArtifact) -> str:
         """按单张图片内容构造单轮去重键。"""
         digest = sha256()
         digest.update(len(artifact.image_bytes).to_bytes(8, byteorder="big"))
         digest.update(artifact.image_bytes)
         return digest.hexdigest()
+
+    def _request_image_detail(
+        self,
+    ) -> Literal["auto", "low", "high"] | None:
+        """把显式 omit 配置转换成协议层的不发送字段。"""
+        detail = self.config.source.images.image_detail
+        return None if detail == "omit" else detail

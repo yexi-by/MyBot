@@ -5,22 +5,20 @@ import base64
 import hashlib
 import tempfile
 import unittest
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import httpx
 
 from app.models import ImageArchiveTask, Response, StoredImage
 from app.services.napcat.image_archive import (
-    DEFAULT_ARCHIVE_CONCURRENCY,
-    DEFAULT_ARCHIVE_LEASE_SECONDS,
-    DEFAULT_ARCHIVE_READ_TIMEOUT_SECONDS,
-    DEFAULT_ARCHIVE_RETRY_DELAYS_SECONDS,
-    MAX_ARCHIVE_IMAGE_BYTES,
-    ImageArchiveWorker,
-    ImageArchiveWorkerFactory,
-    ImageStore,
+    ImageArchiveReader,
+    ImageArchiveTaskRepository,
+    ImageArchiveWorker as RealImageArchiveWorker,
+    ImageArchiveWorkerFactory as RealImageArchiveWorkerFactory,
+    ImageStore as RealImageStore,
     ImageTooLargeError,
     InlineImageArchiver,
     InvalidImageContentError,
@@ -31,6 +29,74 @@ from app.services.napcat.image_reader import (
     NapCatImageReadResult,
     NapCatImageResource,
 )
+
+TEST_MAX_IMAGE_BYTES = 50 * 1024 * 1024
+TEST_CONCURRENCY = 16
+TEST_READ_TIMEOUT_SECONDS = 20.0
+TEST_LEASE_SECONDS = 45.0
+TEST_POLL_INTERVAL_SECONDS = 1.0
+TEST_RETRY_DELAYS_SECONDS = (1.0, 5.0, 20.0)
+
+
+def ImageStore(
+    *, root: Path, max_image_bytes: int = TEST_MAX_IMAGE_BYTES
+) -> RealImageStore:
+    """用显式测试上限构造图片存储。"""
+    return RealImageStore(root=root, max_image_bytes=max_image_bytes)
+
+
+def ImageArchiveWorker(
+    *,
+    bot_id: str,
+    repository: object,
+    reader: object,
+    store: RealImageStore,
+    concurrency: int = TEST_CONCURRENCY,
+    read_timeout_seconds: float = TEST_READ_TIMEOUT_SECONDS,
+    lease_seconds: float = TEST_LEASE_SECONDS,
+    poll_interval_seconds: float = TEST_POLL_INTERVAL_SECONDS,
+    retry_delays_seconds: tuple[float, ...] = TEST_RETRY_DELAYS_SECONDS,
+    utc_now: Callable[[], datetime] | None = None,
+) -> RealImageArchiveWorker:
+    """用显式测试运行参数构造归档 worker。"""
+    return RealImageArchiveWorker(
+        bot_id=bot_id,
+        repository=cast(ImageArchiveTaskRepository, repository),
+        reader=cast(ImageArchiveReader, reader),
+        store=store,
+        concurrency=concurrency,
+        read_timeout_seconds=read_timeout_seconds,
+        lease_seconds=lease_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        retry_delays_seconds=retry_delays_seconds,
+        utc_now=utc_now,
+    )
+
+
+def ImageArchiveWorkerFactory(
+    *,
+    repository: object,
+    http_client: httpx.AsyncClient | None,
+    store: RealImageStore,
+    concurrency: int = TEST_CONCURRENCY,
+    download_timeout_seconds: float = TEST_READ_TIMEOUT_SECONDS,
+    max_image_bytes: int = TEST_MAX_IMAGE_BYTES,
+    lease_seconds: float = TEST_LEASE_SECONDS,
+    poll_interval_seconds: float = TEST_POLL_INTERVAL_SECONDS,
+    retry_delays_seconds: tuple[float, ...] = TEST_RETRY_DELAYS_SECONDS,
+) -> RealImageArchiveWorkerFactory:
+    """用显式测试运行参数构造归档 worker 工厂。"""
+    return RealImageArchiveWorkerFactory(
+        repository=cast(ImageArchiveTaskRepository, repository),
+        http_client=http_client,
+        store=store,
+        concurrency=concurrency,
+        download_timeout_seconds=download_timeout_seconds,
+        max_image_bytes=max_image_bytes,
+        lease_seconds=lease_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        retry_delays_seconds=retry_delays_seconds,
+    )
 
 PNG_BYTES = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
@@ -211,11 +277,6 @@ class ImageStoreTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(root.exists())
 
-    async def test_default_limit_is_exactly_fifty_mebibytes(self) -> None:
-        """默认上限使用 MiB 而不是十进制 MB。"""
-        self.assertEqual(MAX_ARCHIVE_IMAGE_BYTES, 50 * 1024 * 1024)
-
-
 class InlineImageArchiverTest(unittest.IsolatedAsyncioTestCase):
     """验证出站内联图片不依赖 NapCat echo 也能永久归档。"""
 
@@ -365,9 +426,6 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
 
             processed = await worker.run_once()
 
-        self.assertEqual(DEFAULT_ARCHIVE_CONCURRENCY, 16)
-        self.assertEqual(DEFAULT_ARCHIVE_READ_TIMEOUT_SECONDS, 20.0)
-        self.assertEqual(DEFAULT_ARCHIVE_LEASE_SECONDS, 45.0)
         self.assertEqual(repository.claim_calls, [("bot-10001", 16, 45.0)])
         self.assertEqual(processed, 1)
         self.assertEqual(repository.fail_calls, [])
@@ -443,7 +501,6 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
 
             await worker.run_once()
 
-        self.assertEqual(DEFAULT_ARCHIVE_RETRY_DELAYS_SECONDS, (1.0, 5.0, 20.0))
         self.assertEqual(repository.complete_calls, [])
         self.assertEqual(
             [call[2] for call in repository.fail_calls],

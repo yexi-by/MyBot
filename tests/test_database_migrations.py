@@ -34,7 +34,13 @@ class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
             self.skipTest(f"未配置 {TEST_DATABASE_ENV}，跳过 PostgreSQL 集成测试")
         self.database_url = database_url
         self.migrator = DatabaseMigrator(database_url=database_url)
-        self.runtime = PostgreSQLRuntime.create(database_url=database_url)
+        self.runtime = PostgreSQLRuntime.create(
+            database_url=database_url,
+            pool_size=20,
+            max_overflow=20,
+            pool_timeout_seconds=2,
+            statement_timeout_seconds=5,
+        )
 
     async def asyncTearDown(self) -> None:
         """关闭测试连接池。"""
@@ -136,6 +142,9 @@ class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
         """每条连接都启用持久提交和配置的语句超时。"""
         runtime = PostgreSQLRuntime.create(
             database_url=self.database_url,
+            pool_size=20,
+            max_overflow=20,
+            pool_timeout_seconds=2,
             statement_timeout_seconds=1.25,
         )
         try:

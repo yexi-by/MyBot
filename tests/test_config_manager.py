@@ -14,31 +14,12 @@ from app.config import (
     GroupNoticeConfig,
     load_config,
 )
+from tests.config_helpers import minimal_config_toml
 
 
 def base_config(*, group_id: str = "40000", port: int = 6055) -> str:
     """生成不依赖外部文件的最小统一配置。"""
-    return textwrap.dedent(
-        f"""
-        [server]
-        port = {port}
-
-        [napcat]
-        websocket_token = "test-token"
-
-        [database]
-        password = "test-password"
-
-        [llm.providers.main]
-        api_key = "test-api-key"
-        max_attempts = 3
-        retry_delay_seconds = 0
-
-        [plugins.group_notice]
-        groups = ["{group_id}"]
-        send_avatar = true
-        """
-    ).strip() + "\n"
+    return minimal_config_toml(group_id=group_id, port=port)
 
 
 def write_ai_files(config_root: Path) -> None:
@@ -63,12 +44,69 @@ def ai_config() -> str:
 
         [plugins.ai_group_chat]
         model = { provider = "main", name = "chat", supports_images = false }
+        max_tool_rounds = 16
+        token_safety_factor = 1.05
+        context_compression_notice = "正在整理上下文"
+        forward_reply_threshold_chars = 1000
+        show_reasoning = false
+        retain_reasoning = false
+        debug_dump_messages = false
+        debug_dump_directory = "logs/ai_group_chat_debug"
         extra_requirements_file = "ai/extra.md"
+        allow_mention_all = false
+        tool_result_retention = "off"
 
         [plugins.ai_group_chat.vision]
         model = { provider = "main", name = "vision" }
         system_prompt_file = "ai/vision-system.md"
         user_prompt_file = "ai/vision-user.md"
+        max_attempts = 5
+        retry_delay_seconds = 0.25
+        retry_max_delay_seconds = 10
+        retain_descriptions = true
+
+        [plugins.ai_group_chat.images]
+        max_per_turn = 0
+        fetch_concurrency = 16
+        download_timeout_seconds = 20
+        max_image_bytes = 0
+        max_total_bytes_per_request = 0
+        max_width = 0
+        max_height = 0
+        allowed_mime_types = []
+        delivery_mode = "vision"
+        oversize_behavior = "skip"
+        image_detail = "auto"
+        retain_images = false
+        forward_tool_enabled = true
+        forward_max_per_call = 0
+        forward_max_per_turn = 0
+
+        [plugins.ai_group_chat.formatting]
+        field_text_limit = 0
+        json_text_limit = 0
+        markdown_text_limit = 0
+        forward_max_items = 0
+        forward_max_depth = -1
+        nested_text_search_max_depth = -1
+
+        [plugins.ai_group_chat.history]
+        default_limit = 20
+        max_per_call = 0
+        default_before_count = 10
+        default_after_count = 10
+
+        [plugins.ai_group_chat.files]
+        default_count = 50
+        max_per_call = 0
+
+        [plugins.ai_group_chat.token_estimator]
+        request_overhead_tokens = 128
+        message_overhead_tokens = 16
+        tool_call_overhead_tokens = 64
+        image_tokens = 1024
+        ascii_tokens_per_character = 1
+        non_ascii_tokens_per_character = 2
 
         [[plugins.ai_group_chat.groups]]
         id = "40000"
@@ -345,7 +383,7 @@ class ConfigManagerTest(unittest.IsolatedAsyncioTestCase):
             config_file = Path(temp_dir) / "mybot.toml"
             config_file.write_text(base_config(), encoding="utf-8")
             manager = ConfigManager.create(config_file=config_file)
-            watcher = ConfigWatcher(manager=manager)
+            watcher = ConfigWatcher(manager=manager, debounce_ms=500, step_ms=50)
             task = asyncio.create_task(watcher.run())
             await asyncio.sleep(0.2)
             config_file.write_text(base_config(group_id="50000"), encoding="utf-8")
@@ -368,7 +406,7 @@ class ConfigManagerTest(unittest.IsolatedAsyncioTestCase):
             config_file = Path(temp_dir) / "mybot.toml"
             config_file.write_text(base_config(), encoding="utf-8")
             manager = ConfigManager.create(config_file=config_file)
-            watcher = ConfigWatcher(manager=manager)
+            watcher = ConfigWatcher(manager=manager, debounce_ms=500, step_ms=50)
             task = asyncio.create_task(watcher.run())
             await asyncio.sleep(0.2)
             for group_id in ("50000", "60000", "70000"):
@@ -398,7 +436,7 @@ class ConfigManagerTest(unittest.IsolatedAsyncioTestCase):
             config_file = root / "mybot.toml"
             config_file.write_text(ai_config(), encoding="utf-8")
             manager = ConfigManager.create(config_file=config_file)
-            watcher = ConfigWatcher(manager=manager)
+            watcher = ConfigWatcher(manager=manager, debounce_ms=500, step_ms=50)
             task = asyncio.create_task(watcher.run())
             await asyncio.sleep(0.2)
             missing_prompt = root / "ai/new-system.md"

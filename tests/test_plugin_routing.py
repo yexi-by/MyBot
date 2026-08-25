@@ -68,6 +68,8 @@ class PluginRoutingTest(unittest.IsolatedAsyncioTestCase):
                 FakeConfigManager(build_plugin_snapshot()),
                 plugin_id="event_routing_test",
             ),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         plugin = cast(BasePlugin[AllEvent], cast(object, self.plugin))
         self.controller = PluginController(plugin_objects=[plugin])

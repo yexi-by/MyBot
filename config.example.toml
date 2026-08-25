@@ -8,12 +8,19 @@ port = 6055
 websocket_path_prefix = "/ws"
 access_log = false
 log_level = "info"
+config_watch_debounce_ms = 500
+config_watch_step_ms = 50
+config_watcher_stop_timeout_seconds = 3
+power_action_delay_seconds = 0.5
 
 [napcat]
 websocket_token = "CHANGE_ME_NAPCAT_TOKEN"
 # 删除或留空即可关闭 WebSocket Token 校验。
+action_timeout_seconds = 120
 send_max_attempts = 5
 send_retry_delay_seconds = 0
+send_retry_max_delay_seconds = 10
+response_summary_max_chars = 500
 
 [storage.images]
 directory = "images"
@@ -22,6 +29,8 @@ download_timeout_seconds = 20
 max_bytes = 52428800
 retry_delays_seconds = [1, 5, 20]
 lease_seconds = 45
+worker_poll_interval_seconds = 1
+worker_stop_timeout_seconds = 5
 
 [network]
 proxy = ""
@@ -39,8 +48,11 @@ compression = "gz"
 api_key = "sk-CHANGE_ME"
 # 无鉴权的 OpenAI 兼容服务可删除 api_key。
 base_url = "https://api.deepseek.com"
+inherit_network_proxy = true
+timeout_seconds = 0
 max_attempts = 5
 retry_delay_seconds = 0
+retry_max_delay_seconds = 10
 
 [mcp]
 enabled = false
@@ -63,20 +75,48 @@ pool_size = 20
 max_overflow = 20
 pool_timeout_seconds = 2
 statement_timeout_seconds = 5
+persistence_retry_delays_seconds = [0.25]
+
+[plugin_execution]
+stop_timeout_seconds = 3
+
+[plugin_execution.plugins.ai_group_chat]
+consumers_count = 5
+priority = 5
+
+[plugin_execution.plugins.group_notice]
+consumers_count = 5
+priority = 10
+
+[plugin_execution.plugins.auto_unban]
+consumers_count = 1
+priority = 10
+
+[plugin_execution.plugins.image_generate]
+consumers_count = 5
+priority = 40
+
+[plugin_execution.plugins.recall_bot_image]
+consumers_count = 5
+priority = 90
+
+[plugin_execution.plugins.neavo_image_generate]
+consumers_count = 5
+priority = 100
 
 [plugins.ai_group_chat]
 model = { provider = "deepseek", name = "deepseek-chat", supports_images = false }
 max_tool_rounds = 16
 token_safety_factor = 1.05
 context_compression_notice = "上下文有点长，我先整理一下记忆，稍等我几秒喵~"
-max_reply_chars = 1000
+forward_reply_threshold_chars = 1000
 show_reasoning = false
 retain_reasoning = false
 debug_dump_messages = true
+debug_dump_directory = "logs/ai_group_chat_debug"
 extra_requirements_file = "ai_group_chat/prompts/extra_requirements.md"
 allow_mention_all = false
-# 开启后只保留工具名称及成功、失败次数，不保存参数和原始结果。
-retain_tool_results = false
+tool_result_retention = "off"
 
 [plugins.ai_group_chat.vision]
 model = { provider = "deepseek", name = "vision-model" }
@@ -84,15 +124,51 @@ system_prompt_file = "ai_group_chat/prompts/vision/system.md"
 user_prompt_file = "ai_group_chat/prompts/vision/user.md"
 max_attempts = 5
 retry_delay_seconds = 0.25
+retry_max_delay_seconds = 10
 retain_descriptions = true
 
 [plugins.ai_group_chat.images]
-max_per_turn = 20
+max_per_turn = 0
 fetch_concurrency = 16
 download_timeout_seconds = 20
+max_image_bytes = 0
+max_total_bytes_per_request = 0
+max_width = 0
+max_height = 0
+allowed_mime_types = []
+delivery_mode = "vision"
+oversize_behavior = "skip"
+image_detail = "auto"
+retain_images = false
 forward_tool_enabled = true
-forward_max_per_call = 20
-forward_max_per_turn = 50
+forward_max_per_call = 0
+forward_max_per_turn = 0
+
+[plugins.ai_group_chat.formatting]
+field_text_limit = 0
+json_text_limit = 0
+markdown_text_limit = 0
+forward_max_items = 0
+forward_max_depth = -1
+nested_text_search_max_depth = -1
+
+[plugins.ai_group_chat.history]
+default_limit = 20
+max_per_call = 0
+default_before_count = 10
+default_after_count = 10
+
+[plugins.ai_group_chat.files]
+default_count = 50
+max_per_call = 0
+
+[plugins.ai_group_chat.token_estimator]
+request_overhead_tokens = 128
+message_overhead_tokens = 16
+tool_call_overhead_tokens = 64
+image_tokens = 1024
+ascii_tokens_per_character = 1
+non_ascii_tokens_per_character = 2
 
 [[plugins.ai_group_chat.groups]]
 id = "123456789"
@@ -112,6 +188,9 @@ groups = ["123456789"]
 model = { provider = "deepseek", name = "image-model" }
 fetch_concurrency = 16
 download_timeout_seconds = 20
+max_input_image_bytes = 0
+command = "/生图"
+help_command = "/help生图"
 
 [plugins.neavo_image_generate]
 groups = ["123456789"]
@@ -121,6 +200,14 @@ api_token = "CHANGE_ME"
 poll_interval_seconds = 3
 generation_timeout_seconds = 600
 request_timeout_seconds = 30
-max_image_bytes = 20971520
+max_prompt_chars = 4096
+max_input_image_bytes = 10485760
+max_output_image_bytes = 20971520
+allowed_input_mime_types = ["image/jpeg", "image/png", "image/webp"]
+max_consecutive_poll_errors = 3
+generate_command = "#生图"
+describe_command = "#反推"
 
 [plugins.recall_bot_image]
+command = "#撤回"
+failure_detail_max_chars = 160

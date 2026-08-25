@@ -24,10 +24,10 @@ class PostgreSQLRuntime:
         cls,
         *,
         database_url: str,
-        pool_size: int = 20,
-        max_overflow: int = 20,
-        pool_timeout_seconds: float = 2.0,
-        statement_timeout_seconds: float = 5.0,
+        pool_size: int,
+        max_overflow: int,
+        pool_timeout_seconds: float,
+        statement_timeout_seconds: float,
     ) -> "PostgreSQLRuntime":
         """按系统持久性和连接池约束创建运行时。"""
         if not database_url.startswith("postgresql+asyncpg://"):
@@ -38,9 +38,13 @@ class PostgreSQLRuntime:
             raise ValueError("max_overflow 不能小于 0")
         if pool_timeout_seconds <= 0:
             raise ValueError("pool_timeout_seconds 必须大于 0")
-        if statement_timeout_seconds <= 0:
-            raise ValueError("statement_timeout_seconds 必须大于 0")
-        statement_timeout_ms = max(1, ceil(statement_timeout_seconds * 1000))
+        if statement_timeout_seconds < 0:
+            raise ValueError("statement_timeout_seconds 不能小于 0")
+        statement_timeout_ms = (
+            0
+            if statement_timeout_seconds == 0
+            else max(1, ceil(statement_timeout_seconds * 1000))
+        )
         engine = create_async_engine(
             database_url,
             isolation_level="READ COMMITTED",

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal, cast
 
-from app.config import EmptyPluginConfig
+from app.config import RecallBotImageConfig
 from app.database import GroupDataScope, StoredGroupMessage
 from app.models import (
     GroupMessage,
@@ -17,10 +17,7 @@ from app.models import (
     Text,
 )
 from app.plugins.base import Context
-from app.plugins.recall_bot_image.recall_bot_image import (
-    RECALL_COMMAND,
-    RecallBotImagePlugin,
-)
+from app.plugins.recall_bot_image.recall_bot_image import RecallBotImagePlugin
 from tests.config_helpers import (
     FakeConfigManager,
     build_plugin_snapshot,
@@ -32,6 +29,7 @@ USER_ID = "20000"
 GROUP_ID = "40000"
 COMMAND_MESSAGE_ID = "50000"
 TARGET_MESSAGE_ID = "90000"
+RECALL_COMMAND = "#撤回"
 
 
 def build_group_message(
@@ -237,11 +235,16 @@ class RecallBotImagePluginTest(unittest.IsolatedAsyncioTestCase):
             plugin_config=plugin_config_view(
                 FakeConfigManager(
                     build_plugin_snapshot(
-                        recall_bot_image=EmptyPluginConfig()
+                        recall_bot_image=RecallBotImageConfig(
+                            command=RECALL_COMMAND,
+                            failure_detail_max_chars=160,
+                        )
                     )
                 ),
                 plugin_id="recall_bot_image",
             ),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         return self.plugin
 

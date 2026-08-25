@@ -34,9 +34,12 @@ class BaseMixin:
         asyncio.Event, cast(object, None)
     )
     boot_id: NapCatId = ""
-    timeout: int = 0
-    send_max_attempts: int = 5
-    send_retry_delay_seconds: float = 0
+    timeout: float
+    send_max_attempts: int
+    send_retry_delay_seconds: float
+    send_retry_max_delay_seconds: float
+    response_summary_max_chars: int
+    persistence_retry_delays_seconds: tuple[float, ...]
 
     def _generate_echo(self) -> str:
         """生成唯一 echo 标识。"""

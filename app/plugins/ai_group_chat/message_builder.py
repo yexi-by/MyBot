@@ -5,14 +5,18 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import httpx
+from pydantic import TypeAdapter, ValidationError
 
 from app.config import AIGroupChatConfig
 from app.database import GroupDataScope, GroupMessageReader, StoredGroupMessage
 from app.models import (
+    Forward,
     GroupMessage,
     Image,
+    JsonValue,
     MessageSegment,
     NapCatId,
+    Node,
     Reply,
 )
 from app.services import (
@@ -80,8 +84,25 @@ class GroupChatMessageBuilder:
             http_client=http_client,
             fetch_concurrency=config.images.fetch_concurrency,
             download_timeout_seconds=config.images.download_timeout_seconds,
+            max_image_bytes=(
+                None
+                if config.images.oversize_behavior == "describe"
+                else config.images.max_image_bytes or None
+            ),
         )
-        self.message_formatter: NapCatMessageTextFormatter = NapCatMessageTextFormatter()
+        formatting = config.formatting
+        self.message_formatter: NapCatMessageTextFormatter = NapCatMessageTextFormatter(
+            field_text_limit=formatting.field_text_limit,
+            json_text_limit=formatting.json_text_limit,
+            markdown_text_limit=formatting.markdown_text_limit,
+            forward_max_items=formatting.forward_max_items,
+            forward_max_depth=formatting.forward_max_depth,
+            nested_text_search_max_depth=formatting.nested_text_search_max_depth,
+        )
+        self.segment_adapter: TypeAdapter[MessageSegment] = TypeAdapter(MessageSegment)
+        self.segments_adapter: TypeAdapter[list[MessageSegment]] = TypeAdapter(
+            list[MessageSegment]
+        )
 
     async def build_turn_messages(
         self,
@@ -103,9 +124,8 @@ class GroupChatMessageBuilder:
             else []
         )
         all_resources = [*current_resources, *reply_resources]
-        selected_resources = all_resources[: self.config.images.max_per_turn]
-        truncated_image_count = len(all_resources) - len(selected_resources)
-        read_results = await self.image_reader.read_many(resources=selected_resources)
+        truncated_image_count = 0
+        read_results = await self.image_reader.read_many(resources=all_resources)
         image_items: list[LLMImageItem] = []
         loaded_sources: set[str] = set()
         for result_index, result in enumerate(read_results):
@@ -178,21 +198,93 @@ class GroupChatMessageBuilder:
     ) -> list[NapCatImageResource]:
         """按消息段顺序生成来源明确的图片资源。"""
         resources: list[NapCatImageResource] = []
-        image_index = 0
-        for segment in segments:
-            if not isinstance(segment, Image):
-                continue
-            image_index += 1
-            resources.append(
-                NapCatImageResource(
-                    label=f"{source_label}第 {image_index} 张图片",
-                    file=segment.data.file,
-                    file_id=segment.data.file_id,
-                    path=segment.data.path,
-                    url=segment.data.url,
-                )
-            )
+        self._collect_segment_image_resources(
+            segments=segments,
+            source_label=source_label,
+            resources=resources,
+        )
         return resources
+
+    def _collect_segment_image_resources(
+        self,
+        *,
+        segments: Sequence[MessageSegment],
+        source_label: str,
+        resources: list[NapCatImageResource],
+    ) -> None:
+        """递归收集消息、节点和已内嵌转发中的图片。"""
+        for segment in segments:
+            if isinstance(segment, Image):
+                resources.append(
+                    NapCatImageResource(
+                        label=f"{source_label}第 {len(resources) + 1} 张图片",
+                        file=segment.data.file,
+                        file_id=segment.data.file_id,
+                        path=segment.data.path,
+                        url=segment.data.url,
+                    )
+                )
+                continue
+            if isinstance(segment, Node) and isinstance(segment.data.content, list):
+                self._collect_segment_image_resources(
+                    segments=segment.data.content,
+                    source_label=source_label,
+                    resources=resources,
+                )
+                continue
+            if isinstance(segment, Forward) and segment.data.content is not None:
+                self._collect_json_image_resources(
+                    value=segment.data.content,
+                    source_label=source_label,
+                    resources=resources,
+                )
+
+    def _collect_json_image_resources(
+        self,
+        *,
+        value: JsonValue,
+        source_label: str,
+        resources: list[NapCatImageResource],
+    ) -> None:
+        """从合并转发的多种内嵌 JSON 形态中寻找消息段。"""
+        if isinstance(value, list):
+            try:
+                segments = self.segments_adapter.validate_python(value)
+            except ValidationError:
+                for item in value:
+                    self._collect_json_image_resources(
+                        value=item,
+                        source_label=source_label,
+                        resources=resources,
+                    )
+                return
+            self._collect_segment_image_resources(
+                segments=segments,
+                source_label=source_label,
+                resources=resources,
+            )
+            return
+        if not isinstance(value, dict):
+            return
+        if "type" in value:
+            try:
+                segment = self.segment_adapter.validate_python(value)
+            except ValidationError:
+                return
+            self._collect_segment_image_resources(
+                segments=[segment],
+                source_label=source_label,
+                resources=resources,
+            )
+            return
+        for key in ("message", "content", "messages", "data"):
+            nested = value.get(key)
+            if nested is not None:
+                self._collect_json_image_resources(
+                    value=nested,
+                    source_label=source_label,
+                    resources=resources,
+                )
 
     async def _load_reply_context_message(
         self, *, msg: GroupMessage

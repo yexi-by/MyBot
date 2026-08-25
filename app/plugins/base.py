@@ -38,8 +38,6 @@ class PluginMeta(ABCMeta):
         if bases and name != "BasePlugin":
             plugin_name = getattr(cls, "name", None)
             plugin_id = getattr(cls, "plugin_id", None)
-            consumers_count = getattr(cls, "consumers_count", None)
-            priority = getattr(cls, "priority", None)
             if "__init__" in attrs:
                 raise ValueError(
                     f"{name}插件不允许重写 __init__ 方法,请使用 setup 方法"
@@ -52,12 +50,6 @@ class PluginMeta(ABCMeta):
                 _ = validate_plugin_id(plugin_id)
             except ValueError as exc:
                 raise ValueError(f"{name}插件的 {exc}") from exc
-            if consumers_count is None:
-                raise ValueError(
-                    f"{name}插件缺少 consumers_count(最大并发数量) 属性,请重新定义"
-                )
-            if priority is None:
-                raise ValueError(f"{name}插件缺少 priority(优先级) 属性,请重新定义")
             for plugin in PLUGINS:
                 if plugin.name == plugin_name:
                     raise ValueError(
@@ -135,17 +127,22 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
     name: ClassVar[str]
     plugin_id: ClassVar[str]
     migration_package: ClassVar[str | None] = None
-    consumers_count: ClassVar[int]
-    priority: ClassVar[int]
-
     def __init__(
         self,
         context: Context,
         plugin_config: PluginConfigView,
+        consumers_count: int,
+        stop_timeout_seconds: float,
     ) -> None:
         """初始化插件上下文、任务队列和消费者。"""
         self.context: Context = context
         self.plugin_config: PluginConfigView = plugin_config
+        self._consumers_count: int = consumers_count
+        if self._consumers_count < 1:
+            raise ValueError("插件消费者数量必须大于等于 1")
+        if stop_timeout_seconds <= 0:
+            raise ValueError("插件消费者停止超时必须大于 0")
+        self._stop_timeout_seconds: float = stop_timeout_seconds
         self.task_queue: asyncio.Queue[tuple[T, asyncio.Future[bool]]] = asyncio.Queue()
         self.consumers: list[asyncio.Task[None]] = []
         self._active_futures: set[asyncio.Future[bool]] = set()
@@ -194,7 +191,7 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
 
     def register_consumers(self) -> None:
         """启动插件消费者任务。"""
-        for _ in range(self.consumers_count):
+        for _ in range(self._consumers_count):
             consumer = asyncio.create_task(self.consumer())
             self.consumers.append(consumer)
 
@@ -219,7 +216,8 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
         if self.consumers:
             try:
                 _ = await asyncio.wait_for(
-                    asyncio.gather(*self.consumers, return_exceptions=True), timeout=3
+                    asyncio.gather(*self.consumers, return_exceptions=True),
+                    timeout=self._stop_timeout_seconds,
                 )
             except asyncio.TimeoutError:
                 log_event(

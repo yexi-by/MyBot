@@ -2,7 +2,6 @@
 
 import asyncio
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,31 +13,12 @@ import uvicorn
 
 from app.webui import PowerController
 from app.webui.dev import create_dev_app
+from tests.config_helpers import minimal_config_toml
 
 
 def base_config() -> str:
     """生成不依赖外部文件的最小配置。"""
-    return textwrap.dedent(
-        """
-        [server]
-        port = 6055
-
-        [napcat]
-        websocket_token = "test-token"
-
-        [database]
-        password = "test-password"
-
-        [llm.providers.main]
-        api_key = "test-api-key"
-        max_attempts = 3
-        retry_delay_seconds = 0
-
-        [plugins.group_notice]
-        groups = ["40000"]
-        send_avatar = true
-        """
-    ).strip() + "\n"
+    return minimal_config_toml()
 
 
 class WebUIRoutesTest(unittest.IsolatedAsyncioTestCase):
@@ -198,7 +178,10 @@ class WebUIRoutesTest(unittest.IsolatedAsyncioTestCase):
             (root.parent / "escape.md").write_text("外部", encoding="utf-8")
             async with self._client(root) as client:
                 list_response = await client.get("/api/files")
-                self.assertEqual(list_response.json()["files"], ["prompts/system.md"])
+                self.assertEqual(
+                    list_response.json()["files"],
+                    ["mybot.toml", "prompts/system.md"],
+                )
 
                 read_response = await client.get("/api/files/prompts/system.md")
                 self.assertEqual(read_response.status_code, 200)
@@ -223,18 +206,57 @@ class WebUIRoutesTest(unittest.IsolatedAsyncioTestCase):
                 missing_response = await client.get("/api/files/prompts/none.md")
                 self.assertEqual(missing_response.status_code, 404)
 
-                config_bypass = await client.put(
+                config_file_response = await client.get("/api/files/mybot.toml")
+                self.assertEqual(config_file_response.status_code, 200)
+                config_body = config_file_response.json()
+                config_save = await client.put(
                     "/api/files/mybot.toml",
-                    json={"content": "[server]\nport = 1\n", "base_sha256": None},
+                    json={
+                        "content": config_body["content"],
+                        "base_sha256": config_body["sha256"],
+                    },
                 )
-                self.assertEqual(config_bypass.status_code, 422)
-                config_read_bypass = await client.get("/api/files/mybot.toml")
-                self.assertEqual(config_read_bypass.status_code, 422)
+                self.assertEqual(config_save.status_code, 200)
 
                 reread = await client.get("/api/files/prompts/system.md")
 
         self.assertEqual(reread.json()["content"], "新角色")
         self.assertEqual(reread.headers["cache-control"], "no-store")
+
+    async def test_invalid_toml_can_be_repaired_through_raw_file_api(self) -> None:
+        """运行中出现 TOML 语法错误时，文件页仍能读取并写回完整配置。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_file = root / "mybot.toml"
+            valid_text = base_config()
+            config_file.write_text(valid_text, encoding="utf-8")
+            async with self._client(root) as client:
+                initial = await client.get("/api/config")
+                config_file.write_text("[server\nport =", encoding="utf-8")
+                invalid = await client.get("/api/config")
+                structured_write = await client.put(
+                    "/api/config",
+                    json={
+                        "config": initial.json()["config"],
+                        "base_sha256": invalid.json()["sha256"],
+                    },
+                )
+                raw = await client.get("/api/files/mybot.toml")
+                repaired = await client.put(
+                    "/api/files/mybot.toml",
+                    json={
+                        "content": valid_text,
+                        "base_sha256": raw.json()["sha256"],
+                    },
+                )
+                valid_again = await client.get("/api/config")
+
+        self.assertEqual(invalid.status_code, 200)
+        self.assertFalse(invalid.json()["valid"])
+        self.assertEqual(structured_write.status_code, 422)
+        self.assertEqual(raw.status_code, 200)
+        self.assertEqual(repaired.status_code, 200)
+        self.assertTrue(valid_again.json()["valid"])
 
     async def test_power_actions_trigger_graceful_exit(self) -> None:
         """重启与关机端点受理后延迟触发 uvicorn 优雅停机。"""

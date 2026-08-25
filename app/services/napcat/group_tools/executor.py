@@ -1,5 +1,6 @@
 """NapCat 群聊工具执行器。"""
 
+from collections.abc import Callable
 from typing import override
 
 import httpx
@@ -14,6 +15,7 @@ from app.models import (
 )
 from app.services.llm.schemas import LLMToolDefinition, LLMToolExecutor
 from app.services.llm.tools import LLMToolExecutionResult, LLMToolRegistry
+from app.services.napcat.message_formatter import NapCatMessageTextFormatter
 
 from .files import GroupFileToolset
 from .forward import GroupForwardToolset
@@ -31,14 +33,23 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
         bot: NapCatGroupToolBot,
         group_messages: GroupMessageReader,
         event: GroupMessage,
-        allow_mention_all: bool = False,
-        forward_image_tool_enabled: bool = True,
-        forward_image_max_images_per_call: int = 20,
-        forward_image_max_all_images: int = 50,
-        image_fetch_concurrency: int = 16,
-        image_download_timeout_seconds: float = 20.0,
-        max_reply_chars: int = 1000,
-        http_client: httpx.AsyncClient | None = None,
+        allow_mention_all: bool,
+        forward_image_tool_enabled: bool,
+        forward_image_max_images_per_call: int,
+        forward_image_max_images_per_turn: int,
+        image_fetch_concurrency: int,
+        image_download_timeout_seconds: float,
+        image_max_bytes: int | None,
+        forward_reply_threshold_chars: int,
+        http_client: httpx.AsyncClient | None,
+        message_formatter: NapCatMessageTextFormatter,
+        history_default_limit: int,
+        history_max_per_call: int,
+        history_default_before_count: int,
+        history_default_after_count: int,
+        file_default_count: int,
+        file_max_per_call: int,
+        remaining_image_delivery_slots: Callable[[], int | None],
     ) -> None:
         """绑定当前群事件，并注册可供模型调用的群聊工具。"""
         self._registry: LLMToolRegistry = LLMToolRegistry()
@@ -47,29 +58,46 @@ class NapCatGroupToolExecutor(LLMToolExecutor):
             bot=bot,
             event=event,
             allow_mention_all=allow_mention_all,
-            max_reply_chars=max_reply_chars,
+            forward_reply_threshold_chars=forward_reply_threshold_chars,
         )
-        self._files: GroupFileToolset = GroupFileToolset(bot=bot, event=event)
+        self._files: GroupFileToolset = GroupFileToolset(
+            bot=bot,
+            event=event,
+            default_count=file_default_count,
+            max_per_call=file_max_per_call,
+        )
         self._forward: GroupForwardToolset = GroupForwardToolset(
             bot=bot,
             group_messages=group_messages,
             event=event,
+            message_formatter=message_formatter,
         )
         self._forward_images: GroupForwardImageToolset = GroupForwardImageToolset(
             bot=bot,
             group_messages=group_messages,
             event=event,
             max_images_per_call=forward_image_max_images_per_call,
-            max_all_images=forward_image_max_all_images,
+            max_images_per_turn=forward_image_max_images_per_turn,
             fetch_concurrency=image_fetch_concurrency,
             download_timeout_seconds=image_download_timeout_seconds,
             http_client=http_client,
+            max_image_bytes=image_max_bytes,
+            remaining_delivery_slots=remaining_image_delivery_slots,
         )
         self._history: GroupHistoryToolset = GroupHistoryToolset(
             group_messages=group_messages,
             event=event,
+            message_formatter=message_formatter,
+            default_limit=history_default_limit,
+            max_per_call=history_max_per_call,
+            default_before_count=history_default_before_count,
+            default_after_count=history_default_after_count,
         )
         self._register_tools()
+
+    def begin_image_delivery_batch(self) -> None:
+        """通知图片工具开始处理同一条模型响应中的一批调用。"""
+        self._forward_images.begin_delivery_batch()
 
     @override
     def list_tools(self) -> list[LLMToolDefinition]:

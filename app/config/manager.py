@@ -13,12 +13,12 @@ from .schemas import (
     AIGroupChatConfig,
     AIGroupConfig,
     AutoUnbanConfig,
-    EmptyPluginConfig,
     GroupNoticeConfig,
     ImageGenerateConfig,
     ModelRef,
     MyBotConfig,
     NeavoImageGenerateConfig,
+    RecallBotImageConfig,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +34,7 @@ RESTART_ONLY_SECTIONS = (
     "llm",
     "mcp",
     "database",
+    "plugin_execution",
 )
 
 
@@ -44,6 +45,7 @@ class ConfigIssue:
     location: str
     error_type: str
     message: str
+    path: tuple[str | int, ...] = ()
 
 
 class ConfigLoadError(RuntimeError):
@@ -82,7 +84,7 @@ type PluginConfigValue = (
     | AutoUnbanConfig
     | ImageGenerateConfig
     | NeavoImageGenerateConfig
-    | EmptyPluginConfig
+    | RecallBotImageConfig
 )
 
 
@@ -96,7 +98,7 @@ class PluginConfigSnapshot:
     auto_unban: AutoUnbanConfig | None
     image_generate: ImageGenerateConfig | None
     neavo_image_generate: NeavoImageGenerateConfig | None
-    recall_bot_image: EmptyPluginConfig | None
+    recall_bot_image: RecallBotImageConfig | None
     referenced_files: frozenset[Path]
 
     def get(self, plugin_id: str) -> PluginConfigValue | None:
@@ -145,12 +147,14 @@ def safe_validation_issues(exc: ValidationError) -> tuple[ConfigIssue, ...]:
         include_context=False,
         include_input=False,
     ):
-        location = ".".join(str(part) for part in item.get("loc", ())) or "config"
+        raw_path = tuple(item.get("loc", ()))
+        location = ".".join(str(part) for part in raw_path) or "config"
         issues.append(
             ConfigIssue(
                 location=location,
                 error_type=str(item.get("type", "validation_error")),
                 message=str(item.get("msg", "配置字段无效")),
+                path=raw_path,
             )
         )
     return tuple(issues)

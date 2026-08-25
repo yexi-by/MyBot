@@ -40,8 +40,8 @@ class ImageArchiveTask:
             raise ValueError("task_id 必须大于等于 1")
         if self.lease_token.strip() == "":
             raise ValueError("lease_token 不能为空")
-        if not 1 <= self.attempt_number <= 4:
-            raise ValueError("attempt_number 必须介于 1 和 4 之间")
+        if self.attempt_number < 1:
+            raise ValueError("attempt_number 必须大于等于 1")
         if self.label.strip() == "":
             raise ValueError("label 不能为空")
 

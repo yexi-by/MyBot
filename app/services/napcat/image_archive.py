@@ -28,15 +28,6 @@ from app.services.napcat.image_reader import (
 )
 from app.utils.log import log_event, log_exception
 
-MAX_ARCHIVE_IMAGE_BYTES = 50 * 1024 * 1024
-DEFAULT_ARCHIVE_CONCURRENCY = 16
-DEFAULT_ARCHIVE_READ_TIMEOUT_SECONDS = 20.0
-DEFAULT_ARCHIVE_LEASE_SECONDS = 45.0
-DEFAULT_ARCHIVE_POLL_INTERVAL_SECONDS = 1.0
-DEFAULT_ARCHIVE_RETRY_DELAYS_SECONDS = (1.0, 5.0, 20.0)
-MAX_ARCHIVE_ATTEMPTS = 1 + len(DEFAULT_ARCHIVE_RETRY_DELAYS_SECONDS)
-
-
 class ImageArchiveError(ValueError):
     """图片归档内容不符合存储要求。"""
 
@@ -122,7 +113,7 @@ class ImageStore:
         self,
         *,
         root: Path,
-        max_image_bytes: int = MAX_ARCHIVE_IMAGE_BYTES,
+        max_image_bytes: int,
     ) -> None:
         """设置图片根目录和单文件大小限制。"""
         if max_image_bytes < 1:
@@ -298,13 +289,11 @@ class ImageArchiveWorker:
         repository: ImageArchiveTaskRepository,
         reader: ImageArchiveReader,
         store: ImageStore,
-        concurrency: int = DEFAULT_ARCHIVE_CONCURRENCY,
-        read_timeout_seconds: float = DEFAULT_ARCHIVE_READ_TIMEOUT_SECONDS,
-        lease_seconds: float = DEFAULT_ARCHIVE_LEASE_SECONDS,
-        poll_interval_seconds: float = DEFAULT_ARCHIVE_POLL_INTERVAL_SECONDS,
-        retry_delays_seconds: tuple[float, float, float] = (
-            DEFAULT_ARCHIVE_RETRY_DELAYS_SECONDS
-        ),
+        concurrency: int,
+        read_timeout_seconds: float,
+        lease_seconds: float,
+        poll_interval_seconds: float,
+        retry_delays_seconds: tuple[float, ...],
         utc_now: Callable[[], datetime] | None = None,
     ) -> None:
         """保存 worker 依赖并检查并发、超时、租约和重试边界。"""
@@ -318,10 +307,8 @@ class ImageArchiveWorker:
             raise ValueError("图片归档租约时间必须大于 0")
         if poll_interval_seconds <= 0:
             raise ValueError("图片归档轮询间隔必须大于 0")
-        if len(retry_delays_seconds) != 3:
-            raise ValueError("图片归档必须配置三个重试间隔")
-        if any(delay <= 0 for delay in retry_delays_seconds):
-            raise ValueError("图片归档重试间隔必须全部大于 0")
+        if any(delay < 0 for delay in retry_delays_seconds):
+            raise ValueError("图片归档重试间隔不能小于 0")
         self.bot_id: str = bot_id
         self.repository: ImageArchiveTaskRepository = repository
         self.reader: ImageArchiveReader = reader
@@ -330,9 +317,7 @@ class ImageArchiveWorker:
         self.read_timeout_seconds: float = read_timeout_seconds
         self.lease_seconds: float = lease_seconds
         self.poll_interval_seconds: float = poll_interval_seconds
-        self.retry_delays_seconds: tuple[float, float, float] = (
-            retry_delays_seconds
-        )
+        self.retry_delays_seconds: tuple[float, ...] = retry_delays_seconds
         self._utc_now: Callable[[], datetime] = utc_now or (
             lambda: datetime.now(UTC)
         )
@@ -516,7 +501,7 @@ class ImageArchiveWorker:
         )
 
     def _retry_at(self, *, attempt_number: int) -> datetime | None:
-        """第一到第三次失败后延迟重试，第四次终止。"""
+        """按配置中的对应延迟安排下一次尝试，列表耗尽后终止。"""
         retry_index = attempt_number - 1
         if retry_index >= len(self.retry_delays_seconds):
             return None
@@ -547,13 +532,12 @@ class ImageArchiveWorkerFactory:
         repository: ImageArchiveTaskRepository,
         http_client: httpx.AsyncClient | None,
         store: ImageStore,
-        concurrency: int = DEFAULT_ARCHIVE_CONCURRENCY,
-        download_timeout_seconds: float = DEFAULT_ARCHIVE_READ_TIMEOUT_SECONDS,
-        max_image_bytes: int = MAX_ARCHIVE_IMAGE_BYTES,
-        lease_seconds: float = DEFAULT_ARCHIVE_LEASE_SECONDS,
-        retry_delays_seconds: tuple[float, float, float] = (
-            DEFAULT_ARCHIVE_RETRY_DELAYS_SECONDS
-        ),
+        concurrency: int,
+        download_timeout_seconds: float,
+        max_image_bytes: int,
+        lease_seconds: float,
+        poll_interval_seconds: float,
+        retry_delays_seconds: tuple[float, ...],
     ) -> None:
         """保存全局依赖，并在首个事件到来前完成配置校验。"""
         if concurrency < 1:
@@ -566,10 +550,10 @@ class ImageArchiveWorkerFactory:
             raise ValueError("ImageStore 与读取器的图片大小上限必须一致")
         if lease_seconds <= 0:
             raise ValueError("图片归档租约时间必须大于 0")
-        if len(retry_delays_seconds) != 3:
-            raise ValueError("图片归档必须配置三个重试间隔")
-        if any(delay <= 0 for delay in retry_delays_seconds):
-            raise ValueError("图片归档重试间隔必须全部大于 0")
+        if poll_interval_seconds <= 0:
+            raise ValueError("图片归档轮询间隔必须大于 0")
+        if any(delay < 0 for delay in retry_delays_seconds):
+            raise ValueError("图片归档重试间隔不能小于 0")
 
         self.repository: ImageArchiveTaskRepository = repository
         self.http_client: httpx.AsyncClient | None = http_client
@@ -578,9 +562,8 @@ class ImageArchiveWorkerFactory:
         self.download_timeout_seconds: float = download_timeout_seconds
         self.max_image_bytes: int = max_image_bytes
         self.lease_seconds: float = lease_seconds
-        self.retry_delays_seconds: tuple[float, float, float] = (
-            retry_delays_seconds
-        )
+        self.poll_interval_seconds: float = poll_interval_seconds
+        self.retry_delays_seconds: tuple[float, ...] = retry_delays_seconds
 
     def create(
         self,
@@ -604,16 +587,12 @@ class ImageArchiveWorkerFactory:
             concurrency=self.concurrency,
             read_timeout_seconds=self.download_timeout_seconds,
             lease_seconds=self.lease_seconds,
+            poll_interval_seconds=self.poll_interval_seconds,
             retry_delays_seconds=self.retry_delays_seconds,
         )
 
 
 __all__ = [
-    "DEFAULT_ARCHIVE_CONCURRENCY",
-    "DEFAULT_ARCHIVE_LEASE_SECONDS",
-    "DEFAULT_ARCHIVE_POLL_INTERVAL_SECONDS",
-    "DEFAULT_ARCHIVE_READ_TIMEOUT_SECONDS",
-    "DEFAULT_ARCHIVE_RETRY_DELAYS_SECONDS",
     "ImageArchiveError",
     "ImageArchiveReader",
     "ImageArchiveTask",
@@ -626,7 +605,5 @@ __all__ = [
     "InvalidInlineImageSourceError",
     "InlineImageArchiveResult",
     "InlineImageArchiver",
-    "MAX_ARCHIVE_ATTEMPTS",
-    "MAX_ARCHIVE_IMAGE_BYTES",
     "StoredImage",
 ]

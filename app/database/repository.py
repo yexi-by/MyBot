@@ -47,7 +47,6 @@ from .schemas import (
 )
 
 _SEGMENTS_ADAPTER = TypeAdapter(list[MessageSegment])
-_MAX_IMAGE_ATTEMPTS = 4
 _INLINE_PREFIXES = ("base64://", "data:")
 _PATH_SEGMENT_TYPES = frozenset(("image", "record", "video"))
 _FILE_SEGMENT_TYPES = frozenset(("image", "record", "video", "file"))
@@ -83,10 +82,14 @@ class PostgreSQLMessageRepository:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         image_root: Path,
+        image_max_attempts: int,
     ) -> None:
         """保留 session factory 和只用于重组已归档图片的根目录。"""
         self._session_factory: async_sessionmaker[AsyncSession] = session_factory
         self._image_root: Path = image_root
+        if image_max_attempts < 1:
+            raise ValueError("image_max_attempts 必须大于等于 1")
+        self._image_max_attempts: int = image_max_attempts
 
     async def get_active(
         self, *, scope: GroupDataScope, message_id: str
@@ -384,7 +387,7 @@ class PostgreSQLMessageRepository:
                     ),
                     GroupMessageImageRow.status == "leased",
                     GroupMessageImageRow.leased_until <= now,
-                    GroupMessageImageRow.attempt_count >= _MAX_IMAGE_ATTEMPTS,
+                    GroupMessageImageRow.attempt_count >= self._image_max_attempts,
                 )
                 .values(
                     status="failed",
@@ -416,7 +419,7 @@ class PostgreSQLMessageRepository:
                 .where(
                     GroupMessageRow.bot_id == bot_id,
                     ready,
-                    GroupMessageImageRow.attempt_count < _MAX_IMAGE_ATTEMPTS,
+                    GroupMessageImageRow.attempt_count < self._image_max_attempts,
                 )
                 .order_by(
                     GroupMessageImageRow.next_attempt_at.asc().nullsfirst(),
@@ -501,7 +504,8 @@ class PostgreSQLMessageRepository:
             if row is None:
                 return False
             should_retry = (
-                retry_at is not None and row.attempt_count < _MAX_IMAGE_ATTEMPTS
+                retry_at is not None
+                and row.attempt_count < self._image_max_attempts
             )
             row.status = "retry" if should_retry else "failed"
             row.next_attempt_at = retry_at if should_retry else None

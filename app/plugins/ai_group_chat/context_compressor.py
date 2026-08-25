@@ -1,6 +1,7 @@
 """AI 群聊历史上下文压缩。"""
 
 from dataclasses import dataclass
+from typing import Literal
 
 from app.services import ChatMessage
 from app.services.llm.schemas import LLMToolCall
@@ -68,15 +69,19 @@ class GroupChatContextCompressor:
             "",
         ]
         image_bytes: list[bytes] = []
+        image_detail: Literal["auto", "low", "high"] | None = None
         for message in current_turn_messages:
             if message.text:
                 text_parts.extend([message.text, ""])
             if message.image:
                 image_bytes.extend(message.image)
+                if image_detail is None:
+                    image_detail = message.image_detail
         return ChatMessage(
             role="user",
             text="\n".join(text_parts).strip(),
             image=image_bytes if image_bytes else None,
+            image_detail=image_detail,
         )
 
     def _build_compression_prompt(self, *, formatted_context: str) -> str:

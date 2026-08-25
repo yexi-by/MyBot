@@ -14,6 +14,7 @@ from typing import Any, Iterator, cast
 
 import tomlkit
 from pydantic import SecretStr, ValidationError
+from tomlkit.exceptions import ParseError
 
 from app.config import (
     RESTART_ONLY_SECTIONS,
@@ -208,8 +209,8 @@ def _merge_table(
     """把 payload 深合并进 tomlkit 表，保留未触及的注释与格式。
 
     payload 是完整配置视图：文档中存在而 payload 缺失（或为 None）的键被删除，
-    数组与标量整体替换，嵌套表递归更新以保留 inline 形态。原文件没有且
-    仍采用模型默认值的字段不会被展开写入。
+    数组与标量整体替换，嵌套表递归更新以保留 inline 形态。可选空值会从
+    TOML 删除；必填运行字段由保存前的完整模型校验保证存在。
     """
     for key in list(table.keys()):
         if key not in payload or payload[key] is None:
@@ -257,15 +258,27 @@ def write_config_payload(
         candidate = parse_and_validate(config_file=config_file, payload=payload)
         normalized_payload = materialize_config_payload(candidate)
         try:
+            current_raw = tomllib.loads(current_text)
+            document = tomlkit.parse(current_text)
+        except (tomllib.TOMLDecodeError, ParseError) as exc:
+            raise ConfigLoadError(
+                (
+                    ConfigIssue(
+                        "config",
+                        "toml_decode",
+                        "当前 mybot.toml 语法无效，请先在配置文本页直接修复原文件",
+                    ),
+                )
+            ) from exc
+        try:
             current_config = parse_and_validate(
                 config_file=config_file,
-                payload=tomllib.loads(current_text),
+                payload=current_raw,
             )
         except ConfigLoadError:
             baseline_payload: dict[str, Any] = {}
         else:
             baseline_payload = materialize_config_payload(current_config)
-        document = tomlkit.parse(current_text)
         _merge_table(document, normalized_payload, baseline_payload)
         new_text = tomlkit.dumps(document)
         atomic_write_text(config_file, new_text)

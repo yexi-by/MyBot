@@ -33,6 +33,7 @@ class ResilientLLMProvider(LLMProvider):
         model: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
         """调用底层文本接口，并按供应商默认值或当前请求覆盖值重试。"""
         retrier = create_retry_manager(
@@ -45,6 +46,11 @@ class ResilientLLMProvider(LLMProvider):
                 self.provider_config.retry_delay_seconds
                 if retry_delay_seconds is None
                 else retry_delay_seconds
+            ),
+            retry_max_delay_seconds=(
+                self.provider_config.retry_max_delay_seconds
+                if retry_max_delay_seconds is None
+                else retry_max_delay_seconds
             ),
             error_types=(
                 RateLimitError,
@@ -76,6 +82,7 @@ class ResilientLLMProvider(LLMProvider):
         retrier = create_retry_manager(
             max_attempts=self.provider_config.max_attempts,
             retry_delay_seconds=self.provider_config.retry_delay_seconds,
+            retry_max_delay_seconds=self.provider_config.retry_max_delay_seconds,
             error_types=(
                 RateLimitError,
                 APIConnectionError,
@@ -107,6 +114,7 @@ class ResilientLLMProvider(LLMProvider):
         retrier = create_retry_manager(
             max_attempts=self.provider_config.max_attempts,
             retry_delay_seconds=self.provider_config.retry_delay_seconds,
+            retry_max_delay_seconds=self.provider_config.retry_max_delay_seconds,
             error_types=(
                 RateLimitError,
                 APIConnectionError,

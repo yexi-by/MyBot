@@ -30,6 +30,7 @@ def _issue_payloads(error: ConfigLoadError) -> list[ConfigIssuePayload]:
     return [
         ConfigIssuePayload(
             location=issue.location,
+            path=list(issue.path),
             error_type=issue.error_type,
             message=issue.message,
         )
@@ -82,6 +83,7 @@ def create_webui_router(
             issues=[
                 ConfigIssuePayload(
                     location=issue.location,
+                    path=list(issue.path),
                     error_type=issue.error_type,
                     message=issue.message,
                 )

@@ -129,7 +129,7 @@ export function TextareaField({
   );
 }
 
-/** 数字输入字段；清空等价于恢复默认（提交时丢弃该键）。 */
+/** 数字输入字段；清空时省略该键，必填字段会由后端明确报错。 */
 export function NumberField({
   path,
   label,
@@ -163,7 +163,16 @@ export function NumberField({
 }
 
 /** 开关字段。 */
-export function SwitchField({ path, label, description }: BaseFieldProps) {
+export function SwitchField({
+  path,
+  label,
+  description,
+  onCheckedChange,
+  disabled,
+}: BaseFieldProps & {
+  onCheckedChange?: (checked: boolean) => void;
+  disabled?: boolean;
+}) {
   const { control } = useFormContext();
   const controlId = useId();
   return (
@@ -181,8 +190,12 @@ export function SwitchField({ path, label, description }: BaseFieldProps) {
             <Switch
               id={controlId}
               aria-label={label}
-              checked={Boolean(field.value)}
-              onCheckedChange={field.onChange}
+              checked={field.value === true}
+              disabled={disabled}
+              onCheckedChange={(checked) => {
+                field.onChange(checked);
+                onCheckedChange?.(checked);
+              }}
             />
           )}
         />
@@ -203,7 +216,11 @@ export function SelectField({
   description,
   options,
   placeholder = "请选择",
-}: BaseFieldProps & { options: SelectOption[] }) {
+  onValueChange,
+}: BaseFieldProps & {
+  options: SelectOption[];
+  onValueChange?: (value: string) => void;
+}) {
   const { control } = useFormContext();
   const controlId = useId();
   return (
@@ -219,7 +236,11 @@ export function SelectField({
         render={({ field }) => (
           <Select
             value={typeof field.value === "string" ? field.value : ""}
-            onValueChange={field.onChange}
+            onValueChange={(value) => {
+              if (value === null) return;
+              field.onChange(value);
+              onValueChange?.(value);
+            }}
           >
             <SelectTrigger id={controlId} className="w-full">
               <SelectValue placeholder={placeholder} />
@@ -289,60 +310,35 @@ export function StringListField({
   );
 }
 
-/** 键值对编辑器（MCP server 的 env）。键不允许重复，后者覆盖前者。 */
-export function KeyValueField({
+/** 数字数组编辑器；空数组表示当前功能不执行对应的重复操作。 */
+export function NumberListField({
   path,
   label,
   description,
-}: BaseFieldProps) {
-  const { watch, setValue } = useFormContext();
+  addLabel = "添加一项",
+}: BaseFieldProps & { addLabel?: string }) {
+  const { control, register } = useFormContext();
+  const { fields, append, remove } = useFieldArray({ control, name: path });
   const labelId = useId();
-  const record = (watch(path) as Record<string, string> | undefined) ?? {};
-  const entries = Object.entries(record);
-
-  const commit = (next: [string, string][]) => {
-    setValue(path, Object.fromEntries(next), { shouldDirty: true });
-  };
-
   return (
-    <FieldShell
-      path={path}
-      label={label}
-      description={description}
-      labelId={labelId}
-    >
+    <FieldShell path={path} label={label} description={description} labelId={labelId}>
       <div className="space-y-2" role="group" aria-labelledby={labelId}>
-        {entries.map(([key, value], index) => (
-          <div key={index} className="flex items-center gap-2">
+        {fields.map((field, index) => (
+          <div key={field.id} className="flex items-center gap-2">
             <Input
-              className="w-2/5"
-              aria-label={`变量名 ${index + 1}`}
-              placeholder="变量名"
-              value={key}
-              onChange={(event) => {
-                const next: [string, string][] = entries.map((entry, i) =>
-                  i === index ? [event.target.value, entry[1]] : entry,
-                );
-                commit(next);
-              }}
-            />
-            <Input
-              aria-label={`变量值 ${index + 1}`}
-              placeholder="值"
-              value={value}
-              onChange={(event) => {
-                const next: [string, string][] = entries.map((entry, i) =>
-                  i === index ? [entry[0], event.target.value] : entry,
-                );
-                commit(next);
-              }}
+              type="number"
+              step="any"
+              aria-label={`${label} ${index + 1}`}
+              {...register(`${path}.${index}`, {
+                setValueAs: (value: unknown) => Number(value),
+              })}
             />
             <Button
               type="button"
               variant="ghost"
               size="icon"
-              aria-label={`删除环境变量 ${key || index + 1}`}
-              onClick={() => commit(entries.filter((_, i) => i !== index))}
+              aria-label={`删除${label}第 ${index + 1} 项`}
+              onClick={() => remove(index)}
             >
               <Trash2 className="h-4 w-4" />
             </Button>
@@ -352,10 +348,10 @@ export function KeyValueField({
           type="button"
           variant="outline"
           size="sm"
-          onClick={() => commit([...entries, ["", ""]])}
+          onClick={() => append(0)}
         >
           <Plus className="mr-1 h-4 w-4" />
-          添加变量
+          {addLabel}
         </Button>
       </div>
     </FieldShell>

@@ -3,25 +3,12 @@
 import unittest
 
 from app.config import AIGroupChatConfig
+from tests.config_helpers import build_ai_group_chat_config
 
 
 def build_config(**overrides: object) -> AIGroupChatConfig:
     """构造默认使用独立视觉模型的测试配置。"""
-    values: dict[str, object] = {
-        "model": {
-            "provider": "main-provider",
-            "name": "main-model",
-            "supports_images": False,
-        },
-        "vision": {
-            "model": {"provider": "vision-provider", "name": "vision-model"},
-            "system_prompt_file": "vision/system.md",
-            "user_prompt_file": "vision/user.md",
-        },
-        "groups": [],
-    }
-    values.update(overrides)
-    return AIGroupChatConfig.model_validate(values)
+    return build_ai_group_chat_config(overrides=overrides)
 
 
 class AIGroupChatConfigTest(unittest.TestCase):
@@ -30,35 +17,30 @@ class AIGroupChatConfigTest(unittest.TestCase):
     def test_text_model_requires_vision(self) -> None:
         """主模型不支持图片时必须提供独立视觉模型。"""
         with self.assertRaisesRegex(ValueError, "必须配置 vision"):
-            _ = AIGroupChatConfig.model_validate(
-                {
-                    "model": {
-                        "provider": "main-provider",
-                        "name": "main-model",
-                        "supports_images": False,
-                    }
-                }
+            _ = build_config(vision=None)
+
+    def test_image_model_can_use_direct_mode_without_vision(self) -> None:
+        """主模型支持图片时可明确选择原图直达且不配置视觉模型。"""
+        config = build_ai_group_chat_config(supports_images=True)
+        self.assertEqual(config.images.delivery_mode, "direct")
+        self.assertIsNone(config.vision)
+
+    def test_vision_runtime_fields_are_required(self) -> None:
+        """视觉运行参数缺失时直接返回配置字段错误。"""
+        config = build_config().model_dump(mode="python")
+        vision = config["vision"]
+        assert isinstance(vision, dict)
+        del vision["max_attempts"]
+        with self.assertRaisesRegex(ValueError, "max_attempts"):
+            _ = AIGroupChatConfig.model_validate(config)
+
+    def test_direct_oversize_description_requires_vision(self) -> None:
+        """只有显式配置视觉模型时才允许超限图片转描述。"""
+        with self.assertRaisesRegex(ValueError, "必须配置 vision"):
+            _ = build_ai_group_chat_config(
+                supports_images=True,
+                overrides={"images": {"oversize_behavior": "describe"}},
             )
-
-    def test_image_model_forbids_vision(self) -> None:
-        """主模型支持图片时不保留不会消费的视觉配置。"""
-        with self.assertRaisesRegex(ValueError, "不能配置 vision"):
-            _ = build_config(
-                model={
-                    "provider": "main-provider",
-                    "name": "main-model",
-                    "supports_images": True,
-                }
-            )
-
-    def test_vision_retry_defaults(self) -> None:
-        """视觉请求默认最多尝试五次并使用短退避。"""
-        config = build_config()
-
-        self.assertIsNotNone(config.vision)
-        assert config.vision is not None
-        self.assertEqual(config.vision.max_attempts, 5)
-        self.assertEqual(config.vision.retry_delay_seconds, 0.25)
 
     def test_duplicate_groups_are_rejected(self) -> None:
         """同一个群只能有一份权威配置。"""

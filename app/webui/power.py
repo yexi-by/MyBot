@@ -18,7 +18,9 @@ class PowerController:
     本机裸跑时两者都保持停止，需要手动启动）。
     """
 
-    def __init__(self, *, delay_seconds: float = 0.5) -> None:
+    def __init__(self, *, delay_seconds: float) -> None:
+        if delay_seconds < 0:
+            raise ValueError("电源操作延迟不能小于 0")
         self._server: uvicorn.Server | None = None
         self._delay_seconds = delay_seconds
 

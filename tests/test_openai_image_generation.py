@@ -104,6 +104,7 @@ class OpenAIChatMessageFormattingTest(unittest.TestCase):
                     role="user",
                     text="看看这张图",
                     image=[PNG_1X1_BYTES],
+                    image_detail="high",
                 )
             ]
         )
@@ -119,13 +120,26 @@ class OpenAIChatMessageFormattingTest(unittest.TestCase):
                             "type": "image_url",
                             "image_url": {
                                 "url": f"data:image/png;base64,{PNG_1X1_BASE64}",
-                                "detail": "auto",
+                                "detail": "high",
                             },
                         },
                     ],
                 }
             ],
         )
+
+    def test_image_detail_can_be_omitted_from_provider_payload(self) -> None:
+        """detail 未配置时不向兼容接口发送该字段。"""
+        formatted = self.service.format_chat_messages(
+            [ChatMessage(role="user", image=[PNG_1X1_BYTES])]
+        )
+
+        raw_content = formatted[0].get("content")
+        self.assertIsInstance(raw_content, list)
+        content = cast(list[dict[str, object]], raw_content)
+        image_item = content[0]
+        image_url = cast(dict[str, object], image_item["image_url"])
+        self.assertNotIn("detail", image_url)
 
 
 class OpenAIImageGenerationParameterTest(unittest.IsolatedAsyncioTestCase):

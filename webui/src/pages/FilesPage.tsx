@@ -1,4 +1,4 @@
-/** 配置文本编辑页：config/ 内 prompt、知识库等 md/txt 文件的自动保存编辑器，md 支持语法高亮与实时预览。 */
+/** 配置文本编辑页：config/ 内 UTF-8 文件的自动保存编辑器，md 支持实时预览。 */
 
 import {
   lazy,
@@ -71,7 +71,7 @@ function requiredPromptFiles(config: MyBotConfigData): Set<string> {
   return files;
 }
 
-export default function FilesPage() {
+export default function FilesPage({ initialPath }: { initialPath?: string }) {
   const [files, setFiles] = useState<string[]>([]);
   const [listError, setListError] = useState<string | null>(null);
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
@@ -123,6 +123,10 @@ export default function FilesPage() {
         toast.error(error instanceof Error ? error.message : "读取文件失败");
       });
   }, []);
+
+  useEffect(() => {
+    if (initialPath) loadPath(initialPath);
+  }, [initialPath, loadPath]);
 
   const openPath = useCallback(
     (path: string) => {
@@ -207,11 +211,6 @@ export default function FilesPage() {
       toast.error("文件路径不能为空");
       return;
     }
-    const lowerPath = path.toLowerCase();
-    if (!lowerPath.endsWith(".md") && !lowerPath.endsWith(".txt")) {
-      toast.error("只支持 .md 或 .txt 文件");
-      return;
-    }
     try {
       await saveFile(path, "", null);
       setCreateOpen(false);
@@ -241,7 +240,7 @@ export default function FilesPage() {
     <div className="flex h-[calc(100dvh-10.5rem)] min-h-0 flex-col gap-4 md:h-[calc(100dvh-7.5rem)] md:flex-row">
       <div className="flex h-40 w-full shrink-0 flex-col rounded-lg border md:h-auto md:w-64">
         <div className="flex items-center justify-between border-b px-3 py-2">
-          <span className="text-sm font-medium">文本文件</span>
+          <span className="text-sm font-medium">配置目录文件</span>
           <Button
             type="button"
             variant="outline"
@@ -272,7 +271,7 @@ export default function FilesPage() {
             ))}
             {files.length === 0 && !listError ? (
               <p className="px-2 py-1 text-sm text-muted-foreground">
-                config/ 下还没有文本文件
+                config/ 下还没有 UTF-8 文本文件
               </p>
             ) : null}
           </div>
@@ -388,7 +387,7 @@ export default function FilesPage() {
           </>
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-            从左侧选择要编辑的 prompt 或知识库文件
+            从左侧选择要编辑的配置文本文件
           </div>
         )}
       </div>

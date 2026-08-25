@@ -11,11 +11,8 @@ from .config_io import (
     sha256_text,
 )
 
-_TEXT_FILE_SUFFIXES = frozenset({".md", ".txt"})
-
-
 def _validate_text_relative_path(relative_path: str) -> None:
-    """文本 API 只接受 config/ 内使用正斜杠表示的 md/txt 文件。"""
+    """文本 API 接受 config/ 内使用正斜杠表示的任意 UTF-8 文件。"""
     candidate = PurePosixPath(relative_path)
     if (
         relative_path.strip() == ""
@@ -26,10 +23,6 @@ def _validate_text_relative_path(relative_path: str) -> None:
         raise ConfigLoadError(
             (ConfigIssue("file", "invalid_path", "文件路径必须是 config 目录内的相对路径"),)
         )
-    if candidate.suffix.lower() not in _TEXT_FILE_SUFFIXES:
-        raise ConfigLoadError(
-            (ConfigIssue("file", "unsupported_file_type", "只允许读写 .md 或 .txt 文件"),)
-        )
 
 
 def list_text_files(*, config_root: Path) -> list[str]:
@@ -37,13 +30,17 @@ def list_text_files(*, config_root: Path) -> list[str]:
     root = config_root.resolve(strict=True)
     files: list[str] = []
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in _TEXT_FILE_SUFFIXES:
+        if not path.is_file():
             continue
         try:
             resolved = path.resolve(strict=True)
         except OSError:
             continue
         if not resolved.is_relative_to(root):
+            continue
+        try:
+            _ = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
             continue
         files.append(path.relative_to(root).as_posix())
     return files

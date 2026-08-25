@@ -2,7 +2,12 @@
 
 from datetime import datetime, timedelta
 
-from app.database import GroupDataScope, GroupMessageReader, StoredGroupMessage
+from app.database import (
+    GroupDataScope,
+    GroupMessageReader,
+    MessageCursor,
+    StoredGroupMessage,
+)
 from app.models import GroupMessage, Image, JsonObject, JsonValue, to_json_value
 from app.services.napcat.message_formatter import NapCatMessageTextFormatter
 from app.services.llm.tools import LLMToolRegistry
@@ -18,12 +23,24 @@ class GroupHistoryToolset:
     """通过群消息仓库向 LLM 暴露当前群历史消息。"""
 
     def __init__(
-        self, *, group_messages: GroupMessageReader, event: GroupMessage
+        self,
+        *,
+        group_messages: GroupMessageReader,
+        event: GroupMessage,
+        message_formatter: NapCatMessageTextFormatter,
+        default_limit: int,
+        max_per_call: int,
+        default_before_count: int,
+        default_after_count: int,
     ) -> None:
         """绑定当前群事件与消息数据库。"""
         self.group_messages: GroupMessageReader = group_messages
         self.event: GroupMessage = event
-        self.message_formatter: NapCatMessageTextFormatter = NapCatMessageTextFormatter()
+        self.message_formatter = message_formatter
+        self.default_limit = default_limit
+        self.max_per_call = max_per_call
+        self.default_before_count = default_before_count
+        self.default_after_count = default_after_count
 
     def register_tools(self, registry: LLMToolRegistry) -> None:
         """向工具注册表登记群历史消息工具。"""
@@ -44,16 +61,27 @@ class GroupHistoryToolset:
         args = GetGroupHistoryMessagesArgs.model_validate(arguments)
         if args.query_mode == "around_message":
             return await self._get_around_history_messages(args=args)
-        group_messages = await self._search_history_messages(args=args)
+        limit = self._effective_limit(requested=args.limit)
+        fetched_messages = await self._search_history_messages(
+            args=args, limit=limit + 1
+        )
+        has_more = len(fetched_messages) > limit
+        group_messages = fetched_messages[:limit]
         return {
             "ok": True,
             "action": "get_group_history_messages",
-            "query": self._build_history_query_summary(args=args),
+            "query": self._build_history_query_summary(args=args, limit=limit),
             "group_id": to_json_value(self.event.group_id),
             "messages": [
                 self._format_history_message(message=message)
                 for message in group_messages
             ],
+            "has_more": has_more,
+            "next_cursor": (
+                self._format_cursor(message=group_messages[-1])
+                if has_more and group_messages
+                else None
+            ),
         }
 
     async def _get_around_history_messages(
@@ -62,17 +90,29 @@ class GroupHistoryToolset:
         """按数据库中的任意未撤回锚点读取前后文。"""
         if args.context_message_id is None:
             raise ValueError("around_message 模式必须填写 context_message_id")
+        before_count = (
+            self.default_before_count
+            if args.before_count is None
+            else args.before_count
+        )
+        after_count = (
+            self.default_after_count if args.after_count is None else args.after_count
+        )
         context_messages = await self.group_messages.list_around(
             scope=self._scope(),
             message_id=args.context_message_id,
-            before_count=args.before_count,
-            after_count=args.after_count,
+            before_count=before_count,
+            after_count=after_count,
             sender_id=args.user_id,
         )
         return {
             "ok": True,
             "action": "get_group_history_messages",
-            "query": self._build_history_query_summary(args=args),
+            "query": self._build_history_query_summary(
+                args=args,
+                before_count=before_count,
+                after_count=after_count,
+            ),
             "group_id": to_json_value(self.event.group_id),
             "messages": [
                 self._format_history_message(
@@ -84,13 +124,14 @@ class GroupHistoryToolset:
         }
 
     async def _search_history_messages(
-        self, *, args: GetGroupHistoryMessagesArgs
+        self, *, args: GetGroupHistoryMessagesArgs, limit: int
     ) -> list[StoredGroupMessage]:
         """按查询模式读取群历史消息。"""
         if args.query_mode == "recent_count":
             return await self.group_messages.list_recent(
                 scope=self._scope(),
-                limit=args.limit,
+                limit=limit,
+                before=self._parse_cursor(args=args),
                 sender_id=args.user_id,
             )
         start, end = self._resolve_history_time_range(args=args)
@@ -98,7 +139,8 @@ class GroupHistoryToolset:
             scope=self._scope(),
             start=start,
             end=end,
-            limit=args.limit,
+            limit=limit,
+            before=self._parse_cursor(args=args),
             sender_id=args.user_id,
         )
 
@@ -127,6 +169,32 @@ class GroupHistoryToolset:
             group_id=self.event.group_id,
         )
 
+    def _effective_limit(self, *, requested: int | None) -> int:
+        """应用用户配置的默认单页大小和可选上限。"""
+        limit = self.default_limit if requested is None else requested
+        if self.max_per_call > 0:
+            return min(limit, self.max_per_call)
+        return limit
+
+    def _parse_cursor(self, *, args: GetGroupHistoryMessagesArgs) -> MessageCursor | None:
+        """把工具参数中的可读游标还原为数据库稳定游标。"""
+        if args.before is None:
+            return None
+        try:
+            occurred_at = datetime.fromisoformat(args.before.occurred_at)
+        except ValueError as exc:
+            raise ValueError("before.occurred_at 必须是 ISO 8601 时间") from exc
+        if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
+            raise ValueError("before.occurred_at 必须包含时区")
+        return MessageCursor(occurred_at=occurred_at, row_id=args.before.row_id)
+
+    def _format_cursor(self, *, message: StoredGroupMessage) -> JsonObject:
+        """返回下一页可原样使用的稳定游标。"""
+        return {
+            "occurred_at": message.cursor.occurred_at.isoformat(),
+            "row_id": message.cursor.row_id,
+        }
+
     def _parse_history_time(self, *, value: str, field_name: str) -> datetime:
         """解析北京时间历史查询时间。"""
         try:
@@ -138,12 +206,17 @@ class GroupHistoryToolset:
         return naive_time.replace(tzinfo=BEIJING_TIMEZONE)
 
     def _build_history_query_summary(
-        self, *, args: GetGroupHistoryMessagesArgs
+        self,
+        *,
+        args: GetGroupHistoryMessagesArgs,
+        limit: int | None = None,
+        before_count: int | None = None,
+        after_count: int | None = None,
     ) -> JsonObject:
         """生成历史查询参数摘要。"""
         summary: JsonObject = {
             "query_mode": args.query_mode,
-            "limit": args.limit,
+            "limit": limit,
         }
         if args.duration_minutes is not None:
             summary["duration_minutes"] = args.duration_minutes
@@ -156,8 +229,10 @@ class GroupHistoryToolset:
         if args.query_mode == "around_message":
             if args.context_message_id is not None:
                 summary["context_message_id"] = args.context_message_id
-            summary["before_count"] = args.before_count
-            summary["after_count"] = args.after_count
+            summary["before_count"] = before_count
+            summary["after_count"] = after_count
+        if args.before is not None:
+            summary["before"] = args.before.model_dump(mode="json")
         return summary
 
     def _format_history_message(

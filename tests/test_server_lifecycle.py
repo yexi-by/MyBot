@@ -1,6 +1,7 @@
 """NapCatServer 应用级资源生命周期回归测试。"""
 
 import asyncio
+import tomllib
 import unittest
 from typing import cast
 
@@ -17,6 +18,7 @@ from app.database import (
 )
 from app.services import LLMHandler, MCPToolManager
 from app.services.napcat import ImageArchiveWorkerFactory
+from tests.config_helpers import minimal_config_toml
 
 
 class _ClosableResource:
@@ -133,14 +135,15 @@ class _FakeContainer:
 class NapCatServerLifespanTest(unittest.IsolatedAsyncioTestCase):
     """验证启动失败和关闭失败都不会漏掉已创建资源。"""
 
-    def _config(self) -> MyBotConfig:
+    def _config(self, *, websocket_token: str | None = "test-token") -> MyBotConfig:
         """构造不依赖本机配置文件的最小设置。"""
-        return MyBotConfig.model_validate(
-            {
-                "napcat": {"websocket_token": "test-token"},
-                "database": {"password": "test-password"},
-            }
-        )
+        raw_config = tomllib.loads(minimal_config_toml())
+        napcat = cast(dict[str, object], raw_config["napcat"])
+        if websocket_token is None:
+            napcat.pop("websocket_token", None)
+        else:
+            napcat["websocket_token"] = websocket_token
+        return MyBotConfig.model_validate(raw_config)
 
     def _server(self, *, container: _FakeContainer) -> NapCatServer:
         """绕过路由注册，只测试 lifespan 本身。"""
@@ -189,9 +192,7 @@ class NapCatServerLifespanTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_websocket_token_disables_authentication(self) -> None:
         """NapCat 未配置 Token 时直接接受反向 WebSocket。"""
-        config = MyBotConfig.model_validate(
-            {"napcat": {}, "database": {}}
-        )
+        config = self._config(websocket_token=None)
         container = _FakeContainer({MyBotConfig: config})
         server = object.__new__(NapCatServer)
         server.container = cast(AsyncContainer, cast(object, container))
@@ -206,12 +207,7 @@ class NapCatServerLifespanTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_configured_websocket_token_is_still_enforced(self) -> None:
         """显式 Token 仍拒绝缺少 Bearer 认证的连接。"""
-        config = MyBotConfig.model_validate(
-            {
-                "napcat": {"websocket_token": "test-token"},
-                "database": {},
-            }
-        )
+        config = self._config()
         container = _FakeContainer({MyBotConfig: config})
         server = object.__new__(NapCatServer)
         server.container = cast(AsyncContainer, cast(object, container))

@@ -9,16 +9,24 @@ from app.utils.log import log_event, log_exception
 
 from .manager import ConfigManager
 
-_WATCH_DEBOUNCE_MS = 500
-_WATCH_STEP_MS = 50
-
-
 class ConfigWatcher:
     """只响应主配置和当前插件实际引用的文件。"""
 
-    def __init__(self, *, manager: ConfigManager) -> None:
+    def __init__(
+        self,
+        *,
+        manager: ConfigManager,
+        debounce_ms: int,
+        step_ms: int,
+    ) -> None:
         """绑定配置管理器和停止事件。"""
+        if debounce_ms < 0:
+            raise ValueError("配置监听防抖毫秒数不能小于 0")
+        if step_ms < 1:
+            raise ValueError("配置监听轮询毫秒数必须大于等于 1")
         self.manager = manager
+        self.debounce_ms = debounce_ms
+        self.step_ms = step_ms
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -26,8 +34,8 @@ class ConfigWatcher:
         try:
             async for changes in awatch(
                 self.manager.config_root,
-                debounce=_WATCH_DEBOUNCE_MS,
-                step=_WATCH_STEP_MS,
+                debounce=self.debounce_ms,
+                step=self.step_ms,
                 stop_event=self._stop_event,
             ):
                 changed_paths = {

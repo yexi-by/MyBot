@@ -3,7 +3,6 @@
 from .arguments import (
     BEIJING_TIMEZONE,
     HISTORY_TIME_FORMAT,
-    MAX_HISTORY_LIMIT,
     MENTION_ALL,
     GetForwardMessageArgs,
     GetForwardMessageImagesArgs,
@@ -11,6 +10,7 @@ from .arguments import (
     GetGroupHistoryMessagesArgs,
     ForwardImageQueryMode,
     HistoryQueryMode,
+    HistoryCursorArgs,
     ListGroupFilesByFolderArgs,
     ListGroupRootFilesArgs,
 )
@@ -25,10 +25,10 @@ __all__ = [
     "GetGroupFileUrlArgs",
     "GetGroupHistoryMessagesArgs",
     "HISTORY_TIME_FORMAT",
+    "HistoryCursorArgs",
     "HistoryQueryMode",
     "ListGroupFilesByFolderArgs",
     "ListGroupRootFilesArgs",
-    "MAX_HISTORY_LIMIT",
     "MENTION_ALL",
     "NapCatGroupToolBot",
     "NapCatGroupToolExecutor",

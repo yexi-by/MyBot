@@ -22,8 +22,8 @@ class WebUIFilesTest(unittest.TestCase):
         (root / "image.png").write_bytes(b"\x89PNG")
         return root
 
-    def test_list_only_returns_text_files(self) -> None:
-        """列表只包含 config/ 内的 md/txt，排除 toml 与二进制。"""
+    def test_list_returns_all_utf8_files(self) -> None:
+        """列表包含任意扩展名的 UTF-8 文件，并排除二进制。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = self._root(temp_dir)
 
@@ -31,7 +31,12 @@ class WebUIFilesTest(unittest.TestCase):
 
         self.assertEqual(
             files,
-            ["ai/knowledge.md", "ai/prompts/system.md", "notes.txt"],
+            [
+                "ai/knowledge.md",
+                "ai/prompts/system.md",
+                "mybot.toml",
+                "notes.txt",
+            ],
         )
 
     def test_read_returns_content_and_hash(self) -> None:
@@ -59,20 +64,23 @@ class WebUIFilesTest(unittest.TestCase):
             with self.assertRaises(ConfigLoadError):
                 read_text_file(config_root=root, relative_path=absolute)
 
-    def test_read_and_write_reject_non_text_paths(self) -> None:
-        """文本 API 不能绕过配置校验读写 TOML 或其他文件。"""
+    def test_toml_is_editable_but_binary_and_invalid_paths_are_rejected(self) -> None:
+        """TOML 可直接修复，二进制内容和反斜杠路径仍被拒绝。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = self._root(temp_dir)
 
+            _, digest = read_text_file(
+                config_root=root,
+                relative_path="mybot.toml",
+            )
+            _ = write_text_file(
+                config_root=root,
+                relative_path="mybot.toml",
+                content="[server]\nport = 1\n",
+                base_sha256=digest,
+            )
             with self.assertRaises(ConfigLoadError):
-                read_text_file(config_root=root, relative_path="mybot.toml")
-            with self.assertRaises(ConfigLoadError):
-                write_text_file(
-                    config_root=root,
-                    relative_path="mybot.toml",
-                    content="[server]\nport = 1\n",
-                    base_sha256=None,
-                )
+                read_text_file(config_root=root, relative_path="image.png")
             with self.assertRaises(ConfigLoadError):
                 write_text_file(
                     config_root=root,

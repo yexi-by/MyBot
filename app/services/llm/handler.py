@@ -2,9 +2,9 @@
 
 from typing import Self
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
-from app.config.schemas import LLMProviderConfig
+from app.config.schemas import LLMProviderConfig, NetworkConfig
 
 from .providers.openai import OpenAIService
 from .schemas import (
@@ -22,26 +22,53 @@ from .wrapper import ResilientLLMProvider
 class LLMHandler:
     """按模型厂商路由到具体 LLM 服务。"""
 
-    def __init__(self, services: dict[str, LLMProviderWrapper]) -> None:
+    def __init__(
+        self,
+        services: dict[str, LLMProviderWrapper],
+        clients: list[AsyncOpenAI],
+    ) -> None:
         """保存按稳定 ID 注册的服务。"""
         self.services: dict[str, LLMProviderWrapper] = services
+        self._clients: list[AsyncOpenAI] = clients
 
     @classmethod
-    def register_instance(cls, providers: dict[str, LLMProviderConfig]) -> Self:
+    def register_instance(
+        cls,
+        providers: dict[str, LLMProviderConfig],
+        network: NetworkConfig,
+    ) -> Self:
         """根据配置注册 LLM 服务实例。"""
         services: dict[str, LLMProviderWrapper] = {}
+        clients: list[AsyncOpenAI] = []
         for provider_id, provider_config in providers.items():
             api_key = (
                 provider_config.api_key.get_secret_value()
                 if provider_config.api_key is not None
                 else ""
             )
-            raw_service = OpenAIService(
-                client=AsyncOpenAI(
-                    api_key=api_key,
-                    base_url=provider_config.base_url,
-                )
+            proxy = (
+                provider_config.proxy
+                if provider_config.proxy is not None
+                else network.proxy if provider_config.inherit_network_proxy else None
             )
+            timeout = (
+                network.timeout_seconds
+                if provider_config.timeout_seconds == 0
+                else provider_config.timeout_seconds
+            )
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=provider_config.base_url,
+                timeout=timeout,
+                max_retries=0,
+                http_client=(
+                    DefaultAsyncHttpxClient(proxy=proxy, timeout=timeout)
+                    if proxy is not None
+                    else None
+                ),
+            )
+            clients.append(client)
+            raw_service = OpenAIService(client=client)
             safe_service = ResilientLLMProvider(
                 inner_provider=raw_service, provider_config=provider_config
             )
@@ -50,7 +77,12 @@ class LLMHandler:
                 provider=safe_service,
             )
             services[provider_id] = wrapper
-        return cls(services=services)
+        return cls(services=services, clients=clients)
+
+    async def aclose(self) -> None:
+        """关闭每个 provider 拥有的 OpenAI HTTP 客户端。"""
+        for client in self._clients:
+            await client.close()
 
     async def get_ai_text_response(
         self,
@@ -59,6 +91,7 @@ class LLMHandler:
         model_name: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
         """获取指定模型厂商的文本响应，可覆盖当前请求的重试参数。"""
         llm = self.services.get(provider)
@@ -69,6 +102,7 @@ class LLMHandler:
             model=model_name,
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
+            retry_max_delay_seconds=retry_max_delay_seconds,
         )
 
     async def get_ai_response_with_tools(
@@ -98,7 +132,7 @@ class LLMHandler:
         provider: str,
         model_name: str,
         tool_executor: LLMToolExecutor,
-        max_tool_rounds: int = 16,
+        max_tool_rounds: int,
     ) -> str:
         """执行完整工具调用循环，直到模型返回最终文本。"""
         working_messages = messages[:]

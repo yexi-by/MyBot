@@ -13,7 +13,7 @@ from app.models import NapCatId
 from app.services.llm.schemas import ChatMessage, LLMToolCall
 from app.utils.log import log_event
 
-from .constants import BEIJING_TIMEZONE, DEBUG_DUMP_DIR
+from .constants import BEIJING_TIMEZONE
 
 type DumpPhase = Literal["启动初始化", "长期上下文增量"]
 
@@ -33,7 +33,8 @@ class AIGroupChatDebugDumper:
     def __init__(self, *, config: AIGroupChatConfig) -> None:
         """保存调试转储配置，并生成本次进程启动的文件名。"""
         self.enabled: bool = config.debug_dump_messages
-        self.root_dir: Path = DEBUG_DUMP_DIR
+        self.root_dir: Path = Path(config.debug_dump_directory)
+        self.tool_result_retention = config.tool_result_retention
         self.started_at: datetime = datetime.now(BEIJING_TIMEZONE)
         self.session_name: str = self.started_at.strftime("%Y%m%d_%H%M%S_%f")
         self._paths: dict[str, Path] = {}
@@ -59,7 +60,7 @@ class AIGroupChatDebugDumper:
             f"- 系统提示词文件: `{group_config.system_prompt_file}`",
             f"- 知识库文件: `{group_config.knowledge_base_file or '未配置'}`",
             "- 记录策略: `只记录长期上下文 messages 增量，不记录完整 LLM 请求体`",
-            "- 工具策略: `只记录工具名称摘要，不记录工具参数和工具结果正文`",
+            f"- 工具结果长期保存策略: `{self.tool_result_retention}`",
             "",
             *self._format_messages(
                 title="启动初始化长期上下文",

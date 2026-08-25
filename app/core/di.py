@@ -50,6 +50,20 @@ class MyProvider(Provider):
     def __init__(self, config_manager: ConfigManager) -> None:
         """保存启动阶段已经校验过的统一配置。"""
         super().__init__()
+        load_all_plugins()
+        loaded_plugin_ids = {plugin.plugin_id for plugin in PLUGINS}
+        configured_plugin_ids = set(
+            config_manager.boot_config.plugin_execution.plugins
+        )
+        missing = sorted(loaded_plugin_ids - configured_plugin_ids)
+        unused = sorted(configured_plugin_ids - loaded_plugin_ids)
+        if missing or unused:
+            details: list[str] = []
+            if missing:
+                details.append("缺少执行配置: " + ", ".join(missing))
+            if unused:
+                details.append("配置了不存在的插件: " + ", ".join(unused))
+            raise ValueError("plugin_execution.plugins 与已加载插件不一致；" + "；".join(details))
         self.config_manager = config_manager
 
     @provide(scope=Scope.APP)
@@ -63,9 +77,15 @@ class MyProvider(Provider):
         return manager.boot_config
 
     @provide(scope=Scope.APP)
-    def get_config_watcher(self, manager: ConfigManager) -> ConfigWatcher:
+    def get_config_watcher(
+        self, manager: ConfigManager, config: MyBotConfig
+    ) -> ConfigWatcher:
         """创建插件配置目录 watcher。"""
-        return ConfigWatcher(manager=manager)
+        return ConfigWatcher(
+            manager=manager,
+            debounce_ms=config.server.config_watch_debounce_ms,
+            step_ms=config.server.config_watch_step_ms,
+        )
 
     @provide(scope=Scope.APP)
     def get_database_url(self, config: MyBotConfig) -> PostgreSQLUrl:
@@ -98,6 +118,7 @@ class MyProvider(Provider):
         return PostgreSQLMessageRepository(
             session_factory=runtime.session_factory,
             image_root=Path(config.storage.images.directory).resolve(),
+            image_max_attempts=1 + len(config.storage.images.retry_delays_seconds),
         )
 
     @provide(scope=Scope.APP)
@@ -153,7 +174,7 @@ class MyProvider(Provider):
         """初始化可选 LLM 服务。"""
         if not config.llm.providers:
             return None
-        return LLMHandler.register_instance(config.llm.providers)
+        return LLMHandler.register_instance(config.llm.providers, config.network)
 
     @provide(scope=Scope.APP)
     def get_mcp_tool_manager(self, config: MyBotConfig) -> MCPToolManager:
@@ -191,6 +212,7 @@ class MyProvider(Provider):
             download_timeout_seconds=storage.download_timeout_seconds,
             max_image_bytes=storage.max_bytes,
             lease_seconds=storage.lease_seconds,
+            poll_interval_seconds=storage.worker_poll_interval_seconds,
             retry_delays_seconds=storage.retry_delays_seconds,
         )
 
@@ -215,8 +237,14 @@ class MyProvider(Provider):
             websocket=websocket,
             sent_message_recorder=repository,
             inline_image_archiver=inline_image_archiver,
+            action_timeout_seconds=config.napcat.action_timeout_seconds,
             send_max_attempts=config.napcat.send_max_attempts,
             send_retry_delay_seconds=config.napcat.send_retry_delay_seconds,
+            send_retry_max_delay_seconds=config.napcat.send_retry_max_delay_seconds,
+            response_summary_max_chars=config.napcat.response_summary_max_chars,
+            persistence_retry_delays_seconds=(
+                config.database.persistence_retry_delays_seconds
+            ),
         )
 
     @provide(scope=Scope.SESSION)
@@ -235,7 +263,16 @@ class MyProvider(Provider):
         """实例化插件控制器。"""
         load_all_plugins()
         plugin_objects: list[BasePlugin[AllEvent]] = []
-        for cls in PLUGINS:
+        execution = config_manager.boot_config.plugin_execution
+        ordered_plugins = sorted(
+            PLUGINS,
+            key=lambda plugin: (
+                -execution.for_plugin(plugin.plugin_id).priority,
+                plugin.plugin_id,
+            ),
+        )
+        for cls in ordered_plugins:
+            runtime = execution.for_plugin(cls.plugin_id)
             context = Context(
                 bot=bot,
                 group_messages=repository,
@@ -251,6 +288,8 @@ class MyProvider(Provider):
                 cls(
                     context=context,
                     plugin_config=config_manager.bind_plugin(cls.plugin_id),
+                    consumers_count=runtime.consumers_count,
+                    stop_timeout_seconds=execution.stop_timeout_seconds,
                 )
             )
         return PluginController(plugin_objects=plugin_objects)

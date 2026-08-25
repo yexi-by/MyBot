@@ -19,13 +19,25 @@ class TokenBudgetEstimate:
 class ConservativeTokenEstimator:
     """使用宁多不少的规则估算不同模型的上下文 token 数。"""
 
-    def __init__(self, *, safety_factor: float) -> None:
-        """保存最终安全系数。"""
+    def __init__(
+        self,
+        *,
+        safety_factor: float,
+        request_overhead_tokens: int,
+        message_overhead_tokens: int,
+        tool_call_overhead_tokens: int,
+        image_tokens: int,
+        ascii_tokens_per_character: float,
+        non_ascii_tokens_per_character: float,
+    ) -> None:
+        """保存用户为当前模型配置的估算参数。"""
         self.safety_factor: float = safety_factor
-        self.request_overhead_tokens: int = 128
-        self.message_overhead_tokens: int = 16
-        self.tool_call_overhead_tokens: int = 64
-        self.image_tokens: int = 1024
+        self.request_overhead_tokens: int = request_overhead_tokens
+        self.message_overhead_tokens: int = message_overhead_tokens
+        self.tool_call_overhead_tokens: int = tool_call_overhead_tokens
+        self.image_tokens: int = image_tokens
+        self.ascii_tokens_per_character: float = ascii_tokens_per_character
+        self.non_ascii_tokens_per_character: float = non_ascii_tokens_per_character
 
     def estimate_request(
         self, *, messages: list[ChatMessage], tools: list[LLMToolDefinition]
@@ -73,10 +85,10 @@ class ConservativeTokenEstimator:
         """按字符保守估算文本 token，非 ASCII 字符按两个 token 计算。"""
         if text is None:
             return 0
-        tokens = 0
+        tokens = 0.0
         for character in text:
             if character.isascii():
-                tokens += 1
+                tokens += self.ascii_tokens_per_character
                 continue
-            tokens += 2
-        return tokens
+            tokens += self.non_ascii_tokens_per_character
+        return ceil(tokens)

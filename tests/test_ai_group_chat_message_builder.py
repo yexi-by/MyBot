@@ -32,6 +32,7 @@ from app.models import (
     to_json_value,
 )
 from app.plugins.ai_group_chat.message_builder import GroupChatMessageBuilder
+from tests.config_helpers import build_ai_group_chat_config
 
 VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
 VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
@@ -82,27 +83,25 @@ class MissingImageBot:
 
 def build_config(**overrides: object) -> AIGroupChatConfig:
     """构造使用独立视觉工具的测试配置。"""
-    values: dict[str, object] = {
-        "model": {
-            "provider": "main-vendor",
-            "name": "text-model",
-            "supports_images": False,
-        },
-        "vision": {
-            "model": {"provider": "vision-vendor", "name": "vision-model"},
-            "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
-            "user_prompt_file": VISION_USER_PROMPT_PATH,
-        },
-        "groups": [
+    return build_ai_group_chat_config(
+        provider="main-vendor",
+        model_name="text-model",
+        overrides={
+            "vision": {
+                "model": {"provider": "vision-vendor", "name": "vision-model"},
+                "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
+                "user_prompt_file": VISION_USER_PROMPT_PATH,
+            },
+            "groups": [
             AIGroupConfig(
                 id="40000",
                 system_prompt_file="unused",
                 max_context_tokens=1000000,
             )
-        ],
-    }
-    values.update(overrides)
-    return AIGroupChatConfig.model_validate(values)
+            ],
+            **overrides,
+        },
+    )
 
 
 def build_message(
@@ -237,8 +236,8 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
         )
         self.assertIsNone(result.turn_messages[0].image)
 
-    def test_image_limit_truncates_after_current_then_reply_order(self) -> None:
-        """图片上限先保留当前消息图片，再截断引用消息图片。"""
+    def test_builder_reads_all_images_before_turn_delivery_policy(self) -> None:
+        """消息构造器不提前截断，统一由视觉交付层执行单轮策略。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             paths = [root / f"image-{index}.bin" for index in range(3)]
@@ -265,10 +264,14 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
             )
 
         self.assertEqual(result.detected_image_count, 3)
-        self.assertEqual(result.truncated_image_count, 1)
+        self.assertEqual(result.truncated_image_count, 0)
         self.assertEqual(
             [artifact.label for artifact in result.image_artifacts],
-            ["当前消息第 1 张图片", "当前消息第 2 张图片"],
+            [
+                "当前消息第 1 张图片",
+                "当前消息第 2 张图片",
+                "引用消息第 1 张图片",
+            ],
         )
 
     def test_supported_non_text_segments_are_readable(self) -> None:
@@ -390,7 +393,10 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
         msg = build_message(message=[Forward.new("forward-many", content=items)])
 
         chat_message = asyncio.run(
-            build_builder(database=EmptyDatabase()).build_turn_messages(msg=msg)
+            build_builder(
+                database=EmptyDatabase(),
+                config=build_config(formatting={"forward_max_items": 8}),
+            ).build_turn_messages(msg=msg)
         ).turn_messages[0]
         text = chat_message.text or ""
 

@@ -11,9 +11,28 @@ import httpx
 
 from app.models import Response
 from app.services.napcat.image_reader import (
-    NapCatImageReader,
+    NapCatImageBot,
+    NapCatImageReader as RealNapCatImageReader,
     NapCatImageResource,
 )
+
+
+def NapCatImageReader(
+    *,
+    bot: object,
+    http_client: httpx.AsyncClient | None,
+    fetch_concurrency: int,
+    download_timeout_seconds: float,
+    max_image_bytes: int | None = None,
+) -> RealNapCatImageReader:
+    """用显式的不限大小策略构造测试读取器。"""
+    return RealNapCatImageReader(
+        bot=cast(NapCatImageBot, bot),
+        http_client=http_client,
+        fetch_concurrency=fetch_concurrency,
+        download_timeout_seconds=download_timeout_seconds,
+        max_image_bytes=max_image_bytes,
+    )
 
 
 class FakeImageBot:
@@ -252,6 +271,19 @@ class NapCatImageReaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(results[0].ok)
         self.assertFalse(results[1].ok)
         self.assertEqual(results[1].error_type, "NapCatActionFailed")
+
+    async def test_read_many_requires_explicit_concurrency(self) -> None:
+        """仅配置为单图读取的实例不能静默采用批量并发数。"""
+        reader = RealNapCatImageReader(
+            bot=cast(NapCatImageBot, FakeImageBot()),
+            http_client=None,
+            fetch_concurrency=None,
+            download_timeout_seconds=3.0,
+            max_image_bytes=None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "fetch_concurrency"):
+            _ = await reader.read_many(resources=[])
 
     async def test_concurrency_limit_applies_to_shared_reader(self) -> None:
         """批量 URL 下载不会超过配置的并发数。"""

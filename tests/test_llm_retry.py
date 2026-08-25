@@ -4,7 +4,7 @@ import unittest
 from typing import override
 from unittest.mock import AsyncMock, call, patch
 
-from app.config import LLMProviderConfig
+from app.config import LLMProviderConfig, NetworkConfig
 from app.services.llm.base import LLMProvider
 from app.services.llm.handler import LLMHandler
 from app.services.llm.schemas import ChatMessage, LLMProviderWrapper
@@ -39,15 +39,28 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
     async def test_register_instance_allows_provider_without_api_key(self) -> None:
         """无鉴权 OpenAI 兼容服务使用空 key，客户端不会发送认证头。"""
         provider_config = LLMProviderConfig.model_validate(
-            {"base_url": "http://model.internal/v1"}
+            {
+                "base_url": "http://model.internal/v1",
+                "inherit_network_proxy": True,
+                "timeout_seconds": 0,
+                "max_attempts": 5,
+                "retry_delay_seconds": 0,
+                "retry_max_delay_seconds": 0,
+            }
         )
 
         with patch("app.services.llm.handler.AsyncOpenAI") as client_type:
-            handler = LLMHandler.register_instance({"local": provider_config})
+            handler = LLMHandler.register_instance(
+                {"local": provider_config},
+                NetworkConfig(proxy=None, timeout_seconds=15),
+            )
 
         client_type.assert_called_once_with(
             api_key="",
             base_url="http://model.internal/v1",
+            timeout=15,
+            max_retries=0,
+            http_client=None,
         )
         self.assertIn("local", handler.services)
 
@@ -61,8 +74,11 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
             provider_config=LLMProviderConfig.model_validate(
                 {
                     "api_key": "test-key",
+                    "inherit_network_proxy": True,
+                    "timeout_seconds": 0,
                     "max_attempts": 1,
                     "retry_delay_seconds": 9,
+                    "retry_max_delay_seconds": 10,
                 }
             ),
         )
@@ -72,7 +88,8 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
                     provider_id="vision-vendor",
                     provider=provider,
                 )
-            }
+            },
+            clients=[],
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
@@ -82,6 +99,7 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
                 model_name="vision-model",
                 max_attempts=3,
                 retry_delay_seconds=1,
+                retry_max_delay_seconds=0,
             )
 
         self.assertEqual(result, "视觉描述成功")
@@ -96,8 +114,11 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
             provider_config=LLMProviderConfig.model_validate(
                 {
                     "api_key": "test-key",
+                    "inherit_network_proxy": True,
+                    "timeout_seconds": 0,
                     "max_attempts": 3,
                     "retry_delay_seconds": 0,
+                    "retry_max_delay_seconds": 0,
                 }
             ),
         )
@@ -107,7 +128,8 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
                     provider_id="fast-vendor",
                     provider=provider,
                 )
-            }
+            },
+            clients=[],
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:

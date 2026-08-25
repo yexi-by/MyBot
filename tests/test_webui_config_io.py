@@ -15,33 +15,12 @@ from app.webui.config_io import (
     read_config_payload,
     write_config_payload,
 )
+from tests.config_helpers import minimal_config_toml
 
 
 def commented_config() -> str:
     """生成带注释的最小配置，用于验证写回保真。"""
-    return textwrap.dedent(
-        """
-        # 服务监听配置
-        [server]
-        port = 6055  # NapCat 反向 WS 端口
-
-        [napcat]
-        websocket_token = "test-token"
-
-        [database]
-        password = "test-password"
-
-        [llm.providers.main]
-        api_key = "test-api-key"
-        max_attempts = 3
-        retry_delay_seconds = 0
-
-        # 群通知插件
-        [plugins.group_notice]
-        groups = ["40000"]
-        send_avatar = true
-        """
-    ).strip() + "\n"
+    return minimal_config_toml(with_comments=True)
 
 
 class WebUIConfigIOTest(unittest.TestCase):
@@ -132,10 +111,13 @@ class WebUIConfigIOTest(unittest.TestCase):
         self.assertEqual(result.restart_required_sections, ("server",))
         self.assertEqual(result.config["server"]["port"], 7000)
         written = tomllib.loads(new_text)
-        self.assertEqual(written["server"], {"port": 7000})
-        self.assertEqual(written["database"], {"password": "test-password"})
-        self.assertNotIn("network", written)
-        self.assertNotIn("storage", written)
+        self.assertEqual(written["server"]["port"], 7000)
+        self.assertEqual(written["server"]["config_watch_debounce_ms"], 500)
+        self.assertEqual(written["database"]["password"], "test-password")
+        self.assertNotIn("password_file", written["database"])
+        self.assertEqual(written["network"]["timeout_seconds"], 15)
+        self.assertNotIn("proxy", written["network"])
+        self.assertEqual(written["storage"]["images"]["download_concurrency"], 16)
 
     def test_blank_password_does_not_conflict_with_password_file(self) -> None:
         """WebUI 空密码与已配置的 secret 文件可以一起提交。"""
@@ -202,12 +184,69 @@ class WebUIConfigIOTest(unittest.TestCase):
 
             [plugins.ai_group_chat]
             model = { provider = "main", name = "chat", supports_images = false }
+            max_tool_rounds = 16
+            token_safety_factor = 1.05
+            context_compression_notice = "正在整理上下文"
+            forward_reply_threshold_chars = 1000
+            show_reasoning = false
+            retain_reasoning = false
+            debug_dump_messages = false
+            debug_dump_directory = "logs/ai_group_chat_debug"
             extra_requirements_file = "extra.md"
+            allow_mention_all = false
+            tool_result_retention = "off"
 
             [plugins.ai_group_chat.vision]
             model = { provider = "main", name = "vision" }
             system_prompt_file = "vs.md"
             user_prompt_file = "vu.md"
+            max_attempts = 5
+            retry_delay_seconds = 0.25
+            retry_max_delay_seconds = 10
+            retain_descriptions = true
+
+            [plugins.ai_group_chat.images]
+            max_per_turn = 0
+            fetch_concurrency = 16
+            download_timeout_seconds = 20
+            max_image_bytes = 0
+            max_total_bytes_per_request = 0
+            max_width = 0
+            max_height = 0
+            allowed_mime_types = []
+            delivery_mode = "vision"
+            oversize_behavior = "skip"
+            image_detail = "auto"
+            retain_images = false
+            forward_tool_enabled = true
+            forward_max_per_call = 0
+            forward_max_per_turn = 0
+
+            [plugins.ai_group_chat.formatting]
+            field_text_limit = 0
+            json_text_limit = 0
+            markdown_text_limit = 0
+            forward_max_items = 0
+            forward_max_depth = -1
+            nested_text_search_max_depth = -1
+
+            [plugins.ai_group_chat.history]
+            default_limit = 20
+            max_per_call = 0
+            default_before_count = 10
+            default_after_count = 10
+
+            [plugins.ai_group_chat.files]
+            default_count = 50
+            max_per_call = 0
+
+            [plugins.ai_group_chat.token_estimator]
+            request_overhead_tokens = 128
+            message_overhead_tokens = 16
+            tool_call_overhead_tokens = 64
+            image_tokens = 1024
+            ascii_tokens_per_character = 1
+            non_ascii_tokens_per_character = 2
 
             [[plugins.ai_group_chat.groups]]
             id = "40000"
@@ -253,6 +292,59 @@ class WebUIConfigIOTest(unittest.TestCase):
         groups = written["plugins"]["ai_group_chat"]["groups"]
         self.assertEqual([group["id"] for group in groups], ["50000", "60000"])
         self.assertEqual(groups[0]["max_context_tokens"], 32000)
+
+    def test_dynamic_record_keys_with_dots_roundtrip_unchanged(self) -> None:
+        """Provider ID 和 MCP 服务名中的点号不会被拆成嵌套对象。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_file = root / "mybot.toml"
+            config_file.write_text(commented_config(), encoding="utf-8")
+            manager = self._manager(root)
+            current = read_config_payload(config_file=config_file)
+            payload = dict(current.config)
+            payload["llm"] = {
+                "providers": {
+                    **current.config["llm"]["providers"],
+                    "deep.seek": {
+                        "api_key": "dot-key",
+                        "base_url": "https://example.com/v1",
+                        "proxy": None,
+                        "inherit_network_proxy": True,
+                        "timeout_seconds": 0,
+                        "max_attempts": 5,
+                        "retry_delay_seconds": 0,
+                        "retry_max_delay_seconds": 10,
+                    },
+                }
+            }
+            payload["mcp"] = {
+                "enabled": True,
+                "servers": {
+                    "vendor.tool": {
+                        "command": "npx",
+                        "args": ["-y"],
+                        "env": {"API.KEY": "value"},
+                        "cwd": None,
+                        "disabled": False,
+                    }
+                },
+            }
+
+            _ = write_config_payload(
+                config_file=config_file,
+                payload=payload,
+                base_sha256=current.sha256,
+                boot_config=manager.boot_config,
+            )
+            written = tomllib.loads(config_file.read_text(encoding="utf-8"))
+
+        self.assertIn("deep.seek", written["llm"]["providers"])
+        self.assertNotIn("deep", written["llm"]["providers"])
+        self.assertIn("vendor.tool", written["mcp"]["servers"])
+        self.assertEqual(
+            written["mcp"]["servers"]["vendor.tool"]["env"]["API.KEY"],
+            "value",
+        )
 
     def test_write_rejects_stale_hash_and_keeps_file(self) -> None:
         """乐观锁失配时拒绝写入且文件内容不变。"""
@@ -335,8 +427,11 @@ class WebUIConfigIOTest(unittest.TestCase):
             new_providers = dict(payload.config["llm"]["providers"])
             new_providers["second"] = {
                 "api_key": "sk-second",
+                "inherit_network_proxy": True,
+                "timeout_seconds": 0,
                 "max_attempts": 3,
                 "retry_delay_seconds": 0,
+                "retry_max_delay_seconds": 10,
             }
             new_llm["providers"] = new_providers
             new_config["llm"] = new_llm
@@ -344,6 +439,11 @@ class WebUIConfigIOTest(unittest.TestCase):
             new_plugins["image_generate"] = {
                 "groups": ["40000"],
                 "model": {"provider": "second", "name": "image"},
+                "fetch_concurrency": 16,
+                "download_timeout_seconds": 20,
+                "max_input_image_bytes": 0,
+                "command": "/生图",
+                "help_command": "/help生图",
             }
             new_config["plugins"] = new_plugins
             result = write_config_payload(

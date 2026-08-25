@@ -20,8 +20,6 @@ from app.utils.log import log_event
 
 AVATAR_URL_TEMPLATE: Final[str] = "https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
 UNKNOWN_NICKNAME: Final[str] = "未知用户"
-CONSUMERS_COUNT: Final[int] = 5
-PRIORITY: Final[int] = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,9 +37,6 @@ class GroupNoticePlugin(
 
     name: ClassVar[str] = "群成员变动提醒插件"
     plugin_id: ClassVar[str] = "group_notice"
-    consumers_count: ClassVar[int] = CONSUMERS_COUNT
-    priority: ClassVar[int] = PRIORITY
-
     @override
     def setup(self) -> None:
         """初始化延迟构造的配置运行对象。"""

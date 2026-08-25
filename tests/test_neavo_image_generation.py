@@ -29,8 +29,6 @@ from app.models import (
 )
 from app.plugins.base import Context
 from app.plugins.neavo_image_generate.client import (
-    MAX_CONSECUTIVE_POLL_RETRIES,
-    MAX_INPUT_IMAGE_BYTES,
     NeavoGenerationTimeoutError,
     NeavoImageClient,
     NeavoProtocolError,
@@ -38,9 +36,6 @@ from app.plugins.neavo_image_generate.client import (
     NeavoUpstreamError,
 )
 from app.plugins.neavo_image_generate.plugin import (
-    MAX_PROMPT_LENGTH,
-    PRIORITY,
-    REVERSE_COMMAND_TOKEN,
     NeavoImageGeneratePlugin,
     extract_command,
     extract_prompt,
@@ -62,6 +57,11 @@ GIF_BYTES = base64.b64decode(
 )
 JOB_A = UUID("550e8400-e29b-41d4-a716-446655440000")
 JOB_B = UUID("550e8400-e29b-41d4-a716-446655440001")
+GENERATE_COMMAND = "#生图"
+DESCRIBE_COMMAND = "#反推"
+MAX_PROMPT_CHARS = 4096
+TEST_MAX_INPUT_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_CONSECUTIVE_POLL_ERRORS = 3
 
 type AsyncHttpHandler = Callable[
     [httpx.Request], Coroutine[None, None, httpx.Response]
@@ -78,7 +78,13 @@ def build_config(**overrides: object) -> NeavoImageGenerateConfig:
         "poll_interval_seconds": 3.0,
         "generation_timeout_seconds": 60.0,
         "request_timeout_seconds": 10.0,
-        "max_image_bytes": 20 * 1024 * 1024,
+        "max_prompt_chars": MAX_PROMPT_CHARS,
+        "max_input_image_bytes": TEST_MAX_INPUT_IMAGE_BYTES,
+        "max_output_image_bytes": 20 * 1024 * 1024,
+        "allowed_input_mime_types": ["image/jpeg", "image/png", "image/webp"],
+        "max_consecutive_poll_errors": MAX_CONSECUTIVE_POLL_ERRORS,
+        "generate_command": GENERATE_COMMAND,
+        "describe_command": DESCRIBE_COMMAND,
     }
     values.update(overrides)
     return NeavoImageGenerateConfig.model_validate(values)
@@ -252,19 +258,20 @@ class NeavoImageGenerateConfigTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(API_TOKEN, repr(config))
 
     async def test_config_rejects_unknown_and_invalid_values(self) -> None:
-        """未知字段、无效 URL 和越界轮询间隔必须显式失败。"""
+        """未知字段、无效 URL 和非正轮询间隔必须显式失败。"""
         invalid_overrides = [
             {"unexpected": True},
             {"base_url": "ftp://neavo.example"},
             {"base_url": "https://neavo.example/path?query=1"},
-            {"poll_interval_seconds": 1.9},
-            {"poll_interval_seconds": 5.1},
+            {"poll_interval_seconds": 0},
         ]
 
         for overrides in invalid_overrides:
             with self.subTest(overrides=overrides):
                 with self.assertRaises(ValidationError):
                     _ = build_config(**overrides)
+
+        self.assertEqual(build_config(poll_interval_seconds=30).poll_interval_seconds, 30)
 
     async def test_config_allows_no_token_and_basic_auth_url(self) -> None:
         """无鉴权服务可省略 Token，Basic Auth 也可放在 URL 中。"""
@@ -455,7 +462,7 @@ class NeavoImageClientTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(NeavoTransportError) as raised:
             _ = await client.generate("测试提示词")
 
-        self.assertEqual(poll_count, 1 + MAX_CONSECUTIVE_POLL_RETRIES)
+        self.assertEqual(poll_count, 1 + MAX_CONSECUTIVE_POLL_ERRORS)
         self.assertEqual(raised.exception.stage, "poll")
         self.assertEqual(raised.exception.job_id, JOB_A)
 
@@ -504,7 +511,7 @@ class NeavoImageClientTest(unittest.IsolatedAsyncioTestCase):
 
                 client = self.make_client(
                     handler=handler,
-                    config=build_config(max_image_bytes=max_image_bytes),
+                    config=build_config(max_output_image_bytes=max_image_bytes),
                 )
                 with self.assertRaises(NeavoProtocolError) as raised:
                     _ = await client.generate("测试提示词")
@@ -526,7 +533,10 @@ class NeavoImageClientTest(unittest.IsolatedAsyncioTestCase):
         cases = [
             (b"", "image/png"),
             (PNG_BYTES, "image/jpeg"),
-            (b"\x89PNG\r\n\x1a\n" + b"x" * MAX_INPUT_IMAGE_BYTES, "image/png"),
+            (
+                b"\x89PNG\r\n\x1a\n" + b"x" * TEST_MAX_INPUT_IMAGE_BYTES,
+                "image/png",
+            ),
         ]
         for image_bytes, mime_type in cases:
             with self.subTest(mime_type=mime_type, size=len(image_bytes)):
@@ -622,6 +632,8 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
                 manager,
                 plugin_id="neavo_image_generate",
             ),
+            consumers_count=5,
+            stop_timeout_seconds=1,
         )
         runtime = plugin._current_runtime()  # pyright: ignore[reportPrivateUsage]
         if runtime is None:
@@ -646,19 +658,37 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
 
         for message, expected in cases:
             with self.subTest(raw_message=message.raw_message):
-                self.assertEqual(extract_prompt(message), expected)
+                self.assertEqual(
+                    extract_prompt(message, command_token=GENERATE_COMMAND),
+                    expected,
+                )
 
-    async def test_reverse_command_is_exact_and_plugin_has_highest_priority(
+    async def test_reverse_command_is_exact(
         self,
     ) -> None:
-        """只有独立 #反推 被识别，且插件优先于其他群聊回复插件。"""
-        reverse = extract_command(build_group_message(text=REVERSE_COMMAND_TOKEN))
+        """只有配置的独立反推命令会被识别。"""
+        reverse = extract_command(
+            build_group_message(text=DESCRIBE_COMMAND),
+            generate_command=GENERATE_COMMAND,
+            describe_command=DESCRIBE_COMMAND,
+        )
 
         self.assertIsNotNone(reverse)
         self.assertEqual(reverse.operation if reverse is not None else None, "image_to_text")
-        self.assertIsNone(extract_command(build_group_message(text="#反推一下")))
-        self.assertIsNone(extract_command(build_group_message(text="请帮我 #反推")))
-        self.assertEqual(PRIORITY, 100)
+        self.assertIsNone(
+            extract_command(
+                build_group_message(text="#反推一下"),
+                generate_command=GENERATE_COMMAND,
+                describe_command=DESCRIBE_COMMAND,
+            )
+        )
+        self.assertIsNone(
+            extract_command(
+                build_group_message(text="请帮我 #反推"),
+                generate_command=GENERATE_COMMAND,
+                describe_command=DESCRIBE_COMMAND,
+            )
+        )
 
     async def test_queue_filters_other_groups_and_non_commands_before_http(self) -> None:
         """白名单外消息和普通消息不会进入耗时生成流程。"""
@@ -726,7 +756,7 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
         plugin, bot = self.make_plugin(handler=handler)
         empty_message = build_group_message(text="#生图", user_id="21001")
         long_message = build_group_message(
-            text=f"#生图 {'猫' * (MAX_PROMPT_LENGTH + 1)}",
+            text=f"#生图 {'猫' * (MAX_PROMPT_CHARS + 1)}",
             user_id="21002",
             message_id="30002",
         )
@@ -744,7 +774,7 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
         )
         sent_text = "\n".join(extract_text(item.segments) for item in bot.sent_messages)
         self.assertIn("填写图片描述", sent_text)
-        self.assertIn(str(MAX_PROMPT_LENGTH), sent_text)
+        self.assertIn(str(MAX_PROMPT_CHARS), sent_text)
 
     async def test_reverse_without_image_returns_usage_without_http(self) -> None:
         """#反推 没有当前或回复图片时只返回明确用法。"""
@@ -878,7 +908,7 @@ class NeavoImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_max_length_prompt_generates_and_sends_base64_image(self) -> None:
         """4096 字边界提示词可以生成，并把图片艾特回原用户。"""
-        prompt = "猫" * MAX_PROMPT_LENGTH
+        prompt = "猫" * MAX_PROMPT_CHARS
         submitted_prompts: list[str] = []
 
         async def handler(request: httpx.Request) -> httpx.Response:

@@ -8,7 +8,6 @@ from pydantic import Field, model_validator
 from app.models import StrictModel
 
 MENTION_ALL: Literal["all"] = "all"
-MAX_HISTORY_LIMIT: int = 100
 BEIJING_TIMEZONE: timezone = timezone(timedelta(hours=8))
 HISTORY_TIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
 type HistoryQueryMode = Literal[
@@ -20,11 +19,10 @@ type ForwardImageQueryMode = Literal["single", "message", "all"]
 class ListGroupRootFilesArgs(StrictModel):
     """获取当前群根目录文件列表的工具参数。"""
 
-    file_count: int = Field(
-        default=50,
+    file_count: int | None = Field(
+        default=None,
         ge=1,
-        le=200,
-        description="需要返回的文件数量，默认 50，最大 200。",
+        description="需要返回的文件数量；为空时使用插件配置。",
     )
 
 
@@ -39,11 +37,10 @@ class ListGroupFilesByFolderArgs(StrictModel):
         default=None,
         description="群文件夹路径或名称。仅在没有 folder_id 时填写。",
     )
-    file_count: int = Field(
-        default=50,
+    file_count: int | None = Field(
+        default=None,
         ge=1,
-        le=200,
-        description="需要返回的文件数量，默认 50，最大 200。",
+        description="需要返回的文件数量；为空时使用插件配置。",
     )
 
     @model_validator(mode="after")
@@ -100,7 +97,6 @@ class GetForwardMessageImagesArgs(StrictModel):
     max_images: int | None = Field(
         default=None,
         ge=1,
-        le=50,
         description="本次最多读取的图片数量；为空时使用插件配置上限。",
     )
 
@@ -122,6 +118,15 @@ class GetForwardMessageImagesArgs(StrictModel):
         return self
 
 
+class HistoryCursorArgs(StrictModel):
+    """群历史稳定分页游标。"""
+
+    occurred_at: str = Field(
+        description="上一页最后一条消息的 ISO 8601 时间，由工具结果原样返回。"
+    )
+    row_id: int = Field(ge=1, description="上一页最后一条消息的数据库行 ID。")
+
+
 class GetGroupHistoryMessagesArgs(StrictModel):
     """获取当前群聊天记录的工具参数。"""
 
@@ -132,19 +137,17 @@ class GetGroupHistoryMessagesArgs(StrictModel):
             "date_range 北京时间范围；around_message 某消息前后文。"
         ),
     )
-    limit: int = Field(
-        default=20,
+    limit: int | None = Field(
+        default=None,
         ge=1,
-        le=MAX_HISTORY_LIMIT,
         description=(
-            "返回上限，默认 20，最大 100；around_message 由 before/after 控制。"
+            "单页返回数量；为空时使用插件配置，around_message 由 before/after 控制。"
         ),
     )
     duration_minutes: int | None = Field(
         default=None,
         ge=1,
-        le=10080,
-        description="recent_duration：回溯分钟数，最大 10080。",
+        description="recent_duration：回溯分钟数。",
     )
     start_time: str | None = Field(
         default=None,
@@ -158,26 +161,58 @@ class GetGroupHistoryMessagesArgs(StrictModel):
         default=None,
         description="可选 QQ 号；只保留该成员发言。",
     )
+    before: HistoryCursorArgs | None = Field(
+        default=None,
+        description="读取下一页时原样传回上一页的 next_cursor。",
+    )
     context_message_id: str | None = Field(
         default=None,
         description="around_message 锚点消息 ID。",
     )
-    before_count: int = Field(
-        default=10,
+    before_count: int | None = Field(
+        default=None,
         ge=0,
-        le=MAX_HISTORY_LIMIT,
-        description="锚点前消息数量，默认 10。",
+        description="锚点前消息数量；为空时使用插件配置。",
     )
-    after_count: int = Field(
-        default=10,
+    after_count: int | None = Field(
+        default=None,
         ge=0,
-        le=MAX_HISTORY_LIMIT,
-        description="锚点后消息数量，默认 10。",
+        description="锚点后消息数量；为空时使用插件配置。",
     )
 
     @model_validator(mode="after")
     def check_query_mode_arguments(self) -> "GetGroupHistoryMessagesArgs":
-        """校验不同历史查询模式所需的参数。"""
+        """校验必填参数，并拒绝当前模式不会读取的输入。"""
+        mode_fields = {
+            "recent_count": frozenset(("limit", "before")),
+            "recent_duration": frozenset(
+                ("limit", "duration_minutes", "before")
+            ),
+            "date_range": frozenset(("limit", "start_time", "end_time", "before")),
+            "around_message": frozenset(
+                ("context_message_id", "before_count", "after_count")
+            ),
+        }
+        optional_fields = (
+            "limit",
+            "duration_minutes",
+            "start_time",
+            "end_time",
+            "before",
+            "context_message_id",
+            "before_count",
+            "after_count",
+        )
+        unused_fields = [
+            field_name
+            for field_name in optional_fields
+            if field_name not in mode_fields[self.query_mode]
+            and getattr(self, field_name) is not None
+        ]
+        if unused_fields:
+            raise ValueError(
+                f"{self.query_mode} 模式不使用参数: {', '.join(unused_fields)}"
+            )
         if self.query_mode == "recent_count":
             return self
         if self.query_mode == "recent_duration":

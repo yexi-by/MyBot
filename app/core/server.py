@@ -31,12 +31,8 @@ from .di import DirectHttpx, ProxyHttpx
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
 
-_PERSISTENCE_RETRY_DELAY_SECONDS = 0.25
-_IMAGE_WORKER_STOP_TIMEOUT_SECONDS = 5.0
-
-
 class EventPersistenceError(RuntimeError):
-    """事件在两次 PostgreSQL 写入后仍无法持久化。"""
+    """事件按配置尝试后仍无法持久化。"""
 
 
 class NapCatServer:
@@ -104,6 +100,7 @@ class NapCatServer:
         mcp_tool_manager: MCPToolManager | None = None
         direct_httpx: DirectHttpx | None = None
         proxy_httpx: ProxyHttpx | None = None
+        llm_handler: LLMHandler | None = None
         config_watcher: ConfigWatcher | None = None
         config_watcher_task: asyncio.Task[None] | None = None
         active_error: BaseException | None = None
@@ -119,7 +116,7 @@ class NapCatServer:
             await mcp_tool_manager.start()
             _ = await self.container.get(PostgreSQLMessageRepository)
             _ = await self.container.get(ImageArchiveWorkerFactory)
-            _ = await self.container.get(LLMHandler | None)
+            llm_handler = await self.container.get(LLMHandler | None)
             config_watcher_task = asyncio.create_task(config_watcher.run())
             log_event(
                 level="SUCCESS",
@@ -162,7 +159,12 @@ class NapCatServer:
                 config_watcher.stop()
             if config_watcher_task is not None:
                 async def wait_config_watcher() -> None:
-                    await asyncio.wait_for(config_watcher_task, timeout=3)
+                    await asyncio.wait_for(
+                        config_watcher_task,
+                        timeout=(
+                            self.config.server.config_watcher_stop_timeout_seconds
+                        ),
+                    )
 
                 await close_resource(
                     resource_name="config_watcher",
@@ -172,6 +174,11 @@ class NapCatServer:
                 await close_resource(
                     resource_name="mcp_tool_manager",
                     operation=mcp_tool_manager.close,
+                )
+            if llm_handler is not None:
+                await close_resource(
+                    resource_name="llm_handler",
+                    operation=llm_handler.aclose,
                 )
             if direct_httpx is not None:
                 await close_resource(
@@ -224,25 +231,30 @@ class NapCatServer:
         event_model: str,
         message_id: str,
     ) -> ResultT:
-        """PostgreSQL 写入失败后等待 250ms，并且只重试一次。"""
+        """按数据库配置重试 PostgreSQL 写入。"""
         first_error: Exception | None = None
-        for attempt_number in (1, 2):
+        retry_delays = self.config.database.persistence_retry_delays_seconds
+        for attempt_index in range(len(retry_delays) + 1):
             try:
                 return await operation()
             except Exception as exc:
-                if attempt_number == 1:
+                if first_error is None:
                     first_error = exc
+                if attempt_index < len(retry_delays):
+                    retry_delay = retry_delays[attempt_index]
                     log_event(
                         level="WARNING",
                         event=f"{event_name}.retry",
                         category="database",
-                        message="PostgreSQL 写入失败，250ms 后重试一次",
+                        message="PostgreSQL 写入失败，等待后重试",
                         event_model=event_model,
                         message_id=message_id,
                         error_type=type(exc).__name__,
                         error=str(exc),
+                        retry_delay_seconds=retry_delay,
+                        retry_number=attempt_index + 1,
                     )
-                    await asyncio.sleep(_PERSISTENCE_RETRY_DELAY_SECONDS)
+                    await asyncio.sleep(retry_delay)
                     continue
                 log_exception(
                     event=f"{event_name}.failed",
@@ -251,11 +263,7 @@ class NapCatServer:
                     exc=exc,
                     event_model=event_model,
                     message_id=message_id,
-                    first_error_type=(
-                        type(first_error).__name__
-                        if first_error is not None
-                        else None
-                    ),
+                    first_error_type=type(first_error).__name__,
                 )
                 log_event(
                     level="CRITICAL",
@@ -334,7 +342,7 @@ class NapCatServer:
         try:
             await asyncio.wait_for(
                 asyncio.shield(worker_task),
-                timeout=_IMAGE_WORKER_STOP_TIMEOUT_SECONDS,
+                timeout=self.config.storage.images.worker_stop_timeout_seconds,
             )
         except TimeoutError:
             worker_task.cancel()

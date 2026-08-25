@@ -24,12 +24,16 @@ class ForwardImageAutoFetcher:
         *,
         tool_call: LLMToolCall,
         result: JsonValue,
-        explicit_forward_image_call: bool,
+        explicit_forward_image_message_ids: set[str],
     ) -> bool:
         """判断是否需要在读取合并转发后自动补取图片内容。"""
         if tool_call.name != FORWARD_MESSAGE_TOOL_NAME:
             return False
-        if explicit_forward_image_call:
+        message_id = tool_call.arguments.get("message_id")
+        if (
+            isinstance(message_id, str)
+            and message_id in explicit_forward_image_message_ids
+        ):
             return False
         if not self.config.images.forward_tool_enabled:
             return False

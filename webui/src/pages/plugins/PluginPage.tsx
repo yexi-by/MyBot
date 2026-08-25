@@ -81,13 +81,20 @@ function ImageGenerateFields() {
         <NumberField
           path="plugins.image_generate.fetch_concurrency"
           label="取图并发数"
-          placeholder="默认 16"
+          placeholder="例如 16"
         />
         <NumberField
           path="plugins.image_generate.download_timeout_seconds"
           label="下载超时（秒）"
-          placeholder="默认 20"
+          placeholder="例如 20"
         />
+        <NumberField
+          path="plugins.image_generate.max_input_image_bytes"
+          label="输入单图最大字节"
+          description="0 表示不限"
+        />
+        <TextField path="plugins.image_generate.command" label="生图命令" />
+        <TextField path="plugins.image_generate.help_command" label="帮助命令" />
       </SectionCard>
     </>
   );
@@ -120,24 +127,50 @@ function NeavoImageGenerateFields() {
         <NumberField
           path="plugins.neavo_image_generate.poll_interval_seconds"
           label="轮询间隔（秒）"
-          description="2 到 5 秒"
-          placeholder="默认 3"
+          placeholder="例如 3"
         />
         <NumberField
           path="plugins.neavo_image_generate.generation_timeout_seconds"
           label="生成超时（秒）"
-          placeholder="默认 600"
+          placeholder="例如 600"
         />
         <NumberField
           path="plugins.neavo_image_generate.request_timeout_seconds"
           label="请求超时（秒）"
-          placeholder="默认 30"
+          placeholder="例如 30"
         />
         <NumberField
-          path="plugins.neavo_image_generate.max_image_bytes"
-          label="图片最大字节"
-          placeholder="默认 20971520"
+          path="plugins.neavo_image_generate.max_prompt_chars"
+          label="生图描述最大字符数"
+          description="0 表示不限"
         />
+        <NumberField
+          path="plugins.neavo_image_generate.max_input_image_bytes"
+          label="反推输入最大字节"
+          description="0 表示不限"
+        />
+        <NumberField
+          path="plugins.neavo_image_generate.max_output_image_bytes"
+          label="生成结果最大字节"
+          description="0 表示不限"
+        />
+        <div className="xl:col-span-2">
+          <StringListField
+            path="plugins.neavo_image_generate.allowed_input_mime_types"
+            label="允许的反推输入 MIME 类型"
+            description="空列表表示不限制；图片内容仍需可识别"
+            placeholder="如 image/png"
+            addLabel="添加 MIME 类型"
+          />
+        </div>
+        <NumberField
+          path="plugins.neavo_image_generate.max_consecutive_poll_errors"
+          label="连续轮询错误上限"
+          description="0 表示只受生成总超时限制"
+          placeholder="例如 3"
+        />
+        <TextField path="plugins.neavo_image_generate.generate_command" label="生图命令" />
+        <TextField path="plugins.neavo_image_generate.describe_command" label="反推命令" />
       </SectionCard>
     </>
   );
@@ -147,8 +180,14 @@ function RecallBotImageFields() {
   return (
     <SectionCard title="撤回图片配置">
       <p className="text-sm text-muted-foreground xl:col-span-2">
-        该插件没有额外配置项，启用开关即全部配置。
+        修改机器人图片撤回命令。
       </p>
+      <TextField path="plugins.recall_bot_image.command" label="撤回命令" />
+      <NumberField
+        path="plugins.recall_bot_image.failure_detail_max_chars"
+        label="失败详情最大字符数"
+        description="0 表示不截断"
+      />
     </SectionCard>
   );
 }
@@ -212,15 +251,29 @@ export default function PluginPage({ pluginId }: { pluginId: PluginId }) {
         </div>
       </div>
 
-      {enabled ? (
-        <SettingsGrid>
+      <SettingsGrid>
+        {enabled ? (
+          <>
           <PluginFields pluginId={pluginId} />
-        </SettingsGrid>
-      ) : (
-        <p className="text-sm text-muted-foreground">
-          插件已禁用；打开开关后将按默认配置创建该插件的配置节。
-        </p>
-      )}
+          </>
+        ) : (
+          <SectionCard title="插件配置">
+            <p className="text-sm text-muted-foreground xl:col-span-2">
+              插件已禁用；打开开关后将写入该插件的完整初始配置节。
+            </p>
+          </SectionCard>
+        )}
+        <SectionCard title="执行参数" description="修改后需要重启进程。">
+          <NumberField
+            path={`plugin_execution.plugins.${pluginId}.consumers_count`}
+            label="并发消费者数量"
+          />
+          <NumberField
+            path={`plugin_execution.plugins.${pluginId}.priority`}
+            label="事件处理优先级"
+          />
+        </SectionCard>
+      </SettingsGrid>
 
       <Dialog open={confirmDisable} onOpenChange={setConfirmDisable}>
         <DialogContent>

@@ -126,6 +126,11 @@ class ImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
                         "provider": "image-vendor",
                         "name": "image-model",
                     },
+                    "fetch_concurrency": 16,
+                    "download_timeout_seconds": 20,
+                    "max_input_image_bytes": 0,
+                    "command": "/生图",
+                    "help_command": "/help生图",
                 }
             )
             manager = FakeConfigManager(
@@ -137,6 +142,8 @@ class ImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
                     manager,
                     plugin_id="image_generate",
                 ),
+                consumers_count=1,
+                stop_timeout_seconds=1,
             )
             try:
                 runtime = plugin._current_runtime()  # pyright: ignore[reportPrivateUsage]

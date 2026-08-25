@@ -38,9 +38,11 @@ def _log_retry_attempt(retry_state: RetryCallState) -> None:
 
 
 def create_retry_manager(
-    error_types: tuple[type[Exception], ...] = (Exception,),
-    max_attempts: int = 5,
-    retry_delay_seconds: float = 0,
+    *,
+    error_types: tuple[type[Exception], ...],
+    max_attempts: int,
+    retry_delay_seconds: float,
+    retry_max_delay_seconds: float,
 ) -> AsyncRetrying:
     """创建一个异步重试管理器，用于在操作失败时自动进行重试。
 
@@ -50,7 +52,8 @@ def create_retry_manager(
     Args:
         error_types: 需要触发重试的异常类型元组。当捕获到这些异常时会自动重试。
         max_attempts: 包含首次请求的最大尝试次数。
-        retry_delay_seconds: 初始重试延迟时间（秒），实际延迟会按指数增长，最大不超过 10 秒。
+        retry_delay_seconds: 初始重试延迟时间（秒）。
+        retry_max_delay_seconds: 指数退避最大等待秒数；0 表示不另设上限。
 
     Returns:
         配置好的 AsyncRetrying 实例，可用于异步函数的重试控制。
@@ -59,7 +62,8 @@ def create_retry_manager(
         >>> retry_manager = create_retry_manager(
         ...     error_types=(ConnectionError, TimeoutError),
         ...     max_attempts=5,
-        ...     retry_delay_seconds=1
+        ...     retry_delay_seconds=1,
+        ...     retry_max_delay_seconds=0,
         ... )
         >>> async for attempt in retry_manager:
         ...     with attempt:
@@ -69,13 +73,21 @@ def create_retry_manager(
         raise ValueError("max_attempts 必须大于等于 1")
     if retry_delay_seconds < 0:
         raise ValueError("retry_delay_seconds 不能小于 0")
+    if retry_max_delay_seconds < 0:
+        raise ValueError("retry_max_delay_seconds 不能小于 0")
+    if 0 < retry_max_delay_seconds < retry_delay_seconds:
+        raise ValueError("retry_max_delay_seconds 不能小于初始重试延迟")
     retry_strategy = retry_if_exception_type(error_types)
     return AsyncRetrying(
         stop=stop_after_attempt(max_attempts),
         wait=wait_exponential(
             multiplier=retry_delay_seconds,
             min=retry_delay_seconds,
-            max=max(10, retry_delay_seconds),
+            max=(
+                retry_max_delay_seconds
+                if retry_max_delay_seconds > 0
+                else float("inf")
+            ),
         ),
         retry=retry_strategy,
         reraise=True,

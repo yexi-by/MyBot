@@ -37,6 +37,7 @@ from app.services.llm.tools import (
     LLMImageError,
     LLMToolExecutionResult,
 )
+from tests.config_helpers import build_ai_group_chat_config
 
 VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
 VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
@@ -53,6 +54,7 @@ class FakeLLMProtocol(Protocol):
         model_name: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
         """返回纯文本响应。"""
         ...
@@ -94,9 +96,10 @@ class RecordingLLM:
         model_name: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
         """记录视觉或压缩请求并返回固定文本。"""
-        _ = (max_attempts, retry_delay_seconds)
+        _ = (max_attempts, retry_delay_seconds, retry_max_delay_seconds)
         self.text_requests.append(messages[:])
         self.text_models.append((provider, model_name))
         return self.text_response
@@ -318,42 +321,43 @@ def build_config(
     provider: str = "main-vendor",
     show_reasoning: bool = False,
     retain_reasoning: bool = False,
-    retain_tool_results: bool = False,
+    tool_result_retention: str = "off",
     retain_vision_descriptions: bool = True,
+    retain_images: bool = False,
     max_tool_rounds: int = 16,
-    max_reply_chars: int = 100,
+    forward_reply_threshold_chars: int = 100,
     context_compression_notice: str = "正在整理上下文",
 ) -> AIGroupChatConfig:
     """按主模型能力构造有效配置。"""
-    values: dict[str, object] = {
-        "model": {
-            "provider": provider,
-            "name": model_name,
-            "supports_images": supports_images,
-        },
-        "show_reasoning": show_reasoning,
-        "retain_reasoning": retain_reasoning,
-        "retain_tool_results": retain_tool_results,
-        "max_tool_rounds": max_tool_rounds,
-        "max_reply_chars": max_reply_chars,
-        "context_compression_notice": context_compression_notice,
-        "groups": [],
-    }
-    if not supports_images:
-        values.update(
-            {
-                "vision": {
-                    "model": {
-                        "provider": "vision-vendor",
-                        "name": "vision-model",
-                    },
-                    "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
-                    "user_prompt_file": VISION_USER_PROMPT_PATH,
-                    "retain_descriptions": retain_vision_descriptions,
+    return build_ai_group_chat_config(
+        supports_images=supports_images,
+        provider=provider,
+        model_name=model_name,
+        overrides={
+            "show_reasoning": show_reasoning,
+            "retain_reasoning": retain_reasoning,
+            "tool_result_retention": tool_result_retention,
+            "max_tool_rounds": max_tool_rounds,
+            "forward_reply_threshold_chars": forward_reply_threshold_chars,
+            "context_compression_notice": context_compression_notice,
+            "images": {"retain_images": retain_images},
+            **(
+                {
+                    "vision": {
+                        "model": {
+                            "provider": "vision-vendor",
+                            "name": "vision-model",
+                        },
+                        "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
+                        "user_prompt_file": VISION_USER_PROMPT_PATH,
+                        "retain_descriptions": retain_vision_descriptions,
+                    }
                 }
-            }
-        )
-    return AIGroupChatConfig.model_validate(values)
+                if not supports_images
+                else {}
+            ),
+        },
+    )
 
 
 def build_message() -> GroupMessage:
@@ -591,7 +595,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         context = FakeContext(llm=llm)
-        config = build_config(retain_tool_results=True)
+        config = build_config(tool_result_retention="summary")
         chat_handler = ContextHandler(
             system_prompt="系统提示词", max_context_tokens=1000000
         )
@@ -615,6 +619,46 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             ),
             1,
         )
+
+    async def test_full_tool_retention_preserves_arguments_and_result(self) -> None:
+        """full 模式把可继续使用的工具调用和完整结果写入长期上下文。"""
+        tool_call = LLMToolCall(
+            id="call-full",
+            name=TOOL_NAME,
+            arguments={"query": "完整参数"},
+        )
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(content="我来检查", tool_calls=[tool_call]),
+                LLMResponse(content="检查完成"),
+            ]
+        )
+        context = FakeContext(llm=llm)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        await run_turn(
+            loop=build_loop(
+                config=build_config(tool_result_retention="full"),
+                context=context,
+            ),
+            chat_handler=chat_handler,
+        )
+
+        retained_tool_call = next(
+            message
+            for message in chat_handler.messages_lst
+            if message.tool_calls
+        )
+        self.assertEqual(retained_tool_call.tool_calls, [tool_call])
+        retained_result = next(
+            message
+            for message in chat_handler.messages_lst
+            if message.role == "tool"
+        )
+        self.assertIn("工具结果", retained_result.text or "")
+        self.assertEqual(retained_result.tool_call_id, "call-full")
 
     async def test_sent_content_survives_tool_round_exhaustion(self) -> None:
         """正文发送后即使工具轮数耗尽，后续请求仍能看到该回复。"""
@@ -1103,6 +1147,38 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             all(message.image is None for message in chat_handler.messages_lst)
         )
 
+    async def test_direct_mode_can_retain_original_images_across_turns(self) -> None:
+        """用户显式开启 retain_images 后，后续请求继续携带原始图片字节。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="下一轮回复")])
+        context = FakeContext(llm=llm)
+        config = build_config(supports_images=True, retain_images=True)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+        chat_handler.build_chatmessage(
+            message=ChatMessage(
+                role="user",
+                text="上一轮图片",
+                image=[b"old-original-image"],
+                image_detail="high",
+            )
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+            question="继续看上一张图",
+        )
+
+        self.assertEqual(
+            llm.formal_requests[0][1].image,
+            [b"old-original-image"],
+        )
+        self.assertEqual(
+            chat_handler.messages_lst[1].image,
+            [b"old-original-image"],
+        )
+
     async def test_context_compression_and_formal_reply_use_main_model(self) -> None:
         """上下文压缩与压缩后的正式请求都固定使用主模型。"""
         llm = RecordingLLM(
@@ -1154,7 +1230,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             responses=[LLMResponse(content="这是一段很长的正式回复")]
         )
         context = FakeContext(llm=llm)
-        config = build_config(max_reply_chars=5)
+        config = build_config(forward_reply_threshold_chars=5)
         chat_handler = ContextHandler(
             system_prompt="系统提示词", max_context_tokens=1000000
         )

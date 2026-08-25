@@ -28,7 +28,9 @@ def main() -> None:
     from app.webui import PowerController
 
     container = make_async_container(MyProvider(config_manager=config_manager))
-    power = PowerController()
+    power = PowerController(
+        delay_seconds=config.server.power_action_delay_seconds
+    )
     napcat = NapCatServer(
         container=container, config=config, config_manager=config_manager, power=power
     )
