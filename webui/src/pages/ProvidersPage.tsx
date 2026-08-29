@@ -2,27 +2,35 @@
 
 import { useState } from "react";
 import { useFormContext } from "react-hook-form";
-import { Plus, Trash2 } from "lucide-react";
+import { Cable, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { EmptyState } from "@/components/EmptyState";
+import { PageHeader } from "@/components/PageHeader";
 import { SectionCard } from "@/components/SectionCard";
 import { SettingsGrid } from "@/components/SettingsGrid";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { countDirtyUnder } from "@/lib/dirty";
 import type { LLMProviderConfig, MyBotConfigData } from "@/lib/types";
+import { useFieldFilter } from "@/lib/useFieldFilter";
 
 function numberInput(value: string): number | undefined {
   return value === "" ? undefined : Number(value);
 }
 
 export default function ProvidersPage() {
-  const { watch, setValue } = useFormContext<MyBotConfigData>();
+  const { watch, setValue, formState } = useFormContext<MyBotConfigData>();
   const [newProviderId, setNewProviderId] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+  const filterRef = useFieldFilter(filter);
   const providers = watch("llm.providers") ?? {};
   const providerIds = Object.keys(providers);
+  const dirtyCount = countDirtyUnder(formState.dirtyFields, ["llm"]);
 
   const commit = (next: Record<string, LLMProviderConfig>) => {
     setValue("llm.providers", next, { shouldDirty: true });
@@ -71,19 +79,25 @@ export default function ProvidersPage() {
   };
 
   return (
-    <div className="space-y-4">
-      <Alert>
-        <AlertTitle>Provider 改动需要重启进程后生效</AlertTitle>
-        <AlertDescription>
-          Provider ID 可以包含点号；界面会保留完整键名，不会把点号解释成对象层级。
-        </AlertDescription>
-      </Alert>
+    <div ref={filterRef} className="space-y-3">
+      <PageHeader
+        title="模型 Providers"
+        description="OpenAI 兼容服务接入；Provider ID 可以包含点号，界面会保留完整键名。"
+        notice="Provider 改动需要重启进程后生效"
+        dirtyCount={dirtyCount}
+        filterValue={filter}
+        onFilterChange={setFilter}
+      />
 
       {providerIds.length === 0 ? (
-        <p className="text-sm text-muted-foreground">尚未配置任何 LLM provider。</p>
+        <EmptyState
+          icon={Cable}
+          title="尚未配置 LLM Provider"
+          description="在下方「新增 Provider」卡片中输入 ID 即可添加；插件的模型引用从这里选择服务。"
+        />
       ) : null}
 
-      <SettingsGrid>
+      <SettingsGrid columns={providerIds.length + 1 >= 3 ? 3 : 2}>
         {providerIds.map((id) => {
           const provider = providers[id];
           return (
@@ -97,7 +111,7 @@ export default function ProvidersPage() {
                   variant="ghost"
                   size="icon"
                   aria-label={`删除 Provider ${id}`}
-                  onClick={() => removeProvider(id)}
+                  onClick={() => setDeleteTarget(id)}
                 >
                   <Trash2 className="h-4 w-4" />
                 </Button>
@@ -221,6 +235,20 @@ export default function ProvidersPage() {
           </div>
         </SectionCard>
       </SettingsGrid>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+        title={`删除 Provider ${deleteTarget ?? ""}？`}
+        description="删除后该 Provider 的 API Key 与连接参数将随自动保存一并移除，且无法恢复；引用它的模型配置需要重新选择服务。"
+        confirmLabel="删除 Provider"
+        destructive
+        onConfirm={() => {
+          if (deleteTarget !== null) removeProvider(deleteTarget);
+        }}
+      />
     </div>
   );
 }

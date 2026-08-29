@@ -344,3 +344,8 @@ export interface PowerResponse {
   action: "restart" | "shutdown";
   message: string;
 }
+
+export interface ProviderModelsResponse {
+  provider: string;
+  models: string[];
+}

@@ -1,4 +1,4 @@
-/** Markdown 编辑器：CodeMirror 6 + markdown 语法高亮，跟随亮暗主题。 */
+/** 文本编辑器：CodeMirror 6，markdown 语法高亮或纯文本模式，跟随亮暗主题。 */
 
 import CodeMirror from "@uiw/react-codemirror";
 import {
@@ -16,6 +16,8 @@ interface MarkdownEditorProps {
   value: string;
   onChange: (value: string) => void;
   ariaLabel: string;
+  /** markdown 语法高亮；text 为无高亮纯文本（toml 等配置文件的诚实呈现）。 */
+  language?: "markdown" | "text";
 }
 
 const markdownData = defineLanguageFacet({
@@ -35,11 +37,13 @@ const MARKDOWN_EXTENSIONS = [
   new LanguageSupport(markdownLanguage),
   EditorView.lineWrapping,
 ];
+const TEXT_EXTENSIONS = [EditorView.lineWrapping];
 
 export function MarkdownEditor({
   value,
   onChange,
   ariaLabel,
+  language = "markdown",
 }: MarkdownEditorProps) {
   const { resolvedTheme } = useTheme();
   return (
@@ -49,7 +53,9 @@ export function MarkdownEditor({
       onChange={onChange}
       height="100%"
       theme={resolvedTheme === "dark" ? oneDark : "light"}
-      extensions={MARKDOWN_EXTENSIONS}
+      extensions={
+        language === "markdown" ? MARKDOWN_EXTENSIONS : TEXT_EXTENSIONS
+      }
       basicSetup={{
         lineNumbers: false,
         foldGutter: false,

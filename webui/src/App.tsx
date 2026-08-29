@@ -9,7 +9,15 @@ import {
   useState,
 } from "react";
 import { FormProvider, useForm, useWatch } from "react-hook-form";
-import { Loader2, Power, RotateCw } from "lucide-react";
+import {
+  Bot,
+  CheckCircle2,
+  Loader2,
+  Power,
+  RotateCw,
+  Save,
+  SunMoon,
+} from "lucide-react";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 
@@ -31,6 +39,11 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  CommandPalette,
+  type PaletteItem,
+} from "@/components/CommandPalette";
+import { SaveStatusPill } from "@/components/SaveStatusPill";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import {
   ApiError,
@@ -40,7 +53,16 @@ import {
   shutdownSystem,
   validateConfig,
 } from "@/lib/api";
-import { PLUGIN_METAS, SECTION_LABELS } from "@/lib/configMeta";
+import { SECTION_LABELS } from "@/lib/configMeta";
+import { hasDirtyUnder } from "@/lib/dirty";
+import {
+  dirtyPrefixesForPage,
+  NAV_GROUPS,
+  pageForIssuePath,
+  pageFromLocation,
+  sectionTitleForIssue,
+  type PageKey,
+} from "@/lib/pages";
 import type {
   ConfigGetResponse,
   ConfigIssuePayload,
@@ -54,44 +76,6 @@ const McpPage = lazy(() => import("@/pages/McpPage"));
 const ProvidersPage = lazy(() => import("@/pages/ProvidersPage"));
 const SystemPage = lazy(() => import("@/pages/SystemPage"));
 const PluginPage = lazy(() => import("@/pages/plugins/PluginPage"));
-
-type PageKey = "system" | "providers" | "mcp" | "files" | `plugin:${PluginId}`;
-
-interface NavItem {
-  key: PageKey;
-  label: string;
-}
-
-const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
-  {
-    title: "系统",
-    items: [
-      { key: "system", label: "系统设置" },
-      { key: "providers", label: "模型 Providers" },
-      { key: "mcp", label: "MCP 服务" },
-    ],
-  },
-  {
-    title: "插件",
-    items: PLUGIN_METAS.map((meta) => ({
-      key: `plugin:${meta.id}` as PageKey,
-      label: meta.name,
-    })),
-  },
-  {
-    title: "配置文本",
-    items: [{ key: "files", label: "配置文本文件" }],
-  },
-];
-
-const PAGE_KEYS = new Set<string>(
-  NAV_GROUPS.flatMap((group) => group.items.map((item) => item.key)),
-);
-
-function pageFromLocation(): PageKey {
-  const requested = new URLSearchParams(window.location.search).get("page") ?? "";
-  return PAGE_KEYS.has(requested) ? (requested as PageKey) : "system";
-}
 
 type ApplyState =
   | { kind: "idle" }
@@ -116,6 +100,54 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** 初始加载骨架屏。 */
+function LoadingSkeleton() {
+  return (
+    <div className="flex h-dvh bg-background">
+      <div className="hidden w-56 shrink-0 flex-col border-r md:flex">
+        <div className="flex items-center gap-2.5 px-4 py-4">
+          <div className="size-8 animate-pulse rounded-lg bg-muted" />
+          <div className="space-y-1.5">
+            <div className="h-3.5 w-28 animate-pulse rounded bg-muted" />
+            <div className="h-2.5 w-16 animate-pulse rounded bg-muted" />
+          </div>
+        </div>
+        <Separator />
+        <div className="space-y-3 p-3">
+          {Array.from({ length: 6 }, (_, index) => (
+            <div
+              key={index}
+              className="h-7 animate-pulse rounded-md bg-muted"
+            />
+          ))}
+        </div>
+      </div>
+      <div className="flex-1 space-y-4 p-6">
+        <div className="h-8 w-56 animate-pulse rounded bg-muted" />
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-3">
+          {Array.from({ length: 6 }, (_, index) => (
+            <div
+              key={index}
+              className="h-48 animate-pulse rounded-xl bg-muted"
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 页面懒加载占位。 */
+function PageSkeleton() {
+  return (
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-3">
+      {Array.from({ length: 3 }, (_, index) => (
+        <div key={index} className="h-56 animate-pulse rounded-xl bg-muted" />
+      ))}
+    </div>
+  );
+}
+
 export default function App() {
   const [snapshot, setSnapshot] = useState<ConfigGetResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -125,6 +157,7 @@ export default function App() {
   const [restartSections, setRestartSections] = useState<string[]>([]);
   const [applyState, setApplyState] = useState<ApplyState>({ kind: "idle" });
   const [conflictOpen, setConflictOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [powerState, setPowerState] = useState<PowerState>({ kind: "idle" });
   const [powerConfirm, setPowerConfirm] = useState<"restart" | "shutdown" | null>(
     null,
@@ -134,12 +167,13 @@ export default function App() {
   const mainContent = useRef<HTMLElement>(null);
   const editVersion = useRef(0);
   const blockedVersion = useRef<number | null>(null);
-  const { resolvedTheme } = useTheme();
+  const { resolvedTheme, setTheme } = useTheme();
 
   const methods = useForm<MyBotConfigData>({
     values: snapshot?.config ?? ({} as MyBotConfigData),
   });
   const isDirty = methods.formState.isDirty;
+  const dirtyFields = methods.formState.dirtyFields;
   const watchedConfig = useWatch({ control: methods.control });
 
   const reload = useCallback(async () => {
@@ -280,6 +314,17 @@ export default function App() {
       blockedVersion.current = saveVersion;
       if (error instanceof ApiError && error.status === 409) {
         setApplyState({ kind: "error" });
+        // 先拉取最新 sha 再弹冲突对话框：三个出口（覆盖/丢弃/继续编辑）都基于此走通。
+        try {
+          const fresh = await getConfig();
+          setSnapshot((previous) =>
+            previous
+              ? { ...previous, sha256: fresh.sha256, meta: fresh.meta }
+              : previous,
+          );
+        } catch {
+          // 刷新失败时保留旧 sha，覆盖会再次 409 并重新弹窗
+        }
         setConflictOpen(true);
       } else if (error instanceof ApiError && error.issues.length > 0) {
         setApplyState({ kind: "invalid" });
@@ -328,6 +373,25 @@ export default function App() {
       toast.error(error instanceof Error ? error.message : "校验请求失败");
     }
   }, [methods, applyIssues]);
+
+  /** 校验问题定位：跳到所属页面并滚动高亮目标卡片。 */
+  const locateIssue = useCallback(
+    (issue: ConfigIssuePayload) => {
+      navigate(pageForIssuePath(issue.path));
+      const target = sectionTitleForIssue(issue.path);
+      if (!target) return;
+      window.setTimeout(() => {
+        const element = document.querySelector(`[data-section="${target}"]`);
+        if (!element) return;
+        element.scrollIntoView({ behavior: "smooth", block: "center" });
+        element.classList.add("section-flash");
+        window.setTimeout(() => {
+          element.classList.remove("section-flash");
+        }, 1600);
+      }, 120);
+    },
+    [navigate],
+  );
 
   /** 重启后轮询服务恢复：boot_id 变化才说明新进程已接管，避免命中停机中的旧进程。 */
   const waitForRestart = useCallback(
@@ -392,6 +456,75 @@ export default function App() {
     toast.success("已重新连接");
   }, [reload]);
 
+  // 全局快捷键：Ctrl/Cmd+S 立即保存，Ctrl/Cmd+K 命令面板。
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      if (event.key === "s") {
+        event.preventDefault();
+        void onSave();
+      } else if (event.key === "k") {
+        event.preventDefault();
+        setPaletteOpen((current) => !current);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onSave]);
+
+  const paletteItems: PaletteItem[] = [
+    ...NAV_GROUPS.flatMap((group) =>
+      group.items.map((item) => ({
+        id: `page:${item.key}`,
+        group: "页面",
+        label: item.label,
+        keywords: item.key,
+        icon: item.icon,
+        run: () => navigate(item.key),
+      })),
+    ),
+    {
+      id: "action:save",
+      group: "操作",
+      label: "立即保存",
+      keywords: "save ctrl+s",
+      icon: Save,
+      run: () => void onSave(),
+    },
+    {
+      id: "action:validate",
+      group: "操作",
+      label: "校验配置",
+      keywords: "validate check",
+      icon: CheckCircle2,
+      run: () => void onValidate(),
+    },
+    {
+      id: "action:theme",
+      group: "操作",
+      label: "切换亮暗主题",
+      keywords: "theme dark light",
+      icon: SunMoon,
+      run: () => setTheme(resolvedTheme === "dark" ? "light" : "dark"),
+    },
+    {
+      id: "action:restart",
+      group: "操作",
+      label: "重启 MyBot 进程",
+      keywords: "restart reboot",
+      icon: RotateCw,
+      run: () => setPowerConfirm("restart"),
+    },
+    {
+      id: "action:shutdown",
+      group: "操作",
+      label: "关闭 MyBot 进程",
+      keywords: "shutdown stop power",
+      icon: Power,
+      run: () => setPowerConfirm("shutdown"),
+    },
+  ];
+
   if (loadError) {
     return (
       <FormProvider {...methods}>
@@ -415,12 +548,8 @@ export default function App() {
               </Button>
             </AlertDescription>
           </Alert>
-          <div className="min-h-0 flex-1">
-            <Suspense
-              fallback={
-                <p className="text-sm text-muted-foreground">正在加载原始配置编辑器…</p>
-              }
-            >
+          <div className="flex min-h-0 flex-1 flex-col">
+            <Suspense fallback={<PageSkeleton />}>
               <FilesPage initialPath="mybot.toml" />
             </Suspense>
           </div>
@@ -434,16 +563,14 @@ export default function App() {
     );
   }
   if (!snapshot) {
-    return (
-      <div className="flex h-screen items-center justify-center text-muted-foreground">
-        正在加载配置…
-      </div>
-    );
+    return <LoadingSkeleton />;
   }
 
   const restartLabels = restartSections.map(
     (section) => SECTION_LABELS[section] ?? section,
   );
+  const isFilesPage = page === "files";
+  const pluginsConfig = watchedConfig?.plugins;
 
   return (
     <FormProvider {...methods}>
@@ -454,12 +581,19 @@ export default function App() {
         跳至主要内容
       </a>
       <div className="flex h-dvh bg-background">
-        <aside className="hidden w-52 shrink-0 flex-col border-r md:flex">
-          <div className="px-4 py-4">
-            <h1 className="text-base font-semibold">MyBot 配置控制台</h1>
-            <p className="text-xs text-muted-foreground">
-              插件配置版本 v{snapshot.meta.plugin_revision}
-            </p>
+        <aside className="hidden w-56 shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground md:flex">
+          <div className="flex items-center gap-2.5 px-4 py-3">
+            <div className="card-geek flex size-8 shrink-0 items-center justify-center rounded-sm bg-primary text-primary-foreground">
+              <Bot className="size-4.5" aria-hidden />
+            </div>
+            <div className="min-w-0">
+              <h1 className="truncate text-sm font-semibold leading-tight">
+                MyBot 配置控制台
+              </h1>
+              <p className="text-xs text-muted-foreground">
+                Ctrl+K 搜索页面与操作
+              </p>
+            </div>
           </div>
           <Separator />
           <nav className="flex-1 space-y-4 overflow-y-auto p-3">
@@ -469,28 +603,76 @@ export default function App() {
                   {group.title}
                 </p>
                 <div className="space-y-0.5">
-                  {group.items.map((item) => (
-                    <button
-                      key={item.key}
-                      type="button"
-                      aria-current={page === item.key ? "page" : undefined}
-                      onClick={() => navigate(item.key)}
-                      className={cn(
-                        "w-full cursor-pointer rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent",
-                        page === item.key && "bg-accent font-medium",
-                      )}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
+                  {group.items.map((item) => {
+                    const active = page === item.key;
+                    const pluginEnabled =
+                      item.key.startsWith("plugin:") && pluginsConfig
+                        ? pluginsConfig[item.key.slice(7) as PluginId] != null
+                        : null;
+                    const itemDirty = dirtyPrefixesForPage(item.key).some(
+                      (prefix) => hasDirtyUnder(dirtyFields, prefix),
+                    );
+                    return (
+                      <button
+                        key={item.key}
+                        type="button"
+                        aria-current={active ? "page" : undefined}
+                        onClick={() => navigate(item.key)}
+                        className={cn(
+                          "relative flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent",
+                          active && "bg-accent font-medium",
+                        )}
+                      >
+                        {active ? (
+                          <span
+                            className="absolute top-1/2 left-0 h-4 w-0.5 -translate-y-1/2 bg-primary"
+                            aria-hidden
+                          />
+                        ) : null}
+                        <item.icon
+                          className="size-4 shrink-0 text-muted-foreground"
+                          aria-hidden
+                        />
+                        {pluginEnabled !== null ? (
+                          <span
+                            className={cn(
+                              "size-1.5 shrink-0",
+                              pluginEnabled
+                                ? "bg-green-500"
+                                : "bg-muted-foreground/40",
+                            )}
+                            title={pluginEnabled ? "已启用" : "已禁用"}
+                            aria-hidden
+                          />
+                        ) : null}
+                        <span className="min-w-0 flex-1 truncate">
+                          {item.label}
+                        </span>
+                        {itemDirty ? (
+                          <span
+                            className="size-1.5 shrink-0 bg-accent-foreground/80"
+                            title="本页有修改"
+                            aria-hidden
+                          />
+                        ) : null}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             ))}
           </nav>
+          <Separator />
+          <div className="space-y-0.5 px-4 py-3 text-xs text-muted-foreground">
+            <p>插件配置版本 v{snapshot.meta.plugin_revision}</p>
+            {snapshot.meta.watcher_active ? null : (
+              <p>开发模式 · 保存只写文件</p>
+            )}
+          </div>
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3 md:px-6">
+          <header className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2 md:px-6">
             <div className="w-full md:hidden">
               <label htmlFor="mobile-page-navigation" className="sr-only">
                 当前配置页面
@@ -513,40 +695,10 @@ export default function App() {
               </select>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              {snapshot.meta.watcher_active ? null : (
-                <Tooltip>
-                  <TooltipTrigger>
-                    <Badge variant="secondary">开发模式</Badge>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    配置热载未运行，保存只写文件
-                  </TooltipContent>
-                </Tooltip>
-              )}
-              {applyState.kind === "idle" ? (
-                <Badge variant="outline">自动保存已开启</Badge>
-              ) : null}
-              {applyState.kind === "editing" ? (
-                <Badge variant="secondary">等待自动保存…</Badge>
-              ) : null}
-              {applyState.kind === "saving" ? (
-                <Badge variant="secondary">自动保存中…</Badge>
-              ) : null}
-              {applyState.kind === "watching" ? (
-                <Badge variant="secondary">等待热生效…</Badge>
-              ) : null}
-              {applyState.kind === "applied" ? (
-                <Badge className="bg-green-600 text-white">已热生效</Badge>
-              ) : null}
-              {applyState.kind === "saved" ? (
-                <Badge variant="outline">已自动保存</Badge>
-              ) : null}
-              {applyState.kind === "invalid" ? (
-                <Badge variant="destructive">配置有误，未保存</Badge>
-              ) : null}
-              {applyState.kind === "error" ? (
-                <Badge variant="destructive">自动保存失败</Badge>
-              ) : null}
+              <SaveStatusPill
+                state={applyState.kind}
+                onRetry={() => void onSave()}
+              />
               {restartLabels.length > 0 ? (
                 <Tooltip>
                   <TooltipTrigger>
@@ -570,6 +722,23 @@ export default function App() {
                   立即重启
                 </Button>
               ) : null}
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={!isDirty || saving}
+                      onClick={() => void onSave()}
+                    />
+                  }
+                >
+                  <Save className="h-4 w-4" />
+                  保存
+                </TooltipTrigger>
+                <TooltipContent>立即保存（Ctrl+S）</TooltipContent>
+              </Tooltip>
               <Button variant="outline" size="sm" onClick={onValidate}>
                 校验
               </Button>
@@ -597,6 +766,7 @@ export default function App() {
                       type="button"
                       variant="ghost"
                       size="icon"
+                      className="hover:text-destructive"
                       aria-label="关闭 MyBot 进程"
                       onClick={() => setPowerConfirm("shutdown")}
                     />
@@ -610,18 +780,25 @@ export default function App() {
           </header>
 
           {serverIssues.length > 0 ? (
-            <Alert variant="destructive" className="m-4 mb-0 w-auto">
+            <Alert variant="destructive" className="m-3 mb-0 w-auto">
               <AlertTitle>配置存在问题</AlertTitle>
               <AlertDescription>
                 <ul className="list-disc pl-4">
                   {serverIssues.map((issue) => (
                     <li key={`${JSON.stringify(issue.path)}:${issue.message}`}>
-                      <code className="text-xs">
-                        {issue.path.length > 0
-                          ? JSON.stringify(issue.path)
-                          : issue.location}
-                      </code>：
-                      {issue.message}
+                      <button
+                        type="button"
+                        onClick={() => locateIssue(issue)}
+                        className="cursor-pointer text-left underline-offset-2 hover:underline"
+                        title="点击定位到对应页面"
+                      >
+                        <code className="text-xs">
+                          {issue.path.length > 0
+                            ? JSON.stringify(issue.path)
+                            : issue.location}
+                        </code>
+                        ：{issue.message}
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -633,14 +810,19 @@ export default function App() {
             ref={mainContent}
             id="main-content"
             tabIndex={-1}
-            className="flex-1 overflow-y-auto p-4 outline-none md:p-6"
+            className={cn(
+              "flex-1 p-3 outline-none md:p-4",
+              isFilesPage ? "flex flex-col overflow-hidden" : "overflow-y-auto",
+            )}
           >
-            <div className="mx-auto max-w-7xl space-y-6">
-              <Suspense
-                fallback={
-                  <p className="text-sm text-muted-foreground">正在加载页面…</p>
-                }
-              >
+            <div
+              key={page}
+              className={cn(
+                "page-enter mx-auto w-full max-w-7xl",
+                isFilesPage ? "flex min-h-0 flex-1 flex-col" : "space-y-3",
+              )}
+            >
+              <Suspense fallback={<PageSkeleton />}>
                 {page === "system" ? <SystemPage /> : null}
                 {page === "providers" ? <ProvidersPage /> : null}
                 {page === "mcp" ? <McpPage /> : null}
@@ -659,12 +841,13 @@ export default function App() {
           <DialogHeader>
             <DialogTitle>配置已被外部修改</DialogTitle>
             <DialogDescription>
-              自动保存发现配置文件已被其他方式修改。刷新后将丢失当前未保存的修改。
+              自动保存发现配置文件已被其他方式修改。可以继续编辑稍后再保存，
+              或立即选择用哪一份内容覆盖另一份。
             </DialogDescription>
           </DialogHeader>
-          <DialogFooter>
+          <DialogFooter className="flex-wrap">
             <Button variant="outline" onClick={() => setConflictOpen(false)}>
-              保留我的修改
+              继续编辑
             </Button>
             <Button
               variant="destructive"
@@ -673,7 +856,15 @@ export default function App() {
                 void reload();
               }}
             >
-              丢弃并刷新
+              丢弃我的修改
+            </Button>
+            <Button
+              onClick={() => {
+                setConflictOpen(false);
+                void onSave();
+              }}
+            >
+              用面板内容覆盖
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -714,6 +905,12 @@ export default function App() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        items={paletteItems}
+      />
 
       {powerState.kind !== "idle" ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">

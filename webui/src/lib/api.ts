@@ -10,6 +10,7 @@ import type {
   FileSaveResponse,
   MyBotConfigData,
   PowerResponse,
+  ProviderModelsResponse,
 } from "./types";
 
 export class ApiError extends Error {
@@ -27,12 +28,23 @@ interface ErrorDetail {
   detail?: string | { issues?: ConfigIssuePayload[] };
 }
 
+const REQUEST_TIMEOUT_MS = 30_000;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    cache: "no-store",
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      ...init,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new ApiError(0, "请求超时，请检查服务状态");
+    }
+    throw error;
+  }
   if (!response.ok) {
     let message = `请求失败（${response.status}）`;
     let issues: ConfigIssuePayload[] = [];
@@ -107,4 +119,12 @@ export function restartSystem(): Promise<PowerResponse> {
 
 export function shutdownSystem(): Promise<PowerResponse> {
   return request<PowerResponse>("/api/system/shutdown", { method: "POST" });
+}
+
+export function getProviderModels(
+  providerId: string,
+): Promise<ProviderModelsResponse> {
+  return request<ProviderModelsResponse>(
+    `/api/llm/providers/${encodeURIComponent(providerId)}/models`,
+  );
 }

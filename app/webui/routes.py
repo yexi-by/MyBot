@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Response, status
 
 from app.config import RESTART_ONLY_SECTIONS, ConfigLoadError, ConfigManager
 
-from . import config_io, files
+from . import config_io, files, llm_models
 from .config_io import ConfigConflictError
 from .power import PowerAction, PowerController
 from .schemas import (
@@ -22,6 +22,7 @@ from .schemas import (
     FileSaveRequest,
     FileSaveResponse,
     PowerResponse,
+    ProviderModelsResponse,
 )
 
 
@@ -192,6 +193,24 @@ def create_webui_router(
             ) from exc
         return FileSaveResponse(sha256=digest)
 
+    @router.get("/llm/providers/{provider_id}/models")
+    async def list_provider_models(provider_id: str) -> ProviderModelsResponse:
+        """代理拉取指定 provider 的可用模型列表；未定义 404，上游失败 502。"""
+        try:
+            models = await llm_models.list_provider_models(
+                config_file=manager.config_file, provider_id=provider_id
+            )
+        except llm_models.ProviderNotFoundError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"未定义的 LLM provider: {provider_id}",
+            ) from exc
+        except llm_models.ProviderModelsError as exc:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+        return ProviderModelsResponse(provider=provider_id, models=models)
+
     def _request_power(action: PowerAction) -> PowerResponse:
         """受理电源操作：延迟优雅停机，是否重新拉起由外部守护策略决定。"""
         if power is None or not power.available:
@@ -227,6 +246,7 @@ def create_webui_router(
         list_files,
         read_file,
         save_file,
+        list_provider_models,
         restart_process,
         shutdown_process,
     )

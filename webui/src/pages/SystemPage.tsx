@@ -1,8 +1,11 @@
 /** 系统设置页：app/server/napcat/database/network/storage/logging，改动均需重启。 */
 
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { useState } from "react";
+import { useFormContext } from "react-hook-form";
+
+import { PageHeader } from "@/components/PageHeader";
 import { SectionCard } from "@/components/SectionCard";
-import { SettingsGrid } from "@/components/SettingsGrid";
+import { countDirtyUnder } from "@/lib/dirty";
 import {
   NumberField,
   NumberListField,
@@ -10,19 +13,32 @@ import {
   SwitchField,
   TextField,
 } from "@/lib/fields";
+import type { MyBotConfigData } from "@/lib/types";
+import { dirtyPrefixesForPage } from "@/lib/pages";
+import { useFieldFilter } from "@/lib/useFieldFilter";
 
 export default function SystemPage() {
+  const { formState } = useFormContext<MyBotConfigData>();
+  const [filter, setFilter] = useState("");
+  const filterRef = useFieldFilter(filter);
+  const dirtyCount = countDirtyUnder(
+    formState.dirtyFields,
+    dirtyPrefixesForPage("system"),
+  );
+
   return (
-    <div className="space-y-4">
-      <Alert>
-        <AlertTitle>本页改动需要重启进程后生效</AlertTitle>
-        <AlertDescription>
-          停止编辑后会自动写入配置文件，但运行中的服务继续使用启动时的配置。
-        </AlertDescription>
-      </Alert>
+    <div ref={filterRef} className="space-y-3">
+      <PageHeader
+        title="系统设置"
+        description="服务监听、连接、存储与日志等启动期参数。"
+        notice="本页改动需要重启进程后生效，停止编辑后会自动写入配置文件"
+        dirtyCount={dirtyCount}
+        filterValue={filter}
+        onFilterChange={setFilter}
+      />
 
-      <SettingsGrid>
-
+      <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2 2xl:grid-cols-3">
+        <div className="space-y-3">
       <SectionCard title="服务监听" description="HTTP 与 WebSocket 服务监听参数。">
         <TextField path="server.host" label="监听地址" placeholder="例如 0.0.0.0" />
         <NumberField path="server.port" label="端口" placeholder="例如 6055" />
@@ -62,6 +78,18 @@ export default function SystemPage() {
         />
       </SectionCard>
 
+      <SectionCard title="应用" description="应用元信息。">
+        <TextField path="app.name" label="应用名" placeholder="例如 MyBot" />
+        <SelectField
+          path="app.environment"
+          label="运行环境"
+          options={["development", "staging", "production", "test"].map(
+            (value) => ({ value, label: value }),
+          )}
+        />
+      </SectionCard>
+        </div>
+        <div className="space-y-3">
       <SectionCard title="NapCat 连接" description="NapCat 反向 WebSocket 接入与发送重试。">
         <TextField
           path="napcat.websocket_token"
@@ -94,6 +122,27 @@ export default function SystemPage() {
         />
       </SectionCard>
 
+      <SectionCard title="网络" description="项目通用 HTTP 访问配置。">
+        <TextField
+          path="network.proxy"
+          label="代理地址"
+          placeholder="如 http://127.0.0.1:7890，留空不走代理"
+        />
+        <NumberField
+          path="network.timeout_seconds"
+          label="请求超时（秒）"
+          placeholder="例如 15"
+        />
+      </SectionCard>
+
+      <SectionCard title="插件执行" description="所有已加载插件共用的启动期执行参数。">
+        <NumberField
+          path="plugin_execution.stop_timeout_seconds"
+          label="消费者停止超时（秒）"
+        />
+      </SectionCard>
+        </div>
+        <div className="space-y-3">
       <SectionCard
         title="数据库"
         description="PostgreSQL 连接池；无密码服务可留空，需要认证时密码与密码文件二选一。"
@@ -137,21 +186,15 @@ export default function SystemPage() {
           />
         </div>
       </SectionCard>
+        </div>
+      </div>
 
-      <SectionCard title="网络" description="项目通用 HTTP 访问配置。">
-        <TextField
-          path="network.proxy"
-          label="代理地址"
-          placeholder="如 http://127.0.0.1:7890，留空不走代理"
-        />
-        <NumberField
-          path="network.timeout_seconds"
-          label="请求超时（秒）"
-          placeholder="例如 15"
-        />
-      </SectionCard>
-
-      <SectionCard title="图片存储" description="群图片归档目录与下载策略。">
+      <SectionCard
+        title="图片存储"
+        description="群图片归档目录与下载策略。"
+        className="col-span-full"
+        cols={3}
+      >
         <TextField
           path="storage.images.directory"
           label="归档目录"
@@ -195,14 +238,12 @@ export default function SystemPage() {
         />
       </SectionCard>
 
-      <SectionCard title="插件执行" description="所有已加载插件共用的启动期执行参数。">
-        <NumberField
-          path="plugin_execution.stop_timeout_seconds"
-          label="消费者停止超时（秒）"
-        />
-      </SectionCard>
-
-      <SectionCard title="日志" description="日志输出与归档策略。">
+      <SectionCard
+        title="日志"
+        description="日志输出与归档策略。"
+        className="col-span-full"
+        cols={3}
+      >
         <TextField path="logging.directory" label="日志目录" placeholder="例如 logs" />
         <SelectField
           path="logging.console_level"
@@ -222,18 +263,6 @@ export default function SystemPage() {
         <TextField path="logging.retention" label="保留时长" placeholder="例如 30 days" />
         <TextField path="logging.compression" label="压缩格式" placeholder="例如 gz" />
       </SectionCard>
-
-      <SectionCard title="应用" description="应用元信息。">
-        <TextField path="app.name" label="应用名" placeholder="例如 MyBot" />
-        <SelectField
-          path="app.environment"
-          label="运行环境"
-          options={["development", "staging", "production", "test"].map(
-            (value) => ({ value, label: value }),
-          )}
-        />
-      </SectionCard>
-      </SettingsGrid>
     </div>
   );
 }

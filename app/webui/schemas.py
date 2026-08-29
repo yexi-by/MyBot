@@ -89,6 +89,13 @@ class FileSaveResponse(BaseModel):
     sha256: str
 
 
+class ProviderModelsResponse(BaseModel):
+    """指定 provider 的可用模型 id 列表。"""
+
+    provider: str
+    models: list[str]
+
+
 class PowerResponse(BaseModel):
     """电源操作受理结果；进程会在响应返回后优雅停机。"""
 

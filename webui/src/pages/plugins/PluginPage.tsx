@@ -2,10 +2,12 @@
 
 import { useState } from "react";
 import { useFormContext } from "react-hook-form";
+import { Search } from "lucide-react";
 
 import { SectionCard } from "@/components/SectionCard";
 import { SettingsGrid } from "@/components/SettingsGrid";
 import { ModelRefField } from "@/components/ModelRefField";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -15,8 +17,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { defaultPluginConfig, pluginMeta } from "@/lib/configMeta";
+import { countDirtyUnder } from "@/lib/dirty";
 import {
   NumberField,
   StringListField,
@@ -24,6 +28,7 @@ import {
   TextField,
 } from "@/lib/fields";
 import type { MyBotConfigData, PluginId } from "@/lib/types";
+import { useFieldFilter } from "@/lib/useFieldFilter";
 
 import AIGroupChatFields from "./AIGroupChatFields";
 
@@ -211,10 +216,14 @@ function PluginFields({ pluginId }: { pluginId: PluginId }) {
 
 export default function PluginPage({ pluginId }: { pluginId: PluginId }) {
   const meta = pluginMeta(pluginId);
-  const { watch, setValue, getValues } = useFormContext<MyBotConfigData>();
+  const { watch, setValue, getValues, formState } =
+    useFormContext<MyBotConfigData>();
   const [confirmDisable, setConfirmDisable] = useState(false);
+  const [filter, setFilter] = useState("");
+  const filterRef = useFieldFilter(filter);
   const path = `plugins.${pluginId}` as const;
   const enabled = watch(path) != null;
+  const dirtyCount = countDirtyUnder(formState.dirtyFields, [path]);
 
   const enablePlugin = () => {
     setValue(path, defaultPluginConfig(pluginId, getValues()), {
@@ -227,27 +236,51 @@ export default function PluginPage({ pluginId }: { pluginId: PluginId }) {
   };
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between rounded-lg border p-4">
-        <div>
-          <h2 className="text-lg font-semibold">{meta.name}</h2>
+    <div ref={filterRef} className="space-y-3">
+      <div className="card-geek flex flex-wrap items-center justify-between gap-3 rounded-sm border p-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold">{meta.name}</h2>
+            {dirtyCount > 0 ? (
+              <Badge variant="secondary" title="本页已修改的字段数">
+                {dirtyCount} 项已修改
+              </Badge>
+            ) : null}
+          </div>
           <p className="text-sm text-muted-foreground">{meta.description}</p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-muted-foreground">
-            {enabled ? "已启用" : "已禁用"}
-          </span>
-          <Switch
-            aria-label={`${enabled ? "禁用" : "启用"}${meta.name}`}
-            checked={enabled}
-            onCheckedChange={(checked) => {
-              if (checked) {
-                enablePlugin();
-              } else {
-                setConfirmDisable(true);
-              }
-            }}
-          />
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">
+              {enabled ? "已启用" : "已禁用"}
+            </span>
+            <Switch
+              aria-label={`${enabled ? "禁用" : "启用"}${meta.name}`}
+              checked={enabled}
+              onCheckedChange={(checked) => {
+                if (checked) {
+                  enablePlugin();
+                } else {
+                  setConfirmDisable(true);
+                }
+              }}
+            />
+          </div>
+          {enabled ? (
+            <div className="relative">
+              <Search
+                className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+                aria-hidden
+              />
+              <Input
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+                placeholder="筛选字段…"
+                aria-label={`筛选${meta.name}字段`}
+                className="w-40 pl-8"
+              />
+            </div>
+          ) : null}
         </div>
       </div>
 

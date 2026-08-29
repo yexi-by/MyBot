@@ -1,8 +1,10 @@
 /** AI 群聊插件配置表单：模型、视觉、图片、行为开关与群列表。 */
 
+import { useState } from "react";
 import { useFieldArray, useFormContext } from "react-hook-form";
 import { Plus, Trash2 } from "lucide-react";
 
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ModelRefField } from "@/components/ModelRefField";
 import { SectionCard } from "@/components/SectionCard";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -138,55 +140,64 @@ function VisionSection() {
 }
 
 function GroupsSection() {
-  const { control } = useFormContext<MyBotConfigData>();
+  const { control, watch } = useFormContext<MyBotConfigData>();
   const { fields, append, remove } = useFieldArray({
     control,
     name: GROUPS_BASE,
   });
+  const [deleteIndex, setDeleteIndex] = useState<number | null>(null);
 
   return (
     <>
-      {fields.map((field, index) => (
-        <SectionCard
-          key={field.id}
-          title={`群配置 ${index + 1}`}
-          actions={
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label={`删除群配置 ${index + 1}`}
-              onClick={() => remove(index)}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          }
-        >
-          <TextField
-            path={`${GROUPS_BASE}.${index}.id`}
-            label="群号"
-            placeholder="QQ 群号"
-          />
-          <NumberField
-            path={`${GROUPS_BASE}.${index}.max_context_tokens`}
-            label="上下文 Token 上限"
-            placeholder="如 64000"
-          />
-          <TextField
-            path={`${GROUPS_BASE}.${index}.system_prompt_file`}
-            label="角色提示词文件"
-            placeholder="ai_group_chat/prompts/roles/default.md"
-          />
-          <TextField
-            path={`${GROUPS_BASE}.${index}.knowledge_base_file`}
-            label="知识库文件"
-            placeholder="留空不使用知识库"
-          />
-        </SectionCard>
-      ))}
+      {fields.map((field, index) => {
+        const groupId = watch(`${GROUPS_BASE}.${index}.id`);
+        const title =
+          typeof groupId === "string" && groupId.trim() !== ""
+            ? `群 ${groupId.trim()}`
+            : `群配置 ${index + 1}`;
+        return (
+          <SectionCard
+            key={field.id}
+            title={title}
+            actions={
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={`删除${title}`}
+                onClick={() => setDeleteIndex(index)}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            }
+          >
+            <TextField
+              path={`${GROUPS_BASE}.${index}.id`}
+              label="群号"
+              placeholder="QQ 群号"
+            />
+            <NumberField
+              path={`${GROUPS_BASE}.${index}.max_context_tokens`}
+              label="上下文 Token 上限"
+              placeholder="如 64000"
+            />
+            <TextField
+              path={`${GROUPS_BASE}.${index}.system_prompt_file`}
+              label="角色提示词文件"
+              placeholder="ai_group_chat/prompts/roles/default.md"
+            />
+            <TextField
+              path={`${GROUPS_BASE}.${index}.knowledge_base_file`}
+              label="知识库文件"
+              placeholder="留空不使用知识库"
+            />
+          </SectionCard>
+        );
+      })}
       <Button
         type="button"
         variant="outline"
+        className="min-h-32 h-full w-full border-dashed text-muted-foreground hover:text-foreground"
         onClick={() =>
           append({
             id: "",
@@ -199,6 +210,19 @@ function GroupsSection() {
         <Plus className="mr-1 h-4 w-4" />
         添加群配置
       </Button>
+      <ConfirmDialog
+        open={deleteIndex !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteIndex(null);
+        }}
+        title={`删除群配置 ${deleteIndex !== null ? deleteIndex + 1 : ""}？`}
+        description="删除后该群的模型上下文与提示词引用将随自动保存一并移除，且无法恢复。"
+        confirmLabel="删除群配置"
+        destructive
+        onConfirm={() => {
+          if (deleteIndex !== null) remove(deleteIndex);
+        }}
+      />
     </>
   );
 }
@@ -208,6 +232,8 @@ export default function AIGroupChatFields() {
   const deliveryMode = watch("plugins.ai_group_chat.images.delivery_mode");
   return (
     <>
+      <div className="col-span-full grid grid-cols-1 items-start gap-3 md:grid-cols-2 2xl:grid-cols-3">
+        <div className="space-y-3">
       <SectionCard title="主模型" description="群聊对话使用的聊天模型。">
         <ModelRefField
           path="plugins.ai_group_chat.model"
@@ -243,9 +269,129 @@ export default function AIGroupChatFields() {
         />
       </SectionCard>
 
+      <SectionCard title="历史工具" description="群历史分页和锚点默认数量。">
+        <NumberField
+          path="plugins.ai_group_chat.history.default_limit"
+          label="默认单页条数"
+        />
+        <NumberField
+          path="plugins.ai_group_chat.history.max_per_call"
+          label="单页最大条数"
+          description="0 表示不限"
+        />
+        <NumberField
+          path="plugins.ai_group_chat.history.default_before_count"
+          label="锚点前默认条数"
+        />
+        <NumberField
+          path="plugins.ai_group_chat.history.default_after_count"
+          label="锚点后默认条数"
+        />
+      </SectionCard>
+
+      <SectionCard title="群文件工具" description="群文件列表工具的返回数量。">
+        <NumberField
+          path="plugins.ai_group_chat.files.default_count"
+          label="默认文件数量"
+        />
+        <NumberField
+          path="plugins.ai_group_chat.files.max_per_call"
+          label="单次最大文件数量"
+          description="0 表示不限"
+        />
+      </SectionCard>
+        </div>
+        <div className="space-y-3">
       <VisionSection />
 
-      <SectionCard title="图片处理" description="群聊图片读取与合并转发限制。">
+      <SectionCard title="Token 估算" description="按当前模型调整无 tokenizer 时的估算参数。">
+        <NumberField path="plugins.ai_group_chat.token_estimator.request_overhead_tokens" label="请求固定 Token" />
+        <NumberField path="plugins.ai_group_chat.token_estimator.message_overhead_tokens" label="每条消息固定 Token" />
+        <NumberField path="plugins.ai_group_chat.token_estimator.tool_call_overhead_tokens" label="每次工具调用固定 Token" />
+        <NumberField path="plugins.ai_group_chat.token_estimator.image_tokens" label="每张图片 Token" />
+        <NumberField path="plugins.ai_group_chat.token_estimator.ascii_tokens_per_character" label="ASCII 每字符 Token" />
+        <NumberField path="plugins.ai_group_chat.token_estimator.non_ascii_tokens_per_character" label="非 ASCII 每字符 Token" />
+      </SectionCard>
+        </div>
+        <div className="space-y-3">
+      <SectionCard title="对话行为" description="工具循环、上下文与回复控制。">
+        <NumberField
+          path="plugins.ai_group_chat.max_tool_rounds"
+          label="最大工具轮数"
+          placeholder="例如 16"
+        />
+        <NumberField
+          path="plugins.ai_group_chat.token_safety_factor"
+          label="Token 安全系数"
+          placeholder="例如 1.05"
+        />
+        <NumberField
+          path="plugins.ai_group_chat.forward_reply_threshold_chars"
+          label="转合并转发字符阈值"
+          description="0 表示所有非空回复都使用合并转发"
+          placeholder="例如 1000"
+        />
+        <TextField
+          path="plugins.ai_group_chat.extra_requirements_file"
+          label="通用要求文件"
+          placeholder="ai_group_chat/prompts/extra_requirements.md"
+        />
+        <div className="xl:col-span-2">
+          <TextareaField
+            path="plugins.ai_group_chat.context_compression_notice"
+            label="上下文压缩提示语"
+            rows={2}
+          />
+        </div>
+        <SwitchField
+          path="plugins.ai_group_chat.show_reasoning"
+          label="展示推理过程"
+        />
+        <SwitchField
+          path="plugins.ai_group_chat.retain_reasoning"
+          label="保留推理到上下文"
+        />
+        <SwitchField
+          path="plugins.ai_group_chat.debug_dump_messages"
+          label="调试消息转储"
+          description="把长期上下文增量写入下方指定目录"
+        />
+        <TextField
+          path="plugins.ai_group_chat.debug_dump_directory"
+          label="调试转储目录"
+        />
+        <SwitchField
+          path="plugins.ai_group_chat.allow_mention_all"
+          label="允许 @全体"
+        />
+        <SelectField
+          path="plugins.ai_group_chat.tool_result_retention"
+          label="工具结果长期保存"
+          options={[
+            { value: "off", label: "off（不保存）" },
+            { value: "summary", label: "summary（名称与状态）" },
+            { value: "full", label: "full（参数与完整结果）" },
+          ]}
+        />
+      </SectionCard>
+
+      <SectionCard title="消息格式化" description="字符和条目上限为 0 时不限；深度为 -1 时不限。">
+        <NumberField path="plugins.ai_group_chat.formatting.field_text_limit" label="普通字段字符上限" />
+        <NumberField path="plugins.ai_group_chat.formatting.json_text_limit" label="JSON 字符上限" />
+        <NumberField path="plugins.ai_group_chat.formatting.markdown_text_limit" label="Markdown 字符上限" />
+        <NumberField path="plugins.ai_group_chat.formatting.forward_max_items" label="内嵌转发条目上限" />
+        <NumberField path="plugins.ai_group_chat.formatting.forward_max_depth" label="转发展开深度" />
+        <NumberField path="plugins.ai_group_chat.formatting.nested_text_search_max_depth" label="卡片文本搜索深度" />
+      </SectionCard>
+        </div>
+      </div>
+
+      <SectionCard
+        title="图片处理"
+        description="群聊图片读取与合并转发限制。"
+        className="col-span-full"
+        cols={3}
+      >
         <SelectField
           path="plugins.ai_group_chat.images.delivery_mode"
           label="图片交付方式"
@@ -327,7 +473,7 @@ export default function AIGroupChatFields() {
           label="图片最大高度"
           description="0 表示不限"
         />
-        <div className="xl:col-span-2">
+        <div className="xl:col-span-3">
           <StringListField
             path="plugins.ai_group_chat.images.allowed_mime_types"
             label="允许的图片 MIME 类型"
@@ -411,117 +557,6 @@ export default function AIGroupChatFields() {
           path="plugins.ai_group_chat.images.forward_max_per_turn"
           label="单轮转发上限"
           description="0 表示不限"
-        />
-      </SectionCard>
-
-      <SectionCard title="历史工具" description="群历史分页和锚点默认数量。">
-        <NumberField
-          path="plugins.ai_group_chat.history.default_limit"
-          label="默认单页条数"
-        />
-        <NumberField
-          path="plugins.ai_group_chat.history.max_per_call"
-          label="单页最大条数"
-          description="0 表示不限"
-        />
-        <NumberField
-          path="plugins.ai_group_chat.history.default_before_count"
-          label="锚点前默认条数"
-        />
-        <NumberField
-          path="plugins.ai_group_chat.history.default_after_count"
-          label="锚点后默认条数"
-        />
-      </SectionCard>
-
-      <SectionCard title="群文件工具" description="群文件列表工具的返回数量。">
-        <NumberField
-          path="plugins.ai_group_chat.files.default_count"
-          label="默认文件数量"
-        />
-        <NumberField
-          path="plugins.ai_group_chat.files.max_per_call"
-          label="单次最大文件数量"
-          description="0 表示不限"
-        />
-      </SectionCard>
-
-      <SectionCard title="消息格式化" description="字符和条目上限为 0 时不限；深度为 -1 时不限。">
-        <NumberField path="plugins.ai_group_chat.formatting.field_text_limit" label="普通字段字符上限" />
-        <NumberField path="plugins.ai_group_chat.formatting.json_text_limit" label="JSON 字符上限" />
-        <NumberField path="plugins.ai_group_chat.formatting.markdown_text_limit" label="Markdown 字符上限" />
-        <NumberField path="plugins.ai_group_chat.formatting.forward_max_items" label="内嵌转发条目上限" />
-        <NumberField path="plugins.ai_group_chat.formatting.forward_max_depth" label="转发展开深度" />
-        <NumberField path="plugins.ai_group_chat.formatting.nested_text_search_max_depth" label="卡片文本搜索深度" />
-      </SectionCard>
-
-      <SectionCard title="Token 估算" description="按当前模型调整无 tokenizer 时的估算参数。">
-        <NumberField path="plugins.ai_group_chat.token_estimator.request_overhead_tokens" label="请求固定 Token" />
-        <NumberField path="plugins.ai_group_chat.token_estimator.message_overhead_tokens" label="每条消息固定 Token" />
-        <NumberField path="plugins.ai_group_chat.token_estimator.tool_call_overhead_tokens" label="每次工具调用固定 Token" />
-        <NumberField path="plugins.ai_group_chat.token_estimator.image_tokens" label="每张图片 Token" />
-        <NumberField path="plugins.ai_group_chat.token_estimator.ascii_tokens_per_character" label="ASCII 每字符 Token" />
-        <NumberField path="plugins.ai_group_chat.token_estimator.non_ascii_tokens_per_character" label="非 ASCII 每字符 Token" />
-      </SectionCard>
-
-      <SectionCard title="对话行为" description="工具循环、上下文与回复控制。">
-        <NumberField
-          path="plugins.ai_group_chat.max_tool_rounds"
-          label="最大工具轮数"
-          placeholder="例如 16"
-        />
-        <NumberField
-          path="plugins.ai_group_chat.token_safety_factor"
-          label="Token 安全系数"
-          placeholder="例如 1.05"
-        />
-        <NumberField
-          path="plugins.ai_group_chat.forward_reply_threshold_chars"
-          label="转合并转发字符阈值"
-          description="0 表示所有非空回复都使用合并转发"
-          placeholder="例如 1000"
-        />
-        <TextField
-          path="plugins.ai_group_chat.extra_requirements_file"
-          label="通用要求文件"
-          placeholder="ai_group_chat/prompts/extra_requirements.md"
-        />
-        <div className="xl:col-span-2">
-          <TextareaField
-            path="plugins.ai_group_chat.context_compression_notice"
-            label="上下文压缩提示语"
-            rows={2}
-          />
-        </div>
-        <SwitchField
-          path="plugins.ai_group_chat.show_reasoning"
-          label="展示推理过程"
-        />
-        <SwitchField
-          path="plugins.ai_group_chat.retain_reasoning"
-          label="保留推理到上下文"
-        />
-        <SwitchField
-          path="plugins.ai_group_chat.debug_dump_messages"
-          label="调试消息转储"
-          description="把长期上下文增量写入下方指定目录"
-        />
-        <TextField
-          path="plugins.ai_group_chat.debug_dump_directory"
-          label="调试转储目录"
-        />
-        <SwitchField
-          path="plugins.ai_group_chat.allow_mention_all"
-          label="允许 @全体"
-        />
-        <SelectField
-          path="plugins.ai_group_chat.tool_result_retention"
-          label="工具结果长期保存"
-          options={[
-            { value: "off", label: "off（不保存）" },
-            { value: "summary", label: "summary（名称与状态）" },
-            { value: "full", label: "full（参数与完整结果）" },
-          ]}
         />
       </SectionCard>
 

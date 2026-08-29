@@ -7,13 +7,20 @@ import { cn } from "@/lib/utils";
 interface SettingsGridProps {
   children: ReactNode;
   className?: string;
+  /** 宽屏列数上限：内容少时传 2，让卡片拉宽填满行，避免空格子留白。 */
+  columns?: 2 | 3;
 }
 
-export function SettingsGrid({ children, className }: SettingsGridProps) {
+export function SettingsGrid({
+  children,
+  className,
+  columns = 3,
+}: SettingsGridProps) {
   return (
     <div
       className={cn(
-        "grid grid-cols-1 items-start gap-4 md:grid-cols-2 2xl:grid-cols-3",
+        "grid grid-cols-1 items-start gap-3 md:grid-cols-2",
+        columns === 3 && "2xl:grid-cols-3",
         className,
       )}
     >

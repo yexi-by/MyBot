@@ -21,15 +21,21 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Plus, Trash2 } from "lucide-react";
 
-/** 按点路径从 RHF errors 嵌套对象中取错误消息。 */
-function errorAtPath(errors: unknown, path: string): string | undefined {
-  let current: unknown = errors;
+/** 按点路径从 RHF 嵌套对象（errors/dirtyFields）中取子节点。 */
+function valueAtPath(source: unknown, path: string): unknown {
+  let current: unknown = source;
   for (const part of path.split(".")) {
     if (current === null || typeof current !== "object") {
       return undefined;
     }
     current = (current as Record<string, unknown>)[part];
   }
+  return current;
+}
+
+/** 按点路径从 RHF errors 嵌套对象中取错误消息。 */
+function errorAtPath(errors: unknown, path: string): string | undefined {
+  const current = valueAtPath(errors, path);
   if (current && typeof current === "object" && "message" in current) {
     const message = (current as { message?: unknown }).message;
     return typeof message === "string" ? message : undefined;
@@ -39,14 +45,14 @@ function errorAtPath(errors: unknown, path: string): string | undefined {
 
 interface FieldShellProps {
   path: string;
-  label: string;
+  label: ReactNode;
   description?: string;
   controlId?: string;
   labelId?: string;
   children: ReactNode;
 }
 
-/** 字段外壳：标签、说明文字、校验错误。 */
+/** 字段外壳：标签、说明文字、校验错误、修改标记。 */
 export function FieldShell({
   path,
   label,
@@ -56,12 +62,24 @@ export function FieldShell({
   children,
 }: FieldShellProps) {
   const {
-    formState: { errors },
+    formState: { errors, dirtyFields },
   } = useFormContext();
   const error = errorAtPath(errors, path);
+  const dirty = valueAtPath(dirtyFields, path) !== undefined;
   return (
-    <div className="space-y-1.5">
-      <Label id={labelId} htmlFor={controlId}>
+    <div className="space-y-1" data-field-path={path}>
+      <Label
+        id={labelId}
+        htmlFor={controlId}
+        className="gap-1.5 font-mono text-xs font-medium tracking-wide"
+      >
+        {dirty ? (
+          <span
+            className="inline-block size-1.5 shrink-0 bg-accent-foreground/80"
+            title="已修改"
+            aria-hidden
+          />
+        ) : null}
         {label}
       </Label>
       {children}
@@ -81,7 +99,13 @@ interface BaseFieldProps {
 }
 
 /** 文本输入字段；清空时从配置载荷中省略该键。 */
-export function TextField({ path, label, description, placeholder }: BaseFieldProps) {
+export function TextField({
+  path,
+  label,
+  description,
+  placeholder,
+  list,
+}: BaseFieldProps & { list?: string }) {
   const { register } = useFormContext();
   const controlId = useId();
   return (
@@ -93,6 +117,7 @@ export function TextField({ path, label, description, placeholder }: BaseFieldPr
     >
       <Input
         id={controlId}
+        list={list}
         placeholder={placeholder}
         {...register(path, {
           setValueAs: (value: unknown) => value === "" ? undefined : value,
@@ -129,7 +154,7 @@ export function TextareaField({
   );
 }
 
-/** 数字输入字段；清空时省略该键，必填字段会由后端明确报错。 */
+/** 数字输入字段；清空时省略该键，非法中间态保留原文交由后端校验报可读错误。 */
 export function NumberField({
   path,
   label,
@@ -152,10 +177,15 @@ export function NumberField({
         step={step ?? "any"}
         placeholder={placeholder}
         {...register(path, {
-          setValueAs: (value: unknown) =>
-            value === "" || value === null || value === undefined
-              ? undefined
-              : Number(value),
+          setValueAs: (value: unknown) => {
+            if (value === "" || value === null || value === undefined) {
+              return undefined;
+            }
+            const numeric = Number(value);
+            // "1e" 等中间态 Number 得 NaN，序列化会变 null 导致 422 不知所云；
+            // 保留原始字符串，让后端报"应为数字"并回显到字段。
+            return Number.isFinite(numeric) ? numeric : value;
+          },
         })}
       />
     </FieldShell>
@@ -330,7 +360,10 @@ export function NumberListField({
               step="any"
               aria-label={`${label} ${index + 1}`}
               {...register(`${path}.${index}`, {
-                setValueAs: (value: unknown) => Number(value),
+                setValueAs: (value: unknown) => {
+                  const numeric = Number(value);
+                  return Number.isFinite(numeric) ? numeric : value;
+                },
               })}
             />
             <Button
