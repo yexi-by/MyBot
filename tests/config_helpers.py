@@ -81,6 +81,8 @@ def minimal_config_toml(
 
         [mcp]
         enabled = false
+        initialization_timeout_seconds = 30
+        call_timeout_seconds = 60
         servers = {{}}
 
         [database]

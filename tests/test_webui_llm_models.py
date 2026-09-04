@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from openai import AuthenticationError
 
 from app.webui import llm_models
 from app.webui.dev import create_dev_app
@@ -66,14 +67,18 @@ class WebUILLMModelsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ghost", response.json()["detail"])
 
     async def test_list_models_upstream_error_returns_502(self) -> None:
-        """上游不可达返回 502 与脱敏原因。"""
+        """上游响应回显密钥时，502 仅展示鉴权分类与状态码。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "mybot.toml").write_text(minimal_config_toml(), encoding="utf-8")
             with patch("app.webui.llm_models.AsyncOpenAI") as mock_client_cls:
                 instance = mock_client_cls.return_value
                 instance.models.list = AsyncMock(
-                    side_effect=ConnectionError("connection refused")
+                    side_effect=AuthenticationError(
+                        "invalid key test-api-key at https://user:password@model.invalid",
+                        response=httpx.Response(401, request=httpx.Request("GET", "https://model.invalid")),
+                        body={"error": "test-api-key"},
+                    )
                 )
                 instance.close = AsyncMock()
                 async with self._client(root) as client:
@@ -83,6 +88,8 @@ class WebUILLMModelsTest(unittest.IsolatedAsyncioTestCase):
             detail = response.json()["detail"]
             self.assertIn("拉取模型列表失败", detail)
             self.assertNotIn("test-api-key", detail)
+            self.assertNotIn("password", detail)
+            self.assertIn("HTTP 401", detail)
 
     async def test_list_models_cached_within_ttl(self) -> None:
         """30 秒 TTL 内同配置同 provider 不重复请求上游。"""

@@ -1,6 +1,6 @@
 /** LLM Providers 管理页：动态 ID 始终作为不透明键整体写回。 */
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useFormContext } from "react-hook-form";
 import { Cable, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -23,6 +23,7 @@ function numberInput(value: string): number | undefined {
 }
 
 export default function ProvidersPage() {
+  const controlPrefix = useId();
   const { watch, setValue, formState } = useFormContext<MyBotConfigData>();
   const [newProviderId, setNewProviderId] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
@@ -118,8 +119,9 @@ export default function ProvidersPage() {
               }
             >
               <div className="space-y-1.5">
-                <Label>API Key</Label>
+                <Label htmlFor={`${controlPrefix}-${id}-api_key`}>API Key</Label>
                 <Input
+                  id={`${controlPrefix}-${id}-api_key`}
                   value={provider.api_key ?? ""}
                   onChange={(event) =>
                     updateProvider(id, { api_key: event.target.value || null })
@@ -130,8 +132,9 @@ export default function ProvidersPage() {
                 </p>
               </div>
               <div className="space-y-1.5">
-                <Label>Base URL</Label>
+                <Label htmlFor={`${controlPrefix}-${id}-base_url`}>Base URL</Label>
                 <Input
+                  id={`${controlPrefix}-${id}-base_url`}
                   value={provider.base_url ?? ""}
                   onChange={(event) =>
                     updateProvider(id, { base_url: event.target.value || null })
@@ -139,8 +142,9 @@ export default function ProvidersPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>Provider 代理</Label>
+                <Label htmlFor={`${controlPrefix}-${id}-proxy`}>Provider 代理</Label>
                 <Input
+                  id={`${controlPrefix}-${id}-proxy`}
                   value={provider.proxy ?? ""}
                   placeholder="留空时按继承开关决定"
                   onChange={(event) =>
@@ -149,8 +153,9 @@ export default function ProvidersPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>继承全局代理</Label>
+                <Label htmlFor={`${controlPrefix}-${id}-inherit_network_proxy`}>继承全局代理</Label>
                 <Switch
+                  id={`${controlPrefix}-${id}-inherit_network_proxy`}
                   checked={Boolean(provider.inherit_network_proxy)}
                   onCheckedChange={(checked) =>
                     updateProvider(id, { inherit_network_proxy: checked })
@@ -158,8 +163,9 @@ export default function ProvidersPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>请求超时（秒）</Label>
+                <Label htmlFor={`${controlPrefix}-${id}-timeout_seconds`}>请求超时（秒）</Label>
                 <Input
+                  id={`${controlPrefix}-${id}-timeout_seconds`}
                   type="number"
                   step="any"
                   value={provider.timeout_seconds ?? ""}
@@ -172,8 +178,9 @@ export default function ProvidersPage() {
                 <p className="text-xs text-muted-foreground">0 表示使用全局网络超时</p>
               </div>
               <div className="space-y-1.5">
-                <Label>最大尝试次数</Label>
+                <Label htmlFor={`${controlPrefix}-${id}-max_attempts`}>最大尝试次数</Label>
                 <Input
+                  id={`${controlPrefix}-${id}-max_attempts`}
                   type="number"
                   value={provider.max_attempts ?? ""}
                   onChange={(event) =>
@@ -184,8 +191,9 @@ export default function ProvidersPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>初始重试间隔（秒）</Label>
+                <Label htmlFor={`${controlPrefix}-${id}-retry_delay_seconds`}>初始重试间隔（秒）</Label>
                 <Input
+                  id={`${controlPrefix}-${id}-retry_delay_seconds`}
                   type="number"
                   step="any"
                   value={provider.retry_delay_seconds ?? ""}
@@ -197,8 +205,9 @@ export default function ProvidersPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>最大重试间隔（秒）</Label>
+                <Label htmlFor={`${controlPrefix}-${id}-retry_max_delay_seconds`}>最大重试间隔（秒）</Label>
                 <Input
+                  id={`${controlPrefix}-${id}-retry_max_delay_seconds`}
                   type="number"
                   step="any"
                   value={provider.retry_max_delay_seconds ?? ""}

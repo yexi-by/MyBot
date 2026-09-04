@@ -24,7 +24,7 @@ import { toast } from "sonner";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
-import { Badge } from "@/components/ui/badge";
+import type { SaveStatusKind } from "@/components/SaveStatusPill";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -47,14 +47,12 @@ interface OpenFile {
   dirty: boolean;
 }
 
-type FileSaveState =
-  | "idle"
-  | "editing"
-  | "saving"
-  | "saved"
-  | "invalid"
-  | "conflict"
-  | "error";
+export interface FileEditorState {
+  dirty: boolean;
+  saving: boolean;
+  state: SaveStatusKind;
+  save: () => Promise<void>;
+}
 
 const TEXT_AUTOSAVE_DELAY_MS = 1000;
 
@@ -145,18 +143,23 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-export default function FilesPage({ initialPath }: { initialPath?: string }) {
+export default function FilesPage({ initialPath, onEditorStateChange }: {
+  initialPath?: string;
+  onEditorStateChange: (state: FileEditorState | null) => void;
+}) {
   const [files, setFiles] = useState<string[]>([]);
   const [listError, setListError] = useState<string | null>(null);
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [newPath, setNewPath] = useState("");
   const [saving, setSaving] = useState(false);
-  const [saveState, setSaveState] = useState<FileSaveState>("idle");
+  const [saveState, setSaveState] = useState<SaveStatusKind>("idle");
   const [previewOn, setPreviewOn] = useState(false);
   const [conflictOpen, setConflictOpen] = useState(false);
   const [pendingSwitch, setPendingSwitch] = useState<string | null>(null);
   const [closedGroups, setClosedGroups] = useState<Set<string>>(new Set());
+  const savingRef = useRef(false);
+  const loadGeneration = useRef(0);
   const blockedContent = useRef<string | null>(null);
   const latestOpenFile = useRef<OpenFile | null>(null);
   const editVersion = useRef(0);
@@ -184,8 +187,15 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
   }, [refreshFiles]);
 
   const loadPath = useCallback((path: string) => {
+    const generation = ++loadGeneration.current;
+    const previousEditVersion = editVersion.current;
     readFile(path)
       .then((response) => {
+        if (generation !== loadGeneration.current) return;
+        if (previousEditVersion !== editVersion.current) {
+          toast.info("读取期间当前文件有新修改，已保留编辑内容；请保存后重新打开目标文件");
+          return;
+        }
         blockedContent.current = null;
         editVersion.current = 0;
         setSaveState("idle");
@@ -223,9 +233,9 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
     [openFile, loadPath, saving],
   );
 
-  const onSave = useCallback(async () => {
-    if (!openFile || !openFile.dirty || saving) return;
-    const request = openFile;
+  const onSave = useCallback(async (overwrite = false) => {
+    const request = latestOpenFile.current;
+    if (!request?.dirty || savingRef.current) return;
     if (
       request.content.trim() === "" &&
       requiredPromptFiles(getValues()).has(request.path)
@@ -235,13 +245,14 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
       return;
     }
     const saveVersion = editVersion.current;
+    savingRef.current = true;
     setSaving(true);
     setSaveState("saving");
     try {
       const result = await saveFile(
         request.path,
         request.content,
-        request.sha256,
+        overwrite ? (await readFile(request.path)).sha256 : request.sha256,
       );
       blockedContent.current = null;
       const latest = latestOpenFile.current;
@@ -255,25 +266,39 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
         latestOpenFile.current = updatedFile;
         setOpenFile(updatedFile);
         setSaveState(unchangedSinceRequest ? "saved" : "editing");
+        setConflictOpen(false);
       }
     } catch (error) {
       blockedContent.current = request.content;
       if (error instanceof ApiError && error.status === 409) {
         setSaveState("conflict");
+        try {
+          const fresh = await readFile(request.path);
+          const latest = latestOpenFile.current;
+          if (latest?.path === request.path) {
+            const updated = { ...latest, sha256: fresh.sha256 };
+            latestOpenFile.current = updated;
+            setOpenFile(updated);
+          }
+        } catch {
+          // 保留原哈希，覆盖操作会再次读取并核对最新文件。
+        }
         setConflictOpen(true);
       } else {
         setSaveState("error");
         toast.error(error instanceof Error ? error.message : "保存失败");
       }
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
-  }, [openFile, saving, getValues]);
+  }, [getValues]);
 
   useEffect(() => {
     if (
       !openFile?.dirty ||
       saving ||
+      conflictOpen ||
       blockedContent.current === openFile.content
     ) {
       return;
@@ -283,9 +308,13 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
       void onSave();
     }, TEXT_AUTOSAVE_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [openFile, saving, onSave]);
+  }, [openFile, saving, conflictOpen, onSave]);
 
   const onCreate = useCallback(async () => {
+    if (latestOpenFile.current?.dirty || savingRef.current) {
+      toast.info("请先保存当前文件，再新建文件");
+      return;
+    }
     const path = newPath.trim();
     if (path === "") {
       toast.error("文件路径不能为空");
@@ -296,38 +325,11 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
       setCreateOpen(false);
       setNewPath("");
       refreshFiles();
-      loadPath(path);
+      if (!latestOpenFile.current?.dirty && !savingRef.current) loadPath(path);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "新建文件失败");
     }
   }, [newPath, refreshFiles, loadPath]);
-
-  /** 冲突出口：拉取最新 sha 后用本地内容强制覆盖外部修改。 */
-  const overwriteConflict = useCallback(async () => {
-    const current = latestOpenFile.current;
-    if (!current) return;
-    try {
-      const fresh = await readFile(current.path);
-      const result = await saveFile(
-        current.path,
-        current.content,
-        fresh.sha256,
-      );
-      blockedContent.current = null;
-      const updatedFile = { ...current, sha256: result.sha256, dirty: false };
-      latestOpenFile.current = updatedFile;
-      setOpenFile(updatedFile);
-      setSaveState("saved");
-      setConflictOpen(false);
-      toast.success("已用本地内容覆盖外部修改");
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 409) {
-        toast.error("文件刚又被外部修改，请重新选择处理方式");
-      } else {
-        toast.error(error instanceof Error ? error.message : "覆盖失败");
-      }
-    }
-  }, []);
 
   const reloadConflictFile = useCallback(() => {
     const current = latestOpenFile.current;
@@ -347,10 +349,20 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
     }
   }, []);
 
-  const retryCurrentFile = useCallback(() => {
+  const saveCurrentFile = useCallback(async () => {
+    if (saveState === "conflict" && blockedContent.current === latestOpenFile.current?.content) {
+      setConflictOpen(true);
+      return;
+    }
     blockedContent.current = null;
-    void onSave();
-  }, [onSave]);
+    await onSave();
+  }, [saveState, onSave]);
+
+  useEffect(() => {
+    onEditorStateChange({ dirty: openFile?.dirty ?? false, saving, state: saveState, save: saveCurrentFile });
+  }, [onEditorStateChange, openFile?.dirty, saving, saveState, saveCurrentFile]);
+
+  useEffect(() => () => onEditorStateChange(null), [onEditorStateChange]);
 
   const toggleGroup = useCallback((dir: string) => {
     setClosedGroups((current) => {
@@ -393,6 +405,7 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
             type="button"
             variant="outline"
             size="sm"
+            disabled={Boolean(openFile?.dirty) || saving}
             onClick={() => setCreateOpen(true)}
           >
             新建
@@ -468,35 +481,8 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
                     {previewOn ? "关闭预览" : "预览"}
                   </Button>
                 ) : null}
-                {saveState === "idle" ? (
-                  <Badge variant="outline">自动保存已开启</Badge>
-                ) : null}
-                {saveState === "editing" ? (
-                  <Badge variant="secondary">等待自动保存…</Badge>
-                ) : null}
-                {saveState === "saving" ? (
-                  <Badge variant="secondary">自动保存中…</Badge>
-                ) : null}
-                {saveState === "saved" ? (
-                  <Badge variant="outline">已自动保存</Badge>
-                ) : null}
                 {saveState === "invalid" ? (
-                  <Badge variant="destructive">必填文件不能为空</Badge>
-                ) : null}
-                {saveState === "conflict" ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => setConflictOpen(true)}
-                  >
-                    解决冲突
-                  </Button>
-                ) : null}
-                {saveState === "error" ? (
-                  <Button type="button" size="sm" onClick={retryCurrentFile}>
-                    重试
-                  </Button>
+                  <span className="text-xs text-destructive">必填文件不能为空</span>
                 ) : null}
               </div>
             </div>
@@ -597,7 +583,7 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={conflictOpen} onOpenChange={setConflictOpen}>
+      <Dialog open={conflictOpen} onOpenChange={(open) => { if (!saving) setConflictOpen(open); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>文件已被外部修改</DialogTitle>
@@ -607,6 +593,9 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="flex-wrap">
+            <Button type="button" variant="outline" disabled={saving} onClick={() => setConflictOpen(false)}>
+              继续编辑
+            </Button>
             <Button
               type="button"
               variant="outline"
@@ -617,6 +606,7 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
             <Button
               type="button"
               variant="outline"
+              disabled={saving}
               onClick={reloadConflictFile}
             >
               丢弃本地并重新载入
@@ -624,7 +614,8 @@ export default function FilesPage({ initialPath }: { initialPath?: string }) {
             <Button
               type="button"
               variant="destructive"
-              onClick={() => void overwriteConflict()}
+              disabled={saving}
+              onClick={() => void onSave(true)}
             >
               用本地内容覆盖
             </Button>

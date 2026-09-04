@@ -1,5 +1,6 @@
 """旧生图插件的引用图片读取测试。"""
 
+import asyncio
 import unittest
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -7,11 +8,12 @@ from typing import cast
 
 import httpx
 
-from app.config import ImageGenerateConfig
+from app.config import ImageGenerateConfig, ModelRef
 from app.database import GroupDataScope, StoredGroupMessage
 from app.models import GroupMessage, Image, MessageSegment, Reply, Response, Sender, Text
 from app.plugins.base import Context
 from app.plugins.image_generate.image_generate import ImageGeneratePlugin
+from app.services.llm.errors import LLMRequestError
 from tests.config_helpers import (
     FakeConfigManager,
     build_plugin_snapshot,
@@ -21,6 +23,14 @@ from tests.config_helpers import (
 
 class FakeBot:
     """仅提供图片刷新能力的测试 Bot。"""
+
+    def __init__(self) -> None:
+        self.sent_texts: list[str] = []
+
+    async def send_msg(self, *, group_id: str, at: str, text: str) -> Response:
+        _ = (group_id, at)
+        self.sent_texts.append(text)
+        return Response(status="ok", retcode=0)
 
     async def get_image(
         self, file_id: str | None = None, file: str | None = None
@@ -57,6 +67,18 @@ class FakeContext:
         self.bot = FakeBot()
         self.direct_httpx = http_client
         self.group_messages = group_messages
+        self.llm = WaitingImageLLM()
+
+
+class WaitingImageLLM:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def get_image(self, **_kwargs: object) -> str:
+        self.entered.set()
+        await self.release.wait()
+        raise LLMRequestError("模型请求超时")
 
 
 def build_stored_reply() -> StoredGroupMessage:
@@ -102,6 +124,34 @@ def build_command() -> GroupMessage:
 
 class ImageGeneratePluginTest(unittest.IsolatedAsyncioTestCase):
     """验证引用消息 DTO 和共享图片读取服务的组合。"""
+
+    async def test_busy_image_queue_does_not_block_unrelated_group(self) -> None:
+        config = ImageGenerateConfig(
+            groups=("40000",), model=ModelRef(provider="main", name="image"),
+            fetch_concurrency=1, download_timeout_seconds=1, max_input_image_bytes=0,
+            command="/生图", help_command="/help生图",
+        )
+        async with httpx.AsyncClient() as client:
+            context = FakeContext(http_client=client, group_messages=FakeGroupMessages(build_stored_reply()))
+            llm = context.llm
+            plugin = ImageGeneratePlugin(
+                context=cast(Context, context),
+                plugin_config=plugin_config_view(FakeConfigManager(build_plugin_snapshot(image_generate=config)), plugin_id="image_generate"),
+                consumers_count=1, stop_timeout_seconds=1,
+            )
+            event = build_command().model_copy(update={"message": [Text.new("/生图 test")]})
+            pending = asyncio.create_task(plugin.add_to_queue(event))
+            try:
+                await asyncio.wait_for(llm.entered.wait(), 1)
+                unrelated = event.model_copy(update={"group_id": "other", "message": [Text.new("普通消息")]})
+                self.assertFalse(await asyncio.wait_for(plugin.add_to_queue(unrelated), 1))
+                self.assertFalse(pending.done())
+                llm.release.set()
+                self.assertTrue(await pending)
+                self.assertIn("生图失败", context.bot.sent_texts[-1])
+            finally:
+                await plugin.stop_consumers()
+                _ = await asyncio.gather(pending, return_exceptions=True)
 
     async def test_replied_image_uses_group_reader_and_shared_image_reader(self) -> None:
         """引用图片会按当前群查询，并直接使用消息中的 URL。"""

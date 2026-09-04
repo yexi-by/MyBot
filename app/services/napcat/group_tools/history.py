@@ -98,6 +98,13 @@ class GroupHistoryToolset:
         after_count = (
             self.default_after_count if args.after_count is None else args.after_count
         )
+        if self.max_per_call > 0:
+            # 锚点占一个名额，两侧均分，其余名额交给仍有请求量的一侧。
+            available = self.max_per_call - 1
+            requested_before = before_count
+            before_count = min(before_count, (available + 1) // 2)
+            after_count = min(after_count, available - before_count)
+            before_count = min(requested_before, available - after_count)
         context_messages = await self.group_messages.list_around(
             scope=self._scope(),
             message_id=args.context_message_id,

@@ -162,7 +162,7 @@ def _configure_logger() -> "Logger":
         encoding="utf-8",
         enqueue=True,
         backtrace=True,
-        diagnose=True,
+        diagnose=False,
     )
     _ = _logger.add(
         log_dir / STRUCTURED_LOG_PATTERN,
@@ -173,6 +173,7 @@ def _configure_logger() -> "Logger":
         encoding="utf-8",
         enqueue=True,
         serialize=True,
+        diagnose=False,
     )
     return _logger
 

@@ -17,6 +17,10 @@ from app.utils.file_type import detect_mime_type
 from app.utils.log import log_event
 
 
+class ImageDeliveryError(ValueError):
+    """图片无法按当前交付限制处理，本轮需要结束并反馈。"""
+
+
 class VisionDescriptionResult(StrictModel):
     """描述内部视觉工具生成的结构化结果。"""
 
@@ -532,7 +536,7 @@ class VisionDescriptionTool:
                     image_config.oversize_behavior == "error"
                     and item.error_type == "ImageReadTooLargeError"
                 ):
-                    raise ValueError(f"{item.label}: {item.error}")
+                    raise ImageDeliveryError(f"{item.label}: {item.error}")
                 validated.append(item)
                 continue
             error = self._validate_artifact(artifact=item)
@@ -540,7 +544,7 @@ class VisionDescriptionTool:
                 validated.append(item)
                 continue
             if image_config.oversize_behavior == "error":
-                raise ValueError(f"{error.label}: {error.error}")
+                raise ImageDeliveryError(f"{error.label}: {error.error}")
             if image_config.oversize_behavior == "describe":
                 description_fallback.append(item)
                 continue
@@ -638,7 +642,7 @@ class VisionDescriptionTool:
                 ),
             )
             if self.config.source.images.oversize_behavior == "error":
-                raise ValueError(f"{error.label}: {error.error}")
+                raise ImageDeliveryError(f"{error.label}: {error.error}")
             if self.config.source.images.oversize_behavior == "describe":
                 description_fallback.append(artifact)
                 continue

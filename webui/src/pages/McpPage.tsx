@@ -1,6 +1,6 @@
 /** MCP 服务管理页：动态服务名始终作为不透明键整体写回。 */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useFormContext } from "react-hook-form";
 import { Plug, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -15,7 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { countDirtyUnder } from "@/lib/dirty";
-import { SwitchField } from "@/lib/fields";
+import { NumberField, SwitchField } from "@/lib/fields";
 import type { MCPServerConfig, MyBotConfigData } from "@/lib/types";
 import { useFieldFilter } from "@/lib/useFieldFilter";
 
@@ -137,6 +137,7 @@ function EnvEntriesEditor({
 }
 
 export default function McpPage() {
+  const controlPrefix = useId();
   const { watch, setValue, formState } = useFormContext<MyBotConfigData>();
   const [newServerName, setNewServerName] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
@@ -207,6 +208,8 @@ export default function McpPage() {
             label="启用 MCP"
             description="以 mcp__{server}__{tool} 形式暴露给 AI 工具调用"
           />
+          <NumberField path="mcp.initialization_timeout_seconds" label="初始化超时（秒）" description="每个服务完成握手与工具清单加载的总等待期限" />
+          <NumberField path="mcp.call_timeout_seconds" label="工具调用超时（秒）" description="超时会向 AI 返回可恢复错误" />
         </SectionCard>
 
         <SectionCard title="新增 MCP 服务">
@@ -250,8 +253,9 @@ export default function McpPage() {
               }
             >
               <div className="space-y-1.5">
-                <Label>启动命令</Label>
+                <Label htmlFor={`${controlPrefix}-${name}-command`}>启动命令</Label>
                 <Input
+                  id={`${controlPrefix}-${name}-command`}
                   value={server.command}
                   placeholder="如 npx / uvx"
                   onChange={(event) =>
@@ -260,8 +264,9 @@ export default function McpPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>工作目录</Label>
+                <Label htmlFor={`${controlPrefix}-${name}-cwd`}>工作目录</Label>
                 <Input
+                  id={`${controlPrefix}-${name}-cwd`}
                   value={server.cwd ?? ""}
                   placeholder="留空使用进程当前目录"
                   onChange={(event) =>
@@ -311,8 +316,9 @@ export default function McpPage() {
                 onCommit={(env) => updateServer(name, { env })}
               />
               <div className="space-y-1.5">
-                <Label>禁用此服务</Label>
+                <Label htmlFor={`${controlPrefix}-${name}-disabled`}>禁用此服务</Label>
                 <Switch
+                  id={`${controlPrefix}-${name}-disabled`}
                   checked={Boolean(server.disabled)}
                   onCheckedChange={(checked) =>
                     updateServer(name, { disabled: checked })

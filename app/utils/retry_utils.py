@@ -25,7 +25,6 @@ def _log_retry_attempt(retry_state: RetryCallState) -> None:
             message="操作失败，即将重试",
             attempt=retry_state.attempt_number,
             error_type=type(exc).__name__ if exc is not None else "unknown",
-            error=str(exc),
         )
     else:
         log_event(

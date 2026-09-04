@@ -5,6 +5,8 @@ from pathlib import Path
 
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
+from app.services.llm.errors import provider_error_message
+
 from .config_io import read_config_payload
 
 
@@ -75,8 +77,7 @@ async def list_provider_models(*, config_file: Path, provider_id: str) -> list[s
         page = await client.models.list()
         models = sorted({model.id for model in page.data})
     except Exception as exc:
-        # openai/httpx 异常不含 api_key；URL 与状态码可以安全展示。
-        raise ProviderModelsError(f"拉取模型列表失败：{exc}") from exc
+        raise ProviderModelsError(f"拉取模型列表失败：{provider_error_message(exc)}") from None
     finally:
         await client.close()
     if not models:

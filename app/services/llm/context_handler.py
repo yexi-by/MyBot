@@ -69,7 +69,7 @@ class ContextHandler:
         if image_count == 0:
             return 0
         self._messages_lst = [
-            self._without_images(message=message) for message in self._messages_lst
+            message.without_images() for message in self._messages_lst
         ]
         self._revision += 1
         return image_count
@@ -151,27 +151,3 @@ class ContextHandler:
                 continue
             image_bytes.append(item)
         return image_bytes
-
-    def del_chatmessage(self, index: int | None = None) -> None:
-        """删除指定下标的上下文消息，默认删除最后一条。"""
-        target_index = -1 if index is None else index
-        try:
-            del self._messages_lst[target_index]
-        except IndexError as exc:
-            raise IndexError("索引超出范围，无法删除对应消息") from exc
-        self._revision += 1
-
-    def _without_images(self, *, message: ChatMessage) -> ChatMessage:
-        """复制单条消息并移除只服务当前请求的图片字节。"""
-        if not message.image:
-            return message
-        text = message.text
-        if text is None:
-            text = "（图片内容已用于当轮多模态请求，长期上下文不保存图片字节）"
-        return ChatMessage(
-            role=message.role,
-            text=text,
-            reasoning_content=message.reasoning_content,
-            tool_calls=message.tool_calls,
-            tool_call_id=message.tool_call_id,
-        )

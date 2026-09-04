@@ -43,7 +43,7 @@ import {
   CommandPalette,
   type PaletteItem,
 } from "@/components/CommandPalette";
-import { SaveStatusPill } from "@/components/SaveStatusPill";
+import { SaveStatusPill, type SaveStatusKind } from "@/components/SaveStatusPill";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import {
   ApiError,
@@ -71,21 +71,15 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+import type { FileEditorState } from "@/pages/FilesPage";
+
 const FilesPage = lazy(() => import("@/pages/FilesPage"));
 const McpPage = lazy(() => import("@/pages/McpPage"));
 const ProvidersPage = lazy(() => import("@/pages/ProvidersPage"));
 const SystemPage = lazy(() => import("@/pages/SystemPage"));
 const PluginPage = lazy(() => import("@/pages/plugins/PluginPage"));
 
-type ApplyState =
-  | { kind: "idle" }
-  | { kind: "editing" }
-  | { kind: "saving" }
-  | { kind: "watching" }
-  | { kind: "applied" }
-  | { kind: "saved" }
-  | { kind: "invalid" }
-  | { kind: "error" };
+type ApplyState = { kind: SaveStatusKind };
 
 type PowerState =
   | { kind: "idle" }
@@ -152,6 +146,8 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<ConfigGetResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [page, setPage] = useState<PageKey>(pageFromLocation);
+  const [fileEditor, setFileEditor] = useState<FileEditorState | null>(null);
+  const [filesVisited, setFilesVisited] = useState(page === "files");
   const [saving, setSaving] = useState(false);
   const [serverIssues, setServerIssues] = useState<ConfigIssuePayload[]>([]);
   const [restartSections, setRestartSections] = useState<string[]>([]);
@@ -173,6 +169,21 @@ export default function App() {
     values: snapshot?.config ?? ({} as MyBotConfigData),
   });
   const isDirty = methods.formState.isDirty;
+  const editingFile = page === "files" || loadError !== null;
+  const activeDirty = editingFile ? (fileEditor?.dirty ?? false) : isDirty;
+  const activeSaving = editingFile ? (fileEditor?.saving ?? false) : saving;
+  const hasPendingEdits = isDirty || saving || Boolean(fileEditor?.dirty || fileEditor?.saving);
+
+  useEffect(() => {
+    if (page === "files") setFilesVisited(true);
+  }, [page]);
+
+  useEffect(() => {
+    if (!hasPendingEdits) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [hasPendingEdits]);
   const dirtyFields = methods.formState.dirtyFields;
   const watchedConfig = useWatch({ control: methods.control });
 
@@ -381,7 +392,7 @@ export default function App() {
       const target = sectionTitleForIssue(issue.path);
       if (!target) return;
       window.setTimeout(() => {
-        const element = document.querySelector(`[data-section="${target}"]`);
+        const element = document.querySelector(`[data-section="${CSS.escape(target)}"]`);
         if (!element) return;
         element.scrollIntoView({ behavior: "smooth", block: "center" });
         element.classList.add("section-flash");
@@ -422,7 +433,7 @@ export default function App() {
   /** 执行确认过的重启/关机操作，并切换到对应的等待界面。 */
   const onPowerAction = useCallback(async () => {
     const action = powerConfirm;
-    if (action === null || !snapshot) return;
+    if (action === null || !snapshot || hasPendingEdits) return;
     setPowerConfirm(null);
     try {
       if (action === "restart") {
@@ -440,7 +451,7 @@ export default function App() {
     }
     setPowerState({ kind: "restarting" });
     void waitForRestart(snapshot.meta.boot_id);
-  }, [powerConfirm, snapshot, waitForRestart]);
+  }, [powerConfirm, snapshot, waitForRestart, hasPendingEdits]);
 
   /** 关机/超时后手动尝试重连；连通则恢复正常界面。 */
   const onReconnect = useCallback(async () => {
@@ -456,13 +467,18 @@ export default function App() {
     toast.success("已重新连接");
   }, [reload]);
 
+  const onSaveActive = useCallback(async () => {
+    if (editingFile) await fileEditor?.save();
+    else await onSave();
+  }, [editingFile, fileEditor, onSave]);
+
   // 全局快捷键：Ctrl/Cmd+S 立即保存，Ctrl/Cmd+K 命令面板。
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey)) return;
       if (event.key === "s") {
         event.preventDefault();
-        void onSave();
+        void onSaveActive();
       } else if (event.key === "k") {
         event.preventDefault();
         setPaletteOpen((current) => !current);
@@ -470,7 +486,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onSave]);
+  }, [onSaveActive]);
 
   const paletteItems: PaletteItem[] = [
     ...NAV_GROUPS.flatMap((group) =>
@@ -489,7 +505,7 @@ export default function App() {
       label: "立即保存",
       keywords: "save ctrl+s",
       icon: Save,
-      run: () => void onSave(),
+      run: () => void onSaveActive(),
     },
     {
       id: "action:validate",
@@ -533,9 +549,12 @@ export default function App() {
             <AlertTitle>配置加载失败，可直接修复原文件</AlertTitle>
             <AlertDescription className="space-y-3">
               <p>{loadError}</p>
+              <SaveStatusPill state={fileEditor?.state ?? "idle"} onRetry={() => void onSaveActive()} />
+              <Button disabled={!activeDirty || activeSaving} onClick={() => void onSaveActive()}>保存文件</Button>
               <Button
                 type="button"
                 variant="outline"
+                disabled={Boolean(fileEditor?.dirty || fileEditor?.saving)}
                 onClick={() => {
                   void reload().catch((error: unknown) => {
                     setLoadError(
@@ -550,7 +569,7 @@ export default function App() {
           </Alert>
           <div className="flex min-h-0 flex-1 flex-col">
             <Suspense fallback={<PageSkeleton />}>
-              <FilesPage initialPath="mybot.toml" />
+              <FilesPage initialPath="mybot.toml" onEditorStateChange={setFileEditor} />
             </Suspense>
           </div>
           <Toaster
@@ -609,7 +628,7 @@ export default function App() {
                       item.key.startsWith("plugin:") && pluginsConfig
                         ? pluginsConfig[item.key.slice(7) as PluginId] != null
                         : null;
-                    const itemDirty = dirtyPrefixesForPage(item.key).some(
+                    const itemDirty = (item.key === "files" && Boolean(fileEditor?.dirty)) || dirtyPrefixesForPage(item.key).some(
                       (prefix) => hasDirtyUnder(dirtyFields, prefix),
                     );
                     return (
@@ -696,8 +715,8 @@ export default function App() {
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <SaveStatusPill
-                state={applyState.kind}
-                onRetry={() => void onSave()}
+                state={editingFile ? (fileEditor?.state ?? "idle") : applyState.kind}
+                onRetry={() => void onSaveActive()}
               />
               {restartLabels.length > 0 ? (
                 <Tooltip>
@@ -729,8 +748,8 @@ export default function App() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      disabled={!isDirty || saving}
-                      onClick={() => void onSave()}
+                      disabled={!activeDirty || activeSaving}
+                      onClick={() => void onSaveActive()}
                     />
                   }
                 >
@@ -819,19 +838,25 @@ export default function App() {
               key={page}
               className={cn(
                 "page-enter mx-auto w-full max-w-7xl",
-                isFilesPage ? "flex min-h-0 flex-1 flex-col" : "space-y-3",
+                isFilesPage ? "hidden" : "space-y-3",
               )}
             >
               <Suspense fallback={<PageSkeleton />}>
                 {page === "system" ? <SystemPage /> : null}
                 {page === "providers" ? <ProvidersPage /> : null}
                 {page === "mcp" ? <McpPage /> : null}
-                {page === "files" ? <FilesPage /> : null}
                 {page.startsWith("plugin:") ? (
                   <PluginPage pluginId={page.slice(7) as PluginId} />
                 ) : null}
               </Suspense>
             </div>
+            {filesVisited || isFilesPage ? (
+              <div className={cn("mx-auto w-full max-w-7xl min-h-0 flex-1 flex-col", isFilesPage ? "flex" : "hidden")}>
+                <Suspense fallback={<PageSkeleton />}>
+                  <FilesPage onEditorStateChange={setFileEditor} />
+                </Suspense>
+              </div>
+            ) : null}
           </main>
         </div>
       </div>
@@ -886,7 +911,7 @@ export default function App() {
                 : "进程将优雅退出并保持停止；Docker 部署下会被守护策略重新拉起，效果等同重启。"}
             </DialogDescription>
           </DialogHeader>
-          {isDirty || saving ? (
+          {hasPendingEdits ? (
             <p className="text-sm text-muted-foreground">
               存在待自动保存的修改，保存完成后才能执行电源操作…
             </p>
@@ -897,7 +922,7 @@ export default function App() {
             </Button>
             <Button
               variant={powerConfirm === "shutdown" ? "destructive" : "default"}
-              disabled={isDirty || saving}
+              disabled={hasPendingEdits}
               onClick={() => void onPowerAction()}
             >
               {powerConfirm === "restart" ? "确认重启" : "确认关机"}

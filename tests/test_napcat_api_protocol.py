@@ -10,6 +10,7 @@ from pathlib import Path
 from collections.abc import Sequence
 from datetime import datetime
 from typing import cast, override
+from unittest.mock import patch
 
 from fastapi import WebSocket
 
@@ -143,6 +144,9 @@ class StreamClient(BaseMixin):
     ) -> StreamTransferResult:
         """通过公开测试入口触发 Stream Action 调度。"""
         return await self._call_stream_action(action, params)
+
+    async def call_action_for_test(self) -> Response:
+        return await self._call_action("get_status")
 
 
 def parse_payload(raw_text: str) -> JsonObject:
@@ -299,6 +303,24 @@ class NapCatProtocolAlignmentTest(unittest.IsolatedAsyncioTestCase):
 
 class NapCatStreamDispatchTest(unittest.IsolatedAsyncioTestCase):
     """验证 Stream Action 的 echo 分流与终止条件。"""
+
+    async def test_action_accepts_response_before_send_returns(self) -> None:
+        """发送期间到达的回包不会丢失，完成后释放等待对象。"""
+        client = StreamClient()
+
+        async def respond_immediately(raw: str) -> None:
+            echo = extract_echo(parse_payload(raw))
+            await client.receive_data(Response(status="ok", retcode=0, echo=echo))
+
+        with patch.object(client.fake_websocket, "send_text", side_effect=respond_immediately):
+            result = await client.call_action_for_test()
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(client.echo_dict, {})
+
+        with patch.object(client.fake_websocket, "send_text", side_effect=RuntimeError("closed")):
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                await client.call_action_for_test()
+        self.assertEqual(client.echo_dict, {})
 
     async def test_stream_action_collects_packets_until_response(self) -> None:
         """多包 stream-action 会按顺序收集并在完成包后清理队列。"""

@@ -172,12 +172,12 @@ class GetGroupHistoryMessagesArgs(StrictModel):
     before_count: int | None = Field(
         default=None,
         ge=0,
-        description="锚点前消息数量；为空时使用插件配置。",
+        description="锚点前消息数量；为空时使用插件配置。前后文总量含锚点受单次上限约束，两侧均分可用名额。",
     )
     after_count: int | None = Field(
         default=None,
         ge=0,
-        description="锚点后消息数量；为空时使用插件配置。",
+        description="锚点后消息数量；为空时使用插件配置。前后文总量含锚点受单次上限约束。",
     )
 
     @model_validator(mode="after")

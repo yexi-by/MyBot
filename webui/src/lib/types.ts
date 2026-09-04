@@ -114,6 +114,8 @@ export interface MCPServerConfig {
 }
 
 export interface MCPConfig {
+  initialization_timeout_seconds?: number;
+  call_timeout_seconds?: number;
   enabled?: boolean;
   servers?: Record<string, MCPServerConfig>;
 }

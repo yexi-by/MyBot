@@ -4,15 +4,16 @@ from dataclasses import dataclass
 from typing import ClassVar, Mapping, override
 
 from app.config import MaterializedAIGroupChatConfig, MaterializedAIGroupConfig
-from app.models import At, GroupMessage, NapCatId
+from app.models import At, GroupMessage, NapCatId, Reply, Text
 from app.plugins.base import BasePlugin
 from app.services import ConversationContextKey, ContextHandler
+from app.services.llm.errors import LLMRequestError
 from app.utils.log import log_event
 
 from .debug_dump import AIGroupChatDebugDumper
 from .message_builder import GroupChatMessageBuilder
-from .tool_loop import GroupChatToolLoop, TurnContextState
-from .vision_tool import VisionDescriptionTool, VisionTurnState
+from .tool_loop import GroupChatToolLoop, GroupChatTurnError, TurnContextState
+from .vision_tool import ImageDeliveryError, VisionDescriptionTool, VisionTurnState
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +313,28 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
 
     @override
     async def run(self, msg: GroupMessage) -> bool:
+        """为本轮预期失败提供明确反馈，代码与配置缺陷继续向外报告。"""
+        try:
+            return await self._reply(msg)
+        except (LLMRequestError, GroupChatTurnError, ImageDeliveryError) as exc:
+            if isinstance(exc, ImageDeliveryError):
+                feedback = "图片读取失败或超过配置限制，请缩小图片后重试。"
+            else:
+                feedback = str(exc)
+            log_event(
+                level="WARNING", event="ai_group_chat.turn.failed", category="plugin",
+                message="AI 群聊本轮已结束并反馈失败",
+                group_id=msg.group_id, message_id=msg.message_id,
+                error_type=type(exc).__name__,
+                error=feedback,
+            )
+            _ = await self.context.bot.send_msg(
+                group_id=msg.group_id,
+                message_segment=[Reply.new(msg.message_id), Text.new(f"本轮处理已结束：{feedback}")],
+            )
+            return True
+
+    async def _reply(self, msg: GroupMessage) -> bool:
         """在机器人被艾特时触发 AI 群聊回复。"""
         group_key = str(msg.group_id)
         context_key = ConversationContextKey(

@@ -1,14 +1,20 @@
 """LLM 单次请求重试覆盖测试。"""
 
 import unittest
+import traceback
 from typing import override
 from unittest.mock import AsyncMock, call, patch
+
+import httpx
+from openai import AuthenticationError
+from pydantic import SecretStr
 
 from app.config import LLMProviderConfig, NetworkConfig
 from app.services.llm.base import LLMProvider
 from app.services.llm.handler import LLMHandler
 from app.services.llm.schemas import ChatMessage, LLMProviderWrapper
 from app.services.llm.wrapper import ResilientLLMProvider
+from app.services.llm.errors import LLMRequestError
 
 
 class FlakyTextProvider(LLMProvider):
@@ -35,6 +41,29 @@ class FlakyTextProvider(LLMProvider):
 
 class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
     """验证当前请求可以替换供应商默认重试参数。"""
+
+    async def test_provider_error_omits_credentials_from_feedback_and_exception_chain(self) -> None:
+        inner = FlakyTextProvider(failures_before_success=0)
+        provider = ResilientLLMProvider(inner, LLMProviderConfig(
+            api_key=SecretStr("test-key"), inherit_network_proxy=True, timeout_seconds=0,
+            max_attempts=1, retry_delay_seconds=0, retry_max_delay_seconds=0,
+        ))
+        handler = LLMHandler(services={"main": LLMProviderWrapper(provider_id="main", provider=provider)}, clients=[])
+        error = AuthenticationError(
+            "invalid test-key at https://user:secret@model.invalid",
+            response=httpx.Response(401, request=httpx.Request("GET", "https://model.invalid")),
+            body={"error": "test-key"},
+        )
+        with patch.object(inner, "get_image", side_effect=error):
+            try:
+                await handler.get_image(ChatMessage(role="user", text="test"), model="image", provider="main")
+            except LLMRequestError as exc:
+                formatted = "".join(traceback.format_exception(exc))
+                self.assertIn("HTTP 401", str(exc))
+                self.assertNotIn("test-key", formatted)
+                self.assertNotIn("user:secret", formatted)
+            else:
+                self.fail("模型鉴权失败应返回脱敏异常")
 
     async def test_register_instance_allows_provider_without_api_key(self) -> None:
         """无鉴权 OpenAI 兼容服务使用空 key，客户端不会发送认证头。"""

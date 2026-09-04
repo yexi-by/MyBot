@@ -319,6 +319,8 @@ class WebUIConfigIOTest(unittest.TestCase):
             }
             payload["mcp"] = {
                 "enabled": True,
+                "initialization_timeout_seconds": 30,
+                "call_timeout_seconds": 60,
                 "servers": {
                     "vendor.tool": {
                         "command": "npx",

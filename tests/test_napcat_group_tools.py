@@ -987,6 +987,28 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query["before_count"], 1)
         self.assertEqual(query["after_count"], 2)
 
+    async def test_around_message_obeys_total_limit_including_anchor(self) -> None:
+        """锚点前后文受单次总量限制，0 继续表示不限。"""
+        database = HistoryDatabase([
+            build_group_message(message_id=f"m{i}", time=100 + i)
+            for i in range(11)
+        ])
+        for limit in (1, 3, 8, 0):
+            with self.subTest(limit=limit):
+                executor = NapCatGroupToolExecutor(
+                    bot=cast(NapCatGroupToolBot, FakeBot()), group_messages=database,
+                    event=build_group_message(), history_max_per_call=limit,
+                )
+                result = require_json_object(await executor.call_tool(
+                    "qq__get_group_history_messages", {
+                        "query_mode": "around_message", "context_message_id": "m5",
+                        "before_count": 5, "after_count": 5,
+                    },
+                ))
+                messages = require_json_list(result["messages"])
+                self.assertEqual(len(messages), limit or 11)
+                self.assertTrue(any(require_json_object(m).get("is_anchor") is True for m in messages))
+
     async def test_history_around_message_can_filter_context_by_user_id(self) -> None:
         """上下文查询同时指定 QQ 号时，只返回上下文窗口内该成员消息。"""
         database = HistoryDatabase(

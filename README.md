@@ -51,6 +51,8 @@ npm run dev
 
 开发页面位于 `http://127.0.0.1:5173/`，Vite 会把 `/api` 转发到 6056。配置字段停止编辑 800ms 后自动校验和保存，文本文件停止编辑 1 秒后自动保存；非法值、空的必填 prompt 和内容哈希冲突都不会覆盖磁盘文件。文件页允许读写 `config/` 内任意扩展名的 UTF-8 文本，包括 `mybot.toml`；TOML 语法损坏时可直接在该页修复原文。
 
+顶栏保存与 `Ctrl+S` 保存当前编辑的配置或文本文件。切换页面会保留已打开的文本编辑会话，并继续自动保存；文件冲突可选择覆盖、丢弃并刷新或继续编辑。配置或文本仍有待保存内容时，重启和关机按钮会等待保存完成，关闭浏览器页面也会提示未保存内容。
+
 ## Docker
 
 Compose 使用 `postgres:18.4-bookworm`，PostgreSQL 不向宿主机公开端口。容器内配置必须使用 `database.host = "postgres"` 和 `database.password_file = "/run/secrets/postgres_password"`。
@@ -124,6 +126,8 @@ MCP server 使用 stdio 启动，工具名会转换为 `mcp__{server}__{tool}`�
 ```toml
 [mcp]
 enabled = true
+initialization_timeout_seconds = 30
+call_timeout_seconds = 60
 
 [mcp.servers.example]
 command = "npx"
@@ -133,6 +137,7 @@ disabled = false
 ```
 
 MCP 命令、环境变量和密钥属于部署配置，不应提交到仓库。
+`initialization_timeout_seconds` 限制每个服务握手与工具清单加载的总等待时间；初始化失败会释放已启动的 MCP 资源。`call_timeout_seconds` 限制单次工具调用，超时会把结构化错误返回给 AI，后续调用仍可继续。两个字段均须明确填写正数。
 镜像内已包含 `/app/node_modules/.bin/firecrawl-mcp`、`/app/node_modules/.bin/mcp-searxng` 和 `/usr/local/bin/github-mcp-server`，部署配置可以直接使用这些 stdio 命令，不需要运行时下载安装。
 
 ### AI 群聊与图片交付
@@ -182,11 +187,13 @@ knowledge_base_file = "ai_group_chat/knowledge/default.md"
 max_context_tokens = 64000
 ```
 
-图片读取依次尝试已有路径、现有 URL 和 NapCat `get_image` 刷新。图片数量、单图原始字节、单次请求图片总原始字节、宽高、MIME 类型、下载并发、超时及转发图片额度都由配置决定；数量、字节和宽高字段为 `0` 时不限，MIME 列表为空时不限制格式。超过正数限制时按 `oversize_behavior` 执行：`error` 立即结束本轮并报错，`skip` 跳过单图并把原因告诉主模型，`describe` 调用明确配置的视觉模型。若全部限制为 `0`，MyBot 不预先拦截图片，上游模型拒绝请求时会原样报告 provider 错误。
+图片读取依次尝试已有路径、现有 URL 和 NapCat `get_image` 刷新。图片数量、单图原始字节、单次请求图片总原始字节、宽高、MIME 类型、下载并发、超时及转发图片额度都由配置决定；数量、字节和宽高字段为 `0` 时不限，MIME 列表为空时不限制格式。超过正数限制时按 `oversize_behavior` 执行：`error` 立即结束本轮并报错，`skip` 跳过单图并把原因告诉主模型，`describe` 调用明确配置的视觉模型。若全部限制为 `0`，MyBot 不预先拦截图片。模型服务最终失败时向群成员说明本轮已结束；反馈和日志仅保留模型错误分类及 HTTP 状态，省略可能含密钥的供应商响应正文。
 
 `retain_images = false` 时 direct 图片只服务当前轮；设为 `true` 后原始字节会保留到当前进程的长期上下文，并受上下文压缩及总字节设置约束。进程重启后内存上下文仍会丢失，NapCat 断线重连不会清空当前进程内的上下文。同群请求分别读取长期上下文快照并发执行，待模型回复完成后按完成顺序提交；运行中的请求不会把未完成内容暴露给其他请求。
 
 `tool_result_retention` 支持 `off`、`summary` 和 `full`：分别不保存、只保存工具名称及成功/失败次数、保存工具调用参数和完整结果。`retain_reasoning` 只控制 reasoning 是否跨用户轮次保存。`debug_dump_messages` 和 `debug_dump_directory` 明确控制长期上下文调试文件。消息格式化、历史分页、群文件列表和 token 估算系数也全部位于 `[plugins.ai_group_chat.*]` 配置节；格式化字符/条目上限和工具单次上限为 `0` 时不限，格式化深度为 `-1` 时不限。
+
+主模型的每次正式回复与历史压缩请求都检查完整上下文预算。超限历史会按预算分段压缩，合并后的摘要仍过长时继续压缩摘要，直到能与当前问题一起放入正式请求；空摘要或无法继续缩短的摘要会明确反馈失败。工具结果超出本轮预算时，较大的结果会替换成 `ToolResultTooLarge` 错误，供模型减小查询范围后继续；保存的工具记录与实际交付内容一致。仍无法容纳的请求会结束本轮并反馈。历史工具的 `max_per_call` 同时限制普通分页与前后文查询；前后文包含锚点，两侧均分其余名额，未用名额交给另一侧。
 
 ### Neavo 群聊图像插件
 

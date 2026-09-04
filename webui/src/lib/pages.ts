@@ -62,12 +62,13 @@ export function dirtyPrefixesForPage(key: PageKey): string[] {
       "network",
       "storage",
       "logging",
-      "plugin_execution",
     ];
   }
   if (key === "providers") return ["llm"];
   if (key === "mcp") return ["mcp"];
-  if (key.startsWith("plugin:")) return [`plugins.${key.slice(7)}`];
+  if (key.startsWith("plugin:")) return [
+    `plugins.${key.slice(7)}`, `plugin_execution.plugins.${key.slice(7)}`,
+  ];
   return [];
 }
 
@@ -76,6 +77,10 @@ export function pageForIssuePath(path: (string | number)[]): PageKey {
   const head = path[0];
   if (head === "llm") return "providers";
   if (head === "mcp") return "mcp";
+  if (head === "plugin_execution" && path[1] === "plugins" &&
+      PLUGIN_METAS.some((meta) => meta.id === path[2])) {
+    return `plugin:${path[2]}` as PageKey;
+  }
   if (
     head === "plugins" &&
     typeof path[1] === "string" &&
@@ -94,7 +99,6 @@ const SECTION_CARD_TITLES: Record<string, string> = {
   database: "数据库",
   network: "网络",
   storage: "图片存储",
-  plugin_execution: "插件执行",
   logging: "日志",
 };
 
@@ -102,6 +106,7 @@ const SECTION_CARD_TITLES: Record<string, string> = {
 export function sectionTitleForIssue(
   path: (string | number)[],
 ): string | null {
+  if (path[0] === "plugin_execution" && path[1] === "plugins") return "执行参数";
   if (path[0] === "llm" && path[1] === "providers" && typeof path[2] === "string") {
     return path[2];
   }

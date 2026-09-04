@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 import httpx
 
@@ -37,6 +38,7 @@ from app.services import (
     ConversationContextStore,
 )
 from app.services.llm.schemas import LLMResponse, LLMToolChoice, LLMToolDefinition
+from app.services.llm.errors import LLMRequestError
 from tests.config_helpers import build_ai_group_chat_config
 
 
@@ -360,6 +362,26 @@ def conversation_key(
 
 class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
     """验证附图消息从读取到最终群回复的完整编排。"""
+
+    async def test_final_provider_failure_replies_to_triggering_message(self) -> None:
+        context = SmokeContext()
+        plugin = AIGroupChatPlugin(
+            context=cast(Context, context),
+            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot(supports_images=True))),
+            consumers_count=1, stop_timeout_seconds=1,
+        )
+        event = build_event().model_copy(update={"message": [At.new("10000"), Text.new("hello")]})
+        try:
+            with patch.object(context.llm, "get_ai_response_with_tools", side_effect=LLMRequestError("模型请求超时")):
+                handled = await plugin.add_to_queue(event)
+            self.assertTrue(handled)
+            self.assertEqual(context.bot.sent_texts, ["本轮处理已结束：模型请求超时"])
+            with patch.object(context.llm, "get_ai_response_with_tools", side_effect=TypeError("代码缺陷")):
+                with self.assertRaisesRegex(TypeError, "代码缺陷"):
+                    await plugin.add_to_queue(event)
+            self.assertEqual(len(context.bot.sent_texts), 1)
+        finally:
+            await plugin.stop_consumers()
 
     async def test_non_image_main_model_uses_internal_vision_tool(self) -> None:
         """独立视觉模型描述图片，正式回复始终由主模型生成。"""

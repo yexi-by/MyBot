@@ -16,6 +16,7 @@ from app.models import (
 )
 from app.plugins.base import BasePlugin
 from app.services import ChatMessage, NapCatImageReader, NapCatImageResource
+from app.services.llm.errors import LLMRequestError
 from app.utils.log import log_event, log_exception
 
 
@@ -66,6 +67,19 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
         return runtime
 
     @override
+    async def add_to_queue(self, msg: GroupMessage) -> bool:
+        """在生图队列外过滤其他群和无关命令。"""
+        runtime = self._current_runtime()
+        if runtime is None or msg.group_id not in runtime.groups:
+            return False
+        text = self._extract_plain_text(msg=msg)
+        if text != runtime.config.help_command and self._extract_prompt(
+            text=text, command=runtime.config.command
+        ) is None:
+            return False
+        return await super().add_to_queue(msg)
+
+    @override
     async def run(self, msg: GroupMessage) -> bool:
         """解析群消息中的生图指令并发送生成结果。"""
         runtime = self._current_runtime()
@@ -94,7 +108,7 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
                 msg=msg,
                 image_reader=runtime.image_reader,
             )
-        except Exception as exc:
+        except ValueError as exc:
             log_exception(
                 event="image_generate.input_load_failed",
                 category="plugin",
@@ -106,7 +120,7 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
             _ = await self.context.bot.send_msg(
                 group_id=msg.group_id,
                 at=msg.user_id,
-                text=f"读取图片失败: {exc}",
+                text="读取图片失败，请确认图片仍可访问且未超过配置上限。",
             )
             return True
         await self._send_status(msg=msg, image_count=len(input_images))
@@ -271,7 +285,7 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
                 model=model.name,
                 provider=model.provider,
             )
-        except Exception as exc:
+        except LLMRequestError as exc:
             log_exception(
                 event="image_generate.call_failed",
                 category="plugin",
@@ -285,7 +299,7 @@ class ImageGeneratePlugin(BasePlugin[GroupMessage]):
             _ = await self.context.bot.send_msg(
                 group_id=group_id,
                 at=user_id,
-                text=f"生图失败: {exc}",
+                text="生图失败，请稍后重试；持续失败时请管理员检查模型配置。",
             )
             return
         image_segment = Image.new(f"base64://{image_base64}")

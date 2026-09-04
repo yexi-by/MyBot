@@ -13,6 +13,7 @@ export type SaveStatusKind =
   | "applied"
   | "saved"
   | "invalid"
+  | "conflict"
   | "error";
 
 const STATUS_META: Record<
@@ -25,7 +26,8 @@ const STATUS_META: Record<
   watching: { label: "热生效中", dot: "bg-primary", pulse: true },
   applied: { label: "已热生效", dot: "bg-green-500", pulse: false },
   saved: { label: "已保存", dot: "bg-green-500", pulse: false },
-  invalid: { label: "配置有误", dot: "bg-destructive", pulse: false },
+  invalid: { label: "内容有误", dot: "bg-destructive", pulse: false },
+  conflict: { label: "保存冲突", dot: "bg-destructive", pulse: false },
   error: { label: "保存失败", dot: "bg-destructive", pulse: false },
 };
 
@@ -54,12 +56,12 @@ export function SaveStatusPill({ state, onRetry }: SaveStatusPillProps) {
         />
       </span>
       {meta.label}
-      {state === "error" && onRetry ? (
+      {(state === "error" || state === "conflict") && onRetry ? (
         <Button
           type="button"
           variant="ghost"
           size="icon-xs"
-          aria-label="重试保存"
+          aria-label={state === "conflict" ? "处理保存冲突" : "重试保存"}
           onClick={onRetry}
         >
           <RotateCw className="size-3" />

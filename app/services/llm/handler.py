@@ -1,11 +1,13 @@
-"""LLM 服务注册、路由与工具调用循环。"""
+"""LLM 服务注册与请求路由。"""
 
 from typing import Self
 
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+import httpx
+from openai import APIError, AsyncOpenAI, DefaultAsyncHttpxClient
 
 from app.config.schemas import LLMProviderConfig, NetworkConfig
 
+from .errors import LLMRequestError, provider_error_message
 from .providers.openai import OpenAIService
 from .schemas import (
     ChatMessage,
@@ -13,9 +15,7 @@ from .schemas import (
     LLMResponse,
     LLMToolChoice,
     LLMToolDefinition,
-    LLMToolExecutor,
 )
-from .tools import build_tool_result_message
 from .wrapper import ResilientLLMProvider
 
 
@@ -97,13 +97,16 @@ class LLMHandler:
         llm = self.services.get(provider)
         if llm is None:
             raise ValueError(f"未定义的 LLM provider: {provider}")
-        return await llm.provider.get_ai_response(
-            messages=messages,
-            model=model_name,
-            max_attempts=max_attempts,
-            retry_delay_seconds=retry_delay_seconds,
-            retry_max_delay_seconds=retry_max_delay_seconds,
-        )
+        try:
+            return await llm.provider.get_ai_response(
+                messages=messages,
+                model=model_name,
+                max_attempts=max_attempts,
+                retry_delay_seconds=retry_delay_seconds,
+                retry_max_delay_seconds=retry_max_delay_seconds,
+            )
+        except (APIError, httpx.RequestError, TimeoutError, ValueError) as exc:
+            raise LLMRequestError(provider_error_message(exc)) from None
 
     async def get_ai_response_with_tools(
         self,
@@ -118,60 +121,16 @@ class LLMHandler:
         llm = self.services.get(provider)
         if llm is None:
             raise ValueError(f"未定义的 LLM provider: {provider}")
-        return await llm.provider.get_ai_response_with_tools(
-            messages=messages,
-            model=model_name,
-            tools=tools,
-            tool_choice=tool_choice,
-            parallel_tool_calls=parallel_tool_calls,
-        )
-
-    async def run_ai_with_tools(
-        self,
-        messages: list[ChatMessage],
-        provider: str,
-        model_name: str,
-        tool_executor: LLMToolExecutor,
-        max_tool_rounds: int,
-    ) -> str:
-        """执行完整工具调用循环，直到模型返回最终文本。"""
-        working_messages = messages[:]
-        tools = tool_executor.list_tools()
-        if not tools:
-            return await self.get_ai_text_response(
-                messages=working_messages,
-                provider=provider,
-                model_name=model_name,
-            )
-        for _ in range(max_tool_rounds):
-            response = await self.get_ai_response_with_tools(
-                messages=working_messages,
-                provider=provider,
-                model_name=model_name,
+        try:
+            return await llm.provider.get_ai_response_with_tools(
+                messages=messages,
+                model=model_name,
                 tools=tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
             )
-            if not response.tool_calls:
-                if response.content is None:
-                    raise ValueError("LLM 工具循环返回了空文本")
-                return response.content
-            working_messages.append(
-                ChatMessage(
-                    role="assistant",
-                    text=response.content,
-                    tool_calls=response.tool_calls,
-                )
-            )
-            for tool_call in response.tool_calls:
-                result = await tool_executor.call_tool(
-                    name=tool_call.name, arguments=tool_call.arguments
-                )
-                working_messages.append(
-                    build_tool_result_message(
-                        tool_call_id=tool_call.id,
-                        result=result,
-                    )
-                )
-        raise RuntimeError(f"LLM 工具调用超过最大轮数: {max_tool_rounds}")
+        except (APIError, httpx.RequestError, TimeoutError, ValueError) as exc:
+            raise LLMRequestError(provider_error_message(exc)) from None
 
     async def get_image(
         self,
@@ -183,7 +142,10 @@ class LLMHandler:
         llm = self.services.get(provider)
         if llm is None:
             raise ValueError(f"未定义的 LLM provider: {provider}")
-        return await llm.provider.get_image(
-            message=message,
-            model=model,
-        )
+        try:
+            return await llm.provider.get_image(
+                message=message,
+                model=model,
+            )
+        except (APIError, httpx.RequestError, TimeoutError, ValueError) as exc:
+            raise LLMRequestError(provider_error_message(exc)) from None

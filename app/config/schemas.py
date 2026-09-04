@@ -327,6 +327,8 @@ class MCPConfig(ConfigModel):
     """MCP 总配置。"""
 
     enabled: bool
+    initialization_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
+    call_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
     servers: dict[str, MCPServerConfig]
 
 

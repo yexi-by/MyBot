@@ -11,7 +11,6 @@ from app.services.llm.schemas import LLMToolCall
 class CompressionInput:
     """描述一次上下文压缩输入。"""
 
-    messages: list[ChatMessage]
     dropped_image_count: int
     formatted_context: str
 
@@ -20,35 +19,26 @@ class GroupChatContextCompressor:
     """把群聊历史上下文整理为摘要压缩请求。"""
 
     def build_compression_messages(
-        self, *, system_prompt: ChatMessage, history_messages: list[ChatMessage]
-    ) -> tuple[list[ChatMessage], CompressionInput]:
+        self, *, system_prompt: ChatMessage, formatted_context: str
+    ) -> list[ChatMessage]:
         """构造压缩专用 LLM 请求消息。"""
-        compression_input = self.format_history(messages=history_messages)
-        prompt = self._build_compression_prompt(
-            formatted_context=compression_input.formatted_context
-        )
+        prompt = self._build_compression_prompt(formatted_context=formatted_context)
         system_text = system_prompt.text
         if system_text is None:
             raise ValueError("群聊上下文压缩需要文本 system prompt")
-        return (
-            [
-                ChatMessage(role="system", text=system_text),
-                ChatMessage(role="user", text=prompt),
-            ],
-            compression_input,
-        )
+        return [
+            ChatMessage(role="system", text=system_text),
+            ChatMessage(role="user", text=prompt),
+        ]
 
     def format_history(self, *, messages: list[ChatMessage]) -> CompressionInput:
         """把历史上下文转成压缩模型可读文本，并排除图片和思维链。"""
         lines: list[str] = []
-        sanitized_messages: list[ChatMessage] = []
         dropped_image_count = 0
         for index, message in enumerate(messages, start=1):
             dropped_image_count += len(message.image or [])
-            sanitized_messages.append(self._sanitize_message(message=message))
             lines.extend(self._format_message(index=index, message=message))
         return CompressionInput(
-            messages=sanitized_messages,
             dropped_image_count=dropped_image_count,
             formatted_context="\n".join(lines),
         )
@@ -100,6 +90,7 @@ class GroupChatContextCompressor:
                 "- 摘要需覆盖角色关系、群员偏好、剧情进展、重要事实、未解决任务和承诺。",
                 "- 工具结果摘要只记录结论，不记录大段原始 JSON 或网页正文。",
                 "- 摘要必须适合放进下一轮 user 消息的「历史摘要」区块。",
+                "- 输入可能是历史片段或按时间顺序排列的摘要，保留状态变化和最终结论。",
                 "",
                 "## 待压缩对话上下文",
                 "",
@@ -120,15 +111,6 @@ class GroupChatContextCompressor:
         if message.tool_call_id is not None:
             lines.extend([f"tool_call_id: {message.tool_call_id}", ""])
         return lines
-
-    def _sanitize_message(self, *, message: ChatMessage) -> ChatMessage:
-        """生成不含思维链和图片的压缩输入消息。"""
-        return ChatMessage(
-            role=message.role,
-            text=message.text or "（无文本内容）",
-            tool_calls=message.tool_calls,
-            tool_call_id=message.tool_call_id,
-        )
 
     def _format_tool_calls(self, *, tool_calls: list[LLMToolCall]) -> list[str]:
         """格式化 assistant 历史消息中的工具调用摘要。"""

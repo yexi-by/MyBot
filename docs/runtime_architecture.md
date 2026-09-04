@@ -44,13 +44,18 @@ PostgreSQL 保存入站和出站群消息、撤回字段及顶层图片任务：
 
 `LLMHandler` 按 provider ID 查找启动时创建的 OpenAI 兼容服务。插件通过 `{ provider, name }` 选择模型。`OpenAIService` 负责转换 `ChatMessage`，并把正文、工具调用和 reasoning 收敛为内部结构。
 
+模型请求最终失败由 `LLMHandler` 转换为 `LLMRequestError`，反馈只包含错误分类和状态码，异常链不携带供应商原始响应。重试日志记录尝试次数及异常类型，日志诊断不打印局部变量。AI 群聊在一次请求边界向当前消息反馈预期失败；代码缺陷继续向外报告。
+
 本地工具由 `LLMToolRegistry` 注册。NapCat 群聊工具绑定当前事件的机器人和群，不允许模型传入其他群号。MCP manager 启动配置中的 stdio server，并以 `mcp__{server}__{tool}` 暴露工具。
+
+MCP 每个服务的初始化和工具调用分别受 `initialization_timeout_seconds`、`call_timeout_seconds` 限制。初始化失败释放已经建立的资源；工具调用超时返回结构化错误。结构化工具输出以 `{is_error, data}` 传递，保留 MCP 协议中的失败标记。
 
 AI 群聊由以下组件组成：
 
 - `GroupChatMessageBuilder`：读取当前消息、引用和图片。
 - `VisionDescriptionTool`：按 `images.delivery_mode` 把原图交给主模型或生成事实描述，并执行显式超限策略。
 - `GroupChatToolLoop`：执行主模型、工具、回复标记解析和消息发送。
+- 每次正式或压缩模型请求前检查预算；超限历史按容量分段压缩并合并摘要，摘要仍过长时继续缩减。本批工具的大结果可替换为可恢复错误，保持 assistant/tool 配对及持久记录一致。
 - `GroupChatContextCompressor`：请求超预算时压缩历史。
 - `AIGroupChatDebugDumper`：向 `debug_dump_directory` 配置的目录写调试记录，不参与恢复。
 
@@ -66,6 +71,8 @@ AI 插件为每个群保留一把只保护长期上下文快照、提交和重�
 - `logs/`：日志和 AI 调试转储。
 
 WebUI 与主服务同端口，不另建配置状态。配置表单停止编辑 800ms 后自动校验并写回，文本文件停止编辑 1 秒后自动写回；每次请求都使用读取时的内容哈希，外部修改发生后不会被静默覆盖。文件接口允许访问 `config/` 内任意扩展名的 UTF-8 文本，因此可在 TOML 语法损坏时直接修复 `mybot.toml`；二进制文件和目录逃逸仍被拒绝。Markdown 文件使用语法高亮编辑器，并可并排实时预览 GFM 渲染结果。生产 Compose 允许 MyBot 写入配置目录，migration 服务仍使用只读挂载。
+
+文本页首次访问后保留单个编辑会话，切换配置页面不会取消其自动保存。文件和配置向框架提供当前保存状态，顶栏与快捷键保存当前编辑对象，关闭页面及电源操作共同检查所有未保存内容。列表字段按原始数组受控编辑，保留 0 和空白输入行。
 
 WebUI 还提供 `POST /api/system/restart` 与 `POST /api/system/shutdown` 电源端点：`PowerController` 按 `server.power_action_delay_seconds` 延迟触发 uvicorn 优雅停机，重启/关机在进程级行为一致，是否重新拉起由外部守护策略决定（`docker-compose.yml` 的 mybot 服务是 `restart: unless-stopped`，容器内两种操作都会被重新拉起）。
 

@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { defaultPluginConfig, pluginMeta } from "@/lib/configMeta";
 import { countDirtyUnder } from "@/lib/dirty";
+import { dirtyPrefixesForPage } from "@/lib/pages";
 import {
   NumberField,
   StringListField,
@@ -223,7 +224,7 @@ export default function PluginPage({ pluginId }: { pluginId: PluginId }) {
   const filterRef = useFieldFilter(filter);
   const path = `plugins.${pluginId}` as const;
   const enabled = watch(path) != null;
-  const dirtyCount = countDirtyUnder(formState.dirtyFields, [path]);
+  const dirtyCount = countDirtyUnder(formState.dirtyFields, dirtyPrefixesForPage(`plugin:${pluginId}`));
 
   const enablePlugin = () => {
     setValue(path, defaultPluginConfig(pluginId, getValues()), {
@@ -311,9 +312,9 @@ export default function PluginPage({ pluginId }: { pluginId: PluginId }) {
       <Dialog open={confirmDisable} onOpenChange={setConfirmDisable}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>禁用 {meta.name}？</DialogTitle>
+            <DialogTitle>删除 {meta.name} 配置并停用？</DialogTitle>
             <DialogDescription>
-              禁用会从配置文件中删除该插件的整个配置节，自动保存后立即热生效。
+              该插件的整个配置节会被删除，自动保存后立即热生效；再次启用会使用初始配置。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -321,7 +322,7 @@ export default function PluginPage({ pluginId }: { pluginId: PluginId }) {
               取消
             </Button>
             <Button variant="destructive" onClick={disablePlugin}>
-              禁用插件
+              删除配置并停用
             </Button>
           </DialogFooter>
         </DialogContent>

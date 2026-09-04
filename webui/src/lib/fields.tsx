@@ -3,7 +3,6 @@
 import { useId, type ReactNode } from "react";
 import {
   Controller,
-  useFieldArray,
   useFormContext,
 } from "react-hook-form";
 
@@ -289,104 +288,65 @@ export function SelectField({
   );
 }
 
-/** 字符串数组行编辑器（群号、用户 ID 列表）。 */
-export function StringListField({
-  path,
-  label,
-  description,
-  placeholder,
-  addLabel = "添加一行",
-}: BaseFieldProps & { addLabel?: string }) {
-  const { control, register } = useFormContext();
-  const { fields, append, remove } = useFieldArray({ control, name: path });
+/** 原始值数组受控编辑器，保留合法的 0 与正在输入的空行。 */
+function ListField({
+  path, label, description, placeholder, addLabel, numeric,
+}: BaseFieldProps & { addLabel: string; numeric: boolean }) {
+  const { control } = useFormContext();
   const labelId = useId();
   return (
-    <FieldShell
-      path={path}
-      label={label}
-      description={description}
-      labelId={labelId}
-    >
-      <div className="space-y-2" role="group" aria-labelledby={labelId}>
-        {fields.map((field, index) => (
-          <div key={field.id} className="flex items-center gap-2">
-            <Input
-              aria-label={`${label} ${index + 1}`}
-              placeholder={placeholder}
-              {...register(`${path}.${index}`)}
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label={`删除${label}第 ${index + 1} 项`}
-              onClick={() => remove(index)}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </div>
-        ))}
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => append("")}
-        >
-          <Plus className="mr-1 h-4 w-4" />
-          {addLabel}
-        </Button>
-      </div>
+    <FieldShell path={path} label={label} description={description} labelId={labelId}>
+      <Controller
+        control={control}
+        name={path}
+        render={({ field }) => {
+          const values = (field.value ?? []) as (string | number)[];
+          return (
+            <div className="space-y-2" role="group" aria-labelledby={labelId}>
+              {values.map((value, index) => (
+                <div key={index} className="flex items-center gap-2">
+                  <Input
+                    type={numeric ? "number" : "text"}
+                    step={numeric ? "any" : undefined}
+                    aria-label={`${label} ${index + 1}`}
+                    placeholder={placeholder}
+                    value={value}
+                    onBlur={field.onBlur}
+                    onChange={(event) => {
+                      const text = event.target.value;
+                      const next = [...values];
+                      next[index] = numeric && text !== "" && Number.isFinite(Number(text))
+                        ? Number(text) : text;
+                      field.onChange(next);
+                    }}
+                  />
+                  <Button
+                    type="button" variant="ghost" size="icon"
+                    aria-label={`删除${label}第 ${index + 1} 项`}
+                    onClick={() => field.onChange(values.filter((_, i) => i !== index))}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+              <Button
+                type="button" variant="outline" size="sm"
+                onClick={() => field.onChange([...values, numeric ? 0 : ""])}
+              >
+                <Plus className="mr-1 h-4 w-4" />{addLabel}
+              </Button>
+            </div>
+          );
+        }}
+      />
     </FieldShell>
   );
 }
 
-/** 数字数组编辑器；空数组表示当前功能不执行对应的重复操作。 */
-export function NumberListField({
-  path,
-  label,
-  description,
-  addLabel = "添加一项",
-}: BaseFieldProps & { addLabel?: string }) {
-  const { control, register } = useFormContext();
-  const { fields, append, remove } = useFieldArray({ control, name: path });
-  const labelId = useId();
-  return (
-    <FieldShell path={path} label={label} description={description} labelId={labelId}>
-      <div className="space-y-2" role="group" aria-labelledby={labelId}>
-        {fields.map((field, index) => (
-          <div key={field.id} className="flex items-center gap-2">
-            <Input
-              type="number"
-              step="any"
-              aria-label={`${label} ${index + 1}`}
-              {...register(`${path}.${index}`, {
-                setValueAs: (value: unknown) => {
-                  const numeric = Number(value);
-                  return Number.isFinite(numeric) ? numeric : value;
-                },
-              })}
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label={`删除${label}第 ${index + 1} 项`}
-              onClick={() => remove(index)}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </div>
-        ))}
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => append(0)}
-        >
-          <Plus className="mr-1 h-4 w-4" />
-          {addLabel}
-        </Button>
-      </div>
-    </FieldShell>
-  );
+export function StringListField({ addLabel = "添加一行", ...props }: BaseFieldProps & { addLabel?: string }) {
+  return <ListField {...props} addLabel={addLabel} numeric={false} />;
+}
+
+export function NumberListField({ addLabel = "添加一项", ...props }: BaseFieldProps & { addLabel?: string }) {
+  return <ListField {...props} addLabel={addLabel} numeric />;
 }

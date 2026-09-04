@@ -19,6 +19,16 @@ class ChatMessage(StrictModel):
     tool_calls: list["LLMToolCall"] | None = None
     tool_call_id: str | None = None
 
+    def without_images(self) -> "ChatMessage":
+        """复制图片消息的文字与工具信息，移除图片字节及其交付参数。"""
+        if not self.image:
+            return self
+        return self.model_copy(update={
+            "image": None,
+            "image_detail": None,
+            "text": self.text if self.text is not None else "（图片内容已用于当轮多模态请求，长期上下文不保存图片字节）",
+        })
+
     @model_validator(mode="after")
     def check_at_least_one(self) -> "ChatMessage":
         """确保不同角色消息都满足 OpenAI 工具调用协议约束。"""
@@ -84,13 +94,6 @@ class LLMProviderWrapper:
 
     provider_id: str
     provider: LLMProviderProtocol
-
-
-class LLMContextConfig(StrictModel):
-    """定义 LLM 上下文管理配置。"""
-
-    system_prompt_path: str
-    max_context_tokens: int
 
 
 type LLMToolChoice = Literal["auto", "none", "required"] | JsonObject
