@@ -7,7 +7,6 @@
   },
   "overrides": {
     "axios": "1.18.0",
-    "fast-uri": "3.1.5",
     "hono": "4.12.34",
     "ip-address": "10.5.0",
     "koa-router": "npm:@koa/router@15.7.0",
