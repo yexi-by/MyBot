@@ -74,6 +74,10 @@ docker compose up -d
 
 `migrate` 会等待 PostgreSQL 健康后执行 migration，成功后 MyBot 才启动。应用启动时只检查 migration 版本，不会自动修改 schema。数据库和图片没有自动过期或备份机制。
 
+图片归档先读取消息段已有的本地文件，再尝试已有 URL，失败后向 NapCat 刷新来源。`storage.images.download_timeout_seconds` 分别限制首次下载、刷新信息和刷新后下载；完整读取预算为该值的三倍，任务租约在此基础上加上配置的 `lease_seconds`，为存储和状态写回保留时间。下载失败日志会记录目标主机、异常类型与底层原因；重试间隔由 `retry_delays_seconds` 决定，用尽次数后任务标记为失败。
+
+NapCat 返回的本地缓存路径属于 NapCat 所在的文件系统。分容器部署需要把对应缓存目录以相同容器路径只读挂载到 MyBot，才能使用本地缓存兜底；没有共享缓存时会继续尝试刷新后的 URL。
+
 默认 Compose 允许 MyBot 通过 WebUI 在线保存 `config/`，`migrate` 服务仍保持只读挂载。WebUI 面向可信内网使用，不应直接暴露到公网。
 
 ## 配置

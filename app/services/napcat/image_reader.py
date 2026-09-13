@@ -6,6 +6,7 @@ import binascii
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
+from urllib.parse import urlsplit
 
 import aiofiles
 import httpx
@@ -118,10 +119,11 @@ class NapCatImageReader:
 
         if self._has_text(resource.file) or self._has_text(resource.file_id):
             try:
-                response = await self._refresh_image_info(resource=resource)
+                async with asyncio.timeout(self.download_timeout_seconds):
+                    response = await self._refresh_image_info(resource=resource)
             except Exception as exc:
                 error_type = type(exc).__name__
-                failures.append(f"NapCat 刷新图片信息失败: {exc}")
+                failures.append(f"NapCat 刷新图片信息失败: {self._error_detail(exc)}")
             else:
                 if response.status != "ok" or response.retcode != 0:
                     error_type = "NapCatActionFailed"
@@ -132,11 +134,15 @@ class NapCatImageReader:
                         image_bytes = await self._read_refreshed_response(
                             response=response,
                             failures=failures,
+                            failure_types=failure_types,
                         )
                     except Exception as exc:
                         error_type = type(exc).__name__
-                        failures.append(f"读取 NapCat 刷新结果失败: {exc}")
+                        failures.append(f"读取 NapCat 刷新结果失败: {self._error_detail(exc)}")
                         image_bytes = None
+                    else:
+                        if failure_types:
+                            error_type = failure_types[-1]
                     if image_bytes is not None:
                         return self._finish_success(
                             resource=resource,
@@ -170,7 +176,7 @@ class NapCatImageReader:
                     return await self._read_path(path=path), "direct_path"
                 except Exception as exc:
                     failure_types.append(type(exc).__name__)
-                    failures.append(f"读取本地路径失败: {exc}")
+                    failures.append(f"读取本地路径失败: {self._error_detail(exc)}")
             else:
                 failure_types.append("FileNotFoundError")
                 failures.append(f"本地路径不存在: {path}")
@@ -179,7 +185,7 @@ class NapCatImageReader:
                 return await self._download_url(url=resource.url or ""), "direct_url"
             except Exception as exc:
                 failure_types.append(type(exc).__name__)
-                failures.append(f"下载现有 URL 失败: {exc}")
+                failures.append(f"下载现有 URL 失败: {self._error_detail(exc)}")
         return None
 
     async def _refresh_image_info(self, *, resource: NapCatImageResource) -> Response:
@@ -189,7 +195,7 @@ class NapCatImageReader:
         return await self.bot.get_image(file_id=resource.file_id)
 
     async def _read_refreshed_response(
-        self, *, response: Response, failures: list[str]
+        self, *, response: Response, failures: list[str], failure_types: list[str]
     ) -> bytes | None:
         """读取 NapCat 响应中的 base64、本地路径或 URL。"""
         data = response.data if isinstance(response.data, dict) else {}
@@ -205,13 +211,15 @@ class NapCatImageReader:
                     self._validate_size(image_bytes=image_bytes)
                     return image_bytes
                 except binascii.Error as exc:
-                    failures.append(f"NapCat 返回的 base64 无效: {exc}")
+                    failure_types.append(type(exc).__name__)
+                    failures.append(f"NapCat 返回的 base64 无效: {self._error_detail(exc)}")
         for key in ("path", "file"):
             value = data.get(key)
             if not isinstance(value, str) or value.strip() == "":
                 continue
             path = Path(value)
             if not path.is_file():
+                failure_types.append("FileNotFoundError")
                 failures.append(f"NapCat 返回的本地路径不存在: {path}")
                 continue
             try:
@@ -219,7 +227,8 @@ class NapCatImageReader:
             except ImageReadTooLargeError:
                 raise
             except Exception as exc:
-                failures.append(f"读取 NapCat 本地路径失败: {exc}")
+                failure_types.append(type(exc).__name__)
+                failures.append(f"读取 NapCat 本地路径失败: {self._error_detail(exc)}")
         url = data.get("url")
         if isinstance(url, str) and url.strip() != "":
             try:
@@ -227,10 +236,34 @@ class NapCatImageReader:
             except ImageReadTooLargeError:
                 raise
             except Exception as exc:
-                failures.append(f"下载 NapCat 刷新 URL 失败: {exc}")
+                failure_types.append(type(exc).__name__)
+                failures.append(f"下载 NapCat 刷新 URL 失败: {self._error_detail(exc)}")
         return None
 
     async def _download_url(self, *, url: str) -> bytes:
+        """限制单次下载总时长，让失败后的 NapCat 刷新仍有执行预算。"""
+        try:
+            async with asyncio.timeout(self.download_timeout_seconds):
+                return await self._download_url_content(url=url)
+        except Exception as exc:
+            try:
+                url_host = urlsplit(url).hostname
+            except ValueError:
+                url_host = None
+            log_event(
+                level="DEBUG",
+                event="napcat.image_reader.download_failed",
+                category="napcat_tools",
+                message="图片 URL 下载失败，准备尝试后续来源",
+                resource_type="image",
+                url_host=url_host,
+                timeout_seconds=self.download_timeout_seconds,
+                error_type=type(exc).__name__,
+                error=self._error_detail(exc),
+            )
+            raise
+
+    async def _download_url_content(self, *, url: str) -> bytes:
         """通过 MyBot 本地 HTTP 客户端下载图片。"""
         if self.http_client is None:
             raise RuntimeError("图片 URL 下载需要配置 HTTP 客户端")
@@ -376,3 +409,14 @@ class NapCatImageReader:
     def _has_text(self, value: str | None) -> bool:
         """判断可选字符串是否包含有效内容。"""
         return value is not None and value.strip() != ""
+
+    def _error_detail(self, exc: BaseException) -> str:
+        """保留异常类型和底层原因，避免空字符串掩盖连接失败或超时。"""
+        details: list[str] = []
+        seen: set[int] = set()
+        current: BaseException | None = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            details.append(f"{type(current).__name__}: {current!s}".rstrip(": "))
+            current = current.__cause__ or current.__context__
+        return " <- ".join(details)

@@ -25,9 +25,11 @@ response_summary_max_chars = 500
 [storage.images]
 directory = "images"
 download_concurrency = 16
+# 首次下载、NapCat 刷新和刷新后下载各自的超时预算。
 download_timeout_seconds = 20
 max_bytes = 52428800
 retry_delays_seconds = [1, 5, 20]
+# 在完整读取预算之外，为存储和状态写回保留的租约时长。
 lease_seconds = 45
 worker_poll_interval_seconds = 1
 worker_stop_timeout_seconds = 5

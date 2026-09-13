@@ -456,16 +456,48 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(processed, 0)
         self.assertEqual(worker.bot_id, "bot-A")
         self.assertEqual(worker.concurrency, 3)
-        self.assertEqual(worker.read_timeout_seconds, 12.0)
-        self.assertEqual(worker.lease_seconds, 45.0)
+        self.assertEqual(worker.read_timeout_seconds, 36.0)
+        self.assertEqual(worker.lease_seconds, 81.0)
         self.assertEqual(worker.retry_delays_seconds, (1.0, 2.0, 3.0))
-        self.assertEqual(repository.claim_calls, [("bot-A", 3, 45.0)])
+        self.assertEqual(repository.claim_calls, [("bot-A", 3, 81.0)])
         self.assertIsInstance(worker.reader, NapCatImageReader)
         reader = worker.reader
         if not isinstance(reader, NapCatImageReader):
             self.fail("工厂必须创建 NapCatImageReader")
         self.assertEqual(reader.max_image_bytes, 1024)
         self.assertEqual(reader.download_timeout_seconds, 12.0)
+
+    async def test_direct_download_timeout_still_allows_refresh_and_archive(self) -> None:
+        """首次下载耗尽预算后，刷新和新 URL 下载仍能完成归档。"""
+        class RefreshBot:
+            async def get_image(
+                self, file_id: str | None = None, file: str | None = None,
+            ) -> Response:
+                await asyncio.sleep(0.01)
+                return Response(status="ok", retcode=0, data={
+                    "file": "/missing-napcat-cache/image.png",
+                    "url": "https://example.com/refreshed.png",
+                })
+
+        async def download(request: httpx.Request) -> httpx.Response:
+            if request.url.path != "/refreshed.png":
+                await asyncio.Event().wait()
+            return httpx.Response(200, content=PNG_BYTES)
+
+        repository = FakeArchiveRepository(tasks=[self._task(task_id=1)])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(download)) as client:
+                factory = ImageArchiveWorkerFactory(
+                    repository=repository, http_client=client,
+                    store=ImageStore(root=Path(temp_dir)),
+                    download_timeout_seconds=0.1,
+                )
+                worker = factory.create(bot_id="bot-A", bot=RefreshBot())
+                await worker.run_once()
+
+        self.assertEqual(repository.fail_calls, [])
+        self.assertEqual(len(repository.complete_calls), 1)
+        self.assertEqual(repository.complete_calls[0][2].size_bytes, len(PNG_BYTES))
 
     async def test_factory_rejects_mismatched_store_limit(self) -> None:
         """读取上限和最终存储上限不能分叉。"""

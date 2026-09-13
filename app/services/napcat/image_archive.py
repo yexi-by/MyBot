@@ -585,8 +585,10 @@ class ImageArchiveWorkerFactory:
             reader=reader,
             store=self.store,
             concurrency=self.concurrency,
-            read_timeout_seconds=self.download_timeout_seconds,
-            lease_seconds=self.lease_seconds,
+            # 首次下载、刷新信息、刷新后下载各有独立预算。
+            read_timeout_seconds=3 * self.download_timeout_seconds,
+            # 完整读取预算之外，保留配置的租约时长用于存储和状态写回。
+            lease_seconds=3 * self.download_timeout_seconds + self.lease_seconds,
             poll_interval_seconds=self.poll_interval_seconds,
             retry_delays_seconds=self.retry_delays_seconds,
         )
