@@ -6,7 +6,7 @@ from typing import override
 from unittest.mock import AsyncMock, call, patch
 
 import httpx
-from openai import AuthenticationError
+from openai import AsyncOpenAI, AuthenticationError
 from pydantic import SecretStr
 
 from app.config import LLMProviderConfig, NetworkConfig
@@ -15,6 +15,8 @@ from app.services.llm.handler import LLMHandler
 from app.services.llm.schemas import ChatMessage, LLMProviderWrapper
 from app.services.llm.wrapper import ResilientLLMProvider
 from app.services.llm.errors import LLMRequestError
+from app.services.llm.providers.openai import OpenAIService
+from app.services.llm.schemas import LLMToolDefinition
 
 
 class FlakyTextProvider(LLMProvider):
@@ -41,6 +43,47 @@ class FlakyTextProvider(LLMProvider):
 
 class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
     """验证当前请求可以替换供应商默认重试参数。"""
+
+    async def test_empty_choices_retries_for_text_and_tool_requests(self) -> None:
+        """文本、无工具和带工具入口收到空候选后都能重试恢复。"""
+        for mode in ("text", "no_tools", "tools", "exhausted"):
+            with self.subTest(mode=mode):
+                requests = 0
+
+                async def respond(request: httpx.Request) -> httpx.Response:
+                    nonlocal requests
+                    requests += 1
+                    choices: list[dict[str, object]] = []
+                    if requests > 1 and mode != "exhausted":
+                        choices.append({"index": 0, "finish_reason": "stop",
+                                        "message": {"role": "assistant", "content": "恢复成功"}})
+                    return httpx.Response(200, json={
+                        "id": "test", "object": "chat.completion", "created": 0,
+                        "model": "test", "choices": choices,
+                    })
+
+                async with AsyncOpenAI(
+                    api_key="test", base_url="https://model.invalid/v1", max_retries=0,
+                    http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+                ) as client:
+                    provider = ResilientLLMProvider(OpenAIService(client), LLMProviderConfig(
+                        inherit_network_proxy=False, timeout_seconds=1, max_attempts=2,
+                        retry_delay_seconds=0, retry_max_delay_seconds=0,
+                    ))
+                    messages = [ChatMessage(role="user", text="测试")]
+                    if mode == "text":
+                        self.assertEqual(await provider.get_ai_response(messages, "test"), "恢复成功")
+                    elif mode == "exhausted":
+                        handler = LLMHandler(services={"main": LLMProviderWrapper(
+                            provider_id="main", provider=provider,
+                        )}, clients=[])
+                        with self.assertRaisesRegex(LLMRequestError, "未返回可用结果"):
+                            await handler.get_ai_response_with_tools(messages, "main", "test", [])
+                    else:
+                        tools = [LLMToolDefinition(name="test", description="测试", parameters={})] if mode == "tools" else []
+                        response = await provider.get_ai_response_with_tools(messages, "test", tools)
+                        self.assertEqual(response.content, "恢复成功")
+                self.assertEqual(requests, 2)
 
     async def test_provider_error_omits_credentials_from_feedback_and_exception_chain(self) -> None:
         inner = FlakyTextProvider(failures_before_success=0)

@@ -6,6 +6,7 @@ from typing import Final, cast, override
 
 from openai import AsyncOpenAI
 from openai.types.chat import (
+    ChatCompletion,
     ChatCompletionMessage,
     ChatCompletionMessageParam,
     ChatCompletionToolChoiceOptionParam,
@@ -44,6 +45,12 @@ class OpenAIService(LLMProvider):
     def __init__(self, client: AsyncOpenAI) -> None:
         """保存 OpenAI 异步客户端。"""
         self.client: AsyncOpenAI = client
+
+    def _first_message(self, response: ChatCompletion) -> ChatCompletionMessage:
+        """将空候选结果交给已有重试流程，避免下标越界。"""
+        if not response.choices:
+            raise ValueError("OpenAI 协议服务返回了空 choices")
+        return response.choices[0].message
 
     def _format_chat_messages(
         self, messages: list[ChatMessage]
@@ -215,7 +222,7 @@ class OpenAIService(LLMProvider):
             model=model,
             messages=chat_messages,
         )
-        content = response.choices[0].message.content
+        content = self._first_message(response).content
         if content is None:
             raise ValueError("OpenAI 协议服务返回了空文本")
         return content
@@ -235,7 +242,7 @@ class OpenAIService(LLMProvider):
                 model=model,
                 messages=self._format_chat_messages(messages),
             )
-            message = response.choices[0].message
+            message = self._first_message(response)
             return LLMResponse(
                 content=message.content,
                 reasoning_content=self._extract_reasoning_content(message),
@@ -247,7 +254,7 @@ class OpenAIService(LLMProvider):
             tool_choice=cast(ChatCompletionToolChoiceOptionParam, tool_choice),
             parallel_tool_calls=parallel_tool_calls,
         )
-        message = response.choices[0].message
+        message = self._first_message(response)
         tool_calls: list[LLMToolCall] = []
         for raw_tool_call in message.tool_calls or []:
             if raw_tool_call.type != "function":
