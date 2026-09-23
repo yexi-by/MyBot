@@ -445,69 +445,179 @@ async def run_turn(
 class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
     """验证主模型路由、视觉隔离、思维字段和上下文保存。"""
 
-    async def test_oversized_tool_result_returns_error_within_request_budget(self) -> None:
-        """大工具结果回填错误后继续生成，调用配对及持久记录保持一致。"""
-        llm = RecordingLLM(responses=[
-            LLMResponse(tool_calls=[build_tool_call()]), LLMResponse(content="请缩小查询范围"),
-        ])
-        context = FakeContext(llm=llm)
-        loop = build_loop(config=build_config(supports_images=True, tool_result_retention="full"), context=context)
-        handler = ContextHandler(system_prompt="test", max_context_tokens=64000)
-        with patch.object(context.mcp_tool_manager, "call_tool_with_artifacts", return_value=
-            LLMToolExecutionResult(result={"ok": True, "text": "测" * 100000})
-        ):
-            await run_turn(loop=loop, chat_handler=handler)
-        second = llm.formal_requests[1]
-        self.assertLess(loop.token_estimator.estimate_request(messages=second, tools=[]), 64000)
-        tool_message = next(message for message in second if message.role == "tool")
-        self.assertEqual(tool_message.tool_call_id, "call-1")
-        self.assertIn("ToolResultTooLarge", tool_message.text or "")
-        self.assertIn(tool_message, handler.messages_lst)
-        self.assertEqual(context.bot.sent_texts, ["请缩小查询范围"])
+    async def test_large_tool_results_finish_then_compress_only_retained_history(self) -> None:
+        """完整交付多轮大结果；full 保存后触发压缩，off 和 summary 不积累原文。"""
+        large_result = "工具资料" * 10000
+        for retention in ("off", "summary", "full"):
+            with self.subTest(retention=retention):
+                llm = RecordingLLM(
+                    responses=[
+                        LLMResponse(
+                            reasoning_content="本轮推理" * 3000,
+                            tool_calls=[build_tool_call("call-1")],
+                        ),
+                        LLMResponse(tool_calls=[build_tool_call("call-2")]),
+                        LLMResponse(content="工具查询成功"),
+                        LLMResponse(content="下一轮成功"),
+                        LLMResponse(content="再次成功"),
+                    ],
+                    text_response="工具资料已整理成摘要",
+                )
+                context = FakeContext(llm=llm)
+                loop = build_loop(
+                    config=build_config(
+                        supports_images=True, tool_result_retention=retention,
+                    ),
+                    context=context,
+                )
+                handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
+                with patch.object(
+                    context.mcp_tool_manager,
+                    "call_tool_with_artifacts",
+                    return_value=LLMToolExecutionResult(result={"ok": True, "text": large_result}),
+                ):
+                    await run_turn(loop=loop, chat_handler=handler)
 
-    async def test_large_reply_history_is_compressed_in_bounded_chunks_and_recovers(self) -> None:
-        """正常回复使历史超限后，分段压缩仍能让后续两轮继续。"""
-        llm = RecordingLLM(
-            responses=[LLMResponse(content="历史回复" * 2000), LLMResponse(content="继续成功"), LLMResponse(content="再次成功")],
-            text_response="已整理的历史摘要",
-        )
-        context = FakeContext(llm=llm)
-        loop = build_loop(config=build_config(), context=context)
-        handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
-        await run_turn(loop=loop, chat_handler=handler, question="开始")
-        await run_turn(loop=loop, chat_handler=handler, question="继续")
-        await run_turn(loop=loop, chat_handler=handler, question="继续")
-        self.assertGreater(len(llm.text_requests), 1)
-        for request in llm.text_requests:
-            self.assertLessEqual(loop.token_estimator.estimate_request(messages=request, tools=[]), 9000)
-        self.assertEqual(len(llm.formal_requests), 3)
-        self.assertEqual(handler.messages_lst[-1].text, "再次成功")
+                request = llm.formal_requests[2]
+                self.assertGreater(loop.token_estimator.estimate_messages(messages=request), 9000)
+                results = [message for message in request if message.role == "tool"]
+                self.assertEqual([message.tool_call_id for message in results], ["call-1", "call-2"])
+                self.assertEqual(
+                    [call.id for message in request for call in message.tool_calls or []],
+                    ["call-1", "call-2"],
+                )
+                for result in results:
+                    self.assertIn(large_result, result.text or "")
+                    self.assertEqual(result in handler.messages_lst, retention == "full")
+                self.assertEqual(llm.text_requests, [])
+                self.assertEqual(context.bot.sent_texts, ["工具查询成功"])
 
-    async def test_short_chinese_tool_result_can_be_replaced_by_lower_token_error(self) -> None:
-        """按 token 成本替换中文结果，即使错误提示的字符更多也能恢复。"""
-        llm = RecordingLLM(responses=[
-            LLMResponse(tool_calls=[build_tool_call()]), LLMResponse(content="继续成功"),
-        ])
+                await run_turn(loop=loop, chat_handler=handler, question="继续")
+                await run_turn(loop=loop, chat_handler=handler, question="再继续")
+                self.assertEqual(len(llm.text_requests), 1 if retention == "full" else 0)
+                self.assertEqual(len(llm.formal_requests), 5)
+                self.assertEqual(handler.messages_lst[-1].text, "再次成功")
+                if retention == "full":
+                    self.assertIn(large_result, llm.text_requests[0][1].text or "")
+                    self.assertIn("工具资料已整理成摘要", handler.messages_lst[1].text or "")
+                elif retention == "summary":
+                    statuses = [message.text or "" for message in handler.messages_lst if "运行记录" in (message.text or "")]
+                    self.assertEqual(len(statuses), 2)
+                    self.assertTrue(all("成功 1 次" in status and "失败" not in status for status in statuses))
+
+    async def test_large_reply_history_compresses_above_budget_and_recovers(self) -> None:
+        """压缩请求可超出长期预算，预算小于压缩提示词时后续对话仍能继续。"""
+        for max_tokens in (700, 9000):
+            with self.subTest(max_tokens=max_tokens):
+                llm = RecordingLLM(
+                    responses=[
+                        LLMResponse(content="历史回复" * 2000),
+                        LLMResponse(content="继续成功"),
+                        LLMResponse(content="再次成功"),
+                    ],
+                    text_response="已整理的历史摘要",
+                )
+                context = FakeContext(llm=llm)
+                loop = build_loop(config=build_config(), context=context)
+                handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=max_tokens)
+                await run_turn(loop=loop, chat_handler=handler, question="开始")
+                await run_turn(loop=loop, chat_handler=handler, question="继续")
+                await run_turn(loop=loop, chat_handler=handler, question="继续")
+                self.assertEqual(len(llm.text_requests), 1)
+                self.assertGreater(
+                    loop.token_estimator.estimate_messages(messages=llm.text_requests[0]),
+                    max_tokens,
+                )
+                self.assertEqual(len(llm.formal_requests), 3)
+                self.assertEqual(handler.messages_lst[-1].text, "再次成功")
+
+    async def test_large_current_input_does_not_trigger_empty_history_compression(self) -> None:
+        """首轮大输入直接交付，保存后在下一轮压缩；临时视觉消息不进入长期历史。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="收到"), LLMResponse(content="继续成功")])
         context = FakeContext(llm=llm)
         loop = build_loop(config=build_config(supports_images=True), context=context)
-        with patch.object(context.mcp_tool_manager, "call_tool_with_artifacts", return_value=
-            LLMToolExecutionResult(result={"ok": True, "text": "测" * 130})
-        ):
-            await run_turn(loop=loop, chat_handler=ContextHandler(system_prompt="test", max_context_tokens=8039))
-        self.assertEqual(len(llm.formal_requests), 2)
-        result = next(message for message in llm.formal_requests[1] if message.role == "tool")
-        self.assertIn("ToolResultTooLarge", result.text or "")
-        self.assertEqual(context.bot.sent_texts, ["继续成功"])
+        handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
+        question = "当前大段输入" * 3000
+        vision_message = ChatMessage(role="user", text="临时视觉描述" * 3000, image=[b"image"])
+        await run_turn(
+            loop=loop, chat_handler=handler, question=question,
+            input_vision_messages=[vision_message],
+        )
+        self.assertEqual(llm.text_requests, [])
+        self.assertEqual(llm.formal_requests[0][1].text, question)
+        self.assertIs(llm.formal_requests[0][2], vision_message)
+        self.assertNotIn(vision_message, handler.messages_lst)
+        await run_turn(loop=loop, chat_handler=handler, question="继续")
+        self.assertEqual(len(llm.text_requests), 1)
+        self.assertIn(question, llm.text_requests[0][1].text or "")
+        self.assertNotIn("临时视觉描述", llm.text_requests[0][1].text or "")
+        self.assertEqual(handler.messages_lst[-1].text, "继续成功")
 
-    async def test_whitespace_compression_result_is_expected_model_failure(self) -> None:
-        """空白摘要归入插件已经处理的模型失败，而非代码缺陷。"""
-        llm = RecordingLLM(responses=[], text_response=" \n\t ")
+    async def test_compression_can_reduce_summary_without_reserving_current_input(self) -> None:
+        """超限摘要继续缩短，当前长输入与图片保持独立且不挤占摘要预算。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="压缩后回复")])
+        context = FakeContext(llm=llm)
+        loop = build_loop(config=build_config(supports_images=True, retain_images=True), context=context)
+        handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=700)
+        handler.add_msg(ChatMessage(role="assistant", text="历史" * 3000))
+        current_message = ChatMessage(role="user", text="本轮新问题" * 1000, image=[b"current"], image_detail="high")
+        vision_message = ChatMessage(role="user", text="临时图片", image=[b"vision"], image_detail="low")
+        with patch.object(
+            llm, "get_ai_text_response", side_effect=["长摘要" * 200, "简短摘要"],
+        ) as compress:
+            await run_turn(
+                loop=loop, chat_handler=handler,
+                turn_messages=[current_message], input_vision_messages=[vision_message],
+            )
+        self.assertEqual(compress.await_count, 2)
+        request = llm.formal_requests[0]
+        self.assertEqual([message.role for message in request], ["system", "user", "user", "user"])
+        self.assertIn("简短摘要", request[1].text or "")
+        self.assertIs(request[2], current_message)
+        self.assertIs(request[3], vision_message)
+        self.assertLessEqual(loop.token_estimator.estimate_messages(messages=request[:2]), 700)
+        self.assertNotIn(vision_message, handler.messages_lst)
+        self.assertEqual(handler.messages_lst[-1].text, "压缩后回复")
+
+    async def test_compression_notice_failure_still_allows_reply(self) -> None:
+        """提示发送失败只记录日志，压缩和正式回复继续。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="压缩后回复")])
         context = FakeContext(llm=llm)
         handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
-        handler.build_chatmessage(message=ChatMessage(role="assistant", text="历史回复" * 2000))
-        with self.assertRaisesRegex(LLMRequestError, "空历史摘要"):
+        handler.add_msg(ChatMessage(role="assistant", text="历史" * 3000))
+        with patch.object(
+            context.bot, "send_msg",
+            side_effect=[NapCatSendMessageError("通知发送失败"), Response(status="ok", retcode=0)],
+        ) as send:
             await run_turn(loop=build_loop(config=build_config(), context=context), chat_handler=handler)
-        self.assertEqual(llm.formal_requests, [])
+        self.assertEqual(send.await_count, 2)
+        self.assertEqual(len(llm.text_requests), 1)
+        self.assertEqual(len(llm.formal_requests), 1)
+        self.assertEqual(handler.messages_lst[-1].text, "压缩后回复")
+
+    async def test_invalid_summary_preserves_history_and_allows_retry(self) -> None:
+        """空白或无法缩短的摘要明确失败，保留原历史供后续重试。"""
+        history = ChatMessage(role="assistant", text="历史回复" * 2000)
+        for summary, error in ((" \n\t ", "空历史摘要"), (history.text, "未能缩短")):
+            assert summary is not None
+            with self.subTest(error=error):
+                llm = RecordingLLM(
+                    responses=[LLMResponse(content="重试成功")],
+                    text_response=summary,
+                )
+                context = FakeContext(llm=llm)
+                loop = build_loop(config=build_config(), context=context)
+                handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
+                handler.add_msg(history)
+                original_messages = handler.messages_lst
+                with self.assertRaisesRegex(LLMRequestError, error):
+                    await run_turn(loop=loop, chat_handler=handler)
+                self.assertEqual(llm.formal_requests, [])
+                self.assertEqual(handler.messages_lst, original_messages)
+
+                llm.text_response = "可用摘要"
+                await run_turn(loop=loop, chat_handler=handler)
+                self.assertEqual(handler.messages_lst[-1].text, "重试成功")
 
     async def test_reasoning_is_hidden_but_can_be_passed_back(self) -> None:
         """群内只显示 content，结构化 reasoning 可写回后续上下文。"""
@@ -1262,8 +1372,8 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
         chat_handler.build_chatmessage(
             message_lst=[
-                ChatMessage(role="user", text="历史消息一" * 100),
-                ChatMessage(role="assistant", text="历史回复一" * 100),
+                ChatMessage(role="user", text="历史消息一" * 1000),
+                ChatMessage(role="assistant", text="历史回复一" * 1000),
             ]
         )
 
@@ -1280,11 +1390,12 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("当前新消息", compression_text)
         self.assertEqual(
             [message.role for message in llm.formal_requests[0]],
-            ["system", "user"],
+            ["system", "user", "user"],
         )
         rebuilt_text = llm.formal_requests[0][1].text or ""
         self.assertIn("历史上下文摘要", rebuilt_text)
-        self.assertIn("当前新消息", rebuilt_text)
+        self.assertNotIn("当前新消息", rebuilt_text)
+        self.assertEqual(llm.formal_requests[0][2].text, "当前新消息")
         self.assertEqual(
             context.bot.sent_texts,
             ["我先整理一下记忆", "压缩后回复"],

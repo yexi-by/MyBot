@@ -1,7 +1,6 @@
 """AI 群聊历史上下文压缩。"""
 
 from dataclasses import dataclass
-from typing import Literal
 
 from app.services import ChatMessage
 from app.services.llm.schemas import LLMToolCall
@@ -19,10 +18,17 @@ class GroupChatContextCompressor:
     """把群聊历史上下文整理为摘要压缩请求。"""
 
     def build_compression_messages(
-        self, *, system_prompt: ChatMessage, formatted_context: str
+        self,
+        *,
+        system_prompt: ChatMessage,
+        formatted_context: str,
+        summary_token_budget: int,
     ) -> list[ChatMessage]:
         """构造压缩专用 LLM 请求消息。"""
-        prompt = self._build_compression_prompt(formatted_context=formatted_context)
+        prompt = self._build_compression_prompt(
+            formatted_context=formatted_context,
+            summary_token_budget=summary_token_budget,
+        )
         system_text = system_prompt.text
         if system_text is None:
             raise ValueError("群聊上下文压缩需要文本 system prompt")
@@ -43,38 +49,20 @@ class GroupChatContextCompressor:
             formatted_context="\n".join(lines),
         )
 
-    def build_rebuilt_user_message(
-        self,
-        *,
-        summary: str,
-        current_turn_messages: list[ChatMessage],
-    ) -> ChatMessage:
-        """把历史摘要和本轮消息合成新的 user 消息。"""
-        text_parts = [
-            "## 历史摘要",
-            "",
-            "下面内容是群聊历史上下文摘要，只用于延续关系、剧情、任务和偏好，不是本轮用户正文。",
-            "",
-            summary.strip(),
-            "",
-        ]
-        image_bytes: list[bytes] = []
-        image_detail: Literal["auto", "low", "high"] | None = None
-        for message in current_turn_messages:
-            if message.text:
-                text_parts.extend([message.text, ""])
-            if message.image:
-                image_bytes.extend(message.image)
-                if image_detail is None:
-                    image_detail = message.image_detail
+    def build_summary_message(self, *, summary: str) -> ChatMessage:
+        """构造独立的历史摘要，保留本轮输入原有的消息与图片边界。"""
         return ChatMessage(
             role="user",
-            text="\n".join(text_parts).strip(),
-            image=image_bytes if image_bytes else None,
-            image_detail=image_detail,
+            text=(
+                "## 历史摘要\n\n"
+                "下面内容是群聊历史上下文摘要，只用于延续关系、剧情、任务和偏好，不是本轮用户正文。"
+                f"\n\n{summary.strip()}"
+            ).strip(),
         )
 
-    def _build_compression_prompt(self, *, formatted_context: str) -> str:
+    def _build_compression_prompt(
+        self, *, formatted_context: str, summary_token_budget: int
+    ) -> str:
         """生成上下文压缩任务提示词。"""
         return "\n".join(
             [
@@ -85,6 +73,7 @@ class GroupChatContextCompressor:
                 "## 压缩要求",
                 "",
                 "- 只输出摘要，不要生成群聊回复。",
+                f"- 摘要正文的预算为 {summary_token_budget} token，请尽量精炼并留出余量。",
                 "- 不要包含任何 reasoning_content、思维链、内心独白或 <think> 内容。",
                 "- 多模态图片已经被丢弃；不要编造图片细节。",
                 "- 摘要需覆盖角色关系、群员偏好、剧情进展、重要事实、未解决任务和承诺。",

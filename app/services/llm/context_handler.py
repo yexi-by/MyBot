@@ -12,7 +12,7 @@ class ContextHandler:
     """维护单个会话的系统提示词与完整上下文。"""
 
     def __init__(self, system_prompt: str, max_context_tokens: int) -> None:
-        """初始化上下文并校验最大上下文 token 预算。"""
+        """初始化上下文并校验长期上下文的压缩预算。"""
         if max_context_tokens <= 0:
             raise ValueError(f"最大上下文 token 必须大于0,当前设置: {max_context_tokens}")
         self.system_prompt: ChatMessage = ChatMessage(

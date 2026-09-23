@@ -37,7 +37,7 @@ from app.services import (
     ConversationContextKey,
     ConversationContextStore,
 )
-from app.services.llm.schemas import LLMResponse, LLMToolChoice, LLMToolDefinition
+from app.services.llm.schemas import LLMResponse, LLMToolCall, LLMToolChoice, LLMToolDefinition
 from app.services.llm.errors import LLMRequestError
 from tests.config_helpers import build_ai_group_chat_config
 
@@ -256,6 +256,7 @@ def build_snapshot(
     debug_dump_messages: bool = False,
     supports_images: bool = False,
     retain_images: bool = False,
+    tool_result_retention: str = "off",
 ) -> PluginConfigSnapshot:
     """构造已经读取提示词文件的 AI 配置快照。"""
     group = AIGroupConfig(
@@ -294,6 +295,7 @@ def build_snapshot(
             ),
             "images": {"retain_images": retain_images},
             "show_reasoning": False,
+            "tool_result_retention": tool_result_retention,
             "debug_dump_messages": debug_dump_messages,
             "groups": group_configs,
         },
@@ -362,6 +364,76 @@ def conversation_key(
 
 class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
     """验证附图消息从读取到最终群回复的完整编排。"""
+
+    async def test_retained_tool_overflow_compresses_after_failure_and_commits(self) -> None:
+        """工具超预算后整轮提交，压缩失败保留原历史，重试成功后后续会话继续。"""
+        context = SmokeContext()
+        plugin = AIGroupChatPlugin(
+            context=cast(Context, context),
+            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot(
+                supports_images=True,
+                max_context_tokens=9000,
+                tool_result_retention="full",
+            ))),
+            consumers_count=1,
+            stop_timeout_seconds=1,
+        )
+        tool = LLMToolDefinition(
+            name="mcp__fake__inspect",
+            description="读取资料。",
+            parameters={"type": "object", "properties": {}},
+        )
+        large_result = "资料原文" * 5000
+        event = build_event().model_copy(update={
+            "message": [At.new("10000"), Text.new("读取资料")],
+            "raw_message": "读取资料",
+        })
+        try:
+            with (
+                patch.object(context.mcp_tool_manager, "list_tools", return_value=[tool]),
+                patch.object(
+                    context.mcp_tool_manager, "call_tool",
+                    return_value={"ok": True, "text": large_result},
+                ),
+                patch.object(
+                    context.llm, "get_ai_response_with_tools",
+                    side_effect=[
+                        LLMResponse(tool_calls=[LLMToolCall(id="call-1", name=tool.name, arguments={})]),
+                        LLMResponse(content="资料已读取"),
+                        LLMResponse(content="摘要后继续成功"),
+                        LLMResponse(content="后续对话成功"),
+                    ],
+                ) as formal,
+                patch.object(context.llm, "get_ai_text_response", return_value="资料摘要") as compress,
+            ):
+                self.assertTrue(await plugin.run(event))
+                persistent = context.conversation_contexts.get(key=conversation_key())
+                assert persistent is not None
+                original_messages = persistent.messages_lst
+                original_revision = persistent.revision
+                tool_result = next(message for message in original_messages if message.role == "tool")
+                self.assertIn(large_result, tool_result.text or "")
+                self.assertEqual(original_messages[-1].text, "资料已读取")
+                self.assertEqual(formal.await_count, 2)
+                compress.assert_not_awaited()
+
+                compress.side_effect = LLMRequestError("压缩服务暂时失败")
+                self.assertTrue(await plugin.run(event.model_copy(update={"message_id": "30001"})))
+                self.assertEqual(persistent.messages_lst, original_messages)
+                self.assertEqual(persistent.revision, original_revision)
+                self.assertEqual(formal.await_count, 2)
+
+                compress.side_effect = None
+                self.assertTrue(await plugin.run(event.model_copy(update={"message_id": "30002"})))
+                self.assertIn("资料摘要", persistent.messages_lst[1].text or "")
+                self.assertFalse(any(message.role == "tool" for message in persistent.messages_lst))
+                self.assertEqual(persistent.messages_lst[-1].text, "摘要后继续成功")
+                self.assertTrue(await plugin.run(event.model_copy(update={"message_id": "30003"})))
+                self.assertEqual(persistent.messages_lst[-1].text, "后续对话成功")
+                self.assertEqual(formal.await_count, 4)
+                self.assertEqual(compress.await_count, 2)
+        finally:
+            await plugin.stop_consumers()
 
     async def test_final_provider_failure_replies_to_triggering_message(self) -> None:
         context = SmokeContext()

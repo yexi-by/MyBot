@@ -360,7 +360,10 @@ class AIGroupConfig(ConfigModel):
     id: NapCatId
     system_prompt_file: str
     knowledge_base_file: str | None = None
-    max_context_tokens: int = Field(gt=0)
+    max_context_tokens: int = Field(
+        gt=0,
+        description="长期上下文 token 预算；下一轮开始时压缩超限历史，轮内临时上下文可超出此值。",
+    )
 
     @field_validator("system_prompt_file")
     @classmethod

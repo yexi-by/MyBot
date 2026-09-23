@@ -178,7 +178,8 @@ function GroupsSection() {
             />
             <NumberField
               path={`${GROUPS_BASE}.${index}.max_context_tokens`}
-              label="上下文 Token 上限"
+              label="长期上下文 Token 预算"
+              description="超限历史在下一轮开始时压缩；轮内工具结果等临时内容可超出此值。"
               placeholder="如 64000"
             />
             <TextField

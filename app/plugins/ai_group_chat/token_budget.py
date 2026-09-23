@@ -1,10 +1,9 @@
-"""AI 群聊上下文 token 预算估算。"""
+"""AI 群聊长期上下文 token 预算估算。"""
 
 from dataclasses import dataclass
 from math import ceil
 
-from app.models import to_json_value
-from app.services.llm.schemas import ChatMessage, LLMToolDefinition
+from app.services.llm.schemas import ChatMessage
 
 
 @dataclass(frozen=True)
@@ -39,27 +38,21 @@ class ConservativeTokenEstimator:
         self.ascii_tokens_per_character: float = ascii_tokens_per_character
         self.non_ascii_tokens_per_character: float = non_ascii_tokens_per_character
 
-    def estimate_request(
-        self, *, messages: list[ChatMessage], tools: list[LLMToolDefinition]
-    ) -> int:
-        """估算一次 LLM 请求的 token 数。"""
+    def estimate_messages(self, *, messages: list[ChatMessage]) -> int:
+        """估算消息及固定封装的 token 数，不计临时工具定义。"""
         raw_tokens = self.request_overhead_tokens
         for message in messages:
             raw_tokens += self._estimate_message(message=message)
-        for tool in tools:
-            raw_tokens += self.tool_call_overhead_tokens
-            raw_tokens += self._estimate_text(text=str(to_json_value(tool)))
         return ceil(raw_tokens * self.safety_factor)
 
-    def check_request(
+    def check_context(
         self,
         *,
         messages: list[ChatMessage],
-        tools: list[LLMToolDefinition],
         max_context_tokens: int,
     ) -> TokenBudgetEstimate:
-        """判断一次 LLM 请求是否超过指定上下文预算。"""
-        estimated_tokens = self.estimate_request(messages=messages, tools=tools)
+        """判断长期上下文是否需要压缩。"""
+        estimated_tokens = self.estimate_messages(messages=messages)
         return TokenBudgetEstimate(
             estimated_tokens=estimated_tokens,
             max_context_tokens=max_context_tokens,

@@ -12,7 +12,7 @@ from app.services import (
     ContextHandler,
     NapCatGroupToolExecutor,
 )
-from app.services.llm.schemas import LLMResponse, LLMToolCall, LLMToolDefinition
+from app.services.llm.schemas import LLMResponse, LLMToolCall
 from app.services.llm.errors import LLMRequestError
 from app.services.llm.tools import (
     LLMImageArtifact,
@@ -33,7 +33,7 @@ from .vision_tool import VisionDescriptionTool, VisionTurnState
 
 
 class GroupChatTurnError(RuntimeError):
-    """本轮超过可用预算或工具轮数，需要向群成员说明结束原因。"""
+    """本轮遇到配置限制或工具轮数耗尽，需要向群成员说明结束原因。"""
 
 
 @dataclass(frozen=True)
@@ -222,7 +222,6 @@ class GroupChatToolLoop:
             turn_messages=turn_messages,
             input_vision_messages=input_vision_messages,
             input_vision_history_messages=input_vision_history_messages,
-            tools=tools,
         )
         working_messages = prepared_context.working_messages
         if self.config.images.delivery_mode == "direct":
@@ -261,10 +260,6 @@ class GroupChatToolLoop:
         snapshot_title = "异常结束后的长期上下文"
         try:
             for round_index in range(1, self.config.max_tool_rounds + 1):
-                self._require_request_budget(
-                    messages=working_messages, tools=tools,
-                    max_context_tokens=chat_handler.max_context_tokens,
-                )
                 log_event(
                     level="DEBUG",
                     event="ai_group_chat.llm.request",
@@ -390,9 +385,8 @@ class GroupChatToolLoop:
         turn_messages: list[ChatMessage],
         input_vision_messages: list[ChatMessage],
         input_vision_history_messages: list[ChatMessage],
-        tools: list[LLMToolDefinition],
     ) -> PreparedTurnContext:
-        """在请求模型前按 token 预算决定是否压缩历史上下文。"""
+        """按长期上下文预算整理历史，本轮输入和工具定义留在临时请求中。"""
         stored_messages = chat_handler.messages_lst
         if self.config.images.retain_images:
             history_messages = list(stored_messages)
@@ -432,16 +426,15 @@ class GroupChatToolLoop:
             else self._strip_history_images(messages=current_persisted_messages)
         )
         candidate_messages = [*history_messages, *current_working_messages]
-        budget = self.token_estimator.check_request(
-            messages=candidate_messages,
-            tools=tools,
+        budget = self.token_estimator.check_context(
+            messages=history_messages,
             max_context_tokens=chat_handler.max_context_tokens,
         )
         log_event(
             level="DEBUG",
             event="ai_group_chat.context_budget.checked",
             category="plugin",
-            message="AI 群聊上下文预算检查完成",
+            message="AI 群聊长期上下文预算检查完成",
             group_id=msg.group_id,
             message_id=msg.message_id,
             estimated_tokens=budget.estimated_tokens,
@@ -451,47 +444,39 @@ class GroupChatToolLoop:
             turn_messages_count=len(current_working_messages),
             persisted_turn_messages_count=len(current_persisted_messages),
             request_messages_count=len(candidate_messages),
-            tools_count=len(tools),
         )
-        if not budget.should_compress:
+        if not budget.should_compress or len(history_messages) <= 1:
             return PreparedTurnContext(
                 working_messages=candidate_messages,
                 persisted_turn_messages=current_persisted_messages,
                 fallback_turn_messages=fallback_turn_messages,
                 replace_existing_history=False,
             )
-        _ = await self.context.bot.send_msg(
-            group_id=msg.group_id,
-            text=self.config.context_compression_notice,
-        )
-        summary = await self._compress_existing_context(
+        try:
+            _ = await self.context.bot.send_msg(
+                group_id=msg.group_id,
+                text=self.config.context_compression_notice,
+            )
+        except NapCatSendMessageError as exc:
+            log_event(
+                level="WARNING",
+                event="ai_group_chat.context_compression.notice_failed",
+                category="plugin",
+                message="压缩通知发送失败，继续整理长期上下文",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                error=str(exc),
+            )
+        summary_message = await self._compress_existing_context(
             msg=msg,
             chat_handler=chat_handler,
             budget=budget,
-            current_turn_messages=current_working_messages,
-            tools=tools,
-        )
-        rebuilt_working_user_message = (
-            self.context_compressor.build_rebuilt_user_message(
-                summary=summary,
-                current_turn_messages=current_working_messages,
-            )
-        )
-        rebuilt_persisted_user_message = (
-            self.context_compressor.build_rebuilt_user_message(
-                summary=summary,
-                current_turn_messages=current_persisted_messages,
-            )
         )
         rebuilt_working_messages = [
             chat_handler.system_prompt,
-            rebuilt_working_user_message,
+            summary_message,
+            *current_working_messages,
         ]
-        rebuilt_budget = self.token_estimator.check_request(
-            messages=rebuilt_working_messages,
-            tools=tools,
-            max_context_tokens=chat_handler.max_context_tokens,
-        )
         log_event(
             level="DEBUG",
             event="ai_group_chat.context_compressed.rebuilt",
@@ -499,22 +484,15 @@ class GroupChatToolLoop:
             message="AI 群聊上下文压缩后已重建本轮请求",
             group_id=msg.group_id,
             message_id=msg.message_id,
-            rebuilt_estimated_tokens=rebuilt_budget.estimated_tokens,
-            max_context_tokens=rebuilt_budget.max_context_tokens,
-            rebuilt_should_still_compress=rebuilt_budget.should_compress,
-            rebuilt_user_chars=len(rebuilt_working_user_message.text or ""),
-            rebuilt_image_count=len(rebuilt_working_user_message.image or []),
+            summary_chars=len(summary_message.text or ""),
+            rebuilt_image_count=self._count_images(
+                messages=rebuilt_working_messages
+            ),
             rebuilt_request_messages_count=len(rebuilt_working_messages),
         )
-        if rebuilt_budget.should_compress:
-            raise GroupChatTurnError(
-                "AI 群聊上下文压缩后仍超过最大上下文预算，"
-                f"estimated={rebuilt_budget.estimated_tokens}, "
-                f"max={rebuilt_budget.max_context_tokens}"
-            )
         return PreparedTurnContext(
             working_messages=rebuilt_working_messages,
-            persisted_turn_messages=[rebuilt_persisted_user_message],
+            persisted_turn_messages=[summary_message, *current_persisted_messages],
             fallback_turn_messages=fallback_turn_messages,
             replace_existing_history=True,
         )
@@ -525,12 +503,12 @@ class GroupChatToolLoop:
         msg: GroupMessage,
         chat_handler: ContextHandler,
         budget: TokenBudgetEstimate,
-        current_turn_messages: list[ChatMessage],
-        tools: list[LLMToolDefinition],
-    ) -> str:
+    ) -> ChatMessage:
         """用压缩专用 LLM 请求整理历史上下文，不包含本轮新消息。"""
         history_messages = chat_handler.messages_lst[1:]
-        compression_input = self.context_compressor.format_history(messages=history_messages)
+        compression_input = self.context_compressor.format_history(
+            messages=history_messages
+        )
         log_event(
             level="WARNING",
             event="ai_group_chat.context_compression.triggered",
@@ -543,66 +521,54 @@ class GroupChatToolLoop:
             history_messages_count=len(history_messages),
             dropped_image_count=compression_input.dropped_image_count,
         )
-        max_tokens = chat_handler.max_context_tokens
-
-        def compression_request(text: str) -> list[ChatMessage]:
-            return self.context_compressor.build_compression_messages(
-                system_prompt=chat_handler.system_prompt, formatted_context=text,
-            )
-
-        def reply_budget(summary: str) -> TokenBudgetEstimate:
-            rebuilt = self.context_compressor.build_rebuilt_user_message(
-                summary=summary, current_turn_messages=current_turn_messages,
-            )
-            return self.token_estimator.check_request(
-                messages=[chat_handler.system_prompt, rebuilt], tools=tools,
-                max_context_tokens=max_tokens,
-            )
-
-        if reply_budget("").should_compress:
+        empty_summary = self.context_compressor.build_summary_message(summary="")
+        fixed_tokens = self.token_estimator.estimate_messages(
+            messages=[chat_handler.system_prompt, empty_summary],
+        )
+        summary_token_budget = chat_handler.max_context_tokens - fixed_tokens
+        if summary_token_budget <= 0:
             raise GroupChatTurnError(
-                "系统提示词、工具和当前问题已占满上下文预算，请缩小问题或增大当前群的 max_context_tokens。"
+                "系统提示词与摘要标记已占满长期上下文预算，"
+                "请缩短系统提示词或增大当前群的 max_context_tokens。"
             )
         pending_text = compression_input.formatted_context
         request_count = 0
         while True:
-            summaries: list[str] = []
-            position = 0
-            while position < len(pending_text) or not summaries:
-                end = len(pending_text)
-                request = compression_request(pending_text[position:end])
-                if self.token_estimator.estimate_request(messages=request, tools=[]) > max_tokens:
-                    # 在实际请求（含提示词）上找出能容纳的最大连续片段，单条长消息同样可拆分。
-                    low, high = position, end
-                    while low < high:
-                        middle = (low + high + 1) // 2
-                        candidate = compression_request(pending_text[position:middle])
-                        if self.token_estimator.estimate_request(messages=candidate, tools=[]) <= max_tokens:
-                            low = middle
-                        else:
-                            high = middle - 1
-                    if low == position:
-                        raise GroupChatTurnError("系统提示词与压缩要求已占满预算，请增大当前群的 max_context_tokens。")
-                    end = low
-                    request = compression_request(pending_text[position:end])
-                self._require_request_budget(messages=request, tools=[], max_context_tokens=max_tokens)
-                response = await self.context.llm.get_ai_text_response(
-                    messages=request, provider=self.config.model.provider, model_name=self.config.model.name,
-                )
-                summary = self._normalize_content(response)
-                if summary is None:
-                    raise LLMRequestError("模型返回了空历史摘要，本轮已停止，请稍后重试。")
-                summaries.append(summary)
-                request_count += 1
-                position = end
-            normalized_summary = "\n\n".join(summaries)
-            if not reply_budget(normalized_summary).should_compress:
+            # 压缩请求也属于临时上下文，允许读取已超过长期预算的完整历史。
+            request = self.context_compressor.build_compression_messages(
+                system_prompt=chat_handler.system_prompt,
+                formatted_context=pending_text,
+                summary_token_budget=summary_token_budget,
+            )
+            response = await self.context.llm.get_ai_text_response(
+                messages=request,
+                provider=self.config.model.provider,
+                model_name=self.config.model.name,
+            )
+            request_count += 1
+            summary = self._normalize_content(response)
+            if summary is None:
+                raise LLMRequestError("模型返回了空历史摘要，本轮已停止，请稍后重试。")
+            summary_message = self.context_compressor.build_summary_message(
+                summary=summary
+            )
+            summary_budget = self.token_estimator.check_context(
+                messages=[chat_handler.system_prompt, summary_message],
+                max_context_tokens=chat_handler.max_context_tokens,
+            )
+            if not summary_budget.should_compress:
                 break
-            previous_tokens = self.token_estimator.estimate_request(messages=compression_request(pending_text), tools=[])
-            reduced_tokens = self.token_estimator.estimate_request(messages=compression_request(normalized_summary), tools=[])
+            previous_tokens = self.token_estimator.estimate_messages(
+                messages=[ChatMessage(role="user", text=pending_text)],
+            )
+            reduced_tokens = self.token_estimator.estimate_messages(
+                messages=[ChatMessage(role="user", text=summary)],
+            )
             if reduced_tokens >= previous_tokens:
-                raise LLMRequestError("模型生成的历史摘要未能缩短内容，请调整模型或上下文预算后重试。")
-            pending_text = normalized_summary
+                raise LLMRequestError(
+                    "模型生成的历史摘要未能缩短内容，请调整模型或上下文预算后重试。"
+                )
+            pending_text = summary
         log_event(
             level="DEBUG",
             event="ai_group_chat.context_compression.finished",
@@ -610,10 +576,12 @@ class GroupChatToolLoop:
             message="AI 群聊历史上下文压缩完成",
             group_id=msg.group_id,
             message_id=msg.message_id,
-            summary_chars=len(normalized_summary),
+            summary_chars=len(summary),
+            estimated_tokens=summary_budget.estimated_tokens,
+            max_context_tokens=summary_budget.max_context_tokens,
             request_count=request_count,
         )
-        return normalized_summary
+        return summary_message
 
     async def _handle_tool_response(
         self,
@@ -658,13 +626,6 @@ class GroupChatToolLoop:
             question=question,
             vision_turn_state=vision_turn_state,
         )
-        self._limit_tool_results(
-            working_messages=working_messages,
-            tool_messages=tool_result_history,
-            statuses=tool_statuses,
-            tools=tool_executor.list_tools(),
-            max_context_tokens=chat_handler.max_context_tokens,
-        )
         tool_history_messages.extend(tool_result_history)
         retained_count = 0
         if self.config.tool_result_retention == "summary" and tool_statuses:
@@ -681,55 +642,6 @@ class GroupChatToolLoop:
         if new_vision_messages:
             chat_handler.build_chatmessage(message_lst=new_vision_messages)
         return retained_count
-
-    def _require_request_budget(
-        self, *, messages: list[ChatMessage], tools: list[LLMToolDefinition],
-        max_context_tokens: int,
-    ) -> None:
-        """每次模型请求都遵守当前群的完整上下文预算。"""
-        budget = self.token_estimator.check_request(
-            messages=messages, tools=tools, max_context_tokens=max_context_tokens,
-        )
-        if budget.should_compress:
-            raise GroupChatTurnError(
-                f"本轮内容超过上下文预算（估算 {budget.estimated_tokens}，上限 {max_context_tokens}），"
-                "请缩小查询范围或分次提问。"
-            )
-
-    def _limit_tool_results(
-        self, *, working_messages: list[ChatMessage], tool_messages: list[ChatMessage],
-        statuses: list[ToolCallStatus], tools: list[LLMToolDefinition],
-        max_context_tokens: int,
-    ) -> None:
-        """把装不进本轮预算的大工具结果改为可恢复错误，保留调用配对。"""
-        costs = [
-            self.token_estimator.estimate_request(messages=[message], tools=[])
-            for message in tool_messages
-        ]
-        for index in sorted(
-            range(len(tool_messages)), key=costs.__getitem__, reverse=True,
-        ):
-            budget = self.token_estimator.check_request(
-                messages=working_messages, tools=tools, max_context_tokens=max_context_tokens,
-            )
-            if not budget.should_compress:
-                return
-            message = tool_messages[index]
-            replacement = build_tool_result_message(
-                tool_call_id=message.tool_call_id or "",
-                result={
-                    "ok": False,
-                    "is_error": True,
-                    "error_type": "ToolResultTooLarge",
-                    "error": "工具返回内容超过本轮上下文预算，结果未交付。",
-                    "message": "请减小 limit、时间范围或选取的内容，分次查询；也可以依据已有信息完成回答。",
-                },
-            )
-            if costs[index] <= self.token_estimator.estimate_request(messages=[replacement], tools=[]):
-                continue
-            # 这些消息仅属于刚完成的本批工具，working_messages 和待保存记录共享它们。
-            message.text = replacement.text
-            statuses[index] = ToolCallStatus(name=statuses[index].name, is_error=True)
 
     def _persist_turn_input(
         self,

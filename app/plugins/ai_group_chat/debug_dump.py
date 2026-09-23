@@ -56,7 +56,7 @@ class AIGroupChatDebugDumper:
             "",
             f"- 启动时间: {self.started_at.strftime('%Y-%m-%d %H:%M:%S %z')}",
             f"- 群号: `{group_id}`",
-            f"- 最大上下文 token: `{group_config.max_context_tokens}`",
+            f"- 长期上下文 token 预算: `{group_config.max_context_tokens}`",
             f"- 系统提示词文件: `{group_config.system_prompt_file}`",
             f"- 知识库文件: `{group_config.knowledge_base_file or '未配置'}`",
             "- 记录策略: `只记录长期上下文 messages 增量，不记录完整 LLM 请求体`",
