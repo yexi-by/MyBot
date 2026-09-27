@@ -153,7 +153,7 @@ def to_stored_message(message: GroupMessage, *, row_id: int) -> StoredGroupMessa
             "outgoing" if message.post_type == "message_sent" else "incoming"
         ),
         segments=tuple(message.message),
-        images=(),
+        media=(),
     )
 
 

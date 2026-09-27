@@ -164,6 +164,14 @@ export interface AIImageConfig {
   forward_max_per_turn?: number;
 }
 
+export interface AIVideoConfig {
+  enabled?: boolean;
+  max_per_turn?: number;
+  fetch_concurrency?: number;
+  download_timeout_seconds?: number;
+  max_video_bytes?: number;
+}
+
 export interface AIMessageFormattingConfig {
   field_text_limit?: number;
   json_text_limit?: number;
@@ -198,6 +206,7 @@ export interface AIGroupChatConfig {
   model: ChatModelRef;
   vision?: AIVisionConfig | null;
   images?: AIImageConfig;
+  videos?: AIVideoConfig;
   formatting?: AIMessageFormattingConfig;
   history?: AIHistoryConfig;
   files?: AIFileToolConfig;

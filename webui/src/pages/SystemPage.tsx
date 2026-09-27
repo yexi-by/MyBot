@@ -190,8 +190,8 @@ export default function SystemPage() {
       </div>
 
       <SectionCard
-        title="图片存储"
-        description="群图片归档目录与下载策略。"
+        title="媒体存储"
+        description="群图片与视频共用的归档目录和下载策略。"
         className="col-span-full"
         cols={3}
       >
@@ -212,7 +212,7 @@ export default function SystemPage() {
         />
         <NumberField
           path="storage.images.max_bytes"
-          label="单图最大字节"
+          label="单个媒体最大字节"
           placeholder="例如 52428800"
         />
         <div className="xl:col-span-2">

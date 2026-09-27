@@ -99,7 +99,7 @@ def build_stored_reply() -> StoredGroupMessage:
                 url="https://media.example/quoted.png",
             ),
         ),
-        images=(),
+        media=(),
     )
 
 

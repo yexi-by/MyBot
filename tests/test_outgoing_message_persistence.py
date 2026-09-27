@@ -16,7 +16,7 @@ from fastapi import WebSocket
 from app.api.mixins.message import MessageMixin, NapCatSendMessageError
 from app.database import GroupDataScope
 from app.models import Forward, Image, JsonObject, MessageSegment, Node, Response, Text
-from app.services.napcat import ImageStore, InlineImageArchiver
+from app.services.napcat import MediaStore, InlineImageArchiver
 
 
 PNG_BASE64 = (
@@ -93,7 +93,7 @@ class FakeMessageClient(MessageMixin):
         """初始化录制器、WebSocket 和 NapCat 响应。"""
         self.sent_message_recorder = recorder
         self.inline_image_archiver = InlineImageArchiver(
-            store=ImageStore(root=image_root, max_image_bytes=1024 * 1024)
+            store=MediaStore(root=image_root, max_media_bytes=1024 * 1024)
         )
         self.boot_id = "10000"
         self.fake_websocket = FakeWebSocket()

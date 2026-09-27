@@ -16,8 +16,18 @@ class ChatMessage(StrictModel):
     reasoning_content: str | None = None
     image: list[bytes] | None = None
     image_detail: Literal["auto", "low", "high"] | None = None
+    video: list[bytes] | None = None
     tool_calls: list["LLMToolCall"] | None = None
     tool_call_id: str | None = None
+
+    def without_videos(self) -> "ChatMessage":
+        """视频仅服务当前轮，长期上下文保留来源文字。"""
+        if not self.video:
+            return self
+        return self.model_copy(update={
+            "video": None,
+            "text": self.text or "（视频已用于当轮多模态请求，长期上下文不保存视频字节）",
+        })
 
     def without_images(self) -> "ChatMessage":
         """复制图片消息的文字与工具信息，移除图片字节及其交付参数。"""
@@ -40,8 +50,8 @@ class ChatMessage(StrictModel):
             if self.role != "assistant":
                 raise ValueError("只有 assistant 消息可以携带 tool_calls")
             return self
-        if self.text is None and self.image is None:
-            raise ValueError("必须提供 text、image 或 tool_calls")
+        if self.text is None and self.image is None and self.video is None:
+            raise ValueError("必须提供 text、image、video 或 tool_calls")
         return self
 
     @field_serializer("image")
@@ -52,6 +62,11 @@ class ChatMessage(StrictModel):
         if image is None:
             return None
         return [f"此图片字节码长度为{len(image_bytes)}" for image_bytes in image]
+
+    @field_serializer("video")
+    def serialize_video(self, video: list[bytes] | None) -> list[str] | None:
+        """日志与调试序列化只记录视频长度。"""
+        return None if video is None else [f"此视频字节码长度为{len(item)}" for item in video]
 
 
 class LLMProviderProtocol(Protocol):

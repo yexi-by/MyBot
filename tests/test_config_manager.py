@@ -82,6 +82,13 @@ def ai_config() -> str:
         forward_max_per_call = 0
         forward_max_per_turn = 0
 
+        [plugins.ai_group_chat.videos]
+        enabled = false
+        max_per_turn = 2
+        fetch_concurrency = 2
+        download_timeout_seconds = 60
+        max_video_bytes = 20971520
+
         [plugins.ai_group_chat.formatting]
         field_text_limit = 0
         json_text_limit = 0

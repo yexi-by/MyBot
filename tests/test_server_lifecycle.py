@@ -17,7 +17,7 @@ from app.database import (
     PostgreSQLRuntime,
 )
 from app.services import LLMHandler, MCPToolManager
-from app.services.napcat import ImageArchiveWorkerFactory
+from app.services.napcat import MediaArchiveWorkerFactory
 from tests.config_helpers import minimal_config_toml
 
 
@@ -167,7 +167,7 @@ class NapCatServerLifespanTest(unittest.IsolatedAsyncioTestCase):
             ProxyHttpx | None: None,
             ConfigWatcher: _FakeConfigWatcher(),
             PostgreSQLMessageRepository: object(),
-            ImageArchiveWorkerFactory: object(),
+            MediaArchiveWorkerFactory: object(),
             LLMHandler | None: None,
         }
         return resources, runtime, mcp, direct_httpx

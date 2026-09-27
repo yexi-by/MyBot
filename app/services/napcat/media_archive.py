@@ -1,4 +1,4 @@
-"""NapCat 群图片的内容寻址归档与可恢复下载 worker。"""
+"""NapCat 群图片与视频的内容寻址归档与可恢复下载 worker。"""
 
 from __future__ import annotations
 
@@ -19,28 +19,28 @@ import aiofiles
 import filetype  # pyright: ignore[reportMissingTypeStubs]
 import httpx
 
-from app.models import ImageArchiveTask, StoredImage
+from app.models import MediaArchiveTask, MediaType, StoredMedia
 from app.services.napcat.image_reader import (
-    NapCatImageBot,
     NapCatImageReader,
     NapCatImageReadResult,
     NapCatImageResource,
 )
+from app.services.napcat.video_reader import NapCatMediaBot, NapCatVideoReader, NapCatVideoResource
 from app.utils.log import log_event, log_exception
 
-class ImageArchiveError(ValueError):
-    """图片归档内容不符合存储要求。"""
+class MediaArchiveError(ValueError):
+    """媒体归档内容不符合存储要求。"""
 
 
-class ImageTooLargeError(ImageArchiveError):
-    """图片超过单文件大小限制。"""
+class MediaTooLargeError(MediaArchiveError):
+    """媒体超过单文件大小限制。"""
 
 
-class InvalidImageContentError(ImageArchiveError):
-    """文件内容无法识别为图片。"""
+class InvalidMediaContentError(MediaArchiveError):
+    """文件内容无法识别为预期媒体类型。"""
 
 
-class InvalidInlineImageSourceError(ImageArchiveError):
+class InvalidInlineImageSourceError(MediaArchiveError):
     """内联图片不是支持的 base64 或图片 data URL。"""
 
 
@@ -68,8 +68,8 @@ class ImageArchiveReader(Protocol):
         ...
 
 
-class ImageArchiveTaskRepository(Protocol):
-    """图片任务仓库的最小租约接口。
+class MediaArchiveTaskRepository(Protocol):
+    """媒体任务仓库的最小租约接口。
 
     仓库必须为每次认领生成不可预测的新 lease_token，并且只接受
     当前租约令牌的 complete 或 fail 写入。
@@ -81,7 +81,7 @@ class ImageArchiveTaskRepository(Protocol):
         bot_id: str,
         limit: int,
         lease_seconds: float,
-    ) -> Sequence[ImageArchiveTask]:
+    ) -> Sequence[MediaArchiveTask]:
         """仅为指定机器人原子认领可执行或租约已过期的任务。"""
         ...
 
@@ -90,7 +90,7 @@ class ImageArchiveTaskRepository(Protocol):
         *,
         task_id: int,
         lease_token: str,
-        image: StoredImage,
+        media: StoredMedia,
     ) -> bool:
         """仅在租约仍属于调用方时完成任务。"""
         ...
@@ -106,39 +106,39 @@ class ImageArchiveTaskRepository(Protocol):
         ...
 
 
-class ImageStore:
-    """校验图片内容并按 SHA-256 原子写入本地存储。"""
+class MediaStore:
+    """校验媒体内容并按 SHA-256 原子写入本地存储。"""
 
     def __init__(
         self,
         *,
         root: Path,
-        max_image_bytes: int,
+        max_media_bytes: int,
     ) -> None:
-        """设置图片根目录和单文件大小限制。"""
-        if max_image_bytes < 1:
-            raise ValueError("单张图片大小限制必须大于等于 1")
+        """设置媒体根目录和单文件大小限制。"""
+        if max_media_bytes < 1:
+            raise ValueError("单个媒体大小限制必须大于等于 1")
         self.root: Path = root
-        self.max_image_bytes: int = max_image_bytes
+        self.max_media_bytes: int = max_media_bytes
 
-    async def store(self, *, image_bytes: bytes) -> StoredImage:
-        """按实际内容识别图片类型，去重后原子写入。"""
-        image_size = len(image_bytes)
-        if image_size > self.max_image_bytes:
-            raise ImageTooLargeError(
-                f"图片大小 {image_size} 字节超过上限 "
-                f"{self.max_image_bytes} 字节"
+    async def store(self, *, content: bytes, media_type: MediaType) -> StoredMedia:
+        """按实际内容识别媒体类型，去重后原子写入。"""
+        media_size = len(content)
+        if media_size > self.max_media_bytes:
+            raise MediaTooLargeError(
+                f"媒体大小 {media_size} 字节超过上限 "
+                f"{self.max_media_bytes} 字节"
             )
 
         guess_file_type = cast(
             Callable[[bytes], _DetectedFileType | None],
             filetype.guess,
         )
-        detected = guess_file_type(image_bytes)
-        if detected is None or not detected.mime.startswith("image/"):
-            raise InvalidImageContentError("文件内容无法识别为图片")
+        detected = guess_file_type(content)
+        if detected is None or not detected.mime.startswith(f"{media_type}/"):
+            raise InvalidMediaContentError(f"文件内容无法识别为 {media_type}")
 
-        digest = hashlib.sha256(image_bytes).hexdigest()
+        digest = hashlib.sha256(content).hexdigest()
         storage_path = Path(
             digest[:2],
             digest[2:4],
@@ -150,20 +150,20 @@ class ImageStore:
         if not await asyncio.to_thread(destination.is_file):
             await self._publish_atomically(
                 destination=destination,
-                image_bytes=image_bytes,
+                content=content,
             )
 
-        return StoredImage(
+        return StoredMedia(
             storage_key=storage_path.as_posix(),
             mime_type=detected.mime,
-            size_bytes=image_size,
+            size_bytes=media_size,
         )
 
     async def _publish_atomically(
         self,
         *,
         destination: Path,
-        image_bytes: bytes,
+        content: bytes,
     ) -> None:
         """在目标目录写完临时文件后一次性发布。"""
         temporary = destination.with_name(
@@ -171,7 +171,7 @@ class ImageStore:
         )
         try:
             async with aiofiles.open(temporary, mode="xb") as target:
-                await target.write(image_bytes)
+                await target.write(content)
                 await target.flush()
             await asyncio.to_thread(os.replace, temporary, destination)
         finally:
@@ -179,9 +179,9 @@ class ImageStore:
                 await asyncio.to_thread(temporary.unlink, missing_ok=True)
             except OSError as exc:
                 log_exception(
-                    event="napcat.image_archive.temp_cleanup_failed",
+                    event="napcat.media_archive.temp_cleanup_failed",
                     category="napcat_tools",
-                    message="清理图片归档临时文件失败",
+                    message="清理媒体归档临时文件失败",
                     exc=exc,
                     path=str(temporary),
                 )
@@ -202,15 +202,15 @@ class InlineImageArchiveResult:
 class InlineImageArchiver:
     """严格解码并归档出站 base64 内联图片。"""
 
-    def __init__(self, *, store: ImageStore) -> None:
+    def __init__(self, *, store: MediaStore) -> None:
         """复用同一内容寻址存储和大小上限。"""
-        self.store: ImageStore = store
+        self.store: MediaStore = store
 
     async def archive(self, *, source: str) -> InlineImageArchiveResult:
         """解码 base64:// 或图片 data URL，并返回最终文件的绝对路径。"""
         payload = self._extract_payload(source=source)
         image_bytes = self._decode_payload(payload=payload)
-        stored = await self.store.store(image_bytes=image_bytes)
+        stored = await self.store.store(content=image_bytes, media_type="image")
 
         root = await asyncio.to_thread(self.store.root.resolve)
         absolute_path = await asyncio.to_thread(
@@ -259,11 +259,11 @@ class InlineImageArchiver:
 
     def _decode_payload(self, *, payload: str) -> bytes:
         """在分配解码结果前预判大小，并启用严格 base64 校验。"""
-        max_encoded_length = 4 * ((self.store.max_image_bytes + 2) // 3)
+        max_encoded_length = 4 * ((self.store.max_media_bytes + 2) // 3)
         if len(payload) > max_encoded_length:
-            raise ImageTooLargeError(
+            raise MediaTooLargeError(
                 f"内联图片 base64 长度超过 "
-                f"{self.store.max_image_bytes} 字节图片的可能范围"
+                f"{self.store.max_media_bytes} 字节图片的可能范围"
             )
         try:
             image_bytes = base64.b64decode(payload, validate=True)
@@ -271,24 +271,25 @@ class InlineImageArchiver:
             raise InvalidInlineImageSourceError(
                 f"内联图片 base64 无效: {exc}"
             ) from exc
-        if len(image_bytes) > self.store.max_image_bytes:
-            raise ImageTooLargeError(
+        if len(image_bytes) > self.store.max_media_bytes:
+            raise MediaTooLargeError(
                 f"图片大小 {len(image_bytes)} 字节超过上限 "
-                f"{self.store.max_image_bytes} 字节"
+                f"{self.store.max_media_bytes} 字节"
             )
         return image_bytes
 
 
-class ImageArchiveWorker:
-    """带租约和有限重试的并发图片归档 worker。"""
+class MediaArchiveWorker:
+    """带租约和有限重试的并发媒体归档 worker。"""
 
     def __init__(
         self,
         *,
         bot_id: str,
-        repository: ImageArchiveTaskRepository,
+        repository: MediaArchiveTaskRepository,
         reader: ImageArchiveReader,
-        store: ImageStore,
+        video_reader: NapCatVideoReader,
+        store: MediaStore,
         concurrency: int,
         read_timeout_seconds: float,
         lease_seconds: float,
@@ -298,21 +299,22 @@ class ImageArchiveWorker:
     ) -> None:
         """保存 worker 依赖并检查并发、超时、租约和重试边界。"""
         if bot_id.strip() == "":
-            raise ValueError("图片归档 bot_id 不能为空")
+            raise ValueError("媒体归档 bot_id 不能为空")
         if concurrency < 1:
-            raise ValueError("图片归档并发数必须大于等于 1")
+            raise ValueError("媒体归档并发数必须大于等于 1")
         if read_timeout_seconds <= 0:
-            raise ValueError("图片归档读取超时必须大于 0")
+            raise ValueError("媒体归档读取超时必须大于 0")
         if lease_seconds <= 0:
-            raise ValueError("图片归档租约时间必须大于 0")
+            raise ValueError("媒体归档租约时间必须大于 0")
         if poll_interval_seconds <= 0:
-            raise ValueError("图片归档轮询间隔必须大于 0")
+            raise ValueError("媒体归档轮询间隔必须大于 0")
         if any(delay < 0 for delay in retry_delays_seconds):
-            raise ValueError("图片归档重试间隔不能小于 0")
+            raise ValueError("媒体归档重试间隔不能小于 0")
         self.bot_id: str = bot_id
-        self.repository: ImageArchiveTaskRepository = repository
+        self.repository: MediaArchiveTaskRepository = repository
         self.reader: ImageArchiveReader = reader
-        self.store: ImageStore = store
+        self.video_reader = video_reader
+        self.store: MediaStore = store
         self.concurrency: int = concurrency
         self.read_timeout_seconds: float = read_timeout_seconds
         self.lease_seconds: float = lease_seconds
@@ -336,7 +338,7 @@ class ImageArchiveWorker:
 
         semaphore = asyncio.Semaphore(self.concurrency)
 
-        async def process(task: ImageArchiveTask) -> None:
+        async def process(task: MediaArchiveTask) -> None:
             async with semaphore:
                 await self._process_task(task=task)
 
@@ -350,9 +352,9 @@ class ImageArchiveWorker:
                 processed_count = await self.run_once()
             except Exception as exc:
                 log_exception(
-                    event="napcat.image_archive.batch_failed",
+                    event="napcat.media_archive.batch_failed",
                     category="napcat_tools",
-                    message="图片归档 worker 认领或处理任务失败",
+                    message="媒体归档 worker 认领或处理任务失败",
                     exc=exc,
                 )
                 processed_count = 0
@@ -367,28 +369,31 @@ class ImageArchiveWorker:
             except TimeoutError:
                 pass
 
-    async def _process_task(self, *, task: ImageArchiveTask) -> None:
+    async def _process_task(self, *, task: MediaArchiveTask) -> None:
         """执行一次读取和存储，任何可恢复失败都转为任务状态。"""
         try:
             async with asyncio.timeout(self.read_timeout_seconds):
-                read_result = await self.reader.read(
-                    resource=self._resource_for_task(task=task)
-                )
-            if not read_result.ok:
+                if task.media_type == "video":
+                    video_result = await self.video_reader.read(resource=NapCatVideoResource(
+                        label=task.label, file=task.file or "", file_id=task.file_id,
+                        path=task.path, url=task.url,
+                    ))
+                    content = video_result.video_bytes
+                    source = video_result.source
+                    error_type, error = video_result.error_type, video_result.error
+                else:
+                    read_result = await self.reader.read(resource=self._resource_for_task(task=task))
+                    content = read_result.image_bytes
+                    source = read_result.source
+                    error_type, error = read_result.error_type, read_result.error
+            if content is None or source is None:
                 await self._record_failure(
                     task=task,
-                    error_type=read_result.error_type or "ImageContentUnavailable",
-                    error=read_result.error or "图片没有可读取内容",
+                    error_type=error_type or "MediaContentUnavailable",
+                    error=error or "媒体读取结果缺少来源或字节内容",
                 )
                 return
-            if read_result.source is None or read_result.image_bytes is None:
-                await self._record_failure(
-                    task=task,
-                    error_type="ImageReaderProtocolError",
-                    error="图片读取成功结果缺少来源或字节内容",
-                )
-                return
-            stored = await self.store.store(image_bytes=read_result.image_bytes)
+            stored = await self.store.store(content=content, media_type=task.media_type)
         except Exception as exc:
             await self._record_failure(
                 task=task,
@@ -401,13 +406,13 @@ class ImageArchiveWorker:
             completed = await self.repository.complete(
                 task_id=task.task_id,
                 lease_token=task.lease_token,
-                image=stored,
+                media=stored,
             )
         except Exception as exc:
             log_exception(
-                event="napcat.image_archive.completion_failed",
+                event="napcat.media_archive.completion_failed",
                 category="napcat_tools",
-                message="图片已归档，但任务完成状态写入失败",
+                message="媒体已归档，但任务完成状态写入失败",
                 exc=exc,
                 task_id=task.task_id,
                 attempt_number=task.attempt_number,
@@ -418,9 +423,9 @@ class ImageArchiveWorker:
         if not completed:
             log_event(
                 level="WARNING",
-                event="napcat.image_archive.lease_lost",
+                event="napcat.media_archive.lease_lost",
                 category="napcat_tools",
-                message="图片归档完成时租约已丢失",
+                message="媒体归档完成时租约已丢失",
                 task_id=task.task_id,
                 attempt_number=task.attempt_number,
             )
@@ -428,12 +433,13 @@ class ImageArchiveWorker:
 
         log_event(
             level="DEBUG",
-            event="napcat.image_archive.completed",
+            event="napcat.media_archive.completed",
             category="napcat_tools",
-            message="图片归档完成",
+            message="媒体归档完成",
             task_id=task.task_id,
             attempt_number=task.attempt_number,
-            source=read_result.source,
+            resource_type=task.media_type,
+            source=source,
             storage_key=stored.storage_key,
             mime_type=stored.mime_type,
             size_bytes=stored.size_bytes,
@@ -442,7 +448,7 @@ class ImageArchiveWorker:
     async def _record_failure(
         self,
         *,
-        task: ImageArchiveTask,
+        task: MediaArchiveTask,
         error_type: str,
         error: str,
     ) -> None:
@@ -456,9 +462,9 @@ class ImageArchiveWorker:
             )
         except Exception as exc:
             log_exception(
-                event="napcat.image_archive.failure_record_failed",
+                event="napcat.media_archive.failure_record_failed",
                 category="napcat_tools",
-                message="写入图片归档失败状态失败，将等待租约过期",
+                message="写入媒体归档失败状态失败，将等待租约过期",
                 exc=exc,
                 task_id=task.task_id,
                 attempt_number=task.attempt_number,
@@ -470,9 +476,9 @@ class ImageArchiveWorker:
         if not recorded:
             log_event(
                 level="WARNING",
-                event="napcat.image_archive.lease_lost",
+                event="napcat.media_archive.lease_lost",
                 category="napcat_tools",
-                message="图片归档写入失败状态时租约已丢失",
+                message="媒体归档写入失败状态时租约已丢失",
                 task_id=task.task_id,
                 attempt_number=task.attempt_number,
                 error_type=error_type,
@@ -483,15 +489,15 @@ class ImageArchiveWorker:
         log_event(
             level="WARNING",
             event=(
-                "napcat.image_archive.retry_scheduled"
+                "napcat.media_archive.retry_scheduled"
                 if retry_at is not None
-                else "napcat.image_archive.exhausted"
+                else "napcat.media_archive.exhausted"
             ),
             category="napcat_tools",
             message=(
-                "图片归档失败，已安排重试"
+                "媒体归档失败，已安排重试"
                 if retry_at is not None
-                else "图片归档失败且已用尽重试次数"
+                else "媒体归档失败且已用尽重试次数"
             ),
             task_id=task.task_id,
             attempt_number=task.attempt_number,
@@ -511,9 +517,9 @@ class ImageArchiveWorker:
         return now + timedelta(seconds=self.retry_delays_seconds[retry_index])
 
     def _resource_for_task(
-        self, *, task: ImageArchiveTask
+        self, *, task: MediaArchiveTask
     ) -> NapCatImageResource:
-        """在服务层把纯任务 DTO 转换为 NapCat 图片读取资源。"""
+        """在服务层把纯任务 DTO 转换为 NapCat 媒体读取资源。"""
         return NapCatImageResource(
             label=task.label,
             file=task.file,
@@ -523,44 +529,44 @@ class ImageArchiveWorker:
         )
 
 
-class ImageArchiveWorkerFactory:
+class MediaArchiveWorkerFactory:
     """在确定机器人身份后创建与其 NapCat 实例绑定的归档 worker。"""
 
     def __init__(
         self,
         *,
-        repository: ImageArchiveTaskRepository,
+        repository: MediaArchiveTaskRepository,
         http_client: httpx.AsyncClient | None,
-        store: ImageStore,
+        store: MediaStore,
         concurrency: int,
         download_timeout_seconds: float,
-        max_image_bytes: int,
+        max_media_bytes: int,
         lease_seconds: float,
         poll_interval_seconds: float,
         retry_delays_seconds: tuple[float, ...],
     ) -> None:
         """保存全局依赖，并在首个事件到来前完成配置校验。"""
         if concurrency < 1:
-            raise ValueError("图片归档并发数必须大于等于 1")
+            raise ValueError("媒体归档并发数必须大于等于 1")
         if download_timeout_seconds <= 0:
-            raise ValueError("图片归档下载超时必须大于 0")
-        if max_image_bytes < 1:
-            raise ValueError("图片归档大小上限必须大于等于 1")
-        if store.max_image_bytes != max_image_bytes:
-            raise ValueError("ImageStore 与读取器的图片大小上限必须一致")
+            raise ValueError("媒体归档下载超时必须大于 0")
+        if max_media_bytes < 1:
+            raise ValueError("媒体归档大小上限必须大于等于 1")
+        if store.max_media_bytes != max_media_bytes:
+            raise ValueError("MediaStore 与读取器的媒体大小上限必须一致")
         if lease_seconds <= 0:
-            raise ValueError("图片归档租约时间必须大于 0")
+            raise ValueError("媒体归档租约时间必须大于 0")
         if poll_interval_seconds <= 0:
-            raise ValueError("图片归档轮询间隔必须大于 0")
+            raise ValueError("媒体归档轮询间隔必须大于 0")
         if any(delay < 0 for delay in retry_delays_seconds):
-            raise ValueError("图片归档重试间隔不能小于 0")
+            raise ValueError("媒体归档重试间隔不能小于 0")
 
-        self.repository: ImageArchiveTaskRepository = repository
+        self.repository: MediaArchiveTaskRepository = repository
         self.http_client: httpx.AsyncClient | None = http_client
-        self.store: ImageStore = store
+        self.store: MediaStore = store
         self.concurrency: int = concurrency
         self.download_timeout_seconds: float = download_timeout_seconds
-        self.max_image_bytes: int = max_image_bytes
+        self.max_media_bytes: int = max_media_bytes
         self.lease_seconds: float = lease_seconds
         self.poll_interval_seconds: float = poll_interval_seconds
         self.retry_delays_seconds: tuple[float, ...] = retry_delays_seconds
@@ -569,20 +575,26 @@ class ImageArchiveWorkerFactory:
         self,
         *,
         bot_id: str,
-        bot: NapCatImageBot,
-    ) -> ImageArchiveWorker:
+        bot: NapCatMediaBot,
+    ) -> MediaArchiveWorker:
         """创建只能认领当前机器人任务的 worker。"""
         reader = NapCatImageReader(
             bot=bot,
             http_client=self.http_client,
             fetch_concurrency=self.concurrency,
             download_timeout_seconds=self.download_timeout_seconds,
-            max_image_bytes=self.max_image_bytes,
+            max_image_bytes=self.max_media_bytes,
         )
-        return ImageArchiveWorker(
+        return MediaArchiveWorker(
             bot_id=bot_id,
             repository=self.repository,
             reader=reader,
+            video_reader=NapCatVideoReader(
+                bot=bot, http_client=self.http_client,
+                fetch_concurrency=self.concurrency,
+                download_timeout_seconds=self.download_timeout_seconds,
+                max_video_bytes=self.max_media_bytes,
+            ),
             store=self.store,
             concurrency=self.concurrency,
             # 首次下载、刷新信息、刷新后下载各有独立预算。
@@ -595,17 +607,17 @@ class ImageArchiveWorkerFactory:
 
 
 __all__ = [
-    "ImageArchiveError",
+    "MediaArchiveError",
     "ImageArchiveReader",
-    "ImageArchiveTask",
-    "ImageArchiveTaskRepository",
-    "ImageArchiveWorker",
-    "ImageArchiveWorkerFactory",
-    "ImageStore",
-    "ImageTooLargeError",
-    "InvalidImageContentError",
+    "MediaArchiveTask",
+    "MediaArchiveTaskRepository",
+    "MediaArchiveWorker",
+    "MediaArchiveWorkerFactory",
+    "MediaStore",
+    "MediaTooLargeError",
+    "InvalidMediaContentError",
     "InvalidInlineImageSourceError",
     "InlineImageArchiveResult",
     "InlineImageArchiver",
-    "StoredImage",
+    "StoredMedia",
 ]

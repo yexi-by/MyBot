@@ -71,7 +71,10 @@ class ReplyDatabase(EmptyDatabase):
 
 
 class MissingImageBot:
-    """测试用图片接口，所有刷新请求都返回资源不存在。"""
+    """测试用媒体接口，所有刷新请求都返回资源不存在。"""
+
+    async def get_file(self, file_id: str | None = None, file: str | None = None) -> Response:
+        return Response(status="failed", retcode=404)
 
     async def get_image(
         self, file_id: str | None = None, file: str | None = None
@@ -143,7 +146,7 @@ def to_stored_message(message: GroupMessage) -> StoredGroupMessage:
             "outgoing" if message.post_type == "message_sent" else "incoming"
         ),
         segments=tuple(message.message),
-        images=(),
+        media=(),
     )
 
 

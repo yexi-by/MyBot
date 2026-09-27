@@ -204,7 +204,7 @@ class EmptyGroupMessageReader:
                 occurred_at=datetime(2026, 8, 16, tzinfo=UTC),
                 direction="incoming",
                 segments=(Forward.new(forward_id),),
-                images=(),
+                media=(),
             )
         )
 
@@ -1220,6 +1220,24 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             chat_handler.messages_lst[-1].text,
             "<Reply>\n我在喵~ 已改成合法标记。",
         )
+
+    async def test_video_is_kept_in_current_request_only(self) -> None:
+        """图片保留开关不会把视频带入下一轮；文字来源继续保留。"""
+        for retain_images in (False, True):
+            with self.subTest(retain_images=retain_images):
+                llm = RecordingLLM(responses=[LLMResponse(content="视频答复"), LLMResponse(content="后续答复")])
+                context = FakeContext(llm=llm)
+                config = build_config(supports_images=True, retain_images=retain_images)
+                handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+                loop = build_loop(config=config, context=context)
+                await run_turn(loop=loop, chat_handler=handler, turn_messages=[
+                    ChatMessage(role="user", text="当前消息第 1 个视频", video=[b"original-video"]),
+                ])
+                self.assertTrue(any(item.video for item in llm.formal_requests[0]))
+                self.assertFalse(any(item.video for item in handler.messages_lst))
+                await run_turn(loop=loop, chat_handler=handler, question="继续")
+                self.assertFalse(any(item.video for item in llm.formal_requests[1]))
+                self.assertIn("当前消息第 1 个视频", [item.text for item in handler.messages_lst])
 
     async def test_plain_content_sends_once_and_finishes(self) -> None:
         """无工具正文只发送一次并结束本轮。"""

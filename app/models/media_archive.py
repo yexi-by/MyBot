@@ -1,12 +1,15 @@
-"""图片归档层与数据库之间共用的纯数据对象。"""
+"""媒体归档层与数据库之间共用的纯数据对象。"""
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+
+type MediaType = Literal["image", "video"]
 
 
 @dataclass(frozen=True, slots=True)
-class StoredImage:
-    """内容寻址图片的持久化元数据。"""
+class StoredMedia:
+    """内容寻址媒体的持久化元数据。"""
 
     storage_key: str
     mime_type: str
@@ -16,16 +19,17 @@ class StoredImage:
         """防止数据库将绝对路径或越界路径当成存储键。"""
         key_path = Path(self.storage_key)
         if key_path.is_absolute() or ".." in key_path.parts:
-            raise ValueError("storage_key 必须是图片根目录下的相对路径")
+            raise ValueError("storage_key 必须是媒体根目录下的相对路径")
         if self.size_bytes < 1:
             raise ValueError("size_bytes 必须大于等于 1")
 
 
 @dataclass(frozen=True, slots=True)
-class ImageArchiveTask:
-    """由任务仓库原子认领的单张图片任务。"""
+class MediaArchiveTask:
+    """由任务仓库原子认领的单个媒体任务。"""
 
     task_id: int
+    media_type: MediaType
     lease_token: str
     attempt_number: int
     label: str
@@ -46,4 +50,4 @@ class ImageArchiveTask:
             raise ValueError("label 不能为空")
 
 
-__all__ = ["ImageArchiveTask", "StoredImage"]
+__all__ = ["MediaArchiveTask", "MediaType", "StoredMedia"]

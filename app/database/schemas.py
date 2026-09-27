@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from app.models import MessageSegment
+from app.models import MediaType, MessageSegment
 
 type MessageDirection = Literal["incoming", "outgoing"]
-type ImageArchiveStatus = Literal["pending", "leased", "stored", "retry", "failed"]
+type MediaArchiveStatus = Literal["pending", "leased", "stored", "retry", "failed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,15 +41,16 @@ class MessageCursor:
 
 
 @dataclass(frozen=True, slots=True)
-class StoredGroupImage:
-    """群消息中一张图片的持久化状态。"""
+class StoredGroupMedia:
+    """群消息中一张媒体的持久化状态。"""
 
     row_id: int
+    media_type: MediaType
     segment_index: int
     source_file: str | None
     source_url: str | None
     file_id: str | None
-    status: ImageArchiveStatus
+    status: MediaArchiveStatus
     storage_key: str | None
     mime_type: str | None
     size_bytes: int | None
@@ -69,7 +70,7 @@ class StoredGroupMessage:
     occurred_at: datetime
     direction: MessageDirection
     segments: tuple[MessageSegment, ...]
-    images: tuple[StoredGroupImage, ...]
+    media: tuple[StoredGroupMedia, ...]
 
     @property
     def cursor(self) -> MessageCursor:

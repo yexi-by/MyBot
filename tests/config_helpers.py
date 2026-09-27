@@ -177,6 +177,13 @@ def build_ai_group_chat_config(
             "forward_max_per_call": 0,
             "forward_max_per_turn": 0,
         },
+        "videos": {
+            "enabled": False,
+            "max_per_turn": 2,
+            "fetch_concurrency": 2,
+            "download_timeout_seconds": 60,
+            "max_video_bytes": 20971520,
+        },
         "formatting": {
             "field_text_limit": 0,
             "json_text_limit": 0,

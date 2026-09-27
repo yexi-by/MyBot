@@ -417,7 +417,7 @@ class GroupChatToolLoop:
                 history_messages_count=len(history_messages),
             )
         current_persisted_messages = [
-            *turn_messages,
+            *(message.without_videos() for message in turn_messages),
             *input_vision_history_messages,
         ]
         fallback_turn_messages = (

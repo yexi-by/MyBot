@@ -23,7 +23,7 @@ from app.database import (
 )
 from app.models import GroupMessage, GroupRecallNoticeEvent, Meta, Response
 from app.services import LLMHandler, MCPToolManager
-from app.services.napcat import ImageArchiveWorkerFactory
+from app.services.napcat import MediaArchiveWorkerFactory
 from app.utils.log import log_event, log_exception, log_run_end, log_run_start
 from app.webui import PowerController, create_webui_router, mount_webui_static
 
@@ -115,7 +115,7 @@ class NapCatServer:
             await migrator.assert_current()
             await mcp_tool_manager.start()
             _ = await self.container.get(PostgreSQLMessageRepository)
-            _ = await self.container.get(ImageArchiveWorkerFactory)
+            _ = await self.container.get(MediaArchiveWorkerFactory)
             llm_handler = await self.container.get(LLMHandler | None)
             config_watcher_task = asyncio.create_task(config_watcher.run())
             log_event(
@@ -328,14 +328,14 @@ class NapCatServer:
                 recalled_by_id=str(event.operator_id),
             )
 
-    async def _stop_image_worker(
+    async def _stop_media_worker(
         self,
         *,
         stop_event: asyncio.Event | None,
         worker_task: asyncio.Task[None] | None,
         client_id: str,
     ) -> None:
-        """停止当前机器人图片 worker；超时任务由数据库租约恢复。"""
+        """停止当前机器人媒体 worker；超时任务由数据库租约恢复。"""
         if stop_event is None or worker_task is None:
             return
         stop_event.set()
@@ -349,9 +349,9 @@ class NapCatServer:
             _ = await asyncio.gather(worker_task, return_exceptions=True)
             log_event(
                 level="WARNING",
-                event="napcat.image_archive.stop_timeout",
+                event="napcat.media_archive.stop_timeout",
                 category="napcat_tools",
-                message="图片归档 worker 停止超时，未完成任务将由租约恢复",
+                message="媒体归档 worker 停止超时，未完成任务将由租约恢复",
                 client_id=client_id,
             )
 
@@ -366,7 +366,7 @@ class NapCatServer:
             client_id: str,
             checker: FromDishka[EventTypeChecker],
             repository: FromDishka[PostgreSQLMessageRepository],
-            image_worker_factory: FromDishka[ImageArchiveWorkerFactory],
+            media_worker_factory: FromDishka[MediaArchiveWorkerFactory],
         ) -> None:
             """处理单个 NapCat WebSocket 客户端连接。"""
             async with self.container(
@@ -378,8 +378,8 @@ class NapCatServer:
                     return
                 dispatcher = await request_container.get(EventDispatcher)
                 bot = await request_container.get(BOTClient)
-                image_worker_stop: asyncio.Event | None = None
-                image_worker_task: asyncio.Task[None] | None = None
+                media_worker_stop: asyncio.Event | None = None
+                media_worker_task: asyncio.Task[None] | None = None
                 try:
                     while True:
                         data_str = await websocket.receive_text()
@@ -428,14 +428,14 @@ class NapCatServer:
                             )
                             break
                         bot.get_self_qq_id(msg=event)
-                        if image_worker_task is None:
-                            image_worker_stop = asyncio.Event()
-                            image_worker = image_worker_factory.create(
+                        if media_worker_task is None:
+                            media_worker_stop = asyncio.Event()
+                            media_worker = media_worker_factory.create(
                                 bot_id=str(event.self_id),
                                 bot=bot,
                             )
-                            image_worker_task = asyncio.create_task(
-                                image_worker.run(stop_event=image_worker_stop)
+                            media_worker_task = asyncio.create_task(
+                                media_worker.run(stop_event=media_worker_stop)
                             )
                         if isinstance(event, (GroupMessage, GroupRecallNoticeEvent)):
                             await self._persist_event(
@@ -501,9 +501,9 @@ class NapCatServer:
                         message="正在清理客户端资源",
                         client_id=client_id,
                     )
-                    await self._stop_image_worker(
-                        stop_event=image_worker_stop,
-                        worker_task=image_worker_task,
+                    await self._stop_media_worker(
+                        stop_event=media_worker_stop,
+                        worker_task=media_worker_task,
                         client_id=client_id,
                     )
                     shutdown_tasks = [

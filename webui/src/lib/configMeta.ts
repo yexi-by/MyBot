@@ -17,7 +17,7 @@ export const PLUGIN_METAS: PluginMeta[] = [
   {
     id: "ai_group_chat",
     name: "AI 群聊",
-    description: "群消息 AI 对话，含模型、视觉、图片与群列表配置",
+    description: "群消息 AI 对话，含模型、图片、视频与群列表配置",
   },
   {
     id: "group_notice",
@@ -85,6 +85,13 @@ function defaultAIGroupChat(config: MyBotConfigData): AIGroupChatConfig {
       forward_tool_enabled: true,
       forward_max_per_call: 0,
       forward_max_per_turn: 0,
+    },
+    videos: {
+      enabled: false,
+      max_per_turn: 2,
+      fetch_concurrency: 2,
+      download_timeout_seconds: 60,
+      max_video_bytes: 20971520,
     },
     formatting: {
       field_text_limit: 0,

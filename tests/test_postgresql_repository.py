@@ -1,6 +1,9 @@
 """PostgreSQL 群消息仓库集成测试。"""
 
 import os
+import tempfile
+
+import httpx
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,18 +17,22 @@ from app.database import (
     PostgreSQLMessageRepository,
     PostgreSQLRuntime,
 )
-from app.database.models import GroupMessageImageRow, GroupMessageRow
+from app.database.models import GroupMessageMediaRow, GroupMessageRow
 from app.models import (
     Forward,
     GroupMessage,
     Image,
     MessageSegment,
     Sender,
-    StoredImage,
+    StoredMedia,
     Text,
+    Reply,
     Video,
 )
-from app.services.napcat.image_archive import ImageArchiveTaskRepository
+from app.services.napcat.media_archive import MediaArchiveTaskRepository, MediaArchiveWorkerFactory, MediaStore
+from app.plugins.ai_group_chat.message_builder import GroupChatMessageBuilder
+from tests.test_video_input import VIDEO_BYTES, VideoBot
+from tests.config_helpers import build_ai_group_chat_config
 
 TEST_DATABASE_ENV = "MYBOT_TEST_DATABASE_URL"
 
@@ -51,10 +58,10 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.image_root = Path("test-images")
         self.repository = PostgreSQLMessageRepository(
             session_factory=self.runtime.session_factory,
-            image_root=self.image_root,
-            image_max_attempts=4,
+            media_root=self.image_root,
+            media_max_attempts=4,
         )
-        archive_repository: ImageArchiveTaskRepository = self.repository
+        archive_repository: MediaArchiveTaskRepository = self.repository
         self.assertIs(archive_repository, self.repository)
 
     async def asyncTearDown(self) -> None:
@@ -243,7 +250,7 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
         if first is None:
             self.fail("首次入站消息应该可读")
         original_row_id = first.row_id
-        original_image_row_id = first.images[0].row_id
+        original_image_row_id = first.media[0].row_id
         task = (
             await self.repository.claim_ready(
                 bot_id=self.bot_id,
@@ -256,7 +263,7 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
             await self.repository.complete(
                 task_id=task.task_id,
                 lease_token=task.lease_token,
-                image=StoredImage(
+                media=StoredMedia(
                     storage_key="ef/original.png",
                     mime_type="image/png",
                     size_bytes=24,
@@ -280,8 +287,8 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after_delete.row_id, original_row_id)
         self.assertEqual(after_delete.segments[0], Text.new("首次正文"))
         self.assertEqual(len(after_delete.segments), 2)
-        self.assertEqual(after_delete.images[0].row_id, original_image_row_id)
-        self.assertEqual(after_delete.images[0].status, "stored")
+        self.assertEqual(after_delete.media[0].row_id, original_image_row_id)
+        self.assertEqual(after_delete.media[0].status, "stored")
 
         replacement = self._message(
             message_id=message_id,
@@ -314,7 +321,7 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
                 "https://example.invalid/original.png",
             )
         self.assertEqual(
-            after_replacement.images[0].file_id,
+            after_replacement.media[0].file_id,
             "original-file-id",
         )
 
@@ -343,9 +350,9 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
             )
             image_rows = list(
                 await session.scalars(
-                    select(GroupMessageImageRow)
-                    .where(GroupMessageImageRow.message_row_id == original_row_id)
-                    .order_by(GroupMessageImageRow.segment_index)
+                    select(GroupMessageMediaRow)
+                    .where(GroupMessageMediaRow.message_row_id == original_row_id)
+                    .order_by(GroupMessageMediaRow.segment_index)
                 )
             )
         self.assertIsNotNone(archived_row)
@@ -484,7 +491,7 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
                     f"真实机器人-{message_id}",
                 )
                 self.assertEqual(
-                    [image.segment_index for image in stored.images],
+                    [image.segment_index for image in stored.media],
                     [1],
                 )
 
@@ -697,7 +704,7 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
             await self.repository.complete(
                 task_id=retried[0].task_id,
                 lease_token=retried[0].lease_token,
-                image=StoredImage(
+                media=StoredMedia(
                     storage_key="ab/content.png",
                     mime_type="image/png",
                     size_bytes=12,
@@ -717,8 +724,8 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(segment.data.path, str(self.image_root / "ab/content.png"))
         async with self.runtime.session_factory() as session:
             image_row = await session.scalar(
-                select(GroupMessageImageRow).where(
-                    GroupMessageImageRow.id == retried[0].task_id
+                select(GroupMessageMediaRow).where(
+                    GroupMessageMediaRow.id == retried[0].task_id
                 )
             )
         self.assertIsNotNone(image_row)
@@ -801,8 +808,8 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
         )[0]
         async with self.runtime.session_factory() as session, session.begin():
             _ = await session.execute(
-                update(GroupMessageImageRow)
-                .where(GroupMessageImageRow.id == expired_task.task_id)
+                update(GroupMessageMediaRow)
+                .where(GroupMessageMediaRow.id == expired_task.task_id)
                 .values(
                     attempt_count=4,
                     leased_until=datetime.now(UTC) - timedelta(seconds=1),
@@ -904,8 +911,8 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
         )
         async with self.runtime.session_factory() as session, session.begin():
             _ = await session.execute(
-                update(GroupMessageImageRow)
-                .where(GroupMessageImageRow.id == first_task.task_id)
+                update(GroupMessageMediaRow)
+                .where(GroupMessageMediaRow.id == first_task.task_id)
                 .values(next_attempt_at=datetime.now(UTC))
             )
         second_task = (
@@ -994,7 +1001,7 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
             await self.repository.complete(
                 task_id=stored_task.task_id,
                 lease_token=stored_task.lease_token,
-                image=StoredImage(
+                media=StoredMedia(
                     storage_key="cd/content.png",
                     mime_type="image/png",
                     size_bytes=12,
@@ -1028,34 +1035,50 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
-    async def test_video_is_metadata_only_and_does_not_create_download_task(self) -> None:
-        """视频段保留可用信息，但绝对路径不入库且不创建任务。"""
-        await self.repository.save_incoming(
-            self._message(
-                message_id="video",
-                segments=[
-                    Video.new(
-                        "clip.mp4",
-                        path="C:/temporary/clip.mp4",
-                        url="https://example.invalid/clip.mp4",
-                    )
-                ],
+    async def test_video_archive_and_quote_reads_persistent_file(self) -> None:
+        """视频经过真实任务仓库归档后，引用能在原文件和 URL 失效时读取。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "incoming.mp4"
+            original.write_bytes(VIDEO_BYTES)
+            repository = PostgreSQLMessageRepository(
+                session_factory=self.runtime.session_factory,
+                media_root=root / "archive", media_max_attempts=4,
             )
-        )
-        stored = await self.repository.get_active(
-            scope=self.scope,
-            message_id="video",
-        )
-        self.assertIsNotNone(stored)
-        if stored is None:
-            self.fail("视频消息写入后应该可读")
-        self.assertEqual(stored.segments[0], Video.new("clip.mp4", url="https://example.invalid/clip.mp4"))
-        tasks = await self.repository.claim_ready(
-            bot_id=self.bot_id,
-            limit=10,
-            lease_seconds=30,
-        )
-        self.assertEqual(tasks, [])
+            await repository.save_incoming(self._message(
+                message_id="video", segments=[Video.new(
+                    "clip.mp4", path=str(original), url="https://expired.test/clip.mp4",
+                )],
+            ))
+            bot = VideoBot()
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(403))) as client:
+                factory = MediaArchiveWorkerFactory(
+                    repository=repository, http_client=client,
+                    store=MediaStore(root=root / "archive", max_media_bytes=1024),
+                    concurrency=2, download_timeout_seconds=1, max_media_bytes=1024,
+                    lease_seconds=10, poll_interval_seconds=1, retry_delays_seconds=(1,),
+                )
+                self.assertEqual(await factory.create(bot_id=self.bot_id, bot=bot).run_once(), 1)
+                original.unlink()
+                stored = await repository.get_active(scope=self.scope, message_id="video")
+                assert stored is not None
+                self.assertEqual(stored.media[0].media_type, "video")
+                self.assertEqual(stored.media[0].status, "stored")
+                video = stored.segments[0]
+                assert isinstance(video, Video) and video.data.path is not None
+                self.assertEqual(Path(video.data.path).read_bytes(), VIDEO_BYTES)
+                builder = GroupChatMessageBuilder(
+                    config=build_ai_group_chat_config(supports_images=True, overrides={"videos": {"enabled": True}}),
+                    group_messages=repository, bot=bot, http_client=client,
+                )
+                turn = await builder.build_turn_messages(msg=self._message(
+                    message_id="quote", segments=[Reply.new("video"), Text.new("说说视频")],
+                ))
+                self.assertEqual([item.video for item in turn.turn_messages if item.video], [[VIDEO_BYTES]])
+                self.assertEqual(bot.refreshes, 0)
+                self.assertIsNone(await repository.get_active(
+                    scope=GroupDataScope(bot_id=self.bot_id, group_id="another-group"), message_id="video",
+                ))
 
     async def test_absolute_image_file_is_only_a_temporary_task_source(self) -> None:
         """绝对 file 路径不进 segments 或长期图片 DTO。"""
@@ -1077,7 +1100,7 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
         if isinstance(segment, Image):
             self.assertEqual(segment.data.file, "photo.png")
             self.assertIsNone(segment.data.path)
-        self.assertIsNone(stored.images[0].source_file)
+        self.assertIsNone(stored.media[0].source_file)
         task = (
             await self.repository.claim_ready(
                 bot_id=self.bot_id,
@@ -1257,10 +1280,10 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(tasks[0].url)
         self.assertEqual(tasks[0].file_id, "top-inline-file-id")
 
-    async def _image_row(self, *, task_id: int) -> GroupMessageImageRow:
+    async def _image_row(self, *, task_id: int) -> GroupMessageMediaRow:
         """按任务 ID 读取图片状态行。"""
         async with self.runtime.session_factory() as session:
-            row = await session.get(GroupMessageImageRow, task_id)
+            row = await session.get(GroupMessageMediaRow, task_id)
         if row is None:
             self.fail(f"找不到图片任务 {task_id}")
         return row

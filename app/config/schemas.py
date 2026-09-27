@@ -98,7 +98,7 @@ class NapCatConfig(ConfigModel):
 
 
 class ImageStorageConfig(ConfigModel):
-    """群图片归档配置。"""
+    """群图片和视频共用的归档配置。"""
 
     directory: str
     download_concurrency: int = Field(ge=1)
@@ -112,10 +112,10 @@ class ImageStorageConfig(ConfigModel):
     @field_validator("directory")
     @classmethod
     def validate_directory(cls, value: str) -> str:
-        """确保图片归档目录不是空字符串。"""
+        """确保媒体归档目录不是空字符串。"""
         cleaned_value = value.strip()
         if cleaned_value == "":
-            raise ValueError("图片归档目录不能为空")
+            raise ValueError("媒体归档目录不能为空")
         return cleaned_value
 
     @field_validator("retry_delays_seconds")
@@ -123,9 +123,9 @@ class ImageStorageConfig(ConfigModel):
     def validate_retry_delays(
         cls, value: tuple[float, ...]
     ) -> tuple[float, ...]:
-        """确保图片重试延迟均为非负数；空列表表示不重试。"""
+        """确保媒体重试延迟均为非负数；空列表表示不重试。"""
         if any(delay < 0 for delay in value):
-            raise ValueError("图片重试延迟不能小于 0")
+            raise ValueError("媒体重试延迟不能小于 0")
         return value
 
 
@@ -437,6 +437,16 @@ class AIImageConfig(ConfigModel):
         return normalized
 
 
+class AIVideoConfig(ConfigModel):
+    """AI 群聊原生视频输入与资源读取配置。"""
+
+    enabled: bool
+    max_per_turn: int = Field(ge=0)
+    fetch_concurrency: int = Field(ge=1)
+    download_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
+    max_video_bytes: int = Field(ge=0)
+
+
 class AIMessageFormattingConfig(ConfigModel):
     """模型可读消息文本化策略；0 表示不在格式化阶段截断。"""
 
@@ -481,6 +491,7 @@ class AIGroupChatConfig(ConfigModel):
     model: ChatModelRef
     vision: AIVisionConfig | None = None
     images: AIImageConfig
+    videos: AIVideoConfig
     formatting: AIMessageFormattingConfig
     history: AIHistoryConfig
     files: AIFileToolConfig

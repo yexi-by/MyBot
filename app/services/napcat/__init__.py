@@ -1,18 +1,18 @@
 """NapCat 通用服务能力导出。"""
 
-from .image_archive import (
+from .media_archive import (
     ImageArchiveReader,
-    ImageArchiveTask,
-    ImageArchiveTaskRepository,
-    ImageArchiveWorker,
-    ImageArchiveWorkerFactory,
-    ImageStore,
-    ImageTooLargeError,
+    MediaArchiveTask,
+    MediaArchiveTaskRepository,
+    MediaArchiveWorker,
+    MediaArchiveWorkerFactory,
+    MediaStore,
+    MediaTooLargeError,
     InlineImageArchiveResult,
     InlineImageArchiver,
-    InvalidImageContentError,
+    InvalidMediaContentError,
     InvalidInlineImageSourceError,
-    StoredImage,
+    StoredMedia,
 )
 from .image_reader import (
     ImageReadTooLargeError,
@@ -28,17 +28,17 @@ from .group_tools import (
 
 __all__ = [
     "ImageArchiveReader",
-    "ImageArchiveTask",
-    "ImageArchiveTaskRepository",
-    "ImageArchiveWorker",
-    "ImageArchiveWorkerFactory",
-    "ImageStore",
-    "ImageTooLargeError",
+    "MediaArchiveTask",
+    "MediaArchiveTaskRepository",
+    "MediaArchiveWorker",
+    "MediaArchiveWorkerFactory",
+    "MediaStore",
+    "MediaTooLargeError",
     "InlineImageArchiveResult",
     "InlineImageArchiver",
-    "InvalidImageContentError",
+    "InvalidMediaContentError",
     "InvalidInlineImageSourceError",
-    "StoredImage",
+    "StoredMedia",
     "ImageReadTooLargeError",
     "NapCatImageBot",
     "NapCatImageReader",

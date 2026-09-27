@@ -72,10 +72,10 @@ class OpenAIService(LLMProvider):
                 continue
 
             content_items: list[dict[str, object]] = []
-            if msg.image:
+            if msg.image or msg.video:
                 if msg.text:
                     content_items.append({"type": "text", "text": msg.text})
-                for image_bytes in msg.image:
+                for image_bytes in msg.image or []:
                     mime_type = detect_mime_type(image_bytes)
                     image_data = base64.b64encode(image_bytes).decode("utf-8")
                     base64_image = f"data:{mime_type};base64,{image_data}"
@@ -88,9 +88,18 @@ class OpenAIService(LLMProvider):
                             "image_url": image_url,
                         }
                     )
+                for video_bytes in msg.video or []:
+                    mime_type = detect_mime_type(video_bytes)
+                    if not mime_type.startswith("video/"):
+                        raise ValueError("视频附件必须是可识别的视频格式")
+                    video_data = base64.b64encode(video_bytes).decode("ascii")
+                    content_items.append({
+                        "type": "video_url",
+                        "video_url": {"url": f"data:{mime_type};base64,{video_data}"},
+                    })
             raw_message: dict[str, object] = {
                 "role": msg.role,
-                "content": content_items if msg.image else msg.text,
+                "content": content_items if msg.image or msg.video else msg.text,
             }
             if msg.tool_calls:
                 raw_message["tool_calls"] = [

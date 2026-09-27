@@ -305,6 +305,14 @@ export default function AIGroupChatFields() {
         <div className="space-y-3">
       <VisionSection />
 
+      <SectionCard title="视频输入" description="开启后把当前消息和引用消息中的视频交给主模型；主模型与服务端需支持原生视频输入。">
+        <SwitchField path="plugins.ai_group_chat.videos.enabled" label="接受视频输入" description="视频仅用于当前轮，长期上下文保留文字" />
+        <NumberField path="plugins.ai_group_chat.videos.max_per_turn" label="每轮视频数量" description="0 表示不限；优先读取当前消息" />
+        <NumberField path="plugins.ai_group_chat.videos.fetch_concurrency" label="视频读取并发数" />
+        <NumberField path="plugins.ai_group_chat.videos.download_timeout_seconds" label="下载超时（秒）" />
+        <NumberField path="plugins.ai_group_chat.videos.max_video_bytes" label="单个视频字节上限" description="0 表示不限；超限时跳过并向模型说明原因" />
+      </SectionCard>
+
       <SectionCard title="Token 估算" description="按当前模型调整无 tokenizer 时的估算参数。">
         <NumberField path="plugins.ai_group_chat.token_estimator.request_overhead_tokens" label="请求固定 Token" />
         <NumberField path="plugins.ai_group_chat.token_estimator.message_overhead_tokens" label="每条消息固定 Token" />

@@ -72,9 +72,11 @@ docker compose up -d
 - `./logs:/app/logs`
 - `mybot-postgres-data:/var/lib/postgresql`
 
-`migrate` 会等待 PostgreSQL 健康后执行 migration，成功后 MyBot 才启动。应用启动时只检查 migration 版本，不会自动修改 schema。数据库和图片没有自动过期或备份机制。
+`migrate` 会等待 PostgreSQL 健康后执行 migration，成功后 MyBot 才启动。应用启动时只检查 migration 版本，不会自动修改 schema。数据库和媒体文件没有自动过期或备份机制。
 
-图片归档先读取消息段已有的本地文件，再尝试已有 URL，失败后向 NapCat 刷新来源。`storage.images.download_timeout_seconds` 分别限制首次下载、刷新信息和刷新后下载；完整读取预算为该值的三倍，任务租约在此基础上加上配置的 `lease_seconds`，为存储和状态写回保留时间。下载失败日志会记录目标主机、异常类型与底层原因；重试间隔由 `retry_delays_seconds` 决定，用尽次数后任务标记为失败。
+图片和视频共用 `storage.images` 配置及持久化目录，按 SHA-256 去重保存原文件；数据库只记录任务、文件类型、大小和存储键。引用消息时，仓库会将已归档的本地路径补回对应消息段，优先读取归档文件。归档独立于 AI 视频输入开关，关闭输入后收到的视频仍会保存，供日后引用。
+
+媒体归档先读取消息段已有的本地文件，再尝试已有 URL，失败后向 NapCat 刷新来源：图片用 `get_image`，视频用 `get_file`。`storage.images.download_timeout_seconds` 分别限制首次下载、刷新信息和刷新后下载；完整读取预算为该值的三倍，任务租约在此基础上加上配置的 `lease_seconds`，为存储和状态写回保留时间。重试间隔由 `retry_delays_seconds` 决定，用尽次数后任务标记为失败。
 
 NapCat 返回的本地缓存路径属于 NapCat 所在的文件系统。分容器部署需要把对应缓存目录以相同容器路径只读挂载到 MyBot，才能使用本地缓存兜底；没有共享缓存时会继续尝试刷新后的 URL。
 
@@ -201,6 +203,23 @@ max_context_tokens = 64000
 
 历史工具的 `max_per_call` 同时限制普通分页与前后文查询；前后文包含锚点，两侧均分其余名额，未用名额交给另一侧。
 
+### 群聊视频输入
+
+在 AI 群聊页面开启「接受视频输入」，或配置：
+
+```toml
+[plugins.ai_group_chat.videos]
+enabled = true
+max_per_turn = 2
+fetch_concurrency = 2
+download_timeout_seconds = 60
+max_video_bytes = 20971520
+```
+
+开启后，当前消息、引用消息及已内嵌转发中的视频会按来源顺序交给主模型，优先处理当前消息。主模型及服务端需支持 Chat Completions 的 `video_url` 扩展，例如 CLIProxyAPI 的 Gemini 路由；完整原文件以 `data:video/...;base64,...` 传入。该能力独立于图片的 `delivery_mode`，不调用图片描述模型。关闭时只保留视频消息元信息，不读取视频作为模型输入。
+
+`max_per_turn` 和 `max_video_bytes` 为 `0` 时不限。超限、下载失败或超时会返回明确的部分错误，其余视频与文字继续处理。归档文件受系统「媒体存储」的 `storage.images.max_bytes` 限制；模型输入受这里的 `max_video_bytes` 限制。原文件持久归档；模型请求里的视频字节只保留到本轮结束，后续轮次可以通过引用原消息重新读取。示例配置默认关闭视频输入，以便按主模型能力选择开启。
+
 ### Neavo 群聊图像插件
 
 群成员使用配置的 `generate_command` 触发文生图，使用 `describe_command` 加图片或回复含图消息进行图片反推。输入和输出图片分别由 `max_input_image_bytes`、`max_output_image_bytes` 控制，`0` 表示不限；反推格式列表由 `allowed_input_mime_types` 控制，空列表表示不设 MIME 白名单。
@@ -228,10 +247,10 @@ describe_command = "#反推"
 
 - `app/api/`：NapCat Action 封装。
 - `app/models/`：NapCat 协议模型和 JSON 边界类型。
-- `app/services/napcat/`：可复用的 NapCat 本地工具和图片读取服务。
+- `app/services/napcat/`：可复用的 NapCat 本地工具和媒体读取服务。
 - `app/services/llm/`：模型路由、OpenAI 协议、MCP 和工具注册。
 - `app/plugins/`：插件业务编排。
-- `app/database/`：PostgreSQL、migration、群消息 repository 和图片任务；不保存图片字节。
+- `app/database/`：PostgreSQL、migration、群消息 repository 和媒体任务；不保存媒体字节。
 - `app/config/`：唯一配置模型、加载器、配置版本和目录监听。
 - `app/webui/`：配置控制台 API、保留 TOML 注释的写回和 SPA 静态文件挂载。
 

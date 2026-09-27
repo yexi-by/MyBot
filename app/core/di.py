@@ -27,8 +27,8 @@ from app.plugins import (
 )
 from app.services import ConversationContextStore, LLMHandler, MCPToolManager
 from app.services.napcat import (
-    ImageArchiveWorkerFactory,
-    ImageStore,
+    MediaArchiveWorkerFactory,
+    MediaStore,
     InlineImageArchiver,
 )
 
@@ -114,11 +114,11 @@ class MyProvider(Provider):
         runtime: PostgreSQLRuntime,
         config: MyBotConfig,
     ) -> PostgreSQLMessageRepository:
-        """创建群消息、撤回和图片任务共用的 PostgreSQL repository。"""
+        """创建群消息、撤回和媒体任务共用的 PostgreSQL repository。"""
         return PostgreSQLMessageRepository(
             session_factory=runtime.session_factory,
-            image_root=Path(config.storage.images.directory).resolve(),
-            image_max_attempts=1 + len(config.storage.images.retry_delays_seconds),
+            media_root=Path(config.storage.images.directory).resolve(),
+            media_max_attempts=1 + len(config.storage.images.retry_delays_seconds),
         )
 
     @provide(scope=Scope.APP)
@@ -187,30 +187,30 @@ class MyProvider(Provider):
         return ConversationContextStore()
 
     @provide(scope=Scope.APP)
-    def get_image_store(self, config: MyBotConfig) -> ImageStore:
-        """创建内容寻址的群图片文件存储。"""
-        return ImageStore(
+    def get_media_store(self, config: MyBotConfig) -> MediaStore:
+        """创建内容寻址的群图片和视频文件存储。"""
+        return MediaStore(
             root=Path(config.storage.images.directory).resolve(),
-            max_image_bytes=config.storage.images.max_bytes,
+            max_media_bytes=config.storage.images.max_bytes,
         )
 
     @provide(scope=Scope.APP)
-    def get_image_archive_worker_factory(
+    def get_media_archive_worker_factory(
         self,
         repository: PostgreSQLMessageRepository,
         direct_httpx: DirectHttpx,
-        image_store: ImageStore,
+        media_store: MediaStore,
         config: MyBotConfig,
-    ) -> ImageArchiveWorkerFactory:
-        """创建按 NapCat 会话绑定机器人身份的图片归档 worker 工厂。"""
+    ) -> MediaArchiveWorkerFactory:
+        """创建按 NapCat 会话绑定机器人身份的媒体归档 worker 工厂。"""
         storage = config.storage.images
-        return ImageArchiveWorkerFactory(
+        return MediaArchiveWorkerFactory(
             repository=repository,
             http_client=direct_httpx,
-            store=image_store,
+            store=media_store,
             concurrency=storage.download_concurrency,
             download_timeout_seconds=storage.download_timeout_seconds,
-            max_image_bytes=storage.max_bytes,
+            max_media_bytes=storage.max_bytes,
             lease_seconds=storage.lease_seconds,
             poll_interval_seconds=storage.worker_poll_interval_seconds,
             retry_delays_seconds=storage.retry_delays_seconds,
@@ -219,10 +219,10 @@ class MyProvider(Provider):
     @provide(scope=Scope.APP)
     def get_inline_image_archiver(
         self,
-        image_store: ImageStore,
+        media_store: MediaStore,
     ) -> InlineImageArchiver:
         """创建出站 base64 图片的主动归档服务。"""
-        return InlineImageArchiver(store=image_store)
+        return InlineImageArchiver(store=media_store)
 
     @provide(scope=Scope.SESSION)
     def get_bot_client(

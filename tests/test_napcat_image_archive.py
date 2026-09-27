@@ -12,18 +12,19 @@ from typing import cast
 
 import httpx
 
-from app.models import ImageArchiveTask, Response, StoredImage
-from app.services.napcat.image_archive import (
+from app.models import MediaArchiveTask, Response, StoredMedia
+from app.services.napcat.media_archive import (
     ImageArchiveReader,
-    ImageArchiveTaskRepository,
-    ImageArchiveWorker as RealImageArchiveWorker,
-    ImageArchiveWorkerFactory as RealImageArchiveWorkerFactory,
-    ImageStore as RealImageStore,
-    ImageTooLargeError,
+    MediaArchiveTaskRepository,
+    MediaArchiveWorker as RealMediaArchiveWorker,
+    MediaArchiveWorkerFactory as RealMediaArchiveWorkerFactory,
+    MediaStore as RealMediaStore,
+    MediaTooLargeError,
     InlineImageArchiver,
-    InvalidImageContentError,
+    InvalidMediaContentError,
     InvalidInlineImageSourceError,
 )
+from app.services.napcat.video_reader import NapCatVideoReader
 from app.services.napcat.image_reader import (
     NapCatImageReader,
     NapCatImageReadResult,
@@ -38,31 +39,35 @@ TEST_POLL_INTERVAL_SECONDS = 1.0
 TEST_RETRY_DELAYS_SECONDS = (1.0, 5.0, 20.0)
 
 
-def ImageStore(
-    *, root: Path, max_image_bytes: int = TEST_MAX_IMAGE_BYTES
-) -> RealImageStore:
+def MediaStore(
+    *, root: Path, max_media_bytes: int = TEST_MAX_IMAGE_BYTES
+) -> RealMediaStore:
     """用显式测试上限构造图片存储。"""
-    return RealImageStore(root=root, max_image_bytes=max_image_bytes)
+    return RealMediaStore(root=root, max_media_bytes=max_media_bytes)
 
 
-def ImageArchiveWorker(
+def MediaArchiveWorker(
     *,
     bot_id: str,
     repository: object,
     reader: object,
-    store: RealImageStore,
+    store: RealMediaStore,
     concurrency: int = TEST_CONCURRENCY,
     read_timeout_seconds: float = TEST_READ_TIMEOUT_SECONDS,
     lease_seconds: float = TEST_LEASE_SECONDS,
     poll_interval_seconds: float = TEST_POLL_INTERVAL_SECONDS,
     retry_delays_seconds: tuple[float, ...] = TEST_RETRY_DELAYS_SECONDS,
     utc_now: Callable[[], datetime] | None = None,
-) -> RealImageArchiveWorker:
+) -> RealMediaArchiveWorker:
     """用显式测试运行参数构造归档 worker。"""
-    return RealImageArchiveWorker(
+    return RealMediaArchiveWorker(
         bot_id=bot_id,
-        repository=cast(ImageArchiveTaskRepository, repository),
+        repository=cast(MediaArchiveTaskRepository, repository),
         reader=cast(ImageArchiveReader, reader),
+        video_reader=NapCatVideoReader(
+            bot=FakeImageBot(), http_client=None, fetch_concurrency=concurrency,
+            download_timeout_seconds=read_timeout_seconds, max_video_bytes=store.max_media_bytes,
+        ),
         store=store,
         concurrency=concurrency,
         read_timeout_seconds=read_timeout_seconds,
@@ -73,26 +78,26 @@ def ImageArchiveWorker(
     )
 
 
-def ImageArchiveWorkerFactory(
+def MediaArchiveWorkerFactory(
     *,
     repository: object,
     http_client: httpx.AsyncClient | None,
-    store: RealImageStore,
+    store: RealMediaStore,
     concurrency: int = TEST_CONCURRENCY,
     download_timeout_seconds: float = TEST_READ_TIMEOUT_SECONDS,
-    max_image_bytes: int = TEST_MAX_IMAGE_BYTES,
+    max_media_bytes: int = TEST_MAX_IMAGE_BYTES,
     lease_seconds: float = TEST_LEASE_SECONDS,
     poll_interval_seconds: float = TEST_POLL_INTERVAL_SECONDS,
     retry_delays_seconds: tuple[float, ...] = TEST_RETRY_DELAYS_SECONDS,
-) -> RealImageArchiveWorkerFactory:
+) -> RealMediaArchiveWorkerFactory:
     """用显式测试运行参数构造归档 worker 工厂。"""
-    return RealImageArchiveWorkerFactory(
-        repository=cast(ImageArchiveTaskRepository, repository),
+    return RealMediaArchiveWorkerFactory(
+        repository=cast(MediaArchiveTaskRepository, repository),
         http_client=http_client,
         store=store,
         concurrency=concurrency,
         download_timeout_seconds=download_timeout_seconds,
-        max_image_bytes=max_image_bytes,
+        max_media_bytes=max_media_bytes,
         lease_seconds=lease_seconds,
         poll_interval_seconds=poll_interval_seconds,
         retry_delays_seconds=retry_delays_seconds,
@@ -111,11 +116,11 @@ GIF_BYTES = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff"
 class FakeArchiveRepository:
     """记录 worker 与租约仓库之间的调用。"""
 
-    def __init__(self, *, tasks: Sequence[ImageArchiveTask]) -> None:
+    def __init__(self, *, tasks: Sequence[MediaArchiveTask]) -> None:
         """初始化待认领任务和调用记录。"""
-        self.tasks: list[ImageArchiveTask] = list(tasks)
+        self.tasks: list[MediaArchiveTask] = list(tasks)
         self.claim_calls: list[tuple[str, int, float]] = []
-        self.complete_calls: list[tuple[int, str, StoredImage]] = []
+        self.complete_calls: list[tuple[int, str, StoredMedia]] = []
         self.fail_calls: list[tuple[int, str, datetime | None]] = []
 
     async def claim_ready(
@@ -124,7 +129,7 @@ class FakeArchiveRepository:
         bot_id: str,
         limit: int,
         lease_seconds: float,
-    ) -> Sequence[ImageArchiveTask]:
+    ) -> Sequence[MediaArchiveTask]:
         """一次返回所有预置任务。"""
         self.claim_calls.append((bot_id, limit, lease_seconds))
         claimed = self.tasks
@@ -136,10 +141,10 @@ class FakeArchiveRepository:
         *,
         task_id: int,
         lease_token: str,
-        image: StoredImage,
+        media: StoredMedia,
     ) -> bool:
         """记录成功完成的任务。"""
-        self.complete_calls.append((task_id, lease_token, image))
+        self.complete_calls.append((task_id, lease_token, media))
         return True
 
     async def fail(
@@ -218,6 +223,9 @@ class BlockingReader:
 class FakeImageBot:
     """工厂测试中与指定 bot_id 绑定的 NapCat 实例。"""
 
+    async def get_file(self, file_id: str | None = None, file: str | None = None) -> Response:
+        return Response(status="failed", retcode=404)
+
     async def get_image(
         self,
         file_id: str | None = None,
@@ -228,18 +236,18 @@ class FakeImageBot:
         return Response(status="failed", retcode=404, message="图片不存在")
 
 
-class ImageStoreTest(unittest.IsolatedAsyncioTestCase):
+class MediaStoreTest(unittest.IsolatedAsyncioTestCase):
     """验证图片真实类型、大小限制和内容去重。"""
 
     async def test_valid_image_is_stored_by_sha256_and_deduplicated(self) -> None:
         """同一内容只对应一个相对存储键。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            store = ImageStore(root=root)
+            store = MediaStore(root=root)
 
             first, second = await asyncio.gather(
-                store.store(image_bytes=PNG_BYTES),
-                store.store(image_bytes=PNG_BYTES),
+                store.store(media_type="image", content=PNG_BYTES),
+                store.store(media_type="image", content=PNG_BYTES),
             )
 
             digest = hashlib.sha256(PNG_BYTES).hexdigest()
@@ -259,10 +267,10 @@ class ImageStoreTest(unittest.IsolatedAsyncioTestCase):
         """超限内容不会创建目录或文件。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "images"
-            store = ImageStore(root=root, max_image_bytes=4)
+            store = MediaStore(root=root, max_media_bytes=4)
 
-            with self.assertRaises(ImageTooLargeError):
-                await store.store(image_bytes=PNG_BYTES)
+            with self.assertRaises(MediaTooLargeError):
+                await store.store(media_type="image", content=PNG_BYTES)
 
             self.assertFalse(root.exists())
 
@@ -270,10 +278,10 @@ class ImageStoreTest(unittest.IsolatedAsyncioTestCase):
         """不信任文件名或调用方声称的 MIME。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "images"
-            store = ImageStore(root=root)
+            store = MediaStore(root=root)
 
-            with self.assertRaises(InvalidImageContentError):
-                await store.store(image_bytes=b"not an image")
+            with self.assertRaises(InvalidMediaContentError):
+                await store.store(media_type="image", content=b"not an image")
 
             self.assertFalse(root.exists())
 
@@ -285,7 +293,7 @@ class InlineImageArchiverTest(unittest.IsolatedAsyncioTestCase):
         encoded = base64.b64encode(PNG_BYTES).decode("ascii")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "images"
-            archiver = InlineImageArchiver(store=ImageStore(root=root))
+            archiver = InlineImageArchiver(store=MediaStore(root=root))
 
             base64_result, data_url_result = await asyncio.gather(
                 archiver.archive(source=f"BASE64://{encoded}"),
@@ -308,7 +316,7 @@ class InlineImageArchiverTest(unittest.IsolatedAsyncioTestCase):
         """非法 base64 不会产生任何图片文件。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "images"
-            archiver = InlineImageArchiver(store=ImageStore(root=root))
+            archiver = InlineImageArchiver(store=MediaStore(root=root))
 
             with self.assertRaises(InvalidInlineImageSourceError):
                 await archiver.archive(source="base64://%%%%")
@@ -320,7 +328,7 @@ class InlineImageArchiverTest(unittest.IsolatedAsyncioTestCase):
         encoded = base64.b64encode(PNG_BYTES).decode("ascii")
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "images"
-            archiver = InlineImageArchiver(store=ImageStore(root=root))
+            archiver = InlineImageArchiver(store=MediaStore(root=root))
 
             with self.assertRaises(InvalidInlineImageSourceError):
                 await archiver.archive(
@@ -335,13 +343,13 @@ class InlineImageArchiverTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "images"
             archiver = InlineImageArchiver(
-                store=ImageStore(
+                store=MediaStore(
                     root=root,
-                    max_image_bytes=len(PNG_BYTES) - 1,
+                    max_media_bytes=len(PNG_BYTES) - 1,
                 )
             )
 
-            with self.assertRaises(ImageTooLargeError):
+            with self.assertRaises(MediaTooLargeError):
                 await archiver.archive(source=f"base64://{encoded}")
 
             self.assertFalse(root.exists())
@@ -397,13 +405,14 @@ class ImageReaderSizeLimitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("超过上限", result.error or "")
 
 
-class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
+class MediaArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
     """验证 worker 的租约、并发、超时和四次尝试。"""
 
-    def _task(self, *, task_id: int, attempt_number: int = 1) -> ImageArchiveTask:
+    def _task(self, *, task_id: int, attempt_number: int = 1) -> MediaArchiveTask:
         """构造不含任何视频字段的图片任务。"""
-        return ImageArchiveTask(
+        return MediaArchiveTask(
             task_id=task_id,
+            media_type="image",
             lease_token=f"unpredictable-token-{task_id}",
             attempt_number=attempt_number,
             label=f"图片 {task_id}",
@@ -417,11 +426,11 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
         """默认认领十六张、20 秒读取超时和 45 秒租约。"""
         repository = FakeArchiveRepository(tasks=[self._task(task_id=1)])
         with tempfile.TemporaryDirectory() as temp_dir:
-            worker = ImageArchiveWorker(
+            worker = MediaArchiveWorker(
                 bot_id="bot-10001",
                 repository=repository,
                 reader=SuccessfulReader(),
-                store=ImageStore(root=Path(temp_dir)),
+                store=MediaStore(root=Path(temp_dir)),
             )
 
             processed = await worker.run_once()
@@ -438,14 +447,14 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
         """工厂在确定 bot_id 后才创建带限量 reader 的 worker。"""
         repository = FakeArchiveRepository(tasks=[])
         with tempfile.TemporaryDirectory() as temp_dir:
-            store = ImageStore(root=Path(temp_dir), max_image_bytes=1024)
-            factory = ImageArchiveWorkerFactory(
+            store = MediaStore(root=Path(temp_dir), max_media_bytes=1024)
+            factory = MediaArchiveWorkerFactory(
                 repository=repository,
                 http_client=None,
                 store=store,
                 concurrency=3,
                 download_timeout_seconds=12.0,
-                max_image_bytes=1024,
+                max_media_bytes=1024,
                 lease_seconds=45.0,
                 retry_delays_seconds=(1.0, 2.0, 3.0),
             )
@@ -470,6 +479,8 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
     async def test_direct_download_timeout_still_allows_refresh_and_archive(self) -> None:
         """首次下载耗尽预算后，刷新和新 URL 下载仍能完成归档。"""
         class RefreshBot:
+            async def get_file(self, file_id: str | None = None, file: str | None = None) -> Response:
+                return Response(status="failed", retcode=404)
             async def get_image(
                 self, file_id: str | None = None, file: str | None = None,
             ) -> Response:
@@ -487,9 +498,9 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
         repository = FakeArchiveRepository(tasks=[self._task(task_id=1)])
         with tempfile.TemporaryDirectory() as temp_dir:
             async with httpx.AsyncClient(transport=httpx.MockTransport(download)) as client:
-                factory = ImageArchiveWorkerFactory(
+                factory = MediaArchiveWorkerFactory(
                     repository=repository, http_client=client,
-                    store=ImageStore(root=Path(temp_dir)),
+                    store=MediaStore(root=Path(temp_dir)),
                     download_timeout_seconds=0.1,
                 )
                 worker = factory.create(bot_id="bot-A", bot=RefreshBot())
@@ -503,14 +514,14 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
         """读取上限和最终存储上限不能分叉。"""
         repository = FakeArchiveRepository(tasks=[])
         with tempfile.TemporaryDirectory() as temp_dir:
-            store = ImageStore(root=Path(temp_dir), max_image_bytes=1024)
+            store = MediaStore(root=Path(temp_dir), max_media_bytes=1024)
 
             with self.assertRaisesRegex(ValueError, "大小上限必须一致"):
-                _ = ImageArchiveWorkerFactory(
+                _ = MediaArchiveWorkerFactory(
                     repository=repository,
                     http_client=None,
                     store=store,
-                    max_image_bytes=2048,
+                    max_media_bytes=2048,
                 )
 
     async def test_failures_retry_after_one_five_and_twenty_seconds(self) -> None:
@@ -523,11 +534,11 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         with tempfile.TemporaryDirectory() as temp_dir:
-            worker = ImageArchiveWorker(
+            worker = MediaArchiveWorker(
                 bot_id="bot-10001",
                 repository=repository,
                 reader=FailedReader(),
-                store=ImageStore(root=Path(temp_dir)),
+                store=MediaStore(root=Path(temp_dir)),
                 utc_now=lambda: frozen_now,
             )
 
@@ -548,11 +559,11 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
         """即使抽象 reader 自身不限时，worker 也会终止本次读取。"""
         repository = FakeArchiveRepository(tasks=[self._task(task_id=1)])
         with tempfile.TemporaryDirectory() as temp_dir:
-            worker = ImageArchiveWorker(
+            worker = MediaArchiveWorker(
                 bot_id="bot-10001",
                 repository=repository,
                 reader=BlockingReader(sleep_seconds=1.0),
-                store=ImageStore(root=Path(temp_dir)),
+                store=MediaStore(root=Path(temp_dir)),
                 read_timeout_seconds=0.01,
             )
 
@@ -568,11 +579,11 @@ class ImageArchiveWorkerTest(unittest.IsolatedAsyncioTestCase):
         )
         reader = BlockingReader()
         with tempfile.TemporaryDirectory() as temp_dir:
-            worker = ImageArchiveWorker(
+            worker = MediaArchiveWorker(
                 bot_id="bot-10001",
                 repository=repository,
                 reader=reader,
-                store=ImageStore(root=Path(temp_dir)),
+                store=MediaStore(root=Path(temp_dir)),
             )
 
             processed = await worker.run_once()

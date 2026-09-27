@@ -27,7 +27,7 @@ from app.models import (
     Text,
     to_json_value,
 )
-from app.services.napcat import ImageStore, InlineImageArchiver
+from app.services.napcat import MediaStore, InlineImageArchiver
 
 
 class FakeSentMessageRecorder:
@@ -54,9 +54,9 @@ class RecordingClient(BOTClient):
             websocket=cast(WebSocket, FakeWebSocket()),
             sent_message_recorder=FakeSentMessageRecorder(),
             inline_image_archiver=InlineImageArchiver(
-                store=ImageStore(
+                store=MediaStore(
                     root=Path(self._image_temp_dir.name),
-                    max_image_bytes=1024 * 1024,
+                    max_media_bytes=1024 * 1024,
                 )
             ),
             action_timeout_seconds=120,

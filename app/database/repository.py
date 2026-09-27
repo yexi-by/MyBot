@@ -29,20 +29,22 @@ from sqlalchemy.sql import Select
 from app.models import (
     GroupMessage,
     Image,
-    ImageArchiveTask,
+    Video,
+    MediaType,
+    MediaArchiveTask,
     JsonObject,
     JsonValue,
     MessageSegment,
-    StoredImage,
+    StoredMedia,
 )
 
-from .models import GroupMessageImageRow, GroupMessageRow
+from .models import GroupMessageMediaRow, GroupMessageRow
 from .schemas import (
     GroupDataScope,
-    ImageArchiveStatus,
+    MediaArchiveStatus,
     MessageCursor,
     MessageDirection,
-    StoredGroupImage,
+    StoredGroupMedia,
     StoredGroupMessage,
 )
 
@@ -64,9 +66,10 @@ _FORWARD_CONTENT_KEYS = ("message", "content", "messages")
 
 
 @dataclass(frozen=True, slots=True)
-class _PreparedImage:
-    """仅在消息事务内传递的图片任务来源。"""
+class _PreparedMedia:
+    """仅在消息事务内传递的媒体任务来源。"""
 
+    media_type: MediaType
     segment_index: int
     source_file: str | None
     source_url: str | None
@@ -75,21 +78,21 @@ class _PreparedImage:
 
 
 class PostgreSQLMessageRepository:
-    """实现群消息读写、撤回归档和图片任务租约。"""
+    """实现群消息读写、撤回归档和媒体任务租约。"""
 
     def __init__(
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],
-        image_root: Path,
-        image_max_attempts: int,
+        media_root: Path,
+        media_max_attempts: int,
     ) -> None:
-        """保留 session factory 和只用于重组已归档图片的根目录。"""
+        """保留 session factory 和只用于重组已归档媒体的根目录。"""
         self._session_factory: async_sessionmaker[AsyncSession] = session_factory
-        self._image_root: Path = image_root
-        if image_max_attempts < 1:
-            raise ValueError("image_max_attempts 必须大于等于 1")
-        self._image_max_attempts: int = image_max_attempts
+        self._media_root: Path = media_root
+        if media_max_attempts < 1:
+            raise ValueError("media_max_attempts 必须大于等于 1")
+        self._media_max_attempts: int = media_max_attempts
 
     async def get_active(
         self, *, scope: GroupDataScope, message_id: str
@@ -220,7 +223,7 @@ class PostgreSQLMessageRepository:
         statement = (
             select(GroupMessageRow)
             .join(selected_ids, GroupMessageRow.id == selected_ids.c.row_id)
-            .options(selectinload(GroupMessageRow.images))
+            .options(selectinload(GroupMessageRow.media))
             .order_by(GroupMessageRow.occurred_at.asc(), GroupMessageRow.id.asc())
         )
         return await self._execute_message_list(statement=statement)
@@ -233,7 +236,7 @@ class PostgreSQLMessageRepository:
             "outgoing" if message.post_type == "message_sent" else "incoming"
         )
         sender_name = message.sender.card or message.sender.nickname
-        segments, images = self._prepare_segments(message.message)
+        segments, media = self._prepare_segments(message.message)
         async with self._session_factory() as session, session.begin():
             if direction == "outgoing":
                 row_id, echo_inserted = await self._insert_outgoing_echo(
@@ -248,17 +251,17 @@ class PostgreSQLMessageRepository:
                     segments=segments,
                 )
                 if echo_inserted:
-                    await self._sync_image_tasks(
+                    await self._sync_media_tasks(
                         session=session,
                         message_row_id=row_id,
-                        images=images,
+                        media=media,
                         next_attempt_at=datetime.now(UTC),
                     )
                 else:
-                    await self._merge_echo_image_sources(
+                    await self._merge_echo_media_sources(
                         session=session,
                         message_row_id=row_id,
-                        images=images,
+                        media=media,
                         ready_at=datetime.now(UTC),
                     )
                 return
@@ -275,10 +278,10 @@ class PostgreSQLMessageRepository:
                 segments=segments,
             )
             if inserted:
-                await self._sync_image_tasks(
+                await self._sync_media_tasks(
                     session=session,
                     message_row_id=row_id,
-                    images=images,
+                    media=media,
                     next_attempt_at=datetime.now(UTC),
                 )
 
@@ -294,7 +297,7 @@ class PostgreSQLMessageRepository:
         self._validate_message_id(message_id)
         actual_time = occurred_at or datetime.now(UTC)
         self._validate_datetime(actual_time, name="occurred_at")
-        stored_segments, images = self._prepare_segments(segments)
+        stored_segments, media = self._prepare_segments(segments)
         async with self._session_factory() as session, session.begin():
             statement = insert(GroupMessageRow).values(
                 bot_id=scope.bot_id,
@@ -320,10 +323,10 @@ class PostgreSQLMessageRepository:
             row_id = await session.scalar(statement)
             if row_id is None:
                 raise RuntimeError("出站消息 upsert 未返回行 ID")
-            await self._sync_image_tasks(
+            await self._sync_media_tasks(
                 session=session,
                 message_row_id=row_id,
-                images=images,
+                media=media,
                 next_attempt_at=datetime.now(UTC),
             )
 
@@ -366,7 +369,7 @@ class PostgreSQLMessageRepository:
         bot_id: str,
         limit: int,
         lease_seconds: float,
-    ) -> Sequence[ImageArchiveTask]:
+    ) -> Sequence[MediaArchiveTask]:
         """原子认领就绪任务或已过期租约，并递增尝试次数。"""
         self._validate_limit(limit)
         if bot_id.strip() == "":
@@ -375,19 +378,19 @@ class PostgreSQLMessageRepository:
             raise ValueError("lease_seconds 必须大于 0")
         now = datetime.now(UTC)
         leased_until = now + timedelta(seconds=lease_seconds)
-        tasks: list[ImageArchiveTask] = []
+        tasks: list[MediaArchiveTask] = []
         async with self._session_factory() as session, session.begin():
             _ = await session.execute(
-                update(GroupMessageImageRow)
+                update(GroupMessageMediaRow)
                 .where(
-                    GroupMessageImageRow.message_row_id.in_(
+                    GroupMessageMediaRow.message_row_id.in_(
                         select(GroupMessageRow.id).where(
                             GroupMessageRow.bot_id == bot_id
                         )
                     ),
-                    GroupMessageImageRow.status == "leased",
-                    GroupMessageImageRow.leased_until <= now,
-                    GroupMessageImageRow.attempt_count >= self._image_max_attempts,
+                    GroupMessageMediaRow.status == "leased",
+                    GroupMessageMediaRow.leased_until <= now,
+                    GroupMessageMediaRow.attempt_count >= self._media_max_attempts,
                 )
                 .values(
                     status="failed",
@@ -399,34 +402,34 @@ class PostgreSQLMessageRepository:
             )
             ready = or_(
                 and_(
-                    GroupMessageImageRow.status.in_(("pending", "retry")),
+                    GroupMessageMediaRow.status.in_(("pending", "retry")),
                     or_(
-                        GroupMessageImageRow.next_attempt_at.is_(None),
-                        GroupMessageImageRow.next_attempt_at <= now,
+                        GroupMessageMediaRow.next_attempt_at.is_(None),
+                        GroupMessageMediaRow.next_attempt_at <= now,
                     ),
                 ),
                 and_(
-                    GroupMessageImageRow.status == "leased",
-                    GroupMessageImageRow.leased_until <= now,
+                    GroupMessageMediaRow.status == "leased",
+                    GroupMessageMediaRow.leased_until <= now,
                 ),
             )
             statement = (
-                select(GroupMessageImageRow)
+                select(GroupMessageMediaRow)
                 .join(
                     GroupMessageRow,
-                    GroupMessageRow.id == GroupMessageImageRow.message_row_id,
+                    GroupMessageRow.id == GroupMessageMediaRow.message_row_id,
                 )
                 .where(
                     GroupMessageRow.bot_id == bot_id,
                     ready,
-                    GroupMessageImageRow.attempt_count < self._image_max_attempts,
+                    GroupMessageMediaRow.attempt_count < self._media_max_attempts,
                 )
                 .order_by(
-                    GroupMessageImageRow.next_attempt_at.asc().nullsfirst(),
-                    GroupMessageImageRow.id.asc(),
+                    GroupMessageMediaRow.next_attempt_at.asc().nullsfirst(),
+                    GroupMessageMediaRow.id.asc(),
                 )
                 .limit(limit)
-                .with_for_update(of=GroupMessageImageRow, skip_locked=True)
+                .with_for_update(of=GroupMessageMediaRow, skip_locked=True)
             )
             rows = list((await session.scalars(statement)).all())
             for row in rows:
@@ -436,11 +439,12 @@ class PostgreSQLMessageRepository:
                 row.leased_until = leased_until
                 row.attempt_count += 1
                 tasks.append(
-                    ImageArchiveTask(
+                    MediaArchiveTask(
                         task_id=row.id,
+                        media_type=cast(MediaType, row.media_type),
                         lease_token=lease_token,
                         attempt_number=row.attempt_count,
-                        label=f"群消息图片任务 {row.id}",
+                        label=f"群消息媒体任务 {row.id}",
                         file=row.source_file,
                         file_id=row.file_id,
                         path=row.source_path,
@@ -454,29 +458,29 @@ class PostgreSQLMessageRepository:
         *,
         task_id: int,
         lease_token: str,
-        image: StoredImage,
+        media: StoredMedia,
     ) -> bool:
-        """只允许当前租约持有者完成图片任务。"""
+        """只允许当前租约持有者完成媒体任务。"""
         self._validate_task_lease(task_id=task_id, lease_token=lease_token)
         async with self._session_factory() as session, session.begin():
             statement = (
-                update(GroupMessageImageRow)
+                update(GroupMessageMediaRow)
                 .where(
-                    GroupMessageImageRow.id == task_id,
-                    GroupMessageImageRow.status == "leased",
-                    GroupMessageImageRow.lease_token == lease_token,
+                    GroupMessageMediaRow.id == task_id,
+                    GroupMessageMediaRow.status == "leased",
+                    GroupMessageMediaRow.lease_token == lease_token,
                 )
                 .values(
                     status="stored",
-                    storage_key=image.storage_key,
-                    mime_type=image.mime_type,
-                    size_bytes=image.size_bytes,
+                    storage_key=media.storage_key,
+                    mime_type=media.mime_type,
+                    size_bytes=media.size_bytes,
                     source_path=None,
                     lease_token=None,
                     leased_until=None,
                     next_attempt_at=None,
                 )
-                .returning(GroupMessageImageRow.id)
+                .returning(GroupMessageMediaRow.id)
             )
             return await session.scalar(statement) is not None
 
@@ -493,11 +497,11 @@ class PostgreSQLMessageRepository:
             self._validate_datetime(retry_at, name="retry_at")
         async with self._session_factory() as session, session.begin():
             row = await session.scalar(
-                select(GroupMessageImageRow)
+                select(GroupMessageMediaRow)
                 .where(
-                    GroupMessageImageRow.id == task_id,
-                    GroupMessageImageRow.status == "leased",
-                    GroupMessageImageRow.lease_token == lease_token,
+                    GroupMessageMediaRow.id == task_id,
+                    GroupMessageMediaRow.status == "leased",
+                    GroupMessageMediaRow.lease_token == lease_token,
                 )
                 .with_for_update()
             )
@@ -505,7 +509,7 @@ class PostgreSQLMessageRepository:
                 return False
             should_retry = (
                 retry_at is not None
-                and row.attempt_count < self._image_max_attempts
+                and row.attempt_count < self._media_max_attempts
             )
             row.status = "retry" if should_retry else "failed"
             row.next_attempt_at = retry_at if should_retry else None
@@ -528,7 +532,7 @@ class PostgreSQLMessageRepository:
     ) -> Select[tuple[GroupMessageRow]]:
         """构造统一排除撤回消息的 select。"""
         statement = select(GroupMessageRow).options(
-            selectinload(GroupMessageRow.images)
+            selectinload(GroupMessageRow.media)
         ).where(*self._active_conditions(scope=scope))
         if sender_id is not None:
             statement = statement.where(GroupMessageRow.sender_id == sender_id)
@@ -555,7 +559,7 @@ class PostgreSQLMessageRepository:
         """在指定 session 中按复合唯一身份读取消息。"""
         statement = (
             select(GroupMessageRow)
-            .options(selectinload(GroupMessageRow.images))
+            .options(selectinload(GroupMessageRow.media))
             .where(
                 GroupMessageRow.bot_id == scope.bot_id,
                 GroupMessageRow.group_id == scope.group_id,
@@ -678,33 +682,34 @@ class PostgreSQLMessageRepository:
             raise RuntimeError("出站 echo 冲突后无法读取对应行")
         return existing_id, False
 
-    async def _sync_image_tasks(
+    async def _sync_media_tasks(
         self,
         *,
         session: AsyncSession,
         message_row_id: int,
-        images: list[_PreparedImage],
+        media: list[_PreparedMedia],
         next_attempt_at: datetime,
     ) -> None:
-        """使图片任务与权威消息段一致，不重置已完成任务。"""
-        image_indexes = [image.segment_index for image in images]
-        obsolete_condition = GroupMessageImageRow.message_row_id == message_row_id
-        if image_indexes:
+        """使媒体任务与权威消息段一致，不重置已完成任务。"""
+        media_indexes = [(item.segment_index, item.media_type) for item in media]
+        obsolete_condition = GroupMessageMediaRow.message_row_id == message_row_id
+        if media_indexes:
             obsolete_condition = and_(
                 obsolete_condition,
-                GroupMessageImageRow.segment_index.not_in(image_indexes),
+                tuple_(GroupMessageMediaRow.segment_index, GroupMessageMediaRow.media_type).not_in(media_indexes),
             )
         _ = await session.execute(
-            delete(GroupMessageImageRow).where(obsolete_condition)
+            delete(GroupMessageMediaRow).where(obsolete_condition)
         )
-        for image in images:
-            statement = insert(GroupMessageImageRow).values(
+        for item in media:
+            statement = insert(GroupMessageMediaRow).values(
                 message_row_id=message_row_id,
-                segment_index=image.segment_index,
-                source_file=image.source_file,
-                source_url=image.source_url,
-                source_path=image.source_path,
-                file_id=image.file_id,
+                media_type=item.media_type,
+                segment_index=item.segment_index,
+                source_file=item.source_file,
+                source_url=item.source_url,
+                source_path=item.source_path,
+                file_id=item.file_id,
                 status="pending",
                 attempt_count=0,
                 next_attempt_at=next_attempt_at,
@@ -714,24 +719,24 @@ class PostgreSQLMessageRepository:
                 and_(
                     excluded.source_file.is_not(None),
                     excluded.source_file.is_distinct_from(
-                        GroupMessageImageRow.source_file
+                        GroupMessageMediaRow.source_file
                     ),
                 ),
                 and_(
                     excluded.source_url.is_not(None),
                     excluded.source_url.is_distinct_from(
-                        GroupMessageImageRow.source_url
+                        GroupMessageMediaRow.source_url
                     ),
                 ),
                 and_(
                     excluded.source_path.is_not(None),
                     excluded.source_path.is_distinct_from(
-                        GroupMessageImageRow.source_path
+                        GroupMessageMediaRow.source_path
                     ),
                 ),
                 and_(
                     excluded.file_id.is_not(None),
-                    excluded.file_id.is_distinct_from(GroupMessageImageRow.file_id),
+                    excluded.file_id.is_distinct_from(GroupMessageMediaRow.file_id),
                 ),
             )
             _ = await session.execute(
@@ -740,116 +745,117 @@ class PostgreSQLMessageRepository:
                     set_={
                         "source_file": func.coalesce(
                             excluded.source_file,
-                            GroupMessageImageRow.source_file,
+                            GroupMessageMediaRow.source_file,
                         ),
                         "source_url": func.coalesce(
                             excluded.source_url,
-                            GroupMessageImageRow.source_url,
+                            GroupMessageMediaRow.source_url,
                         ),
                         "source_path": func.coalesce(
                             excluded.source_path,
-                            GroupMessageImageRow.source_path,
+                            GroupMessageMediaRow.source_path,
                         ),
                         "file_id": func.coalesce(
                             excluded.file_id,
-                            GroupMessageImageRow.file_id,
+                            GroupMessageMediaRow.file_id,
                         ),
                         "next_attempt_at": case(
                             (
                                 and_(
-                                    GroupMessageImageRow.status == "retry",
+                                    GroupMessageMediaRow.status == "retry",
                                     source_changed,
                                 ),
                                 next_attempt_at,
                             ),
-                            else_=GroupMessageImageRow.next_attempt_at,
+                            else_=GroupMessageMediaRow.next_attempt_at,
                         ),
                     },
                     where=and_(
-                        GroupMessageImageRow.status.in_(("pending", "retry", "leased")),
+                        GroupMessageMediaRow.status.in_(("pending", "retry", "leased")),
                         source_changed,
                     ),
                 )
             )
 
-    async def _merge_echo_image_sources(
+    async def _merge_echo_media_sources(
         self,
         *,
         session: AsyncSession,
         message_row_id: int,
-        images: list[_PreparedImage],
+        media: list[_PreparedMedia],
         ready_at: datetime,
     ) -> None:
-        """只补充原文已有图片任务的来源，不让 echo 改变段结构。"""
-        for image in images:
+        """只补充原文已有媒体任务的来源，不让 echo 改变段结构。"""
+        for item in media:
             source_changes: list[ColumnElement[bool]] = []
-            if image.source_file is not None:
+            if item.source_file is not None:
                 source_changes.append(
-                    GroupMessageImageRow.source_file.is_distinct_from(
-                        image.source_file
+                    GroupMessageMediaRow.source_file.is_distinct_from(
+                        item.source_file
                     )
                 )
-            if image.source_url is not None:
+            if item.source_url is not None:
                 source_changes.append(
-                    GroupMessageImageRow.source_url.is_distinct_from(image.source_url)
+                    GroupMessageMediaRow.source_url.is_distinct_from(item.source_url)
                 )
-            if image.source_path is not None:
+            if item.source_path is not None:
                 source_changes.append(
-                    GroupMessageImageRow.source_path.is_distinct_from(
-                        image.source_path
+                    GroupMessageMediaRow.source_path.is_distinct_from(
+                        item.source_path
                     )
                 )
-            if image.file_id is not None:
+            if item.file_id is not None:
                 source_changes.append(
-                    GroupMessageImageRow.file_id.is_distinct_from(image.file_id)
+                    GroupMessageMediaRow.file_id.is_distinct_from(item.file_id)
                 )
             if not source_changes:
                 continue
             source_changed = or_(*source_changes)
             _ = await session.execute(
-                update(GroupMessageImageRow)
+                update(GroupMessageMediaRow)
                 .where(
-                    GroupMessageImageRow.message_row_id == message_row_id,
-                    GroupMessageImageRow.segment_index == image.segment_index,
-                    GroupMessageImageRow.status.in_(("pending", "retry", "leased")),
+                    GroupMessageMediaRow.message_row_id == message_row_id,
+                    GroupMessageMediaRow.segment_index == item.segment_index,
+                    GroupMessageMediaRow.media_type == item.media_type,
+                    GroupMessageMediaRow.status.in_(("pending", "retry", "leased")),
                     source_changed,
                 )
                 .values(
                     source_file=func.coalesce(
-                        image.source_file,
-                        GroupMessageImageRow.source_file,
+                        item.source_file,
+                        GroupMessageMediaRow.source_file,
                     ),
                     source_url=func.coalesce(
-                        image.source_url,
-                        GroupMessageImageRow.source_url,
+                        item.source_url,
+                        GroupMessageMediaRow.source_url,
                     ),
                     source_path=func.coalesce(
-                        image.source_path,
-                        GroupMessageImageRow.source_path,
+                        item.source_path,
+                        GroupMessageMediaRow.source_path,
                     ),
                     file_id=func.coalesce(
-                        image.file_id,
-                        GroupMessageImageRow.file_id,
+                        item.file_id,
+                        GroupMessageMediaRow.file_id,
                     ),
                     next_attempt_at=case(
                         (
                             and_(
-                                GroupMessageImageRow.status == "retry",
+                                GroupMessageMediaRow.status == "retry",
                                 source_changed,
                             ),
                             ready_at,
                         ),
-                        else_=GroupMessageImageRow.next_attempt_at,
+                        else_=GroupMessageMediaRow.next_attempt_at,
                     ),
                 )
             )
 
     def _prepare_segments(
         self, segments: Sequence[MessageSegment]
-    ) -> tuple[list[JsonObject], list[_PreparedImage]]:
-        """递归清理消息段中的本地路径和内联字节，并提取顶层图片任务。"""
+    ) -> tuple[list[JsonObject], list[_PreparedMedia]]:
+        """递归清理消息段中的本地路径和内联字节，并提取顶层媒体任务。"""
         stored_segments: list[JsonObject] = []
-        images: list[_PreparedImage] = []
+        media: list[_PreparedMedia] = []
         for index, segment in enumerate(segments):
             raw = cast(
                 JsonObject,
@@ -857,7 +863,7 @@ class PostgreSQLMessageRepository:
             )
             self._sanitize_message_segment(segment=raw)
             stored_segments.append(raw)
-            if not isinstance(segment, Image):
+            if not isinstance(segment, (Image, Video)):
                 continue
             raw_source_file = segment.data.file
             is_inline = self._is_inline_source(raw_source_file)
@@ -871,8 +877,9 @@ class PostgreSQLMessageRepository:
             source_url = segment.data.url
             if source_url is not None and self._is_inline_source(source_url):
                 source_url = None
-            images.append(
-                _PreparedImage(
+            media.append(
+                _PreparedMedia(
+                    media_type=segment.type,
                     segment_index=index,
                     source_file=source_file,
                     source_url=source_url,
@@ -880,7 +887,7 @@ class PostgreSQLMessageRepository:
                     file_id=segment.data.file_id,
                 )
             )
-        return stored_segments, images
+        return stored_segments, media
 
     def _sanitize_message_segment(self, *, segment: JsonObject) -> None:
         """只清理消息段已知的媒体来源字段，并递归处理转发节点内容。"""
@@ -946,7 +953,7 @@ class PostgreSQLMessageRepository:
         return windows_name if len(windows_name) <= len(posix_name) else posix_name
 
     def _resolve_storage_path(self, *, storage_key: str) -> Path:
-        """数据库被外部篡改时也不允许存储键逃出图片根目录。"""
+        """数据库被外部篡改时也不允许存储键逃出媒体根目录。"""
         windows_path = PureWindowsPath(storage_key)
         posix_path = PurePosixPath(storage_key)
         if (
@@ -955,33 +962,33 @@ class PostgreSQLMessageRepository:
             or ".." in windows_path.parts
             or ".." in posix_path.parts
         ):
-            raise ValueError("storage_key 必须是图片根目录内的相对路径")
-        return self._image_root / storage_key
+            raise ValueError("storage_key 必须是媒体根目录内的相对路径")
+        return self._media_root / storage_key
 
     def _to_stored_message(self, row: GroupMessageRow) -> StoredGroupMessage:
         """将 ORM 行转换为不携带 session 的公共 DTO。"""
         parsed_segments = _SEGMENTS_ADAPTER.validate_python(row.segments)
-        image_rows = tuple(row.images)
-        for image_row in image_rows:
-            if not 0 <= image_row.segment_index < len(parsed_segments):
+        media_rows = tuple(row.media)
+        for media_row in media_rows:
+            if not 0 <= media_row.segment_index < len(parsed_segments):
                 raise ValueError(
-                    f"图片任务 {image_row.id} 的段序号超出消息范围"
+                    f"媒体任务 {media_row.id} 的段序号超出消息范围"
                 )
-            segment = parsed_segments[image_row.segment_index]
-            if not isinstance(segment, Image):
+            segment = parsed_segments[media_row.segment_index]
+            if not isinstance(segment, (Image, Video)) or segment.type != media_row.media_type:
                 raise ValueError(
-                    f"图片任务 {image_row.id} 指向的消息段不是图片"
+                    f"媒体任务 {media_row.id} 指向的消息段不是媒体"
                 )
-            segment.data.file_id = segment.data.file_id or image_row.file_id
-            segment.data.url = segment.data.url or image_row.source_url
+            segment.data.file_id = segment.data.file_id or media_row.file_id
+            segment.data.url = segment.data.url or media_row.source_url
             if (
                 segment.data.file == "[inline-media]"
-                and image_row.source_file is not None
+                and media_row.source_file is not None
             ):
-                segment.data.file = image_row.source_file
-            if image_row.status == "stored" and image_row.storage_key is not None:
+                segment.data.file = media_row.source_file
+            if media_row.status == "stored" and media_row.storage_key is not None:
                 segment.data.path = str(
-                    self._resolve_storage_path(storage_key=image_row.storage_key)
+                    self._resolve_storage_path(storage_key=media_row.storage_key)
                 )
         return StoredGroupMessage(
             row_id=row.id,
@@ -994,18 +1001,19 @@ class PostgreSQLMessageRepository:
             occurred_at=row.occurred_at,
             direction=cast(MessageDirection, row.direction),
             segments=tuple(parsed_segments),
-            images=tuple(self._to_stored_image(item) for item in image_rows),
+            media=tuple(self._to_stored_media(item) for item in media_rows),
         )
 
-    def _to_stored_image(self, row: GroupMessageImageRow) -> StoredGroupImage:
-        """转换长期图片事实，故意不暴露临时 source_path。"""
-        return StoredGroupImage(
+    def _to_stored_media(self, row: GroupMessageMediaRow) -> StoredGroupMedia:
+        """转换长期媒体事实，故意不暴露临时 source_path。"""
+        return StoredGroupMedia(
             row_id=row.id,
+            media_type=cast(MediaType, row.media_type),
             segment_index=row.segment_index,
             source_file=row.source_file,
             source_url=row.source_url,
             file_id=row.file_id,
-            status=cast(ImageArchiveStatus, row.status),
+            status=cast(MediaArchiveStatus, row.status),
             storage_key=row.storage_key,
             mime_type=row.mime_type,
             size_bytes=row.size_bytes,
@@ -1032,7 +1040,7 @@ class PostgreSQLMessageRepository:
             raise ValueError("message_id 不能为空")
 
     def _validate_task_lease(self, *, task_id: int, lease_token: str) -> None:
-        """校验图片任务租约身份。"""
+        """校验媒体任务租约身份。"""
         if task_id < 1:
             raise ValueError("task_id 必须大于等于 1")
         if lease_token.strip() == "":

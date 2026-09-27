@@ -2,6 +2,10 @@
 
 from collections.abc import Awaitable, Callable
 import os
+import asyncio
+
+from alembic import command
+from alembic.config import Config
 import tempfile
 import unittest
 from pathlib import Path
@@ -125,7 +129,7 @@ class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
                 text("SELECT to_regclass('core.group_messages')")
             )
             images_table = await connection.scalar(
-                text("SELECT to_regclass('core.group_message_images')")
+                text("SELECT to_regclass('core.group_message_media')")
             )
             indexes = set(
                 (
@@ -141,9 +145,37 @@ class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
         if isinstance(version, str):
             self.assertEqual(int(version) // 10000, 18)
         self.assertEqual(messages_table, "core.group_messages")
-        self.assertEqual(images_table, "core.group_message_images")
+        self.assertEqual(images_table, "core.group_message_media")
         self.assertIn("ix_group_messages_active_recent", indexes)
         self.assertIn("ix_group_messages_active_sender_recent", indexes)
+
+    async def test_video_upgrade_preserves_existing_image_archive(self) -> None:
+        """真实升级保留既有图片行、主键和文件存储键。"""
+        async with self.runtime.engine.begin() as connection:
+            _ = await connection.execute(text('DROP SCHEMA IF EXISTS "core" CASCADE'))
+        config = Config("alembic.ini")
+        config.set_main_option("sqlalchemy.url", self.database_url.replace("%", "%%"))
+        await asyncio.to_thread(command.upgrade, config, "202608160001")
+        async with self.runtime.engine.begin() as connection:
+            _ = await connection.execute(text("""
+                WITH message AS (
+                    INSERT INTO core.group_messages
+                    (bot_id, group_id, message_id, sender_id, occurred_at, direction, sender_name, segments)
+                    VALUES ('migration-test', 'group', 'msg', 'sender', now(), 'incoming', 'test', '[]') RETURNING id
+                )
+                INSERT INTO core.group_message_images
+                (message_row_id, segment_index, status, storage_key, mime_type, size_bytes, attempt_count)
+                SELECT id, 0, 'stored', 'ab/cd/image.png', 'image/png', 123, 1 FROM message
+            """))
+            old_id = await connection.scalar(text("SELECT id FROM core.group_message_images"))
+        await self.migrator.upgrade_all()
+        await self.migrator.assert_current()
+        async with self.runtime.engine.begin() as connection:
+            row = (await connection.execute(text(
+                "SELECT id, media_type, status, storage_key, mime_type, size_bytes FROM core.group_message_media"
+            ))).one()
+            self.assertEqual(tuple(row), (old_id, "image", "stored", "ab/cd/image.png", "image/png", 123))
+            _ = await connection.execute(text("DELETE FROM core.group_messages WHERE bot_id='migration-test'"))
 
     async def test_wrong_revision_is_rejected_without_automatic_upgrade(self) -> None:
         """启动检查对错误 revision 报错，并且不自动改表。"""

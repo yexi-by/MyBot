@@ -1,8 +1,9 @@
 """AI 群聊插件的 LLM 输入构造器。"""
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+import json
 
 import httpx
 from pydantic import TypeAdapter, ValidationError
@@ -18,15 +19,18 @@ from app.models import (
     NapCatId,
     Node,
     Reply,
+    Video,
 )
 from app.services import (
     ChatMessage,
-    NapCatImageBot,
     NapCatImageReader,
     NapCatImageResource,
 )
 from app.services.llm.tools import LLMImageArtifact, LLMImageError, LLMImageItem
 from app.services.napcat.message_formatter import NapCatMessageTextFormatter
+from app.services.napcat.video_reader import (
+    NapCatMediaBot, NapCatVideoReader, NapCatVideoResource,
+)
 from app.utils.log import log_event
 
 from .constants import (
@@ -73,7 +77,7 @@ class GroupChatMessageBuilder:
         *,
         config: AIGroupChatConfig,
         group_messages: GroupMessageReader,
-        bot: NapCatImageBot,
+        bot: NapCatMediaBot,
         http_client: httpx.AsyncClient,
     ) -> None:
         """保存构造 LLM 输入所需的服务。"""
@@ -89,6 +93,13 @@ class GroupChatMessageBuilder:
                 if config.images.oversize_behavior == "describe"
                 else config.images.max_image_bytes or None
             ),
+        )
+        self.video_reader = NapCatVideoReader(
+            bot=bot,
+            http_client=http_client,
+            fetch_concurrency=config.videos.fetch_concurrency,
+            download_timeout_seconds=config.videos.download_timeout_seconds,
+            max_video_bytes=config.videos.max_video_bytes,
         )
         formatting = config.formatting
         self.message_formatter: NapCatMessageTextFormatter = NapCatMessageTextFormatter(
@@ -156,8 +167,11 @@ class GroupChatMessageBuilder:
             current_images_available="current_message" in loaded_sources,
             reply_images_available="quoted_message" in loaded_sources,
         )
+        video_messages = await self._build_video_messages(
+            msg=msg, reply_message=reply_message
+        ) if self.config.videos.enabled else []
         return BuiltTurnMessages(
-            turn_messages=[user_message],
+            turn_messages=[user_message, *video_messages],
             image_items=image_items,
             truncated_image_count=truncated_image_count,
             question=self._format_message_text(msg=msg, images_attached=True),
@@ -191,100 +205,89 @@ class GroupChatMessageBuilder:
         )
 
     def _build_image_resources(
-        self,
-        *,
-        segments: Sequence[MessageSegment],
-        source_label: str,
+        self, *, segments: Sequence[MessageSegment], source_label: str
     ) -> list[NapCatImageResource]:
         """按消息段顺序生成来源明确的图片资源。"""
-        resources: list[NapCatImageResource] = []
-        self._collect_segment_image_resources(
-            segments=segments,
-            source_label=source_label,
-            resources=resources,
-        )
-        return resources
+        images = [item for item in self._iter_media(segments) if isinstance(item, Image)]
+        return [NapCatImageResource(
+            label=f"{source_label}第 {index} 张图片",
+            file=item.data.file, file_id=item.data.file_id,
+            path=item.data.path, url=item.data.url,
+        ) for index, item in enumerate(images, 1)]
 
-    def _collect_segment_image_resources(
-        self,
-        *,
-        segments: Sequence[MessageSegment],
-        source_label: str,
-        resources: list[NapCatImageResource],
-    ) -> None:
-        """递归收集消息、节点和已内嵌转发中的图片。"""
+    async def _build_video_messages(
+        self, *, msg: GroupMessage, reply_message: StoredGroupMessage | None
+    ) -> list[ChatMessage]:
+        """读取当前和引用视频，把部分失败与数量限制明确告知模型。"""
+        resources: list[NapCatVideoResource] = []
+        for label, segments in (
+            ("当前消息", msg.message),
+            ("引用消息", reply_message.segments if reply_message else ()),
+        ):
+            videos = [item for item in self._iter_media(segments) if isinstance(item, Video)]
+            resources.extend(NapCatVideoResource(
+                label=f"{label}第 {index} 个视频",
+                file=item.data.file, file_id=item.data.file_id,
+                path=item.data.path, url=item.data.url,
+            ) for index, item in enumerate(videos, 1))
+        limit = self.config.videos.max_per_turn
+        selected = resources[:limit] if limit else resources
+        results = await self.video_reader.read_many(resources=selected)
+        messages: list[ChatMessage] = []
+        errors: list[dict[str, str]] = []
+        for result in results:
+            if result.video_bytes is not None:
+                messages.append(ChatMessage(
+                    role="user", text=f"{result.resource.label}（附件仅在本轮可见）",
+                    video=[result.video_bytes],
+                ))
+            else:
+                errors.append({
+                    "label": result.resource.label,
+                    "error_type": result.error_type or "VideoContentUnavailable",
+                    "error": result.error or "视频没有可读取内容",
+                })
+        truncated = len(resources) - len(selected)
+        if errors or truncated:
+            messages.append(ChatMessage(role="user", text=json.dumps({
+                "resource_type": "video", "ok": not errors,
+                "is_error": bool(errors), "errors": errors,
+                "loaded_count": len(messages), "truncated_count": truncated,
+                "message": "请根据已读取的内容回答；未读取的视频内容不可见。",
+            }, ensure_ascii=False)))
+        return messages
+
+    def _iter_media(self, segments: Sequence[MessageSegment]) -> Iterator[Image | Video]:
+        """遍历消息、节点和已内嵌转发中的图片与视频。"""
         for segment in segments:
-            if isinstance(segment, Image):
-                resources.append(
-                    NapCatImageResource(
-                        label=f"{source_label}第 {len(resources) + 1} 张图片",
-                        file=segment.data.file,
-                        file_id=segment.data.file_id,
-                        path=segment.data.path,
-                        url=segment.data.url,
-                    )
-                )
-                continue
-            if isinstance(segment, Node) and isinstance(segment.data.content, list):
-                self._collect_segment_image_resources(
-                    segments=segment.data.content,
-                    source_label=source_label,
-                    resources=resources,
-                )
-                continue
-            if isinstance(segment, Forward) and segment.data.content is not None:
-                self._collect_json_image_resources(
-                    value=segment.data.content,
-                    source_label=source_label,
-                    resources=resources,
-                )
+            if isinstance(segment, (Image, Video)):
+                yield segment
+            elif isinstance(segment, Node) and isinstance(segment.data.content, list):
+                yield from self._iter_media(segment.data.content)
+            elif isinstance(segment, Forward) and segment.data.content is not None:
+                yield from self._iter_json_media(segment.data.content)
 
-    def _collect_json_image_resources(
-        self,
-        *,
-        value: JsonValue,
-        source_label: str,
-        resources: list[NapCatImageResource],
-    ) -> None:
-        """从合并转发的多种内嵌 JSON 形态中寻找消息段。"""
+    def _iter_json_media(self, value: JsonValue) -> Iterator[Image | Video]:
+        """从合并转发的内嵌 JSON 形态中寻找媒体段。"""
         if isinstance(value, list):
             try:
                 segments = self.segments_adapter.validate_python(value)
             except ValidationError:
                 for item in value:
-                    self._collect_json_image_resources(
-                        value=item,
-                        source_label=source_label,
-                        resources=resources,
-                    )
-                return
-            self._collect_segment_image_resources(
-                segments=segments,
-                source_label=source_label,
-                resources=resources,
-            )
-            return
-        if not isinstance(value, dict):
-            return
-        if "type" in value:
-            try:
-                segment = self.segment_adapter.validate_python(value)
-            except ValidationError:
-                return
-            self._collect_segment_image_resources(
-                segments=[segment],
-                source_label=source_label,
-                resources=resources,
-            )
-            return
-        for key in ("message", "content", "messages", "data"):
-            nested = value.get(key)
-            if nested is not None:
-                self._collect_json_image_resources(
-                    value=nested,
-                    source_label=source_label,
-                    resources=resources,
-                )
+                    yield from self._iter_json_media(item)
+            else:
+                yield from self._iter_media(segments)
+        elif isinstance(value, dict):
+            if "type" in value:
+                try:
+                    segment = self.segment_adapter.validate_python(value)
+                except ValidationError:
+                    return
+                yield from self._iter_media([segment])
+            else:
+                for key in ("message", "content", "messages", "data"):
+                    if (nested := value.get(key)) is not None:
+                        yield from self._iter_json_media(nested)
 
     async def _load_reply_context_message(
         self, *, msg: GroupMessage
