@@ -281,6 +281,7 @@ export interface PluginRuntimeConfig {
 
 export interface PluginExecutionConfig {
   stop_timeout_seconds?: number;
+  blocked_user_ids?: string[];
   plugins: Record<string, PluginRuntimeConfig>;
 }
 

@@ -10,6 +10,7 @@ import {
   NumberField,
   NumberListField,
   SelectField,
+  StringListField,
   SwitchField,
   TextField,
 } from "@/lib/fields";
@@ -140,6 +141,14 @@ export default function SystemPage() {
           path="plugin_execution.stop_timeout_seconds"
           label="消费者停止超时（秒）"
         />
+        <div className="xl:col-span-2">
+          <StringListField
+            path="plugin_execution.blocked_user_ids"
+            label="屏蔽用户 QQ"
+            description="这些用户的群聊和私聊消息不触发任何插件响应，群历史记录与通知事件照常处理。重启后生效。"
+            addLabel="添加屏蔽用户"
+          />
+        </div>
       </SectionCard>
         </div>
         <div className="space-y-3">

@@ -83,6 +83,8 @@ persistence_retry_delays_seconds = [0.25]
 
 [plugin_execution]
 stop_timeout_seconds = 3
+# 这些用户的群聊和私聊消息不触发插件响应，重启后生效。
+blocked_user_ids = []
 
 [plugin_execution.plugins.ai_group_chat]
 consumers_count = 5

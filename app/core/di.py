@@ -296,7 +296,16 @@ class MyProvider(Provider):
 
     @provide(scope=Scope.SESSION)
     def get_event_dispatcher(
-        self, plugincontroller: PluginController, bot: BOTClient
+        self,
+        plugincontroller: PluginController,
+        bot: BOTClient,
+        config_manager: ConfigManager,
     ) -> EventDispatcher:
         """创建会话事件分发器。"""
-        return EventDispatcher(plugincontroller=plugincontroller, bot=bot)
+        return EventDispatcher(
+            plugincontroller=plugincontroller,
+            bot=bot,
+            blocked_user_ids=frozenset(
+                config_manager.boot_config.plugin_execution.blocked_user_ids
+            ),
+        )

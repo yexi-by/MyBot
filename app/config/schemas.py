@@ -711,7 +711,16 @@ class PluginExecutionConfig(ConfigModel):
     """需要在进程启动时应用的插件执行参数。"""
 
     stop_timeout_seconds: float = Field(gt=0)
+    blocked_user_ids: tuple[NapCatId, ...] = Field(
+        default=(), description="不触发插件响应的用户 QQ，适用于群聊和私聊消息。"
+    )
     plugins: dict[str, PluginRuntimeConfig]
+
+    @field_validator("blocked_user_ids")
+    @classmethod
+    def validate_blocked_users(cls, value: tuple[NapCatId, ...]) -> tuple[NapCatId, ...]:
+        _validate_unique_ids(value, label="plugin_execution.blocked_user_ids")
+        return value
 
     @field_validator("plugins")
     @classmethod
