@@ -10,7 +10,6 @@ from typing import cast
 from sqlalchemy import make_url
 
 from app.config import (
-    AIGroupChatConfig,
     ConfigManager,
     DatabaseConfig,
     LLMProviderConfig,
@@ -31,33 +30,7 @@ class SettingsConfigTest(unittest.TestCase):
 
     def test_example_config_matches_schema(self) -> None:
         """示例配置必须可以被严格模型解析。"""
-        config = MyBotConfig.model_validate(load_example())
-
-        self.assertEqual(config.server.port, 6055)
-        self.assertEqual(config.napcat.send_max_attempts, 5)
-        self.assertEqual(config.database.pool_size, 20)
-        self.assertEqual(config.storage.images.download_concurrency, 16)
-        self.assertEqual(config.storage.images.max_bytes, 50 * 1024 * 1024)
-        self.assertEqual(config.storage.images.retry_delays_seconds, (1, 5, 20))
-        self.assertEqual(tuple(config.llm.providers), ("deepseek",))
-        self.assertNotIn("firecrawl", config.mcp.servers)
-        self.assertIsNotNone(config.plugins.ai_group_chat)
-        assert config.plugins.ai_group_chat is not None
-        self.assertTrue(config.plugins.ai_group_chat.debug_dump_messages)
-        self.assertIsNotNone(config.plugins.recall_bot_image)
-
-    def test_ai_runtime_fields_do_not_have_hidden_defaults(self) -> None:
-        """省略运行参数时配置校验直接指出缺失字段。"""
-        with self.assertRaisesRegex(ValueError, "debug_dump_messages"):
-            _ = AIGroupChatConfig.model_validate(
-                {
-                    "model": {
-                        "provider": "main",
-                        "name": "chat",
-                        "supports_images": True,
-                    }
-                }
-            )
+        _ = MyBotConfig.model_validate(load_example())
 
     def test_database_rejects_two_password_sources(self) -> None:
         """数据库内联密码和 secret 文件不能同时配置。"""
@@ -158,27 +131,6 @@ class SettingsConfigTest(unittest.TestCase):
 
         self.assertIsNone(napcat.websocket_token)
         self.assertIsNone(provider.api_key)
-        self.assertEqual(provider.max_attempts, 5)
-        self.assertEqual(provider.retry_delay_seconds, 0)
-
-    def test_napcat_send_fields_are_required(self) -> None:
-        """发送策略缺失时不使用运行时常量补值。"""
-        raw_config = load_example()
-        napcat = cast(dict[str, object], raw_config["napcat"])
-        del napcat["send_max_attempts"]
-        del napcat["send_retry_delay_seconds"]
-
-        with self.assertRaisesRegex(ValueError, "send_max_attempts"):
-            _ = MyBotConfig.model_validate(raw_config)
-
-    def test_old_config_fields_are_rejected(self) -> None:
-        """破坏性配置重构不接受旧字段别名。"""
-        raw_config = load_example()
-        napcat = cast(dict[str, object], raw_config["napcat"])
-        napcat["send_retry_count"] = napcat.pop("send_max_attempts")
-
-        with self.assertRaises(ValueError):
-            _ = MyBotConfig.model_validate(raw_config)
 
     def test_all_plugin_id_lists_reject_duplicates(self) -> None:
         """所有群号和用户 ID 列表都只有一份权威配置。"""

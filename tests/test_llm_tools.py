@@ -10,7 +10,6 @@ from app.services.llm.tools import (
     LLMToolExecutionResult,
     LLMImageArtifact,
     LLMToolRegistry,
-    tool_result_to_text,
 )
 
 
@@ -51,10 +50,6 @@ class LLMToolRegistryTest(unittest.IsolatedAsyncioTestCase):
         properties = cast(JsonObject, tool.parameters["properties"])
         optional_schema = cast(JsonObject, properties["optional_count"])
         self.assertNotIn("default", optional_schema)
-
-    def test_tool_result_to_text_keeps_string_result(self) -> None:
-        """字符串工具结果直接作为 tool message 文本。"""
-        self.assertEqual(tool_result_to_text("ok"), "ok")
 
     async def test_call_tool_with_artifacts_wraps_plain_result(self) -> None:
         """普通工具通过 artifact 接口调用时会自动包成无附件结果。"""

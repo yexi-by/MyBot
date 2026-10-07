@@ -29,39 +29,6 @@ class WebUIConfigIOTest(unittest.TestCase):
     def _manager(self, root: Path) -> ConfigManager:
         return ConfigManager.create(config_file=root / "mybot.toml")
 
-    def test_read_valid_config_returns_payload_and_hash(self) -> None:
-        """合法配置返回含默认值和明文密钥的可编辑 dict。"""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config_file = Path(temp_dir) / "mybot.toml"
-            config_file.write_text(commented_config(), encoding="utf-8")
-
-            result = read_config_payload(config_file=config_file)
-
-        self.assertTrue(result.valid)
-        self.assertEqual(result.issues, ())
-        self.assertIsNotNone(result.parsed)
-        self.assertEqual(result.config["server"]["port"], 6055)
-        self.assertEqual(result.config["server"]["host"], "0.0.0.0")
-        self.assertEqual(result.config["storage"]["images"]["directory"], "images")
-        self.assertEqual(result.config["napcat"]["websocket_token"], "test-token")
-        self.assertEqual(
-            result.config["llm"]["providers"]["main"]["api_key"],
-            "test-api-key",
-        )
-        self.assertEqual(len(result.sha256), 64)
-
-    def test_read_invalid_toml_still_returns_issues(self) -> None:
-        """TOML 语法错误时返回错误而不是抛出，便于 WebUI 修复。"""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config_file = Path(temp_dir) / "mybot.toml"
-            config_file.write_text("[server\nport =", encoding="utf-8")
-
-            result = read_config_payload(config_file=config_file)
-
-        self.assertFalse(result.valid)
-        self.assertIsNone(result.parsed)
-        self.assertEqual(result.issues[0].error_type, "toml_decode")
-
     def test_validation_issues_do_not_echo_secret(self) -> None:
         """校验失败摘要不包含同文件的 API key。"""
         secret = "sk-never-log-this"

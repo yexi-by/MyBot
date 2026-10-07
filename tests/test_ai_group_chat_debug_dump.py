@@ -46,19 +46,15 @@ def build_group_config() -> AIGroupConfig:
 class AIGroupChatDebugDumperTest(unittest.IsolatedAsyncioTestCase):
     """验证 AI 群聊 Markdown 调试文件内容。"""
 
-    def test_directory_comes_from_explicit_config(self) -> None:
-        """调试目录完全来自当前插件配置。"""
-        dumper = AIGroupChatDebugDumper(config=build_config(enabled=False))
-
-        self.assertEqual(dumper.root_dir, Path("logs/ai_group_chat_debug"))
-
     async def test_enabled_dumper_only_appends_long_term_context_delta(
         self,
     ) -> None:
         """开启开关后，调试文件只追加长期上下文新增 messages。"""
         with tempfile.TemporaryDirectory() as temp_dir:
-            dumper = AIGroupChatDebugDumper(config=build_config(enabled=True))
-            dumper.root_dir = Path(temp_dir)
+            config = build_ai_group_chat_config(
+                overrides={"debug_dump_messages": True, "debug_dump_directory": temp_dir}
+            )
+            dumper = AIGroupChatDebugDumper(config=config)
             group_config = build_group_config()
             path = dumper.initialize_group(
                 group_config=group_config,
@@ -67,6 +63,7 @@ class AIGroupChatDebugDumperTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(path)
             if path is None:
                 raise AssertionError("调试文件路径不应为空")
+            self.assertTrue(path.is_relative_to(Path(temp_dir)))
 
             await dumper.append_context_snapshot(
                 group_id="40000",

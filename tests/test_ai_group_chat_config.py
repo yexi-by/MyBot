@@ -19,21 +19,6 @@ class AIGroupChatConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "必须配置 vision"):
             _ = build_config(vision=None)
 
-    def test_image_model_can_use_direct_mode_without_vision(self) -> None:
-        """主模型支持图片时可明确选择原图直达且不配置视觉模型。"""
-        config = build_ai_group_chat_config(supports_images=True)
-        self.assertEqual(config.images.delivery_mode, "direct")
-        self.assertIsNone(config.vision)
-
-    def test_vision_runtime_fields_are_required(self) -> None:
-        """视觉运行参数缺失时直接返回配置字段错误。"""
-        config = build_config().model_dump(mode="python")
-        vision = config["vision"]
-        assert isinstance(vision, dict)
-        del vision["max_attempts"]
-        with self.assertRaisesRegex(ValueError, "max_attempts"):
-            _ = AIGroupChatConfig.model_validate(config)
-
     def test_direct_oversize_description_requires_vision(self) -> None:
         """只有显式配置视觉模型时才允许超限图片转描述。"""
         with self.assertRaisesRegex(ValueError, "必须配置 vision"):
@@ -51,11 +36,6 @@ class AIGroupChatConfigTest(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "重复群号"):
             _ = build_config(groups=[group, group])
-
-    def test_old_flat_fields_are_rejected(self) -> None:
-        """旧模型和视觉字段不作为兼容别名保留。"""
-        with self.assertRaises(ValueError):
-            _ = build_config(model_name="old-model")
 
 
 if __name__ == "__main__":

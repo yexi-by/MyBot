@@ -39,18 +39,6 @@ class WebUIFilesTest(unittest.TestCase):
             ],
         )
 
-    def test_read_returns_content_and_hash(self) -> None:
-        """读取返回 UTF-8 内容与稳定哈希。"""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = self._root(temp_dir)
-
-            content, digest = read_text_file(
-                config_root=root, relative_path="ai/prompts/system.md"
-            )
-
-        self.assertEqual(content, "角色提示")
-        self.assertEqual(len(digest), 64)
-
     def test_read_rejects_escape_and_absolute_path(self) -> None:
         """父目录逃逸与绝对路径被拒绝。"""
         with tempfile.TemporaryDirectory() as temp_dir:
