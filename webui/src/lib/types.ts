@@ -106,10 +106,13 @@ export interface LLMServiceConfig {
 }
 
 export interface MCPServerConfig {
-  command: string;
+  transport?: "stdio" | "streamable_http";
+  command?: string | null;
   args?: string[];
   env?: Record<string, string> | null;
   cwd?: string | null;
+  url?: string | null;
+  headers?: Record<string, string> | null;
   disabled?: boolean;
 }
 

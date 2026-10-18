@@ -129,7 +129,7 @@ model = { provider = "deepseek", name = "deepseek-chat" }
 
 ### MCP
 
-MCP server 使用 stdio 启动，工具名会转换为 `mcp__{server}__{tool}`：
+MCP server 支持 stdio 和 Streamable HTTP，工具名会转换为 `mcp__{server}__{tool}`：
 
 ```toml
 [mcp]
@@ -138,15 +138,23 @@ initialization_timeout_seconds = 30
 call_timeout_seconds = 60
 
 [mcp.servers.example]
+transport = "stdio"
 command = "npx"
 args = ["-y", "your-mcp-server"]
 env = { EXAMPLE_API_KEY = "CHANGE_ME" }
 disabled = false
+
+[mcp.servers.firecrawl]
+transport = "streamable_http"
+url = "https://mcp.firecrawl.dev/v2/mcp"
+headers = { Authorization = "Bearer fc-CHANGE_ME" }
+disabled = false
 ```
 
-MCP 命令、环境变量和密钥属于部署配置，不应提交到仓库。
+MCP 命令、环境变量和认证头属于部署配置，不应提交真实密钥。stdio 服务配置 `command`、`args` 以及可选的 `env`、`cwd`；Streamable HTTP 服务配置 `url` 和可选的 `headers`，不能混用两种传输的字段。省略 `transport` 时使用 stdio。
 `initialization_timeout_seconds` 限制每个服务握手与工具清单加载的总等待时间；初始化失败会释放已启动的 MCP 资源。`call_timeout_seconds` 限制单次工具调用，超时会把结构化错误返回给 AI，后续调用仍可继续。两个字段均须明确填写正数。
-镜像内已包含 `/app/node_modules/.bin/firecrawl-mcp`、`/app/node_modules/.bin/mcp-searxng` 和 `/usr/local/bin/github-mcp-server`，部署配置可以直接使用这些 stdio 命令，不需要运行时下载安装。
+Firecrawl 直接连接[官方托管 MCP API](https://docs.firecrawl.dev/mcp-server)，通过 `Authorization: Bearer <API Key>` 认证。镜像不再安装或启动本地 Firecrawl MCP，也不需要自建 Firecrawl 服务或 `FIRECRAWL_API_URL`。已有部署需删除 Firecrawl 节的 `command`、`args`、`env`、`cwd`，改为上述 HTTP 配置，并移除 Compose 中 MyBot 对 Firecrawl 专用网络的引用。
+镜像内仍包含 `/app/node_modules/.bin/mcp-searxng` 和 `/usr/local/bin/github-mcp-server`，这两个服务继续使用 stdio 命令，不需要运行时下载安装。
 
 ### AI 群聊与图片交付
 

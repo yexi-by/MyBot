@@ -86,6 +86,45 @@ class WebUIConfigIOTest(unittest.TestCase):
         self.assertNotIn("proxy", written["network"])
         self.assertEqual(written["storage"]["images"]["download_concurrency"], 16)
 
+    def test_switch_mcp_transport_preserves_other_services_and_header_secret(self) -> None:
+        """切换 HTTP 时删除旧进程字段，保留其余配置、注释及可编辑认证头。"""
+        original = commented_config().replace('servers = {}', '') + textwrap.dedent('''
+            # 远程工具配置
+            [mcp.servers.remote]
+            command = "old-command"
+            args = []
+            disabled = false
+            env = { OLD_API_URL = "http://old-service:3002" }
+
+            [mcp.servers.other]
+            command = "other-command"
+            args = ["stdio"]
+            disabled = false
+            env = { OTHER_API_KEY = "unchanged" }
+        ''')
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_file = Path(temp_dir) / "mybot.toml"
+            config_file.write_text(original, encoding="utf-8")
+            manager = self._manager(Path(temp_dir))
+            current = read_config_payload(config_file=config_file)
+            payload = current.config
+            payload["mcp"]["servers"]["remote"] = {
+                "transport": "streamable_http", "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer test-secret"}, "disabled": False,
+            }
+            _ = write_config_payload(
+                config_file=config_file, payload=payload,
+                base_sha256=current.sha256, boot_config=manager.boot_config,
+            )
+            text = config_file.read_text(encoding="utf-8")
+            written = tomllib.loads(text)
+            reloaded = read_config_payload(config_file=config_file)
+
+        self.assertEqual(set(written["mcp"]["servers"]["remote"]), {"transport", "url", "headers", "disabled"})
+        self.assertEqual(written["mcp"]["servers"]["other"], tomllib.loads(original)["mcp"]["servers"]["other"])
+        self.assertIn("# 远程工具配置", text)
+        self.assertEqual(reloaded.config["mcp"]["servers"]["remote"]["headers"], {"Authorization": "Bearer test-secret"})
+
     def test_blank_password_does_not_conflict_with_password_file(self) -> None:
         """WebUI 空密码与已配置的 secret 文件可以一起提交。"""
         original = commented_config().replace(

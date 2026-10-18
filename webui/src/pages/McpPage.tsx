@@ -13,6 +13,13 @@ import { SettingsGrid } from "@/components/SettingsGrid";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { countDirtyUnder } from "@/lib/dirty";
 import { NumberField, SwitchField } from "@/lib/fields";
@@ -30,14 +37,16 @@ function serializeEnv(env: Record<string, string> | null): string {
 }
 
 /**
- * 环境变量条目编辑器：本地维护带稳定 id 的条目列表，
+ * 环境变量和请求头共用键值编辑器，本地维护带稳定 id 的条目列表，
  * 允许空名/重名行共存；写回 RHF 时才序列化为 record（重名后者覆盖前者）。
  */
-function EnvEntriesEditor({
-  env,
+function KeyValueEntriesEditor({
+  value,
+  label,
   onCommit,
 }: {
-  env: Record<string, string> | null;
+  value: Record<string, string> | null;
+  label: string;
   onCommit: (env: Record<string, string> | null) => void;
 }) {
   const nextId = useRef(0);
@@ -47,10 +56,10 @@ function EnvEntriesEditor({
       key,
       value,
     }));
-  const [entries, setEntries] = useState<EnvEntry[]>(() => toEntries(env));
+  const [entries, setEntries] = useState<EnvEntry[]>(() => toEntries(value));
 
   // 外部变更（reload / 保存后 reset）时重新同步；本地写回保持一致，不会自我覆盖。
-  const serialized = serializeEnv(env);
+  const serialized = serializeEnv(value);
   useEffect(() => {
     setEntries((current) => {
       const localSerialized = serializeEnv(
@@ -58,7 +67,7 @@ function EnvEntriesEditor({
           ? Object.fromEntries(current.map((entry) => [entry.key, entry.value]))
           : null,
       );
-      return localSerialized === serialized ? current : toEntries(env);
+      return localSerialized === serialized ? current : toEntries(value);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serialized]);
@@ -80,12 +89,12 @@ function EnvEntriesEditor({
 
   return (
     <div className="space-y-2 xl:col-span-2">
-      <Label>环境变量</Label>
+      <Label className="font-mono">{label}</Label>
       {entries.map((entry, index) => (
         <div key={entry.id} className="flex items-center gap-2">
           <Input
             className="w-2/5"
-            aria-label={`变量名 ${index + 1}`}
+            aria-label={`${label}名称 ${index + 1}`}
             value={entry.key}
             onChange={(event) =>
               commit(
@@ -96,7 +105,7 @@ function EnvEntriesEditor({
             }
           />
           <Input
-            aria-label={`变量值 ${index + 1}`}
+            aria-label={`${label}值 ${index + 1}`}
             value={entry.value}
             onChange={(event) =>
               commit(
@@ -110,7 +119,7 @@ function EnvEntriesEditor({
             type="button"
             variant="ghost"
             size="icon"
-            aria-label={`删除环境变量 ${entry.key || index + 1}`}
+            aria-label={`删除${label} ${entry.key || index + 1}`}
             onClick={() => commit(entries.filter((_, i) => i !== index))}
           >
             <Trash2 className="h-4 w-4" />
@@ -119,7 +128,7 @@ function EnvEntriesEditor({
       ))}
       {duplicateNames.size > 0 ? (
         <p className="text-xs text-amber-600 dark:text-amber-500">
-          重名变量（{[...duplicateNames].join("、")}）保存时后者覆盖前者
+          重名{label}（{[...duplicateNames].join("、")}）保存时后者覆盖前者
         </p>
       ) : null}
       <Button
@@ -130,7 +139,7 @@ function EnvEntriesEditor({
           commit([...entries, { id: nextId.current++, key: "", value: "" }])
         }
       >
-        <Plus className="mr-1 h-4 w-4" />添加变量
+        <Plus className="mr-1 h-4 w-4" />添加{label}
       </Button>
     </div>
   );
@@ -170,7 +179,7 @@ export default function McpPage() {
     }
     commit({
       ...servers,
-      [name]: { command: "", args: [], env: null, cwd: null, disabled: false },
+      [name]: { transport: "stdio", command: "", args: [], env: null, cwd: null, disabled: false },
     });
     setNewServerName("");
   };
@@ -185,7 +194,7 @@ export default function McpPage() {
     <div ref={filterRef} className="space-y-3">
       <PageHeader
         title="MCP 服务"
-        description="管理 MCP server 进程；服务名和环境变量名可包含点号，界面会原样保存完整键名。"
+        description="管理 stdio 进程和 HTTP 服务；服务名、环境变量名和请求头名会原样保存。"
         notice="MCP 改动需要重启进程后生效"
         dirtyCount={dirtyCount}
         filterValue={filter}
@@ -202,7 +211,7 @@ export default function McpPage() {
 
       <SettingsGrid columns={serverNames.length + 1 >= 3 ? 3 : 2}>
         <div className="space-y-3">
-        <SectionCard title="MCP 总开关" description="关闭后所有 MCP server 都不会启动。">
+        <SectionCard title="MCP 总开关" description="关闭后不再连接 MCP 服务。">
           <SwitchField
             path="mcp.enabled"
             label="启用 MCP"
@@ -236,6 +245,7 @@ export default function McpPage() {
         {serverNames.map((name) => {
           const server = servers[name];
           const args = server.args ?? [];
+          const transport = server.transport ?? "stdio";
           return (
             <SectionCard
               key={name}
@@ -252,69 +262,109 @@ export default function McpPage() {
                 </Button>
               }
             >
-              <div className="space-y-1.5">
-                <Label htmlFor={`${controlPrefix}-${name}-command`}>启动命令</Label>
-                <Input
-                  id={`${controlPrefix}-${name}-command`}
-                  value={server.command}
-                  placeholder="如 npx / uvx"
-                  onChange={(event) =>
-                    updateServer(name, { command: event.target.value })
-                  }
-                />
+              <div className="space-y-1.5 xl:col-span-2">
+                <Label className="font-mono" htmlFor={`${controlPrefix}-${name}-transport`}>连接方式</Label>
+                <Select
+                  value={transport}
+                  onValueChange={(value) => {
+                    if ((value !== "stdio" && value !== "streamable_http") || value === transport) return;
+                    commit({
+                      ...servers,
+                      [name]: value === "streamable_http"
+                        ? { transport: value, url: "", headers: null, disabled: server.disabled }
+                        : { transport: value, command: "", args: [], env: null, cwd: null, disabled: server.disabled },
+                    });
+                  }}
+                >
+                  <SelectTrigger id={`${controlPrefix}-${name}-transport`} className="w-full">
+                    <SelectValue>{transport === "stdio" ? "stdio 本地进程" : "Streamable HTTP"}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="stdio">stdio 本地进程</SelectItem>
+                    <SelectItem value="streamable_http">Streamable HTTP</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={`${controlPrefix}-${name}-cwd`}>工作目录</Label>
-                <Input
-                  id={`${controlPrefix}-${name}-cwd`}
-                  value={server.cwd ?? ""}
-                  placeholder="留空使用进程当前目录"
-                  onChange={(event) =>
-                    updateServer(name, { cwd: event.target.value || null })
-                  }
-                />
-              </div>
-              <div className="space-y-2 xl:col-span-2">
-                <Label>命令参数</Label>
-                {args.map((argument, index) => (
-                  <div key={index} className="flex items-center gap-2">
+              {transport === "streamable_http" ? (
+                <>
+                  <div className="space-y-1.5 xl:col-span-2">
+                    <Label className="font-mono" htmlFor={`${controlPrefix}-${name}-url`}>服务地址</Label>
                     <Input
-                      aria-label={`命令参数 ${index + 1}`}
-                      value={argument}
-                      onChange={(event) => {
-                        const next = [...args];
-                        next[index] = event.target.value;
-                        updateServer(name, { args: next });
-                      }}
+                      id={`${controlPrefix}-${name}-url`}
+                      type="url"
+                      value={server.url ?? ""}
+                      placeholder="https://mcp.firecrawl.dev/v2/mcp"
+                      onChange={(event) => updateServer(name, { url: event.target.value })}
                     />
+                  </div>
+                  <KeyValueEntriesEditor
+                    key={`${name}-headers`}
+                    label="请求头"
+                    value={server.headers ?? null}
+                    onCommit={(headers) => updateServer(name, { headers })}
+                  />
+                </>
+              ) : (
+                <>
+                  <div className="space-y-1.5">
+                    <Label className="font-mono" htmlFor={`${controlPrefix}-${name}-command`}>启动命令</Label>
+                    <Input
+                      id={`${controlPrefix}-${name}-command`}
+                      value={server.command ?? ""}
+                      placeholder="如 npx / uvx"
+                      onChange={(event) => updateServer(name, { command: event.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="font-mono" htmlFor={`${controlPrefix}-${name}-cwd`}>工作目录</Label>
+                    <Input
+                      id={`${controlPrefix}-${name}-cwd`}
+                      value={server.cwd ?? ""}
+                      placeholder="留空使用进程当前目录"
+                      onChange={(event) => updateServer(name, { cwd: event.target.value || null })}
+                    />
+                  </div>
+                  <div className="space-y-2 xl:col-span-2">
+                    <Label className="font-mono">命令参数</Label>
+                    {args.map((argument, index) => (
+                      <div key={index} className="flex items-center gap-2">
+                        <Input
+                          aria-label={`命令参数 ${index + 1}`}
+                          value={argument}
+                          onChange={(event) => {
+                            const next = [...args];
+                            next[index] = event.target.value;
+                            updateServer(name, { args: next });
+                          }}
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`删除命令参数 ${index + 1}`}
+                          onClick={() => updateServer(name, { args: args.filter((_, i) => i !== index) })}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ))}
                     <Button
                       type="button"
-                      variant="ghost"
-                      size="icon"
-                      aria-label={`删除命令参数 ${index + 1}`}
-                      onClick={() =>
-                        updateServer(name, {
-                          args: args.filter((_, i) => i !== index),
-                        })
-                      }
+                      variant="outline"
+                      size="sm"
+                      onClick={() => updateServer(name, { args: [...args, ""] })}
                     >
-                      <Trash2 className="h-4 w-4" />
+                      <Plus className="mr-1 h-4 w-4" />添加参数
                     </Button>
                   </div>
-                ))}
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => updateServer(name, { args: [...args, ""] })}
-                >
-                  <Plus className="mr-1 h-4 w-4" />添加参数
-                </Button>
-              </div>
-              <EnvEntriesEditor
-                env={server.env ?? null}
-                onCommit={(env) => updateServer(name, { env })}
-              />
+                  <KeyValueEntriesEditor
+                    key={`${name}-env`}
+                    label="环境变量"
+                    value={server.env ?? null}
+                    onCommit={(env) => updateServer(name, { env })}
+                  />
+                </>
+              )}
               <div className="space-y-1.5">
                 <Label htmlFor={`${controlPrefix}-${name}-disabled`}>禁用此服务</Label>
                 <Switch
@@ -337,7 +387,7 @@ export default function McpPage() {
           if (!open) setDeleteTarget(null);
         }}
         title={`删除 MCP 服务 ${deleteTarget ?? ""}？`}
-        description="删除后该服务的启动命令、参数与环境变量将随自动保存一并移除，且无法恢复。"
+        description="删除后该服务的连接配置将随自动保存一并移除，且无法恢复。"
         confirmLabel="删除服务"
         destructive
         onConfirm={() => {

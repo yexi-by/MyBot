@@ -6,8 +6,10 @@ from contextlib import AsyncExitStack
 from datetime import timedelta
 from typing import cast, override
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
 from mcp.types import CallToolResult, TextContent, Tool
 
@@ -71,7 +73,7 @@ class MCPToolManager(LLMToolExecutor):
         self._started = True
 
     async def close(self) -> None:
-        """关闭所有 MCP 会话和子进程。"""
+        """关闭所有 MCP 会话、HTTP 连接和子进程。"""
         exit_stack = self._exit_stack
         self._exit_stack = None
         self._sessions.clear()
@@ -118,18 +120,43 @@ class MCPToolManager(LLMToolExecutor):
     async def _connect_server(
         self, *, server_name: str, server_config: MCPServerConfig
     ) -> None:
-        """连接单个 MCP stdio server 并注册其工具。"""
+        """按配置连接 MCP server 并注册其工具。"""
         if self._exit_stack is None:
             raise RuntimeError("MCP exit stack 尚未初始化")
-        server_params = StdioServerParameters(
-            command=server_config.command,
-            args=list(server_config.args),
-            env=build_mcp_server_environment(server_config.env),
-            cwd=server_config.cwd,
-        )
-        read_stream, write_stream = await self._exit_stack.enter_async_context(
-            stdio_client(server_params)
-        )
+        if server_config.transport == "streamable_http":
+            if server_config.url is None:
+                raise ValueError("Streamable HTTP MCP 服务缺少 url")
+            http_client = await self._exit_stack.enter_async_context(
+                httpx.AsyncClient(
+                    follow_redirects=True,
+                    headers={
+                        name: value.get_secret_value()
+                        for name, value in (server_config.headers or {}).items()
+                    },
+                    timeout=httpx.Timeout(
+                        self.config.initialization_timeout_seconds,
+                        read=max(
+                            self.config.initialization_timeout_seconds,
+                            self.config.call_timeout_seconds,
+                        ),
+                    ),
+                )
+            )
+            read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+                streamable_http_client(server_config.url, http_client=http_client)
+            )
+        else:
+            if server_config.command is None:
+                raise ValueError("stdio MCP 服务缺少 command")
+            server_params = StdioServerParameters(
+                command=server_config.command,
+                args=list(server_config.args or ()),
+                env=build_mcp_server_environment(server_config.env),
+                cwd=server_config.cwd,
+            )
+            read_stream, write_stream = await self._exit_stack.enter_async_context(
+                stdio_client(server_params)
+            )
         session = await self._exit_stack.enter_async_context(
             ClientSession(
                 read_stream,

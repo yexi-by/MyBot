@@ -314,13 +314,45 @@ class LLMServiceConfig(ConfigModel):
 
 
 class MCPServerConfig(ConfigModel):
-    """单个 MCP stdio 服务配置。"""
+    """单个 MCP 服务的 stdio 或 Streamable HTTP 连接配置。"""
 
-    command: str
-    args: tuple[str, ...]
+    transport: Literal["stdio", "streamable_http"] = "stdio"
+    command: str | None = None
+    args: tuple[str, ...] | None = None
     env: dict[str, str] | None = None
     cwd: str | None = None
+    url: str | None = None
+    headers: dict[str, SecretStr] | None = None
     disabled: bool
+
+    @model_validator(mode="after")
+    def validate_transport(self) -> "MCPServerConfig":
+        """拒绝缺少连接目标或混用两种传输的配置。"""
+        if self.transport == "stdio":
+            if self.command is None or not self.command.strip():
+                raise ValueError("stdio MCP 服务必须配置非空 command")
+            if self.url is not None or self.headers is not None:
+                raise ValueError("stdio MCP 服务不能配置 url 或 headers")
+        else:
+            if self.url is None:
+                raise ValueError("Streamable HTTP MCP 服务必须配置 url")
+            endpoint = urlsplit(self.url)
+            if endpoint.scheme not in {"http", "https"} or not endpoint.hostname:
+                raise ValueError("MCP url 必须是完整的 HTTP 或 HTTPS 地址")
+            if (
+                endpoint.username is not None
+                or endpoint.password is not None
+                or endpoint.fragment
+            ):
+                raise ValueError("MCP url 不能包含用户名、密码或片段；认证信息请使用 headers")
+            if (
+                self.command is not None
+                or self.args
+                or self.env is not None
+                or self.cwd is not None
+            ):
+                raise ValueError("Streamable HTTP MCP 服务不能配置 command、args、env 或 cwd")
+        return self
 
 
 class MCPConfig(ConfigModel):

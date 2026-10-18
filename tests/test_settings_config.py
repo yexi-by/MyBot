@@ -13,6 +13,7 @@ from app.config import (
     ConfigManager,
     DatabaseConfig,
     LLMProviderConfig,
+    MCPServerConfig,
     MyBotConfig,
     NapCatConfig,
     PluginExecutionConfig,
@@ -31,6 +32,18 @@ class SettingsConfigTest(unittest.TestCase):
     def test_example_config_matches_schema(self) -> None:
         """示例配置必须可以被严格模型解析。"""
         _ = MyBotConfig.model_validate(load_example())
+
+    def test_mcp_rejects_mixed_or_missing_transport_targets(self) -> None:
+        """连接字段不能被选错传输后静默忽略，缺少目标也不能保存。"""
+        for server in (
+            {"transport": "streamable_http", "url": "https://example.com/mcp", "command": "npx"},
+            {"transport": "streamable_http", "url": "https://example.com/mcp", "env": {"API_KEY": "test"}},
+            {"transport": "stdio", "command": "npx", "headers": {"Authorization": "Bearer test"}},
+            {"transport": "streamable_http"},
+            {"transport": "stdio"},
+        ):
+            with self.subTest(server=server), self.assertRaises(ValueError):
+                _ = MCPServerConfig.model_validate({**server, "disabled": False})
 
     def test_database_rejects_two_password_sources(self) -> None:
         """数据库内联密码和 secret 文件不能同时配置。"""

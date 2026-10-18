@@ -62,9 +62,16 @@ initialization_timeout_seconds = 30
 call_timeout_seconds = 60
 
 [mcp.servers.node_stdio_example]
+transport = "stdio"
 command = "npx"
 args = ["-y", "your-node-mcp-server-package"]
 env = { EXAMPLE_API_KEY = "CHANGE_ME" }
+disabled = true
+
+[mcp.servers.firecrawl]
+transport = "streamable_http"
+url = "https://mcp.firecrawl.dev/v2/mcp"
+headers = { Authorization = "Bearer fc-CHANGE_ME" }
 disabled = true
 
 [database]

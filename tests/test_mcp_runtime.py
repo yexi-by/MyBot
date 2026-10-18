@@ -1,8 +1,16 @@
-"""通过本地 stdio 子进程验证 MCP 超时、恢复和错误结果。"""
+"""通过 stdio 子进程和真实 HTTP 连接验证 MCP 调用、超时与恢复。"""
 
+import asyncio
+import socket
 import sys
 import unittest
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import cast
+
+import uvicorn
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 
 from app.config import MCPConfig, MCPServerConfig
 from app.models import JsonObject
@@ -44,7 +52,89 @@ def manager_for(mode: str) -> MCPToolManager:
     ))
 
 
+@asynccontextmanager
+async def http_mcp_server() -> AsyncIterator[str]:
+    """运行要求 Bearer 认证的 MCP HTTP 服务，实际验证协议与参数传递。"""
+    app = FastAPI()
+
+    async def no_event_stream() -> Response:
+        return Response(status_code=405)
+
+    async def handle(request: Request) -> Response:
+        if request.headers.get("authorization") != "Bearer test-api-key":
+            return Response(status_code=401)
+        body = cast(dict[str, object], await request.json())
+        if "id" not in body:
+            return Response(status_code=202)
+        params = cast(dict[str, object], body.get("params", {}))
+        if body["method"] == "initialize":
+            result: dict[str, object] = {
+                "protocolVersion": params["protocolVersion"],
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "test-http", "version": "1"},
+            }
+        elif body["method"] == "tools/list":
+            result = {"tools": [{
+                "name": "inspect",
+                "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}},
+            }]}
+        elif body["method"] == "tools/call":
+            arguments = cast(dict[str, object], params.get("arguments", {}))
+            if arguments.get("wait"):
+                await asyncio.sleep(1)
+            result = {"isError": False, "structuredContent": arguments, "content": []}
+        else:
+            return Response(status_code=400)
+        return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    app.add_api_route("/mcp", no_event_stream, methods=["GET"])
+    app.add_api_route("/mcp", handle, methods=["POST"])
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off", ws="none"))
+        task = asyncio.create_task(server.serve(sockets=[listener]))
+        try:
+            async with asyncio.timeout(3):
+                while not server.started:
+                    if task.done():
+                        await task
+                        raise RuntimeError("测试 HTTP 服务未启动")
+                    await asyncio.sleep(0.01)
+            yield f"http://127.0.0.1:{port}/mcp"
+        finally:
+            server.should_exit = True
+            await task
+
+
 class MCPRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_http_authentication_arguments_and_timeout_recovery(self) -> None:
+        """HTTP 认证头、工具参数及超时后的后续调用走完整连接路径。"""
+        async with http_mcp_server() as url:
+            manager = MCPToolManager(MCPConfig.model_validate({
+                "enabled": True,
+                "initialization_timeout_seconds": 3,
+                "call_timeout_seconds": 0.25,
+                "servers": {"remote": {
+                    "transport": "streamable_http", "url": url,
+                    "headers": {"Authorization": "Bearer test-api-key"},
+                    "disabled": False,
+                }},
+            }))
+            try:
+                await manager.start()
+                tools = manager.list_tools()
+                self.assertEqual([tool.name for tool in tools], ["mcp__remote__inspect"])
+                self.assertIn("url", cast(JsonObject, tools[0].parameters["properties"]))
+                timeout = cast(JsonObject, await manager.call_tool("mcp__remote__inspect", {"wait": True}))
+                self.assertEqual(timeout["error_type"], "TimeoutError")
+                result = await manager.call_tool("mcp__remote__inspect", {"url": "https://example.com"})
+                self.assertEqual(result, {"is_error": False, "data": {"url": "https://example.com"}})
+            finally:
+                await manager.close()
+            self.assertEqual(manager.list_tools(), [])
+
     async def test_initialization_timeout_cleans_up_and_allows_restart(self) -> None:
         manager = manager_for("hang")
         with self.assertRaisesRegex(TimeoutError, "test.*初始化超时"):

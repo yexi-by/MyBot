@@ -44,7 +44,7 @@ class MCPEnvironmentTest(unittest.TestCase):
             environment = build_mcp_server_environment(
                 {
                     "HTTPS_PROXY": "http://server-proxy.example:8080",
-                    "FIRECRAWL_API_KEY": "test-key",
+                    "SERVICE_API_KEY": "test-key",
                 }
             )
 
@@ -52,7 +52,7 @@ class MCPEnvironmentTest(unittest.TestCase):
             environment,
             {
                 "HTTPS_PROXY": "http://server-proxy.example:8080",
-                "FIRECRAWL_API_KEY": "test-key",
+                "SERVICE_API_KEY": "test-key",
             },
         )
 
