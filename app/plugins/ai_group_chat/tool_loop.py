@@ -13,7 +13,11 @@ from app.services import (
     NapCatGroupToolExecutor,
 )
 from app.services.llm.schemas import LLMResponse, LLMToolCall
-from app.services.llm.errors import LLMRequestError
+from app.services.llm.errors import LLMRequestError, LLMResponseError
+from app.services.llm.response_validation import (
+    build_response_repair_message,
+    validate_response,
+)
 from app.services.llm.tools import (
     LLMImageArtifact,
     LLMImageError,
@@ -34,6 +38,11 @@ from .vision_tool import VisionDescriptionTool, VisionTurnState
 
 class GroupChatTurnError(RuntimeError):
     """本轮遇到配置限制或工具轮数耗尽，需要向群成员说明结束原因。"""
+
+
+# Provider 已按 max_attempts 处理协议错误；这里只为绕过该入口的响应兜底，
+# 不使用可能很大的 max_tool_rounds 反复生成异常正文。
+MAX_RESPONSE_RETRIES = 2
 
 
 @dataclass(frozen=True)
@@ -258,8 +267,16 @@ class GroupChatToolLoop:
             tool_names=[tool.name for tool in tools],
         )
         snapshot_title = "异常结束后的长期上下文"
+        round_index = 0
+        response_retries = 0
+        repair_message: ChatMessage | None = None
         try:
-            for round_index in range(1, self.config.max_tool_rounds + 1):
+            while round_index < self.config.max_tool_rounds:
+                request_messages = (
+                    [*working_messages, repair_message]
+                    if repair_message is not None
+                    else working_messages
+                )
                 log_event(
                     level="DEBUG",
                     event="ai_group_chat.llm.request",
@@ -267,20 +284,46 @@ class GroupChatToolLoop:
                     message="准备请求 LLM",
                     group_id=msg.group_id,
                     message_id=msg.message_id,
-                    round_index=round_index,
-                    messages_count=len(working_messages),
+                    round_index=round_index + 1,
+                    messages_count=len(request_messages),
                     working_messages_count=len(working_messages),
                     model_name=self.config.model.name,
                     provider=self.config.model.provider,
                     tools_count=len(tools),
                     tool_choice="auto",
                 )
-                response = await self.context.llm.get_ai_response_with_tools(
-                    messages=working_messages,
-                    provider=self.config.model.provider,
-                    model_name=self.config.model.name,
-                    tools=tools,
-                )
+                try:
+                    response = await self.context.llm.get_ai_response_with_tools(
+                        messages=request_messages,
+                        provider=self.config.model.provider,
+                        model_name=self.config.model.name,
+                        tools=tools,
+                    )
+                    # 必须在发送正文、调用工具和保存 reasoning 之前整份检查。
+                    validate_response(response, tools_allowed=bool(tools))
+                except LLMResponseError as exc:
+                    response_retries += 1
+                    log_event(
+                        level="WARNING",
+                        event="ai_group_chat.response.rejected",
+                        category="plugin",
+                        message="模型响应未通过发送前检查，未发送或执行该响应",
+                        group_id=msg.group_id,
+                        message_id=msg.message_id,
+                        round_index=round_index + 1,
+                        error_code=exc.code,
+                        rejected_responses=response_retries,
+                        will_retry=response_retries <= MAX_RESPONSE_RETRIES,
+                    )
+                    if response_retries > MAX_RESPONSE_RETRIES:
+                        snapshot_title = "响应格式重试耗尽后的长期上下文"
+                        raise GroupChatTurnError(
+                            "模型多次返回异常格式，本轮已停止，请稍后重试。"
+                        ) from None
+                    repair_message = build_response_repair_message(exc)
+                    continue
+                round_index += 1
+                repair_message = None
                 content = self._normalize_content(response.content)
                 reply_content = self._build_reply_content(
                     content=content,
@@ -298,6 +341,8 @@ class GroupChatToolLoop:
                     visible_content_chars=len(reply_content.visible_content or ""),
                     memory_content_chars=len(reply_content.memory_content or ""),
                     reasoning_chars=len(response.reasoning_content or ""),
+                    finish_reason=response.finish_reason,
+                    native_finish_reason=response.native_finish_reason,
                     tool_calls_count=len(response.tool_calls),
                     tool_call_names=[
                         tool_call.name for tool_call in response.tool_calls

@@ -137,6 +137,8 @@ class LLMResponse(StrictModel):
     content: str | None = None
     reasoning_content: str | None = None
     tool_calls: list[LLMToolCall] = Field(default_factory=list)
+    finish_reason: str | None = None
+    native_finish_reason: str | None = None
 
 
 class LLMToolExecutor(Protocol):

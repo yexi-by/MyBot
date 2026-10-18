@@ -8,6 +8,14 @@ class LLMRequestError(RuntimeError):
     """模型请求最终失败；消息可用于群聊反馈和诊断日志。"""
 
 
+class LLMResponseError(ValueError):
+    """可通过重新生成恢复的响应错误；仅携带本地生成的分类与说明。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code: str = code
+
+
 def provider_error_message(error: Exception) -> str:
     """省略供应商响应正文、请求 URL 和密钥，返回可执行的失败说明。"""
     if isinstance(error, (TimeoutError, httpx.TimeoutException, APITimeoutError)):

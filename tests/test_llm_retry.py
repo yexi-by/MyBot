@@ -1,8 +1,9 @@
 """LLM 单次请求重试覆盖测试。"""
 
+import json
 import unittest
 import traceback
-from typing import override
+from typing import cast, override
 from unittest.mock import AsyncMock, call, patch
 
 import httpx
@@ -43,6 +44,127 @@ class FlakyTextProvider(LLMProvider):
 
 class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
     """验证当前请求可以替换供应商默认重试参数。"""
+
+    async def test_invalid_protocol_response_retries_with_clean_feedback(self) -> None:
+        """通过真实协议适配器拒绝异常响应，纠错后恢复且不回放异常内容。"""
+        rejected_marker = "private-rejected-payload"
+        valid_call: dict[str, object] = {
+            "id": "call-recovered", "type": "function",
+            "function": {"name": "inspect", "arguments": '{"limit": 15}'},
+        }
+        malformed_call: dict[str, object] = {
+            **valid_call,
+            "function": {"name": "inspect", "arguments": f'{{"secret":"{rejected_marker}"'},
+        }
+        invalid_cases: list[tuple[str, str, dict[str, object], str, str | None]] = [
+            ("text_call", "text", {"content": f"<call:default_api:inspect>{rejected_marker}</call:default_api:inspect>"}, "stop", None),
+            ("no_tools_thought", "no_tools", {"content": f"<thought\n>{rejected_marker}</thought>公开回复"}, "stop", None),
+            ("malformed_arguments", "tools", {"tool_calls": [malformed_call]}, "tool_calls", None),
+            ("non_object_arguments", "tools", {"tool_calls": [{**valid_call, "function": {"name": "inspect", "arguments": "[]"}}]}, "tool_calls", None),
+            ("truncated_content", "text", {"content": rejected_marker}, "length", None),
+            ("native_truncation", "no_tools", {"content": rejected_marker}, "stop", "MAX_TOKENS"),
+            ("malformed_function_call", "tools", {"content": rejected_marker}, "stop", "MALFORMED_FUNCTION_CALL"),
+            ("filtered_content", "text", {"content": rejected_marker}, "content_filter", None),
+            ("missing_calls", "tools", {"content": rejected_marker}, "tool_calls", None),
+            ("missing_call_id", "tools", {"tool_calls": [{key: value for key, value in valid_call.items() if key != "id"}]}, "tool_calls", None),
+            ("duplicate_call_ids", "tools", {"tool_calls": [valid_call, valid_call]}, "tool_calls", None),
+        ]
+        for name, mode, invalid_message, finish_reason, native_finish_reason in invalid_cases:
+            with self.subTest(case=name):
+                request_messages: list[list[dict[str, object]]] = []
+
+                async def respond(request: httpx.Request) -> httpx.Response:
+                    body = cast(dict[str, object], json.loads(request.content))
+                    request_messages.append(cast(list[dict[str, object]], body["messages"]))
+                    first_attempt = len(request_messages) == 1
+                    message: dict[str, object] = (
+                        invalid_message if first_attempt else
+                        {"tool_calls": [valid_call]} if mode == "tools" else
+                        {"content": "恢复成功"}
+                    )
+                    choice: dict[str, object] = {
+                        "index": 0,
+                        "finish_reason": finish_reason if first_attempt else ("tool_calls" if name == "malformed_arguments" else "stop"),
+                        "message": {"role": "assistant", **message},
+                    }
+                    if first_attempt and native_finish_reason is not None:
+                        choice["native_finish_reason"] = native_finish_reason
+                    return httpx.Response(200, json={
+                        "id": "test", "object": "chat.completion", "created": 0,
+                        "model": "test", "choices": [choice],
+                    })
+
+                async with AsyncOpenAI(
+                    api_key="test", base_url="https://model.invalid/v1", max_retries=0,
+                    http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+                ) as client:
+                    provider = ResilientLLMProvider(OpenAIService(client), LLMProviderConfig(
+                        inherit_network_proxy=False, timeout_seconds=1, max_attempts=2,
+                        retry_delay_seconds=0, retry_max_delay_seconds=0,
+                    ))
+                    messages = [ChatMessage(role="user", text="查看最近消息")]
+                    original_messages = [message.model_copy(deep=True) for message in messages]
+                    if mode == "text":
+                        self.assertEqual(await provider.get_ai_response(messages, "test"), "恢复成功")
+                    else:
+                        tools = [LLMToolDefinition(name="inspect", description="查看消息", parameters={})] if mode == "tools" else []
+                        response = await provider.get_ai_response_with_tools(messages, "test", tools)
+                        if mode == "tools":
+                            self.assertEqual(len(response.tool_calls), 1)
+                            self.assertEqual(response.tool_calls[0].arguments, {"limit": 15})
+                        else:
+                            self.assertEqual(response.content, "恢复成功")
+                    self.assertEqual(messages, original_messages)
+
+                self.assertEqual(len(request_messages), 2)
+                self.assertEqual(request_messages[1][:len(request_messages[0])], request_messages[0])
+                self.assertGreater(len(request_messages[1]), len(request_messages[0]))
+                self.assertNotIn(rejected_marker, json.dumps(request_messages))
+
+    async def test_protocol_retry_exhaustion_keeps_error_and_requests_clean(self) -> None:
+        """持续泄漏不会越过重试预算，异常与纠错请求均不携带模型私有正文。"""
+        rejected_marker = "private-rejected-payload"
+        for mode in ("text", "tools"):
+            with self.subTest(mode=mode):
+                request_messages: list[list[dict[str, object]]] = []
+
+                async def respond(request: httpx.Request) -> httpx.Response:
+                    body = cast(dict[str, object], json.loads(request.content))
+                    request_messages.append(cast(list[dict[str, object]], body["messages"]))
+                    return httpx.Response(200, json={
+                        "id": "test", "object": "chat.completion", "created": 0,
+                        "model": "test", "choices": [{
+                            "index": 0, "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": f"<think>{rejected_marker}</think>"},
+                        }],
+                    })
+
+                async with AsyncOpenAI(
+                    api_key="test", base_url="https://model.invalid/v1", max_retries=0,
+                    http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+                ) as client:
+                    provider = ResilientLLMProvider(OpenAIService(client), LLMProviderConfig(
+                        inherit_network_proxy=False, timeout_seconds=1, max_attempts=3,
+                        retry_delay_seconds=0, retry_max_delay_seconds=0,
+                    ))
+                    handler = LLMHandler(services={"main": LLMProviderWrapper(
+                        provider_id="main", provider=provider,
+                    )}, clients=[])
+                    messages = [ChatMessage(role="user", text="正常问题")]
+                    original_messages = [message.model_copy(deep=True) for message in messages]
+                    with self.assertRaises(LLMRequestError) as caught:
+                        if mode == "text":
+                            await handler.get_ai_text_response(messages, "main", "test")
+                        else:
+                            await handler.get_ai_response_with_tools(messages, "main", "test", [
+                                LLMToolDefinition(name="inspect", description="查看消息", parameters={}),
+                            ])
+                    self.assertNotIn(rejected_marker, "".join(traceback.format_exception(caught.exception)))
+                    self.assertEqual(messages, original_messages)
+
+                self.assertEqual(len(request_messages), 3)
+                self.assertNotIn(rejected_marker, json.dumps(request_messages))
+                self.assertEqual(len(request_messages[2]), len(request_messages[1]))
 
     async def test_empty_choices_retries_for_text_and_tool_requests(self) -> None:
         """文本、无工具和带工具入口收到空候选后都能重试恢复。"""
