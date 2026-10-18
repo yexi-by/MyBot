@@ -5,10 +5,11 @@
     "mcp-searxng": "1.15.0"
   },
   "overrides": {
+    "@modelcontextprotocol/sdk": "1.31.0",
     "axios": "1.18.0",
-    "hono": "4.13.5",
-    "ip-address": "10.5.0",
+    "hono": "4.13.7",
+    "ip-address": "10.7.4",
     "koa-router": "npm:@koa/router@15.7.0",
-    "undici": "7.29.0"
+    "undici": "7.30.1"
   }
 }
