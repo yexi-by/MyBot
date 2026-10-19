@@ -65,6 +65,7 @@ AI 插件为每个群保留一把只保护长期上下文快照、提交和重�
 
 - `config/mybot.toml`：唯一运行配置。
 - `config/`：插件引用的 prompt 和知识库。
+- `config.example/`：示例配置引用的默认提示词（默认人格「耄耋」），结构与 `config/` 一致，复制后使用；不作为已部署环境的配置来源。
 - `webui/`：配置控制台前端工程（React + Vite），构建产物由 FastAPI 伺服。
 - `app/webui/`：WebUI 后端（`/api/*` 配置与文本文件路由、tomlkit 保注释写回、SPA 挂载）。
 - `images/`：永久群图片。

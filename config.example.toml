@@ -118,6 +118,7 @@ consumers_count = 5
 priority = 100
 
 [plugins.ai_group_chat]
+# 引用的提示词默认由仓库 config.example/ 提供（默认人格：耄耋），复制到 config/ 后即可使用。
 model = { provider = "deepseek", name = "deepseek-chat", supports_images = false }
 max_tool_rounds = 16
 token_safety_factor = 1.05
@@ -201,7 +202,7 @@ non_ascii_tokens_per_character = 2
 
 [[plugins.ai_group_chat.groups]]
 id = "123456789"
-system_prompt_file = "ai_group_chat/prompts/roles/default.md"
+system_prompt_file = "ai_group_chat/prompts/roles/maodie.md"
 knowledge_base_file = "ai_group_chat/knowledge/default.md"
 max_context_tokens = 64000
 

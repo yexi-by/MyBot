@@ -132,6 +132,7 @@ function defaultAIGroupChat(config: MyBotConfigData): AIGroupChatConfig {
     debug_dump_messages: true,
     debug_dump_directory: "logs/ai_group_chat_debug",
     extra_requirements_file: "ai_group_chat/prompts/extra_requirements.md",
+    turn_instruction_file: "ai_group_chat/prompts/turn_instruction.md",
     allow_mention_all: false,
     tool_result_retention: "off",
     groups: [],

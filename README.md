@@ -19,9 +19,10 @@ MyBot 是面向 QQ 群聊的机器人服务。它通过 FastAPI 接收 NapCat �
 uv sync
 mkdir config
 cp config.example.toml config/mybot.toml
+cp -r config.example/. config/
 ```
 
-编辑 `config/mybot.toml`，并把其中引用的 prompt、知识库文件放到 `config/` 下。随后启动 PostgreSQL、执行 migration 并运行服务：
+编辑 `config/mybot.toml`；其中引用的提示词已随 `config.example/` 复制到 `config/`，默认人格见「默认提示词与人格」。随后启动 PostgreSQL、执行 migration 并运行服务：
 
 ```bash
 uv run python -m app.database.migrations upgrade
@@ -61,6 +62,7 @@ Compose 使用 `postgres:18.4-bookworm`，PostgreSQL 不向宿主机公开端口
 umask 077
 mkdir -p config secrets images logs
 cp config.example.toml config/mybot.toml
+cp -r config.example/. config/
 # 编辑 config/mybot.toml，并向 secrets/postgres_password 写入数据库密码。
 docker compose up -d
 ```
@@ -198,7 +200,7 @@ forward_max_per_turn = 0
 
 [[plugins.ai_group_chat.groups]]
 id = "123456789"
-system_prompt_file = "ai_group_chat/prompts/roles/default.md"
+system_prompt_file = "ai_group_chat/prompts/roles/maodie.md"
 knowledge_base_file = "ai_group_chat/knowledge/default.md"
 max_context_tokens = 64000
 ```
@@ -231,6 +233,18 @@ turn_instruction_file = "ai_group_chat/prompts/turn_instruction.md"
 max_messages = 30
 max_chars_per_message = 200
 ```
+
+### 默认提示词与人格
+
+仓库的 `config.example/` 与 `config/` 目录结构一致，提供 `config.example.toml` 引用的全部提示词，默认人格是猫娘「耄耋」：
+
+- `ai_group_chat/prompts/roles/maodie.md`：群聊角色提示词，写耄耋的性格、说话方式和分寸。
+- `ai_group_chat/knowledge/default.md`：群知识库模板，可写群友称呼、群梗和群规；删空后不会附加到提示词。
+- `ai_group_chat/prompts/extra_requirements.md`：所有群共用的通用要求，说明 `<Reply>`、`<At>` 标记和纯文本输出。
+- `ai_group_chat/prompts/turn_instruction.md`：每次请求末尾的发言要求。
+- `ai_group_chat/prompts/vision/system.md`、`vision/user.md`：视觉模型提示词，只描述图片事实，不带人设。
+
+每个群的 system prompt 按「角色提示词 → 知识库 → 通用要求」拼接，其中任一文件变化都会清空该群的内存上下文；发言要求单独追加在请求末尾，修改后不清空上下文。这些文件只是新部署的起点，复制到 `config/` 后可在 WebUI 文件页直接修改；已部署环境以自身的 `config/` 为准，仓库示例不会覆盖它。
 
 ### 群聊视频输入
 

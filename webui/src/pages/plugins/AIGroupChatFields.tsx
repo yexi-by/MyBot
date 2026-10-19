@@ -237,7 +237,7 @@ function GroupsSection() {
             <TextField
               path={`${GROUPS_BASE}.${index}.system_prompt_file`}
               label="角色提示词文件"
-              placeholder="ai_group_chat/prompts/roles/default.md"
+              placeholder="ai_group_chat/prompts/roles/maodie.md"
             />
             <TextField
               path={`${GROUPS_BASE}.${index}.knowledge_base_file`}
@@ -254,7 +254,7 @@ function GroupsSection() {
         onClick={() =>
           append({
             id: "",
-            system_prompt_file: "ai_group_chat/prompts/roles/default.md",
+            system_prompt_file: "ai_group_chat/prompts/roles/maodie.md",
             knowledge_base_file: null,
             max_context_tokens: 64000,
           })

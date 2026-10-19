@@ -1,5 +1,6 @@
 """统一配置模型测试。"""
 
+import shutil
 import tomllib
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from app.config import (
     MyBotConfig,
     NapCatConfig,
     PluginExecutionConfig,
+    load_config,
 )
 from app.core.di import MyProvider
 
@@ -29,9 +31,17 @@ def load_example() -> dict[str, object]:
 class SettingsConfigTest(unittest.TestCase):
     """验证统一示例和配置模型保持一致。"""
 
-    def test_example_config_matches_schema(self) -> None:
-        """示例配置必须可以被严格模型解析。"""
-        _ = MyBotConfig.model_validate(load_example())
+    def test_example_config_loads_with_default_prompts(self) -> None:
+        """示例配置连同 config.example/ 默认提示词复制到 config/ 后即可加载。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_root = Path(temp_dir)
+            _ = shutil.copytree("config.example", config_root, dirs_exist_ok=True)
+            config_file = config_root / "mybot.toml"
+            _ = shutil.copyfile("config.example.toml", config_file)
+
+            loaded = load_config(config_file=config_file)
+
+        self.assertIsNotNone(loaded.plugins.ai_group_chat)
 
     def test_mcp_rejects_mixed_or_missing_transport_targets(self) -> None:
         """连接字段不能被选错传输后静默忽略，缺少目标也不能保存。"""
