@@ -17,6 +17,8 @@ function baseSpan(el: HTMLElement, cols: number, twoColSection: boolean): number
 }
 
 function fill(body: HTMLElement) {
+  // 旧补位跨列会在容器缩窄后生成隐式列，必须先清掉再读取真实列数。
+  for (const el of body.children) el.removeAttribute("data-fill");
   const cols = getComputedStyle(body).gridTemplateColumns.split(" ").filter(Boolean).length;
   const twoColSection = body.parentElement?.classList.contains("sec--cols2") ?? false;
   const items = [...body.children].filter(
@@ -42,15 +44,7 @@ function fill(body: HTMLElement) {
     }
     close();
   }
-  for (const el of items) {
-    const next = wanted.get(el);
-    const current = el.getAttribute("data-fill");
-    if (next === undefined) {
-      if (current !== null) el.removeAttribute("data-fill");
-    } else if (current !== String(next)) {
-      el.setAttribute("data-fill", String(next));
-    }
-  }
+  for (const [el, span] of wanted) el.setAttribute("data-fill", String(span));
 }
 
 /** 在字段网格容器上启用补位；尺寸变化、字段增删和字段筛选后都会重算。 */
