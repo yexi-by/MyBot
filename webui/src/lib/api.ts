@@ -1,130 +1,110 @@
-/** WebUI 后端 API 封装；409/422 以 ApiError 抛出。 */
+/** WebUI 后端 API 调用；错误统一收敛为 ApiError（status 0 表示连不上服务）。 */
 
 import type {
   ConfigGetResponse,
-  ConfigIssuePayload,
+  ConfigIssue,
   ConfigSaveResponse,
   ConfigValidateResponse,
   FileGetResponse,
   FileListResponse,
   FileSaveResponse,
-  MyBotConfigData,
+  JsonObject,
   PowerResponse,
   ProviderModelsResponse,
 } from "./types";
 
 export class ApiError extends Error {
-  status: number;
-  issues: ConfigIssuePayload[];
+  readonly status: number;
+  readonly issues: ConfigIssue[];
 
-  constructor(status: number, message: string, issues: ConfigIssuePayload[] = []) {
+  constructor(status: number, message: string, issues: ConfigIssue[] = []) {
     super(message);
+    this.name = "ApiError";
     this.status = status;
     this.issues = issues;
   }
 }
 
-interface ErrorDetail {
-  detail?: string | { issues?: ConfigIssuePayload[] };
+function isIssueList(value: unknown): value is ConfigIssue[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        "location" in item &&
+        "error_type" in item &&
+        "message" in item,
+    )
+  );
 }
 
-const REQUEST_TIMEOUT_MS = 30_000;
+function errorFromDetail(status: number, detail: unknown): ApiError {
+  if (typeof detail === "string") return new ApiError(status, detail);
+  if (typeof detail === "object" && detail !== null && "issues" in detail) {
+    const issues = (detail as { issues: unknown }).issues;
+    if (isIssueList(issues)) {
+      const normalized = issues.map((issue) => ({
+        ...issue,
+        path: Array.isArray(issue.path) ? issue.path : [],
+      }));
+      return new ApiError(status, `${normalized.length} 个配置问题`, normalized);
+    }
+  }
+  if (Array.isArray(detail)) return new ApiError(status, "请求格式不被后端接受");
+  return new ApiError(status, `请求失败（HTTP ${status}）`);
+}
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(path, {
+    response = await fetch(url, {
+      method,
       cache: "no-store",
-      headers: { "Content-Type": "application/json" },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      ...init,
+      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "TimeoutError") {
-      throw new ApiError(0, "请求超时，请检查服务状态");
-    }
-    throw error;
+  } catch {
+    throw new ApiError(0, "连不上 MyBot 服务");
   }
-  if (!response.ok) {
-    let message = `请求失败（${response.status}）`;
-    let issues: ConfigIssuePayload[] = [];
-    try {
-      const body = (await response.json()) as ErrorDetail;
-      if (typeof body.detail === "string") {
-        message = body.detail;
-      } else if (body.detail?.issues) {
-        issues = body.detail.issues;
-        message = issues.map((issue) => `${issue.location}: ${issue.message}`).join("；");
-      }
-    } catch {
-      // 保留默认错误消息
-    }
-    throw new ApiError(response.status, message, issues);
+  if (response.ok) return (await response.json()) as T;
+  let detail: unknown = null;
+  try {
+    detail = ((await response.json()) as { detail?: unknown }).detail ?? null;
+  } catch {
+    // 非 JSON 错误体（例如反向代理返回的 HTML）只保留状态码。
   }
-  return (await response.json()) as T;
+  throw errorFromDetail(response.status, detail);
 }
 
-function fileApiPath(path: string): string {
-  return path
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
+/** 文本文件路径逐段编码，保留目录分隔符。 */
+function filePath(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
 }
 
-export function getConfig(): Promise<ConfigGetResponse> {
-  return request<ConfigGetResponse>("/api/config");
-}
+export const api = {
+  getConfig: () => request<ConfigGetResponse>("GET", "/api/config"),
+  validateConfig: (config: JsonObject) =>
+    request<ConfigValidateResponse>("POST", "/api/config/validate", { config }),
+  saveConfig: (config: JsonObject, baseSha256: string) =>
+    request<ConfigSaveResponse>("PUT", "/api/config", { config, base_sha256: baseSha256 }),
+  listFiles: () => request<FileListResponse>("GET", "/api/files"),
+  readFile: (path: string) => request<FileGetResponse>("GET", `/api/files/${filePath(path)}`),
+  saveFile: (path: string, content: string, baseSha256: string | null) =>
+    request<FileSaveResponse>("PUT", `/api/files/${filePath(path)}`, {
+      content,
+      base_sha256: baseSha256,
+    }),
+  listModels: (provider: string) =>
+    request<ProviderModelsResponse>(
+      "GET",
+      `/api/llm/providers/${encodeURIComponent(provider)}/models`,
+    ),
+  restart: () => request<PowerResponse>("POST", "/api/system/restart"),
+  shutdown: () => request<PowerResponse>("POST", "/api/system/shutdown"),
+};
 
-export function validateConfig(
-  config: MyBotConfigData,
-): Promise<ConfigValidateResponse> {
-  return request<ConfigValidateResponse>("/api/config/validate", {
-    method: "POST",
-    body: JSON.stringify({ config }),
-  });
-}
-
-export function saveConfig(
-  config: MyBotConfigData,
-  baseSha256: string,
-): Promise<ConfigSaveResponse> {
-  return request<ConfigSaveResponse>("/api/config", {
-    method: "PUT",
-    body: JSON.stringify({ config, base_sha256: baseSha256 }),
-  });
-}
-
-export function listFiles(): Promise<FileListResponse> {
-  return request<FileListResponse>("/api/files");
-}
-
-export function readFile(path: string): Promise<FileGetResponse> {
-  return request<FileGetResponse>(`/api/files/${fileApiPath(path)}`);
-}
-
-export function saveFile(
-  path: string,
-  content: string,
-  baseSha256: string | null,
-): Promise<FileSaveResponse> {
-  return request<FileSaveResponse>(`/api/files/${fileApiPath(path)}`, {
-    method: "PUT",
-    body: JSON.stringify({ content, base_sha256: baseSha256 }),
-  });
-}
-
-export function restartSystem(): Promise<PowerResponse> {
-  return request<PowerResponse>("/api/system/restart", { method: "POST" });
-}
-
-export function shutdownSystem(): Promise<PowerResponse> {
-  return request<PowerResponse>("/api/system/shutdown", { method: "POST" });
-}
-
-export function getProviderModels(
-  providerId: string,
-): Promise<ProviderModelsResponse> {
-  return request<ProviderModelsResponse>(
-    `/api/llm/providers/${encodeURIComponent(providerId)}/models`,
-  );
+export function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return error.message;
+  return fallback;
 }

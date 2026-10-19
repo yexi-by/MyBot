@@ -66,16 +66,18 @@ AI 插件为每个群保留一把只保护长期上下文快照、提交和重�
 - `config/mybot.toml`：唯一运行配置。
 - `config/`：插件引用的 prompt 和知识库。
 - `config.example/`：示例配置引用的默认提示词（默认人格「耄耋」），结构与 `config/` 一致，复制后使用；不作为已部署环境的配置来源。
-- `webui/`：配置控制台前端工程（React + Vite），构建产物由 FastAPI 伺服。
+- `webui/`：配置控制台前端工程（React + TypeScript + Vite，原生 CSS 主题变量，CodeMirror 6 编辑文本），构建产物由 FastAPI 伺服。
 - `app/webui/`：WebUI 后端（`/api/*` 配置与文本文件路由、tomlkit 保注释写回、SPA 挂载）。
 - `images/`：永久群图片。
 - `logs/`：日志和 AI 调试转储。
 
 WebUI 与主服务同端口，不另建配置状态。配置表单停止编辑 800ms 后自动校验并写回，文本文件停止编辑 1 秒后自动写回；每次请求都使用读取时的内容哈希，外部修改发生后不会被静默覆盖。文件接口允许访问 `config/` 内任意扩展名的 UTF-8 文本，因此可在 TOML 语法损坏时直接修复 `mybot.toml`；二进制文件和目录逃逸仍被拒绝。Markdown 文件使用语法高亮编辑器，并可并排实时预览 GFM 渲染结果。生产 Compose 允许 MyBot 写入配置目录，migration 服务仍使用只读挂载。
 
-文本页首次访问后保留单个编辑会话，切换配置页面不会取消其自动保存。文件和配置向框架提供当前保存状态，顶栏与快捷键保存当前编辑对象，关闭页面及电源操作共同检查所有未保存内容。列表字段按原始数组受控编辑，保留 0 和空白输入行。
+前端以 `webui/src/schema/` 的声明式字段定义描述每个配置节（类型、单位、取值范围、可选节开关和字段联动），同一份定义生成表单、做客户端预检、供命令面板搜索，并给写回记录提供中文字段名。整份配置草稿放在单一 store 里，按叶子路径与上次写入的版本比较，得出字段级和页面级改动；保存失败时按 API 返回的 `path` 把错误标到字段上，只有点分 `location` 的文件与模型引用错误由后端还原出 `path`。插件配置写入后，前端轮询 `meta.plugin_revision`，增长即视为热生效；启动配置节只提示待重启。
 
-WebUI 还提供 `POST /api/system/restart` 与 `POST /api/system/shutdown` 电源端点：`PowerController` 按 `server.power_action_delay_seconds` 延迟触发 uvicorn 优雅停机，重启/关机在进程级行为一致，是否重新拉起由外部守护策略决定（`docker-compose.yml` 的 mybot 服务是 `restart: unless-stopped`，容器内两种操作都会被重新拉起）。
+文本页首次访问后保留单个编辑会话，切换配置页面不会取消其自动保存。顶栏状态和 `Ctrl+S` 作用于当前编辑对象，关闭页面及电源操作共同检查所有未保存内容。
+
+WebUI 还提供 `POST /api/system/restart` 与 `POST /api/system/shutdown` 电源端点：`PowerController` 按 `server.power_action_delay_seconds` 延迟触发 uvicorn 优雅停机，重启/关机在进程级行为一致，是否重新拉起由外部守护策略决定（`docker-compose.yml` 的 mybot 服务是 `restart: unless-stopped`，容器内两种操作都会被重新拉起）。前端以 `/api/config` 元信息中的 `boot_id` 变化判定新进程已接管。
 
 ## 关闭顺序
 

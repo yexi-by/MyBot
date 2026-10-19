@@ -1,263 +1,174 @@
-/** LLM Providers 管理页：动态 ID 始终作为不透明键整体写回。 */
+import { Plus, Trash2, TriangleAlert } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
 
-import { useId, useState } from "react";
-import { useFormContext } from "react-hook-form";
-import { Cable, Plus, Trash2 } from "lucide-react";
-import { toast } from "sonner";
+import { confirm } from "@/components/Dialog";
+import { FilterEmpty, IssueBanner, PageHeader } from "@/components/PageHeader";
+import { Section } from "@/components/Section";
+import { config, useConfig } from "@/lib/config";
+import { useFieldFilter } from "@/lib/filter";
+import { cls } from "@/lib/pages";
+import { getIn, isRecord, tomlKey } from "@/lib/path";
+import { revealField } from "@/lib/router";
+import { shallowArrayEqual } from "@/lib/store";
+import { usePageToc } from "@/lib/toc";
+import type { JsonObject, PathSeg } from "@/lib/types";
+import { defaultProvider, PROVIDER_FIELDS } from "@/schema/services";
+import { fieldPath, type SectionDef } from "@/schema/types";
 
-import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { EmptyState } from "@/components/EmptyState";
-import { PageHeader } from "@/components/PageHeader";
-import { SectionCard } from "@/components/SectionCard";
-import { SettingsGrid } from "@/components/SettingsGrid";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { countDirtyUnder } from "@/lib/dirty";
-import type { LLMProviderConfig, MyBotConfigData } from "@/lib/types";
-import { useFieldFilter } from "@/lib/useFieldFilter";
+const PROVIDER_SECTION: SectionDef = {
+  id: "provider",
+  title: "Provider",
+  base: ["llm", "providers"],
+  restart: true,
+  desc: "OpenAI 兼容服务。",
+  fields: PROVIDER_FIELDS,
+};
 
-function numberInput(value: string): number | undefined {
-  return value === "" ? undefined : Number(value);
+const REFERENCES: [PathSeg[], string][] = [
+  [["plugins", "ai_group_chat", "model", "provider"], "AI 群聊 · 主模型"],
+  [["plugins", "ai_group_chat", "vision", "model", "provider"], "AI 群聊 · 视觉模型"],
+  [["plugins", "image_generate", "model", "provider"], "生图 · 模型"],
+];
+
+function providerRefs(config: JsonObject, id: string): string[] {
+  return REFERENCES.filter(([path]) => getIn(config, path) === id).map(([, label]) => label);
 }
 
-export default function ProvidersPage() {
-  const controlPrefix = useId();
-  const { watch, setValue, formState } = useFormContext<MyBotConfigData>();
-  const [newProviderId, setNewProviderId] = useState("");
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
-  const [filter, setFilter] = useState("");
-  const filterRef = useFieldFilter(filter);
-  const providers = watch("llm.providers") ?? {};
-  const providerIds = Object.keys(providers);
-  const dirtyCount = countDirtyUnder(formState.dirtyFields, ["llm"]);
+function useProviderIds(): string[] {
+  return useConfig((state) => {
+    const record = getIn(state.draft, ["llm", "providers"]);
+    return isRecord(record) ? Object.keys(record) : [];
+  }, shallowArrayEqual);
+}
 
-  const commit = (next: Record<string, LLMProviderConfig>) => {
-    setValue("llm.providers", next, { shouldDirty: true });
-  };
-  const updateProvider = (
-    id: string,
-    patch: Partial<LLMProviderConfig>,
-  ) => {
-    commit({ ...providers, [id]: { ...providers[id], ...patch } });
-  };
-
-  const addProvider = () => {
-    const id = newProviderId.trim();
-    if (id === "") {
-      toast.error("Provider ID 不能为空");
-      return;
-    }
-    if (id !== newProviderId) {
-      toast.error("Provider ID 不能包含首尾空格");
-      return;
-    }
-    if (Object.hasOwn(providers, id)) {
-      toast.error(`Provider ${id} 已存在`);
-      return;
-    }
-    commit({
-      ...providers,
-      [id]: {
-        api_key: null,
-        base_url: null,
-        proxy: null,
-        inherit_network_proxy: true,
-        timeout_seconds: 0,
-        max_attempts: 5,
-        retry_delay_seconds: 0,
-        retry_max_delay_seconds: 0,
-      },
+function ProviderCard({ id }: { id: string }) {
+  const base = useMemo(() => ["llm", "providers", id], [id]);
+  const refs = useConfig((state) => providerRefs(state.draft, id), shallowArrayEqual);
+  const remove = () =>
+    confirm({
+      title: `删除 Provider ${id}？`,
+      body: (
+        <>
+          <p>这个 Provider 的 API Key 与连接参数会随自动保存一起从 mybot.toml 移除，无法恢复。</p>
+          {refs.length > 0 ? <p>下列模型引用会失效，需要重新选择服务：{refs.join("、")}。</p> : null}
+        </>
+      ),
+      confirmLabel: "删除 Provider",
+      onConfirm: () => config.set(base, null),
     });
-    setNewProviderId("");
-  };
-
-  const removeProvider = (id: string) => {
-    const next = { ...providers };
-    delete next[id];
-    commit(next);
-  };
-
   return (
-    <div ref={filterRef} className="space-y-3">
-      <PageHeader
-        title="模型 Providers"
-        description="OpenAI 兼容服务接入；Provider ID 可以包含点号，界面会保留完整键名。"
-        notice="Provider 改动需要重启进程后生效"
-        dirtyCount={dirtyCount}
-        filterValue={filter}
-        onFilterChange={setFilter}
-      />
+    <Section
+      section={PROVIDER_SECTION}
+      base={base}
+      title={id}
+      titleMono
+      table={`[llm.providers.${tomlKey(id)}]`}
+      domId={`provider-${id}`}
+      aside={
+        <button type="button" className="icon-btn icon-btn--danger icon-btn--small" aria-label={`删除 Provider ${id}`} title="删除这个 Provider" onClick={remove}>
+          <Trash2 className="ic" aria-hidden />
+        </button>
+      }
+      footer={refs.length > 0 ? <p className="sec-foot fld-desc">被引用：{refs.join("、")}</p> : null}
+    />
+  );
+}
 
-      {providerIds.length === 0 ? (
-        <EmptyState
-          icon={Cable}
-          title="尚未配置 LLM Provider"
-          description="在下方「新增 Provider」卡片中输入 ID 即可添加；插件的模型引用从这里选择服务。"
-        />
-      ) : null}
-
-      <SettingsGrid columns={providerIds.length + 1 >= 3 ? 3 : 2}>
-        {providerIds.map((id) => {
-          const provider = providers[id];
-          return (
-            <SectionCard
-              key={id}
-              title={id}
-              description="OpenAI 兼容服务"
-              actions={
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={`删除 Provider ${id}`}
-                  onClick={() => setDeleteTarget(id)}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              }
-            >
-              <div className="space-y-1.5">
-                <Label htmlFor={`${controlPrefix}-${id}-api_key`}>API Key</Label>
-                <Input
-                  id={`${controlPrefix}-${id}-api_key`}
-                  value={provider.api_key ?? ""}
-                  onChange={(event) =>
-                    updateProvider(id, { api_key: event.target.value || null })
-                  }
-                />
-                <p className="text-xs text-muted-foreground">
-                  留空时不发送 Authorization；内网 WebUI 明文展示
-                </p>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={`${controlPrefix}-${id}-base_url`}>Base URL</Label>
-                <Input
-                  id={`${controlPrefix}-${id}-base_url`}
-                  value={provider.base_url ?? ""}
-                  onChange={(event) =>
-                    updateProvider(id, { base_url: event.target.value || null })
-                  }
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={`${controlPrefix}-${id}-proxy`}>Provider 代理</Label>
-                <Input
-                  id={`${controlPrefix}-${id}-proxy`}
-                  value={provider.proxy ?? ""}
-                  placeholder="留空时按继承开关决定"
-                  onChange={(event) =>
-                    updateProvider(id, { proxy: event.target.value || null })
-                  }
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={`${controlPrefix}-${id}-inherit_network_proxy`}>继承全局代理</Label>
-                <Switch
-                  id={`${controlPrefix}-${id}-inherit_network_proxy`}
-                  checked={Boolean(provider.inherit_network_proxy)}
-                  onCheckedChange={(checked) =>
-                    updateProvider(id, { inherit_network_proxy: checked })
-                  }
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={`${controlPrefix}-${id}-timeout_seconds`}>请求超时（秒）</Label>
-                <Input
-                  id={`${controlPrefix}-${id}-timeout_seconds`}
-                  type="number"
-                  step="any"
-                  value={provider.timeout_seconds ?? ""}
-                  onChange={(event) =>
-                    updateProvider(id, {
-                      timeout_seconds: numberInput(event.target.value),
-                    })
-                  }
-                />
-                <p className="text-xs text-muted-foreground">0 表示使用全局网络超时</p>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={`${controlPrefix}-${id}-max_attempts`}>最大尝试次数</Label>
-                <Input
-                  id={`${controlPrefix}-${id}-max_attempts`}
-                  type="number"
-                  value={provider.max_attempts ?? ""}
-                  onChange={(event) =>
-                    updateProvider(id, {
-                      max_attempts: numberInput(event.target.value),
-                    })
-                  }
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={`${controlPrefix}-${id}-retry_delay_seconds`}>初始重试间隔（秒）</Label>
-                <Input
-                  id={`${controlPrefix}-${id}-retry_delay_seconds`}
-                  type="number"
-                  step="any"
-                  value={provider.retry_delay_seconds ?? ""}
-                  onChange={(event) =>
-                    updateProvider(id, {
-                      retry_delay_seconds: numberInput(event.target.value),
-                    })
-                  }
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={`${controlPrefix}-${id}-retry_max_delay_seconds`}>最大重试间隔（秒）</Label>
-                <Input
-                  id={`${controlPrefix}-${id}-retry_max_delay_seconds`}
-                  type="number"
-                  step="any"
-                  value={provider.retry_max_delay_seconds ?? ""}
-                  onChange={(event) =>
-                    updateProvider(id, {
-                      retry_max_delay_seconds: numberInput(event.target.value),
-                    })
-                  }
-                />
-                <p className="text-xs text-muted-foreground">0 表示不限制指数退避上限</p>
-              </div>
-            </SectionCard>
-          );
-        })}
-
-        <SectionCard title="新增 Provider" description="ID 不能为空，也不能包含首尾空格。">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center xl:col-span-2">
-            <Input
+function AddProvider({ existing }: { existing: string[] }) {
+  const [id, setId] = useState("");
+  const [error, setError] = useState("");
+  const submit = () => {
+    if (id.trim() === "") return setError("请输入 Provider ID");
+    if (id !== id.trim()) return setError("ID 不能有首尾空格");
+    if (existing.includes(id)) return setError(`Provider ${id} 已存在`);
+    config.set(["llm", "providers", id], defaultProvider());
+    setId("");
+    setError("");
+    revealField(fieldPath(["llm", "providers", id], PROVIDER_FIELDS[0]!));
+  };
+  return (
+    <section className="sec sec--add" id="sec-provider-add" data-section="provider-add" data-search="新增 provider 添加" aria-labelledby="provider-add-title">
+      <header className="sec-head">
+        <h2 className="sec-title" id="provider-add-title">
+          新增 Provider
+        </h2>
+        <code className="sec-path">[llm.providers.&lt;id&gt;]</code>
+        <p className="sec-desc">ID 是插件引用它的名字，例如 deepseek 或 local.qwen；写入后不能改名，只能删除重建。</p>
+      </header>
+      <div className="sec-body">
+        <div className="add-row">
+          <div className="ctl">
+            <input
+              className={cls("inp is-mono", error && "is-error")}
+              value={id}
+              placeholder="provider ID，如 deepseek"
               aria-label="新 Provider ID"
-              placeholder="provider ID，如 deep.seek"
-              value={newProviderId}
-              onChange={(event) => setNewProviderId(event.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(event) => {
+                setId(event.target.value);
+                if (error) setError("");
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
-                  addProvider();
+                  submit();
                 }
               }}
             />
-            <Button type="button" className="sm:w-auto" onClick={addProvider}>
-              <Plus className="mr-1 h-4 w-4" />
-              添加
-            </Button>
           </div>
-        </SectionCard>
-      </SettingsGrid>
+          <button type="button" className="btn btn--primary" onClick={submit}>
+            <Plus className="ic" aria-hidden />
+            添加
+          </button>
+        </div>
+        {error ? (
+          <p className="fld-err" role="alert">
+            <TriangleAlert className="ic" aria-hidden />
+            {error}
+          </p>
+        ) : (
+          <p className="add-hint">新 Provider 写入后要重启进程，插件的模型引用才能选它。</p>
+        )}
+      </div>
+    </section>
+  );
+}
 
-      <ConfirmDialog
-        open={deleteTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) setDeleteTarget(null);
-        }}
-        title={`删除 Provider ${deleteTarget ?? ""}？`}
-        description="删除后该 Provider 的 API Key 与连接参数将随自动保存一并移除，且无法恢复；引用它的模型配置需要重新选择服务。"
-        confirmLabel="删除 Provider"
-        destructive
-        onConfirm={() => {
-          if (deleteTarget !== null) removeProvider(deleteTarget);
-        }}
+export default function ProvidersPage() {
+  const ids = useProviderIds();
+  const [filter, setFilter] = useState("");
+  const root = useRef<HTMLDivElement>(null);
+  const empty = useFieldFilter(root, filter);
+  usePageToc([
+    ...ids.map((id) => ({ id: `provider-${id}`, title: id, prefixes: [["llm", "providers", id]] })),
+    { id: "provider-add", title: "新增 Provider", prefixes: [] },
+  ]);
+  return (
+    <div className="page-inner" ref={root}>
+      <PageHeader
+        page="providers"
+        kicker="系统"
+        table="[llm.providers]"
+        title="模型服务"
+        desc="OpenAI 兼容的模型服务。插件的模型引用从这里选择 Provider；ID 可以包含点号，界面按完整键名写回。"
+        notice="Provider 改动写入后，要重启进程才生效"
+        filter={filter}
+        onFilter={setFilter}
       />
+      <IssueBanner page="providers" />
+      <div className="sections">
+        {ids.length === 0 ? (
+          <div className="empty">
+            <p className="empty-title">还没有配置模型服务</p>
+            <p className="empty-desc">在下面输入一个 Provider ID 即可添加；AI 群聊和生图插件都从这里选择服务。</p>
+          </div>
+        ) : (
+          ids.map((id) => <ProviderCard key={id} id={id} />)
+        )}
+        <AddProvider existing={ids} />
+      </div>
+      {empty ? <FilterEmpty query={filter} /> : null}
     </div>
   );
 }

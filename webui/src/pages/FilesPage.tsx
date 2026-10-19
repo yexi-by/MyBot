@@ -1,644 +1,444 @@
-/** 配置文本编辑页：config/ 内 UTF-8 文件的自动保存编辑器，md 支持实时预览。 */
+/** 配置文本页：config/ 文件树 + 编辑器；.md 可并排预览，其余文件纯文本编辑。 */
 
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { useFormContext } from "react-hook-form";
-import {
-  ChevronDown,
-  ChevronRight,
-  Eye,
-  EyeOff,
-  File,
-  FileCode2,
-  FileText,
-  Folder,
-} from "lucide-react";
-import { toast } from "sonner";
+import { ChevronDown, Copy, File, FileText, Folder, FolderOpen, Plus, RefreshCw, TriangleAlert } from "lucide-react";
+import { lazy, Suspense, useEffect, useMemo, useState, type CSSProperties } from "react";
 
-import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { EmptyState } from "@/components/EmptyState";
-import type { SaveStatusKind } from "@/components/SaveStatusPill";
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { ApiError, listFiles, readFile, saveFile } from "@/lib/api";
-import type { MyBotConfigData } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { Dialog, useLatest } from "@/components/Dialog";
+import { PageHeader } from "@/components/PageHeader";
+import { config, useConfig } from "@/lib/config";
+import { CONFIG_FILE, files, useFiles, type FileView } from "@/lib/files";
+import { cls } from "@/lib/pages";
+import { replaceRoute, useRoute } from "@/lib/router";
+import { fileReferences, requiredPromptFiles, type FileReference } from "@/schema/plugins";
 
-interface OpenFile {
+const MarkdownPreview = lazy(() => import("@/components/MarkdownPreview"));
+// 编辑器只在这一页用到，单独分包，首屏不加载 CodeMirror。
+const CodeEditor = lazy(() => import("@/components/CodeEditor").then((module) => ({ default: module.CodeEditor })));
+
+const isMarkdown = (path: string) => path.toLowerCase().endsWith(".md");
+
+/* ---------- 文件树 ---------- */
+
+interface TreeDir {
+  name: string;
   path: string;
-  content: string;
-  sha256: string;
-  dirty: boolean;
-}
-
-export interface FileEditorState {
-  dirty: boolean;
-  saving: boolean;
-  state: SaveStatusKind;
-  save: () => Promise<void>;
-}
-
-const TEXT_AUTOSAVE_DELAY_MS = 1000;
-
-const MarkdownEditor = lazy(async () => {
-  const module = await import("@/components/MarkdownEditor");
-  return { default: module.MarkdownEditor };
-});
-
-const MarkdownPreview = lazy(async () => {
-  const module = await import("@/components/MarkdownPreview");
-  return { default: module.MarkdownPreview };
-});
-
-function requiredPromptFiles(config: MyBotConfigData): Set<string> {
-  const ai = config.plugins?.ai_group_chat;
-  if (!ai) return new Set();
-  const files = new Set<string>([
-    ai.extra_requirements_file ?? "",
-    ai.turn_instruction_file ?? "",
-  ]);
-  if (ai.vision) {
-    files.add(ai.vision.system_prompt_file);
-    files.add(ai.vision.user_prompt_file);
-  }
-  for (const group of ai.groups ?? []) {
-    files.add(group.system_prompt_file);
-  }
-  files.delete("");
-  return files;
-}
-
-function isMarkdown(path: string): boolean {
-  return path.toLowerCase().endsWith(".md");
-}
-
-function fileIcon(path: string) {
-  const lower = path.toLowerCase();
-  if (lower.endsWith(".md")) return FileText;
-  if (/\.(toml|json|ya?ml)$/.test(lower)) return FileCode2;
-  return File;
-}
-
-interface FileGroup {
-  /** 顶层目录名；null 表示 config/ 根下的散文件。 */
-  dir: string | null;
+  dirs: TreeDir[];
   files: string[];
 }
 
-/** 按顶层目录分组，根目录散文件在前，目录按名称排序。 */
-function groupFiles(files: string[]): FileGroup[] {
-  const root: string[] = [];
-  const dirs = new Map<string, string[]>();
-  for (const file of files) {
-    const slash = file.indexOf("/");
-    if (slash === -1) {
-      root.push(file);
-    } else {
-      const dir = file.slice(0, slash);
-      const list = dirs.get(dir) ?? [];
-      list.push(file);
-      dirs.set(dir, list);
+function buildTree(paths: string[]): TreeDir {
+  const root: TreeDir = { name: "", path: "", dirs: [], files: [] };
+  for (const path of paths) {
+    const parts = path.split("/");
+    let node = root;
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      const dirPath = parts.slice(0, index + 1).join("/");
+      let child = node.dirs.find((dir) => dir.path === dirPath);
+      if (!child) {
+        child = { name: parts[index] ?? "", path: dirPath, dirs: [], files: [] };
+        node.dirs.push(child);
+      }
+      node = child;
     }
+    node.files.push(path);
   }
-  const groups: FileGroup[] = [];
-  if (root.length > 0) groups.push({ dir: null, files: root });
-  for (const dir of [...dirs.keys()].sort()) {
-    groups.push({ dir, files: dirs.get(dir) ?? [] });
-  }
-  return groups;
-}
-
-/** 复制到剪贴板，非安全上下文（局域网 http）回退 execCommand。 */
-async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    try {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      textarea.style.position = "fixed";
-      textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
-      textarea.select();
-      const ok = document.execCommand("copy");
-      textarea.remove();
-      return ok;
-    } catch {
-      return false;
-    }
-  }
-}
-
-export default function FilesPage({ initialPath, onEditorStateChange }: {
-  initialPath?: string;
-  onEditorStateChange: (state: FileEditorState | null) => void;
-}) {
-  const [files, setFiles] = useState<string[]>([]);
-  const [listError, setListError] = useState<string | null>(null);
-  const [openFile, setOpenFile] = useState<OpenFile | null>(null);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [newPath, setNewPath] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [saveState, setSaveState] = useState<SaveStatusKind>("idle");
-  const [previewOn, setPreviewOn] = useState(false);
-  const [conflictOpen, setConflictOpen] = useState(false);
-  const [pendingSwitch, setPendingSwitch] = useState<string | null>(null);
-  const [closedGroups, setClosedGroups] = useState<Set<string>>(new Set());
-  const savingRef = useRef(false);
-  const loadGeneration = useRef(0);
-  const blockedContent = useRef<string | null>(null);
-  const latestOpenFile = useRef<OpenFile | null>(null);
-  const editVersion = useRef(0);
-  const { getValues } = useFormContext<MyBotConfigData>();
-
-  const fileGroups = useMemo(() => groupFiles(files), [files]);
-
-  useEffect(() => {
-    latestOpenFile.current = openFile;
-  }, [openFile]);
-
-  const refreshFiles = useCallback(() => {
-    listFiles()
-      .then((response) => {
-        setFiles(response.files);
-        setListError(null);
-      })
-      .catch((error: unknown) => {
-        setListError(error instanceof Error ? error.message : "加载文件列表失败");
-      });
-  }, []);
-
-  useEffect(() => {
-    refreshFiles();
-  }, [refreshFiles]);
-
-  const loadPath = useCallback((path: string) => {
-    const generation = ++loadGeneration.current;
-    const previousEditVersion = editVersion.current;
-    readFile(path)
-      .then((response) => {
-        if (generation !== loadGeneration.current) return;
-        if (previousEditVersion !== editVersion.current) {
-          toast.info("读取期间当前文件有新修改，已保留编辑内容；请保存后重新打开目标文件");
-          return;
-        }
-        blockedContent.current = null;
-        editVersion.current = 0;
-        setSaveState("idle");
-        setConflictOpen(false);
-        const loadedFile = {
-          path: response.path,
-          content: response.content,
-          sha256: response.sha256,
-          dirty: false,
-        };
-        latestOpenFile.current = loadedFile;
-        setOpenFile(loadedFile);
-      })
-      .catch((error: unknown) => {
-        toast.error(error instanceof Error ? error.message : "读取文件失败");
-      });
-  }, []);
-
-  useEffect(() => {
-    if (initialPath) loadPath(initialPath);
-  }, [initialPath, loadPath]);
-
-  const openPath = useCallback(
-    (path: string) => {
-      if (saving) {
-        toast.info("正在自动保存，请稍后再切换文件");
-        return;
-      }
-      if (openFile?.dirty) {
-        setPendingSwitch(path);
-        return;
-      }
-      loadPath(path);
-    },
-    [openFile, loadPath, saving],
-  );
-
-  const onSave = useCallback(async (overwrite = false) => {
-    const request = latestOpenFile.current;
-    if (!request?.dirty || savingRef.current) return;
-    if (
-      request.content.trim() === "" &&
-      requiredPromptFiles(getValues()).has(request.path)
-    ) {
-      blockedContent.current = request.content;
-      setSaveState("invalid");
-      return;
-    }
-    const saveVersion = editVersion.current;
-    savingRef.current = true;
-    setSaving(true);
-    setSaveState("saving");
-    try {
-      const result = await saveFile(
-        request.path,
-        request.content,
-        overwrite ? (await readFile(request.path)).sha256 : request.sha256,
-      );
-      blockedContent.current = null;
-      const latest = latestOpenFile.current;
-      if (latest?.path === request.path) {
-        const unchangedSinceRequest = editVersion.current === saveVersion;
-        const updatedFile = {
-          ...latest,
-          sha256: result.sha256,
-          dirty: !unchangedSinceRequest,
-        };
-        latestOpenFile.current = updatedFile;
-        setOpenFile(updatedFile);
-        setSaveState(unchangedSinceRequest ? "saved" : "editing");
-        setConflictOpen(false);
-      }
-    } catch (error) {
-      blockedContent.current = request.content;
-      if (error instanceof ApiError && error.status === 409) {
-        setSaveState("conflict");
-        try {
-          const fresh = await readFile(request.path);
-          const latest = latestOpenFile.current;
-          if (latest?.path === request.path) {
-            const updated = { ...latest, sha256: fresh.sha256 };
-            latestOpenFile.current = updated;
-            setOpenFile(updated);
-          }
-        } catch {
-          // 保留原哈希，覆盖操作会再次读取并核对最新文件。
-        }
-        setConflictOpen(true);
-      } else {
-        setSaveState("error");
-        toast.error(error instanceof Error ? error.message : "保存失败");
-      }
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-    }
-  }, [getValues]);
-
-  useEffect(() => {
-    if (
-      !openFile?.dirty ||
-      saving ||
-      conflictOpen ||
-      blockedContent.current === openFile.content
-    ) {
-      return;
-    }
-    setSaveState("editing");
-    const timer = window.setTimeout(() => {
-      void onSave();
-    }, TEXT_AUTOSAVE_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [openFile, saving, conflictOpen, onSave]);
-
-  const onCreate = useCallback(async () => {
-    if (latestOpenFile.current?.dirty || savingRef.current) {
-      toast.info("请先保存当前文件，再新建文件");
-      return;
-    }
-    const path = newPath.trim();
-    if (path === "") {
-      toast.error("文件路径不能为空");
-      return;
-    }
-    try {
-      await saveFile(path, "", null);
-      setCreateOpen(false);
-      setNewPath("");
-      refreshFiles();
-      if (!latestOpenFile.current?.dirty && !savingRef.current) loadPath(path);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "新建文件失败");
-    }
-  }, [newPath, refreshFiles, loadPath]);
-
-  const reloadConflictFile = useCallback(() => {
-    const current = latestOpenFile.current;
-    if (!current) return;
-    setConflictOpen(false);
-    loadPath(current.path);
-  }, [loadPath]);
-
-  const copyConflictContent = useCallback(async () => {
-    const current = latestOpenFile.current;
-    if (!current) return;
-    const ok = await copyText(current.content);
-    if (ok) {
-      toast.success("本地内容已复制到剪贴板");
-    } else {
-      toast.error("复制失败，请手动选择文本复制");
-    }
-  }, []);
-
-  const saveCurrentFile = useCallback(async () => {
-    if (saveState === "conflict" && blockedContent.current === latestOpenFile.current?.content) {
-      setConflictOpen(true);
-      return;
-    }
-    blockedContent.current = null;
-    await onSave();
-  }, [saveState, onSave]);
-
-  useEffect(() => {
-    onEditorStateChange({ dirty: openFile?.dirty ?? false, saving, state: saveState, save: saveCurrentFile });
-  }, [onEditorStateChange, openFile?.dirty, saving, saveState, saveCurrentFile]);
-
-  useEffect(() => () => onEditorStateChange(null), [onEditorStateChange]);
-
-  const toggleGroup = useCallback((dir: string) => {
-    setClosedGroups((current) => {
-      const next = new Set(current);
-      if (next.has(dir)) {
-        next.delete(dir);
-      } else {
-        next.add(dir);
-      }
-      return next;
-    });
-  }, []);
-
-  const renderFileButton = (file: string, label: string, indent: boolean) => {
-    const Icon = fileIcon(file);
-    return (
-      <button
-        key={file}
-        type="button"
-        title={file}
-        onClick={() => openPath(file)}
-        className={cn(
-          "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left font-mono text-xs hover:bg-accent",
-          indent && "pl-6",
-          openFile?.path === file && "bg-accent font-medium",
-        )}
-      >
-        <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-        <span className="truncate">{label}</span>
-      </button>
-    );
+  const sort = (dir: TreeDir) => {
+    dir.dirs.sort((a, b) => a.name.localeCompare(b.name));
+    dir.files.sort((a, b) => a.localeCompare(b));
+    dir.dirs.forEach(sort);
   };
+  sort(root);
+  return root;
+}
 
+function refBadge(path: string, refs: Map<string, FileReference[]>): { text: string; soft: boolean } | null {
+  if (path === CONFIG_FILE) return { text: "主配置", soft: true };
+  const list = refs.get(path);
+  if (!list) return null;
+  const personas = list.filter((ref) => ref.label.endsWith("人格")).length;
+  if (personas > 0) return { text: `${personas} 个群`, soft: false };
+  if (list.some((ref) => ref.required)) return { text: "必需", soft: false };
+  return { text: "知识库", soft: true };
+}
+
+interface TreeProps {
+  dir: TreeDir;
+  depth: number;
+  openPath: string | null;
+  dirtyPath: string | null;
+  refs: Map<string, FileReference[]>;
+  collapsed: Set<string>;
+  onToggle: (path: string) => void;
+}
+
+function TreeItems({ dir, depth, openPath, dirtyPath, refs, collapsed, onToggle }: TreeProps) {
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 md:flex-row">
-      <div className="card-geek flex h-40 w-full shrink-0 flex-col rounded-sm border md:h-auto md:w-72">
-        <div className="flex items-center justify-between border-b px-3 py-2">
-          <span className="text-sm font-medium">配置目录文件</span>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={Boolean(openFile?.dirty) || saving}
-            onClick={() => setCreateOpen(true)}
-          >
-            新建
-          </Button>
-        </div>
-        <ScrollArea className="flex-1">
-          <div className="space-y-0.5 p-2">
-            {listError ? (
-              <p className="px-2 py-1 text-sm text-destructive">{listError}</p>
-            ) : null}
-            {fileGroups.map((group) =>
-              group.dir === null ? (
-                group.files.map((file) => renderFileButton(file, file, false))
-              ) : (
-                <div key={group.dir}>
-                  <button
-                    type="button"
-                    onClick={() => toggleGroup(group.dir ?? "")}
-                    aria-expanded={!closedGroups.has(group.dir)}
-                    className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs font-medium text-muted-foreground hover:bg-accent"
-                  >
-                    {closedGroups.has(group.dir) ? (
-                      <ChevronRight className="size-3.5" aria-hidden />
-                    ) : (
-                      <ChevronDown className="size-3.5" aria-hidden />
-                    )}
-                    <Folder className="size-3.5" aria-hidden />
-                    {group.dir}/
-                  </button>
-                  {closedGroups.has(group.dir)
-                    ? null
-                    : group.files.map((file) =>
-                        renderFileButton(
-                          file,
-                          file.slice((group.dir?.length ?? 0) + 1),
-                          true,
-                        ),
-                      )}
-                </div>
-              ),
+    <>
+      {dir.files.map((path) => {
+        const badge = refBadge(path, refs);
+        const active = path === openPath;
+        return (
+          <li key={path}>
+            <button
+              type="button"
+              className={cls("ft-file", active && "is-active")}
+              style={{ "--d": depth } as CSSProperties}
+              aria-current={active ? "true" : undefined}
+              title={path}
+              onClick={() => void files.requestOpen(path)}
+            >
+              {isMarkdown(path) ? <FileText className="ic" aria-hidden /> : <File className="ic" aria-hidden />}
+              <span className="ft-name">{path.split("/").pop()}</span>
+              {path === dirtyPath ? <span className="ft-dirty" title="有未保存的修改" /> : null}
+              {badge ? <span className={cls("ft-ref", badge.soft && "ft-ref--soft")}>{badge.text}</span> : null}
+            </button>
+          </li>
+        );
+      })}
+      {dir.dirs.map((child) => {
+        const isCollapsed = collapsed.has(child.path);
+        return (
+          <li key={child.path}>
+            <button
+              type="button"
+              className="ft-dir"
+              style={{ "--d": depth } as CSSProperties}
+              aria-expanded={!isCollapsed}
+              onClick={() => onToggle(child.path)}
+            >
+              <ChevronDown className="ic ft-chev" aria-hidden />
+              {isCollapsed ? <Folder className="ic" aria-hidden /> : <FolderOpen className="ic" aria-hidden />}
+              <span>{child.name}/</span>
+            </button>
+            {isCollapsed ? null : (
+              <ul>
+                <TreeItems {...{ dir: child, depth: depth + 1, openPath, dirtyPath, refs, collapsed, onToggle }} />
+              </ul>
             )}
-            {files.length === 0 && !listError ? (
-              <p className="px-2 py-1 text-sm text-muted-foreground">
-                config/ 下还没有 UTF-8 文本文件
-              </p>
-            ) : null}
-          </div>
-        </ScrollArea>
-      </div>
+          </li>
+        );
+      })}
+    </>
+  );
+}
 
-      <div className="card-geek flex min-h-0 min-w-0 flex-1 flex-col rounded-sm border">
-        {openFile ? (
-          <>
-            <div className="flex items-center justify-between gap-2 border-b px-4 py-2">
-              <span className="truncate font-mono text-sm" title={openFile.path}>
-                {openFile.path}
-              </span>
-              <div className="flex shrink-0 items-center gap-2">
-                {isMarkdown(openFile.path) ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    aria-pressed={previewOn}
-                    aria-controls="markdown-live-preview"
-                    onClick={() => setPreviewOn((current) => !current)}
-                  >
-                    {previewOn ? (
-                      <EyeOff className="mr-1 h-4 w-4" />
-                    ) : (
-                      <Eye className="mr-1 h-4 w-4" />
-                    )}
-                    {previewOn ? "关闭预览" : "预览"}
-                  </Button>
-                ) : null}
-                {saveState === "invalid" ? (
-                  <span className="text-xs text-destructive">必填文件不能为空</span>
-                ) : null}
-              </div>
-            </div>
-            <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-              <div
-                className={cn(
-                  "min-h-0 min-w-0 flex-1 overflow-hidden",
-                  previewOn &&
-                    isMarkdown(openFile.path) &&
-                    "border-b md:border-r md:border-b-0",
-                )}
-              >
-                <Suspense
-                  fallback={
-                    <div
-                      className="flex h-full items-center justify-center text-sm text-muted-foreground"
-                      role="status"
-                    >
-                      正在加载编辑器…
-                    </div>
-                  }
-                >
-                  <MarkdownEditor
-                    ariaLabel={`编辑 ${openFile.path}`}
-                    language={isMarkdown(openFile.path) ? "markdown" : "text"}
-                    value={openFile.content}
-                    onChange={(content) => {
-                      editVersion.current += 1;
-                      if (blockedContent.current !== content) {
-                        blockedContent.current = null;
-                      }
-                      setOpenFile((current) => {
-                        if (!current) return current;
-                        const updatedFile = { ...current, content, dirty: true };
-                        latestOpenFile.current = updatedFile;
-                        return updatedFile;
-                      });
-                    }}
-                  />
-                </Suspense>
-              </div>
-              {previewOn && isMarkdown(openFile.path) ? (
-                <div
-                  id="markdown-live-preview"
-                  aria-label="Markdown 实时预览"
-                  className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4"
-                  role="region"
-                >
-                  <Suspense
-                    fallback={
-                      <p className="text-sm text-muted-foreground" role="status">
-                        正在生成预览…
-                      </p>
-                    }
-                  >
-                    <MarkdownPreview content={openFile.content} />
-                  </Suspense>
-                </div>
-              ) : null}
-            </div>
-          </>
-        ) : (
-          <EmptyState
-            icon={FileText}
-            title="未选择文件"
-            description="从左侧选择要编辑的配置文本文件，或点击「新建」创建。"
-            className="flex-1"
-          />
-        )}
-      </div>
+/* ---------- 对话框 ---------- */
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>新建文本文件</DialogTitle>
-            <DialogDescription>
-              路径相对 config/ 目录，父目录必须已存在。
-            </DialogDescription>
-          </DialogHeader>
-          <Input
-            aria-label="新文本文件路径"
-            placeholder="如 ai_group_chat/prompts/roles/new-role.md"
-            value={newPath}
-            onChange={(event) => setNewPath(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void onCreate();
-              }
+function NewFileDialog({ open, dir, onClose }: { open: boolean; dir: string; onClose: () => void }) {
+  const [path, setPath] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [wasOpen, setWasOpen] = useState(open);
+  // 每次打开都从当前文件所在目录起步，不沿用上次没提交的输入。
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setPath(dir);
+      setError("");
+    }
+  }
+  const submit = async () => {
+    setBusy(true);
+    const message = await files.create(path);
+    setBusy(false);
+    if (message) {
+      setError(message);
+      return;
+    }
+    setPath("");
+    setError("");
+    onClose();
+  };
+  return (
+    <Dialog open={open} onClose={onClose} labelledBy="new-file-title">
+      <h2 className="dlg-title" id="new-file-title">
+        新建文本文件
+      </h2>
+      <form
+        className="dlg-body"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void submit();
+        }}
+      >
+        <div className="dlg-field">
+          <label htmlFor="new-file-path">相对 config/ 的路径</label>
+          <input
+            id="new-file-path"
+            className={cls("inp is-mono", error && "is-error")}
+            value={path}
+            placeholder="ai_group_chat/prompts/roles/new-role.md"
+            autoFocus
+            spellCheck={false}
+            autoComplete="off"
+            onFocus={(event) => {
+              const end = event.currentTarget.value.length;
+              event.currentTarget.setSelectionRange(end, end);
+            }}
+            onChange={(event) => {
+              setPath(event.target.value);
+              if (error) setError("");
             }}
           />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>
-              取消
-            </Button>
-            <Button onClick={() => void onCreate()}>创建</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          {error ? <p className="dlg-error">{error}</p> : <p className="dlg-note">所在目录必须已经存在；新文件是空的，写好内容后再在配置里引用它。</p>}
+        </div>
+        <div className="dlg-actions">
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>
+            取消
+          </button>
+          <button type="submit" className="btn btn--primary" disabled={busy || path.trim() === ""}>
+            新建并打开
+          </button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
 
-      <Dialog open={conflictOpen} onOpenChange={(open) => { if (!saving) setConflictOpen(open); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>文件已被外部修改</DialogTitle>
-            <DialogDescription>
-              自动保存发现 {openFile?.path ?? "该文件"}{" "}
-              已被其他方式修改，当前本地修改尚未保存。请选择处理方式。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="flex-wrap">
-            <Button type="button" variant="outline" disabled={saving} onClick={() => setConflictOpen(false)}>
-              继续编辑
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => void copyConflictContent()}
-            >
-              复制本地内容
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={saving}
-              onClick={reloadConflictFile}
-            >
-              丢弃本地并重新载入
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={saving}
-              onClick={() => void onSave(true)}
-            >
-              用本地内容覆盖
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+function FileConflictDialog() {
+  const openState = useFiles((state) => state.conflictOpen);
+  const path = useFiles((state) => state.open?.path ?? "");
+  const shownPath = useLatest(openState ? path : null) ?? path;
+  const [busy, setBusy] = useState(false);
+  const run = async (choice: "overwrite" | "discard" | "keep") => {
+    setBusy(true);
+    try {
+      await files.resolveConflict(choice);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open={openState} onClose={() => !busy && void run("keep")} className="dlg--danger dlg--wide" labelledBy="file-conflict-title">
+      <h2 className="dlg-title" id="file-conflict-title">
+        {shownPath} 已被外部修改
+      </h2>
+      <div className="dlg-body">
+        <p>保存时发现这个文件在别处被改过。编辑器里的内容还没有保存，可以先复制一份留底。</p>
+        <p className="dlg-note">
+          覆盖：用编辑器里的内容写回，外部修改会丢失。丢弃并刷新：载入外部改过的版本。继续编辑：暂不处理，下一次保存时覆盖。
+        </p>
+      </div>
+      <div className="dlg-actions">
+        <button type="button" className="btn" onClick={() => void run("keep")} disabled={busy} autoFocus>
+          继续编辑
+        </button>
+        <button type="button" className="btn btn--ghost" onClick={() => void files.copyLocal()} disabled={busy}>
+          <Copy className="ic" aria-hidden />
+          复制本地内容
+        </button>
+        <span className="spacer" />
+        <button type="button" className="btn" onClick={() => void run("discard")} disabled={busy}>
+          丢弃并刷新
+        </button>
+        <button type="button" className="btn btn--danger" onClick={() => void run("overwrite")} disabled={busy}>
+          覆盖外部修改
+        </button>
+      </div>
+    </Dialog>
+  );
+}
 
-      <ConfirmDialog
-        open={pendingSwitch !== null}
-        onOpenChange={(open) => {
-          if (!open) setPendingSwitch(null);
-        }}
-        title="切换文件将丢失未保存修改"
-        description="当前文件有尚未自动保存的修改（可能是校验失败或冲突未解决），切换后将丢失。"
-        confirmLabel="仍然切换"
-        destructive
-        onConfirm={() => {
-          if (pendingSwitch !== null) loadPath(pendingSwitch);
-        }}
+function SwitchDialog() {
+  const pending = useFiles((state) => state.pendingSwitch);
+  const shown = useLatest(pending);
+  return (
+    <Dialog open={pending !== null} onClose={() => files.cancelSwitch()} className="dlg--danger" labelledBy="switch-title">
+      <h2 className="dlg-title" id="switch-title">
+        切换文件会丢失没保存的修改
+      </h2>
+      <div className="dlg-body">
+        <p>当前文件的修改没能保存（内容不能为空、冲突未处理或保存失败）。切换到 {shown} 后，这些修改会丢失。</p>
+      </div>
+      <div className="dlg-actions">
+        <button type="button" className="btn" onClick={() => files.cancelSwitch()} autoFocus>
+          留在当前文件
+        </button>
+        <button type="button" className="btn btn--danger" onClick={() => files.confirmSwitch()}>
+          丢弃并切换
+        </button>
+      </div>
+    </Dialog>
+  );
+}
+
+/* ---------- 页面 ---------- */
+
+const VIEWS: [FileView, string][] = [
+  ["edit", "编辑"],
+  ["split", "并排"],
+  ["preview", "预览"],
+];
+
+export default function FilesPage({ active }: { active: boolean }) {
+  const route = useRoute();
+  const list = useFiles((state) => state.list);
+  const listError = useFiles((state) => state.listError);
+  const open = useFiles((state) => state.open);
+  const openPath = open?.path ?? "";
+  const loading = useFiles((state) => state.loading);
+  const view = useFiles((state) => state.view);
+  const revision = useFiles((state) => state.revision);
+  const status = useFiles((state) => state.status);
+  const draft = useConfig((state) => state.draft);
+  const phase = useConfig((state) => state.phase);
+  const loadError = useConfig((state) => state.loadError);
+  const refs = useMemo(() => fileReferences(draft), [draft]);
+  const required = useMemo(() => requiredPromptFiles(draft), [draft]);
+  const tree = useMemo(() => buildTree(list ?? []), [list]);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    void files.refreshList();
+  }, []);
+
+  // 地址栏里的文件 → 打开；语法错误时默认打开 mybot.toml 修复。
+  useEffect(() => {
+    if (!active) return;
+    const target = route.file ?? (phase === "broken" && !files.state.open ? CONFIG_FILE : undefined);
+    if (target && target !== files.state.open?.path && target !== files.state.loading) void files.requestOpen(target);
+  }, [active, route.file, phase]);
+
+  // 打开的文件 → 地址栏（不新增历史记录）。
+  useEffect(() => {
+    if (!active || !open) return;
+    if (route.page === "files" && route.file !== open.path) replaceRoute({ page: "files", file: open.path });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, open?.path]);
+
+  const toggleDir = (path: string) =>
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+
+  const dirty = open !== null && open.content !== open.savedContent;
+  const markdown = open !== null && isMarkdown(open.path);
+  const openRefs = open ? (refs.get(open.path) ?? []) : [];
+  const emptyRequired = open !== null && open.content.trim() === "" && required.has(open.path);
+
+  return (
+    <div className="page-inner page-inner--files" hidden={!active}>
+      <PageHeader
+        page="files"
+        kicker="文件"
+        table="config/"
+        title="配置文本"
+        desc="提示词、知识库与 mybot.toml 原文。停止输入 1 秒后自动保存；被插件引用的提示词不能保存为空。"
       />
+      {phase === "broken" ? (
+        <div className="repair" role="alert">
+          <TriangleAlert className="ic" aria-hidden />
+          <div className="repair-msg">
+            <strong>mybot.toml 语法有误，配置页暂时不可用。修好原文并保存后会自动恢复。</strong>
+            <code>{loadError}</code>
+          </div>
+          <button type="button" className="btn" onClick={() => void config.load()}>
+            <RefreshCw className="ic" aria-hidden />
+            重新载入
+          </button>
+        </div>
+      ) : null}
+      <div className="files">
+        <aside className="ftree" aria-label="config/ 文件">
+          <div className="ftree-head">
+            <span>config/</span>
+            <span className="ftree-actions">
+              <button type="button" className="icon-btn icon-btn--small" aria-label="刷新文件列表" title="刷新文件列表" onClick={() => void files.refreshList()}>
+                <RefreshCw className="ic" aria-hidden />
+              </button>
+              <button type="button" className="btn btn--small" onClick={() => setCreating(true)}>
+                <Plus className="ic" aria-hidden />
+                新建
+              </button>
+            </span>
+          </div>
+          <ul className="ftree-list">
+            {list === null ? (
+              <li className="ftree-msg">{listError || "正在读取文件列表…"}</li>
+            ) : list.length === 0 ? (
+              <li className="ftree-msg">config/ 里还没有文本文件。</li>
+            ) : (
+              <TreeItems
+                dir={tree}
+                depth={0}
+                openPath={open?.path ?? null}
+                dirtyPath={dirty ? (open?.path ?? null) : null}
+                refs={refs}
+                collapsed={collapsed}
+                onToggle={toggleDir}
+              />
+            )}
+          </ul>
+        </aside>
+        <section className="fedit" aria-label="编辑器">
+          {open ? (
+            <>
+              <div className="fedit-bar">
+                <code className="fedit-path" title={`config/${open.path}`}>
+                  {open.path}
+                </code>
+                {openRefs.length > 0 ? (
+                  <span className={cls("fedit-tag", !openRefs.some((ref) => ref.required) && "fedit-tag--soft")} title={openRefs.map((ref) => ref.label).join("、")}>
+                    {openRefs.length > 2 ? `被 ${openRefs.length} 处引用` : openRefs.map((ref) => ref.label).join("、")}
+                  </span>
+                ) : null}
+                {emptyRequired ? <span className="fedit-tag fedit-tag--bad">必需文件不能为空</span> : null}
+                {status.kind === "error" ? <span className="fedit-tag fedit-tag--bad">保存失败</span> : null}
+                {markdown ? (
+                  <div className="ctl-seg fedit-views" role="radiogroup" aria-label="视图">
+                    {VIEWS.map(([value, label]) => (
+                      <button
+                        type="button"
+                        role="radio"
+                        key={value}
+                        className="seg-opt"
+                        aria-checked={view === value}
+                        onClick={() => files.setView(value)}
+                      >
+                        <span>{label}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+              <div className={cls("fedit-split", !markdown && "is-plain")} data-view={markdown ? view : "edit"}>
+                <div className="fedit-src">
+                  <Suspense fallback={<p className="md-loading fedit-loading">正在加载编辑器…</p>}>
+                    <CodeEditor
+                      docKey={`${open.path}#${revision}`}
+                      value={open.content}
+                      isMarkdown={markdown}
+                      onChange={(content) => files.edit(content)}
+                      label={`编辑 ${open.path}`}
+                    />
+                  </Suspense>
+                </div>
+                {markdown && view !== "edit" ? (
+                  <div className="fedit-preview">
+                    <Suspense fallback={<p className="md-loading">正在加载预览…</p>}>
+                      <MarkdownPreview content={open.content} />
+                    </Suspense>
+                  </div>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <div className="fedit-empty">
+              <div>
+                <strong>{loading ? `正在打开 ${loading}…` : "从左边选一个文件"}</strong>
+                {loading ? null : "提示词、知识库和 mybot.toml 原文都在这里编辑；也可以新建一个文件。"}
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+      <NewFileDialog open={creating} dir={openPath.includes("/") ? openPath.slice(0, openPath.lastIndexOf("/") + 1) : ""} onClose={() => setCreating(false)} />
+      <FileConflictDialog />
+      <SwitchDialog />
     </div>
   );
 }

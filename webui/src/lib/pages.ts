@@ -1,120 +1,65 @@
-/** 页面导航元信息：图标、dirty 前缀映射、校验问题定位。 */
+/** 侧栏导航与页面元信息。 */
 
-import { Cable, FileText, Plug, Puzzle, Settings } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import {
+  Bell,
+  Cloud,
+  FileText,
+  Image,
+  MessageCircle,
+  Plug,
+  ShieldCheck,
+  SlidersHorizontal,
+  Sparkles,
+  Undo2,
+  type LucideIcon,
+} from "lucide-react";
 
-import { PLUGIN_METAS } from "./configMeta";
+import type { PageKey } from "@/schema";
+
 import type { PluginId } from "./types";
-
-export type PageKey = "system" | "providers" | "mcp" | "files" | `plugin:${PluginId}`;
 
 export interface NavItem {
   key: PageKey;
   label: string;
+  group: string;
+  /** 顶栏面包屑和命令面板里显示的配置位置。 */
+  table: string;
   icon: LucideIcon;
+  plugin?: PluginId;
 }
 
-export interface NavGroup {
-  title: string;
-  items: NavItem[];
-}
-
-export const NAV_GROUPS: NavGroup[] = [
+export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "系统",
     items: [
-      { key: "system", label: "系统设置", icon: Settings },
-      { key: "providers", label: "模型 Providers", icon: Cable },
-      { key: "mcp", label: "MCP 服务", icon: Plug },
+      { key: "system", label: "系统设置", group: "系统", table: "app · server · napcat · database …", icon: SlidersHorizontal },
+      { key: "providers", label: "模型服务", group: "系统", table: "llm.providers", icon: Cloud },
+      { key: "mcp", label: "MCP 服务", group: "系统", table: "mcp", icon: Plug },
     ],
   },
   {
     title: "插件",
-    items: PLUGIN_METAS.map((meta) => ({
-      key: `plugin:${meta.id}` as PageKey,
-      label: meta.name,
-      icon: Puzzle,
-    })),
+    items: [
+      { key: "plugin:ai_group_chat", label: "AI 群聊", group: "插件", table: "plugins.ai_group_chat", icon: MessageCircle, plugin: "ai_group_chat" },
+      { key: "plugin:group_notice", label: "群通知", group: "插件", table: "plugins.group_notice", icon: Bell, plugin: "group_notice" },
+      { key: "plugin:auto_unban", label: "自动解禁", group: "插件", table: "plugins.auto_unban", icon: ShieldCheck, plugin: "auto_unban" },
+      { key: "plugin:image_generate", label: "生图", group: "插件", table: "plugins.image_generate", icon: Image, plugin: "image_generate" },
+      { key: "plugin:neavo_image_generate", label: "Neavo 生图", group: "插件", table: "plugins.neavo_image_generate", icon: Sparkles, plugin: "neavo_image_generate" },
+      { key: "plugin:recall_bot_image", label: "撤回图片", group: "插件", table: "plugins.recall_bot_image", icon: Undo2, plugin: "recall_bot_image" },
+    ],
   },
   {
-    title: "配置文本",
-    items: [{ key: "files", label: "配置文本文件", icon: FileText }],
+    title: "文件",
+    items: [{ key: "files", label: "配置文本", group: "文件", table: "config/", icon: FileText }],
   },
 ];
 
-const PAGE_KEYS = new Set<string>(
-  NAV_GROUPS.flatMap((group) => group.items.map((item) => item.key)),
-);
+export const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((group) => group.items);
 
-export function pageFromLocation(): PageKey {
-  const requested = new URLSearchParams(window.location.search).get("page") ?? "";
-  return PAGE_KEYS.has(requested) ? (requested as PageKey) : "system";
+export function navItem(key: PageKey): NavItem {
+  return NAV_ITEMS.find((item) => item.key === key) ?? NAV_ITEMS[0]!;
 }
 
-/** 各页面包含的配置字段前缀，用于 dirty 计数与导航标记。 */
-export function dirtyPrefixesForPage(key: PageKey): string[] {
-  if (key === "system") {
-    return [
-      "app",
-      "server",
-      "napcat",
-      "database",
-      "network",
-      "storage",
-      "logging",
-    ];
-  }
-  if (key === "providers") return ["llm"];
-  if (key === "mcp") return ["mcp"];
-  if (key.startsWith("plugin:")) return [
-    `plugins.${key.slice(7)}`, `plugin_execution.plugins.${key.slice(7)}`,
-  ];
-  return [];
-}
-
-/** 校验问题路径 → 所属页面。 */
-export function pageForIssuePath(path: (string | number)[]): PageKey {
-  const head = path[0];
-  if (head === "llm") return "providers";
-  if (head === "mcp") return "mcp";
-  if (head === "plugin_execution" && path[1] === "plugins" &&
-      PLUGIN_METAS.some((meta) => meta.id === path[2])) {
-    return `plugin:${path[2]}` as PageKey;
-  }
-  if (
-    head === "plugins" &&
-    typeof path[1] === "string" &&
-    PLUGIN_METAS.some((meta) => meta.id === path[1])
-  ) {
-    return `plugin:${path[1]}` as PageKey;
-  }
-  return "system";
-}
-
-/** 系统页配置节 → SectionCard 标题，与 SystemPage 中的卡片标题保持一致。 */
-const SECTION_CARD_TITLES: Record<string, string> = {
-  app: "应用",
-  server: "服务监听",
-  napcat: "NapCat 连接",
-  database: "数据库",
-  network: "网络",
-  storage: "图片存储",
-  logging: "日志",
-};
-
-/** 校验问题路径 → 滚动定位用的卡片标题（data-section）；无法确定时返回 null。 */
-export function sectionTitleForIssue(
-  path: (string | number)[],
-): string | null {
-  if (path[0] === "plugin_execution" && path[1] === "plugins") return "执行参数";
-  if (path[0] === "llm" && path[1] === "providers" && typeof path[2] === "string") {
-    return path[2];
-  }
-  if (path[0] === "mcp" && path[1] === "servers" && typeof path[2] === "string") {
-    return path[2];
-  }
-  if (typeof path[0] === "string") {
-    return SECTION_CARD_TITLES[path[0]] ?? null;
-  }
-  return null;
+export function cls(...parts: (string | false | null | undefined)[]): string {
+  return parts.filter(Boolean).join(" ");
 }

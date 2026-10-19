@@ -1,16 +1,14 @@
-/** Markdown 渲染预览：GFM 语法，配色由 .markdown-body 的主题变量驱动。 */
+/** GFM 预览；按需懒加载，输入时用 useDeferredValue 让编辑器保持跟手。 */
 
+import { useDeferredValue } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-interface MarkdownPreviewProps {
-  content: string;
-}
-
-export function MarkdownPreview({ content }: MarkdownPreviewProps) {
+export default function MarkdownPreview({ content }: { content: string }) {
+  const deferred = useDeferredValue(content);
   return (
-    <div className="markdown-body">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-    </div>
+    <article className="md">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{deferred}</ReactMarkdown>
+    </article>
   );
 }
