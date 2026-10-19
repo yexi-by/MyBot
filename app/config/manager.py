@@ -76,6 +76,7 @@ class MaterializedAIGroupChatConfig:
     groups: tuple[MaterializedAIGroupConfig, ...]
     vision_system_prompt: str | None
     vision_user_prompt: str | None
+    turn_instruction: str | None
 
 
 type PluginConfigValue = (
@@ -275,6 +276,15 @@ def _materialize_plugins(
             require_content=True,
         )
         referenced_files.add(extra_path)
+        turn_instruction: str | None = None
+        if ai_config.turn_instruction_file is not None:
+            instruction_path, turn_instruction = _read_config_text(
+                config_root=config_root,
+                file_value=ai_config.turn_instruction_file,
+                label="plugins.ai_group_chat.turn_instruction_file",
+                require_content=True,
+            )
+            referenced_files.add(instruction_path)
         vision_system_prompt: str | None = None
         vision_user_prompt: str | None = None
         if ai_config.vision is not None:
@@ -329,6 +339,7 @@ def _materialize_plugins(
             groups=tuple(materialized_groups),
             vision_system_prompt=vision_system_prompt,
             vision_user_prompt=vision_user_prompt,
+            turn_instruction=turn_instruction,
         )
 
     image_generate = config.plugins.image_generate
@@ -380,6 +391,8 @@ def _candidate_plugin_files(*, config_file: Path) -> frozenset[Path]:
     if ai_config is None:
         return frozenset()
     file_values: list[str] = [ai_config.extra_requirements_file]
+    if ai_config.turn_instruction_file is not None:
+        file_values.append(ai_config.turn_instruction_file)
     if ai_config.vision is not None:
         file_values.extend(
             (

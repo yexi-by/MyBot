@@ -58,6 +58,7 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 group_messages=self.context.group_messages,
                 bot=self.context.bot,
                 http_client=self.context.direct_httpx,
+                context_started_at=self.context.conversation_contexts.started_at,
             )
             vision_tool = VisionDescriptionTool(
                 config=materialized,
@@ -67,6 +68,7 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 config=config,
                 context=self.context,
                 vision_tool=vision_tool,
+                turn_instruction=materialized.turn_instruction,
             )
             runtime = _AIGroupChatRuntime(
                 revision=revision,
@@ -410,6 +412,7 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             group_id=group_key,
             message_id=msg.message_id,
             turn_messages_count=len(built_turn_messages.turn_messages),
+            recent_chat_messages_count=len(built_turn_messages.recent_chat_messages),
             text_chars=sum(
                 len(message.text or "")
                 for message in built_turn_messages.turn_messages
@@ -443,6 +446,7 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             await runtime.tool_loop.run(
                 msg=msg,
                 chat_handler=temporary_context,
+                recent_chat_messages=built_turn_messages.recent_chat_messages,
                 turn_messages=built_turn_messages.turn_messages,
                 input_vision_messages=input_vision_delivery.working_messages,
                 input_vision_history_messages=input_vision_delivery.history_messages,

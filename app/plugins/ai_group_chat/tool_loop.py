@@ -126,11 +126,18 @@ class GroupChatToolLoop:
         config: AIGroupChatConfig,
         context: Context,
         vision_tool: VisionDescriptionTool,
+        turn_instruction: str | None,
     ) -> None:
         """保存工具循环所需的配置和运行上下文。"""
         self.config: AIGroupChatConfig = config
         self.context: Context = context
         self.vision_tool: VisionDescriptionTool = vision_tool
+        # 每次请求都放在末尾：长上下文和工具结果之后，开头的人设要求容易被稀释。
+        self.turn_instruction_message: ChatMessage | None = (
+            ChatMessage(role="system", text=turn_instruction)
+            if turn_instruction is not None
+            else None
+        )
         token_config = config.token_estimator
         self.token_estimator: ConservativeTokenEstimator = ConservativeTokenEstimator(
             safety_factor=config.token_safety_factor,
@@ -155,6 +162,7 @@ class GroupChatToolLoop:
         *,
         msg: GroupMessage,
         chat_handler: ContextHandler,
+        recent_chat_messages: list[ChatMessage],
         turn_messages: list[ChatMessage],
         input_vision_messages: list[ChatMessage],
         input_vision_history_messages: list[ChatMessage],
@@ -228,6 +236,7 @@ class GroupChatToolLoop:
         prepared_context = await self._prepare_turn_context(
             msg=msg,
             chat_handler=chat_handler,
+            recent_chat_messages=recent_chat_messages,
             turn_messages=turn_messages,
             input_vision_messages=input_vision_messages,
             input_vision_history_messages=input_vision_history_messages,
@@ -272,11 +281,15 @@ class GroupChatToolLoop:
         repair_message: ChatMessage | None = None
         try:
             while round_index < self.config.max_tool_rounds:
-                request_messages = (
-                    [*working_messages, repair_message]
-                    if repair_message is not None
-                    else working_messages
-                )
+                request_messages = [
+                    *working_messages,
+                    *(
+                        [self.turn_instruction_message]
+                        if self.turn_instruction_message is not None
+                        else []
+                    ),
+                    *([repair_message] if repair_message is not None else []),
+                ]
                 log_event(
                     level="DEBUG",
                     event="ai_group_chat.llm.request",
@@ -427,6 +440,7 @@ class GroupChatToolLoop:
         *,
         msg: GroupMessage,
         chat_handler: ContextHandler,
+        recent_chat_messages: list[ChatMessage],
         turn_messages: list[ChatMessage],
         input_vision_messages: list[ChatMessage],
         input_vision_history_messages: list[ChatMessage],
@@ -441,7 +455,12 @@ class GroupChatToolLoop:
                 messages=stored_messages
             )
             history_messages = self._strip_history_images(messages=stored_messages)
-        current_working_messages = [*turn_messages, *input_vision_messages]
+        # 最近群聊只服务本轮请求，不进入下方的长期保存列表。
+        current_working_messages = [
+            *recent_chat_messages,
+            *turn_messages,
+            *input_vision_messages,
+        ]
         history_messages, byte_limit_stripped_count = (
             self._fit_history_images_to_byte_limit(
                 history_messages=history_messages,

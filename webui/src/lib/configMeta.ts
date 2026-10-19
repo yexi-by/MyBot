@@ -107,6 +107,10 @@ function defaultAIGroupChat(config: MyBotConfigData): AIGroupChatConfig {
       default_before_count: 10,
       default_after_count: 10,
     },
+    recent_chat: {
+      max_messages: 30,
+      max_chars_per_message: 200,
+    },
     files: {
       default_count: 50,
       max_per_call: 0,

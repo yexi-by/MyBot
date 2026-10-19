@@ -4,6 +4,7 @@ import asyncio
 import re
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -88,13 +89,28 @@ class SmokeBot:
 
 
 class SmokeDatabase:
-    """引用消息查询始终为空。"""
+    """引用消息查询始终为空，最近群聊返回测试预置的记录。"""
+
+    def __init__(self) -> None:
+        self.recent_messages: list[StoredGroupMessage] = []
 
     async def get_active(
         self, *, scope: GroupDataScope, message_id: str
     ) -> StoredGroupMessage | None:
         _ = (scope, message_id)
         return None
+
+    async def list_around(
+        self,
+        *,
+        scope: GroupDataScope,
+        message_id: str,
+        before_count: int,
+        after_count: int,
+        sender_id: str | None = None,
+    ) -> list[StoredGroupMessage]:
+        _ = (scope, message_id, before_count, after_count, sender_id)
+        return list(self.recent_messages)
 
 
 class EmptyToolManager:
@@ -202,11 +218,11 @@ class ControlledSmokeLLM(SmokeLLM):
             self.active_formal_requests -= 1
 
     def _message_id(self, *, messages: list[ChatMessage]) -> str:
-        """从当前用户消息的 Markdown 元数据中读取消息 ID。"""
+        """从当前消息聊天记录标题行中读取消息 ID。"""
         for message in reversed(messages):
             if message.role != "user" or message.text is None:
                 continue
-            match = re.search(r"^- 消息 ID: (\d+)$", message.text, re.MULTILINE)
+            match = re.search(r"@你（消息 ID (\d+)）", message.text)
             if match is not None:
                 return match.group(1)
         raise AssertionError("正式请求缺少当前消息 ID")
@@ -257,6 +273,8 @@ def build_snapshot(
     supports_images: bool = False,
     retain_images: bool = False,
     tool_result_retention: str = "off",
+    recent_chat: dict[str, int] | None = None,
+    turn_instruction: str | None = None,
 ) -> PluginConfigSnapshot:
     """构造已经读取提示词文件的 AI 配置快照。"""
     group = AIGroupConfig(
@@ -297,6 +315,10 @@ def build_snapshot(
             "show_reasoning": False,
             "tool_result_retention": tool_result_retention,
             "debug_dump_messages": debug_dump_messages,
+            "recent_chat": recent_chat,
+            "turn_instruction_file": (
+                "turn_instruction.md" if turn_instruction is not None else None
+            ),
             "groups": group_configs,
         },
     )
@@ -315,6 +337,7 @@ def build_snapshot(
         vision_user_prompt=(
             "结合当前问题描述图片。" if source.vision is not None else None
         ),
+        turn_instruction=turn_instruction,
     )
     return PluginConfigSnapshot(
         revision=revision,
@@ -348,6 +371,25 @@ def build_event(
         message=[At.new(bot_id), Text.new("请看图回答"), Image.new("smoke.png")],
         raw_message=f"[CQ:at,qq={bot_id}]请看图回答[图片]",
         sender=Sender(user_id="20000", nickname="测试用户", role="member"),
+    )
+
+
+def build_stored_message(
+    *, message_id: str, text: str, occurred_at: int
+) -> StoredGroupMessage:
+    """构造测试群里其他群员的一条已归档文字消息。"""
+    return StoredGroupMessage(
+        row_id=1,
+        scope=GroupDataScope(bot_id="10000", group_id="40000"),
+        message_id=message_id,
+        group_name="测试群",
+        sender_id="20001",
+        sender_name="小明",
+        sender_role="member",
+        occurred_at=datetime.fromtimestamp(occurred_at, tz=UTC),
+        direction="incoming",
+        segments=(Text.new(text),),
+        media=(),
     )
 
 
@@ -525,6 +567,62 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
                 for message in committed.messages_lst
             )
         )
+
+    async def test_recent_chat_and_turn_instruction_stay_out_of_persistent_context(
+        self,
+    ) -> None:
+        """最近群聊和发言要求只随本轮请求发送，长期上下文只保存 @ 消息与回复。"""
+        smoke_context = SmokeContext()
+        smoke_context.conversation_contexts.started_at = datetime.fromtimestamp(
+            1_777_132_000, tz=UTC
+        )
+        smoke_context.group_messages.recent_messages = [
+            build_stored_message(
+                message_id="29990",
+                text="重启前的旧话题",
+                occurred_at=1_777_131_000,
+            ),
+            build_stored_message(
+                message_id="29991",
+                text="刚才在聊食堂涨价",
+                occurred_at=1_777_132_800,
+            ),
+        ]
+        instruction = "像群友一样随口回一两句。"
+        plugin = AIGroupChatPlugin(
+            context=cast(Context, smoke_context),
+            plugin_config=ai_plugin_config(
+                FakeConfigManager(
+                    build_snapshot(
+                        recent_chat={"max_messages": 20, "max_chars_per_message": 0},
+                        turn_instruction=instruction,
+                    )
+                )
+            ),
+            consumers_count=1,
+            stop_timeout_seconds=1,
+        )
+        try:
+            handled = await plugin.run(build_event())
+        finally:
+            await plugin.stop_consumers()
+
+        self.assertTrue(handled)
+        request = smoke_context.llm.formal_messages[0]
+        self.assertEqual(request[-1], ChatMessage(role="system", text=instruction))
+        request_text = "\n".join(message.text or "" for message in request)
+        self.assertIn("刚才在聊食堂涨价", request_text)
+        self.assertNotIn("重启前的旧话题", request_text)
+        committed = smoke_context.conversation_contexts.get(key=conversation_key())
+        self.assertIsNotNone(committed)
+        assert committed is not None
+        committed_text = "\n".join(
+            message.text or "" for message in committed.messages_lst
+        )
+        self.assertIn("请看图回答", committed_text)
+        self.assertIn("图片里写着测试成功。", committed_text)
+        self.assertNotIn("刚才在聊食堂涨价", committed_text)
+        self.assertNotIn(instruction, committed_text)
 
     async def test_same_group_requests_use_isolated_context_and_commit_by_completion(
         self,

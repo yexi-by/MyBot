@@ -499,6 +499,13 @@ class AIHistoryConfig(ConfigModel):
     default_after_count: int = Field(ge=0)
 
 
+class AIRecentChatConfig(ConfigModel):
+    """被艾特时随本轮附带的最近群聊；只读本进程启动后的消息，不写入长期上下文。"""
+
+    max_messages: int = Field(ge=1)
+    max_chars_per_message: int = Field(ge=0)
+
+
 class AIFileToolConfig(ConfigModel):
     """群文件工具的默认返回数量和可选单次上限。"""
 
@@ -526,6 +533,7 @@ class AIGroupChatConfig(ConfigModel):
     videos: AIVideoConfig
     formatting: AIMessageFormattingConfig
     history: AIHistoryConfig
+    recent_chat: AIRecentChatConfig | None = None
     files: AIFileToolConfig
     token_estimator: AITokenEstimatorConfig
     max_tool_rounds: int = Field(ge=1)
@@ -537,9 +545,19 @@ class AIGroupChatConfig(ConfigModel):
     debug_dump_messages: bool
     debug_dump_directory: str
     extra_requirements_file: str
+    turn_instruction_file: str | None = None
     allow_mention_all: bool
     tool_result_retention: ToolResultRetention
     groups: tuple[AIGroupConfig, ...]
+
+    @field_validator("turn_instruction_file")
+    @classmethod
+    def normalize_turn_instruction_file(cls, value: str | None) -> str | None:
+        """空发言要求路径等同于未配置。"""
+        if value is None:
+            return None
+        cleaned_value = value.strip()
+        return cleaned_value or None
 
     @model_validator(mode="after")
     def validate_vision_and_groups(self) -> "AIGroupChatConfig":

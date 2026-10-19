@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from .context_handler import ContextHandler
 
@@ -19,7 +20,9 @@ class ConversationContextStore:
     """在当前进程内保存跨连接复用的对话上下文与串行锁。"""
 
     def __init__(self) -> None:
-        """初始化空上下文和锁映射。"""
+        """初始化空上下文和锁映射，并记录本进程上下文的起点。"""
+        # 早于该时间的群消息属于上一次运行；需要“重启即干净”的读取以它为下界。
+        self.started_at: datetime = datetime.now(UTC)
         self._contexts: dict[ConversationContextKey, ContextHandler] = {}
         self._locks: dict[ConversationContextKey, asyncio.Lock] = {}
 

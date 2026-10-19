@@ -128,8 +128,16 @@ retain_reasoning = false
 debug_dump_messages = true
 debug_dump_directory = "logs/ai_group_chat_debug"
 extra_requirements_file = "ai_group_chat/prompts/extra_requirements.md"
+# 可选：每次请求都追加在末尾的简短发言要求，不进入长期上下文；删除即关闭。
+turn_instruction_file = "ai_group_chat/prompts/turn_instruction.md"
 allow_mention_all = false
 tool_result_retention = "off"
+
+[plugins.ai_group_chat.recent_chat]
+# 被艾特时附带本进程启动后、该消息之前的最近群聊，只随本轮请求发送；删除整节即关闭。
+max_messages = 30
+# 单条群消息在记录里的最大字符数，0 表示不截断。
+max_chars_per_message = 200
 
 [plugins.ai_group_chat.vision]
 model = { provider = "deepseek", name = "vision-model" }

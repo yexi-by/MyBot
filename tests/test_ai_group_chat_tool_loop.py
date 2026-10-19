@@ -396,11 +396,15 @@ def materialize_config(config: AIGroupChatConfig) -> MaterializedAIGroupChatConf
         vision_user_prompt=(
             "结合当前问题描述图片。" if config.vision is not None else None
         ),
+        turn_instruction=None,
     )
 
 
 def build_loop(
-    *, config: AIGroupChatConfig, context: FakeContext
+    *,
+    config: AIGroupChatConfig,
+    context: FakeContext,
+    turn_instruction: str | None = None,
 ) -> GroupChatToolLoop:
     """构造使用真实视觉工具的工具循环。"""
     typed_context = cast(Context, context)
@@ -411,6 +415,7 @@ def build_loop(
             config=materialize_config(config),
             context=typed_context,
         ),
+        turn_instruction=turn_instruction,
     )
 
 
@@ -419,6 +424,7 @@ async def run_turn(
     loop: GroupChatToolLoop,
     chat_handler: ContextHandler,
     question: str = "请根据图片回答",
+    recent_chat_messages: list[ChatMessage] | None = None,
     turn_messages: list[ChatMessage] | None = None,
     input_vision_messages: list[ChatMessage] | None = None,
     input_vision_history_messages: list[ChatMessage] | None = None,
@@ -428,6 +434,7 @@ async def run_turn(
     await loop.run(
         msg=build_message(),
         chat_handler=chat_handler,
+        recent_chat_messages=recent_chat_messages or [],
         turn_messages=(
             turn_messages
             if turn_messages is not None
@@ -885,6 +892,46 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
                 for message in chat_handler.messages_lst
             )
         )
+
+    async def test_turn_instruction_and_recent_chat_are_request_only(self) -> None:
+        """发言要求在工具结果之后仍是每轮最后一条；它和最近群聊都不进入长期上下文。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(content=None, tool_calls=[build_tool_call()]),
+                LLMResponse(content="查到了，挺离谱的"),
+            ]
+        )
+        context = FakeContext(llm=llm)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+        instruction = "像群友一样随口回一两句。"
+        recent_chat = ChatMessage(role="user", text="[12:01] 小明(20001)：食堂又涨价了")
+
+        await run_turn(
+            loop=build_loop(
+                config=build_config(),
+                context=context,
+                turn_instruction=instruction,
+            ),
+            chat_handler=chat_handler,
+            question="你怎么看",
+            recent_chat_messages=[recent_chat],
+        )
+
+        self.assertEqual(len(llm.formal_requests), 2)
+        for request in llm.formal_requests:
+            self.assertEqual(request[-1], ChatMessage(role="system", text=instruction))
+            self.assertEqual(
+                [message.text for message in request].count(instruction), 1
+            )
+            self.assertIn(recent_chat, request)
+        self.assertEqual(context.bot.sent_texts, ["查到了，挺离谱的"])
+        persisted_texts = [message.text for message in chat_handler.messages_lst]
+        self.assertIn("你怎么看", persisted_texts)
+        self.assertIn("查到了，挺离谱的", persisted_texts)
+        self.assertNotIn(recent_chat.text, persisted_texts)
+        self.assertNotIn(instruction, persisted_texts)
 
     async def test_retained_tool_history_is_bounded_summary(self) -> None:
         """开启工具保留时只保存调用状态，不保存原始结果或重复正文。"""

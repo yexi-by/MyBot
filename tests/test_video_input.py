@@ -17,7 +17,7 @@ from app.plugins.ai_group_chat.message_builder import GroupChatMessageBuilder
 from app.services.llm.schemas import ChatMessage
 from app.services.napcat.video_reader import NapCatVideoReader, NapCatVideoResource
 from tests.test_ai_group_chat_message_builder import (
-    EmptyDatabase, MissingImageBot, ReplyDatabase, build_config, build_message,
+    CONTEXT_STARTED_AT, EmptyDatabase, MissingImageBot, ReplyDatabase, build_config, build_message,
 )
 from tests.test_openai_image_generation import InspectableOpenAIService
 
@@ -115,6 +115,7 @@ class VideoInputTest(unittest.IsolatedAsyncioTestCase):
                     return GroupChatMessageBuilder(
                         config=build_config(videos={"enabled": enabled, "max_per_turn": limit}),
                         group_messages=cast(GroupMessageReader, database), bot=VideoBot(), http_client=client,
+                        context_started_at=CONTEXT_STARTED_AT,
                     )
 
                 disabled = await builder(False, 2).build_turn_messages(msg=msg)
@@ -131,7 +132,7 @@ class VideoInputTest(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(404))) as client:
             builder = GroupChatMessageBuilder(
                 config=build_config(videos={"enabled": True}), group_messages=cast(GroupMessageReader, EmptyDatabase()),
-                bot=MissingImageBot(), http_client=client,
+                bot=MissingImageBot(), http_client=client, context_started_at=CONTEXT_STARTED_AT,
             )
             turn = await builder.build_turn_messages(msg=build_message(message=[Video.new("missing.mp4")]))
         error = json.loads(turn.turn_messages[-1].text or "{}")

@@ -11,6 +11,7 @@ from pydantic import TypeAdapter, ValidationError
 from app.config import AIGroupChatConfig
 from app.database import GroupDataScope, GroupMessageReader, StoredGroupMessage
 from app.models import (
+    At,
     Forward,
     GroupMessage,
     Image,
@@ -19,6 +20,7 @@ from app.models import (
     NapCatId,
     Node,
     Reply,
+    Text,
     Video,
 )
 from app.services import (
@@ -35,8 +37,11 @@ from app.utils.log import log_event
 
 from .constants import (
     BEIJING_TIMEZONE,
+    NOTABLE_ROLES,
     ROLE_LABELS,
+    WEEKDAY_LABELS,
 )
+from .recent_chat import RecentChatFormatter
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,8 @@ class BuiltTurnMessages:
     """描述本轮构造出的用户输入和图片读取结果。"""
 
     turn_messages: list[ChatMessage]
+    # 只随本轮请求发送，不写入长期上下文。
+    recent_chat_messages: list[ChatMessage]
     image_items: list[LLMImageItem]
     truncated_image_count: int
     question: str
@@ -79,10 +86,19 @@ class GroupChatMessageBuilder:
         group_messages: GroupMessageReader,
         bot: NapCatMediaBot,
         http_client: httpx.AsyncClient,
+        context_started_at: datetime,
     ) -> None:
         """保存构造 LLM 输入所需的服务。"""
         self.config: AIGroupChatConfig = config
         self.group_messages: GroupMessageReader = group_messages
+        self.context_started_at: datetime = context_started_at
+        self.recent_chat_formatter: RecentChatFormatter | None = (
+            RecentChatFormatter(
+                max_chars_per_message=config.recent_chat.max_chars_per_message
+            )
+            if config.recent_chat is not None
+            else None
+        )
         self.image_reader: NapCatImageReader = NapCatImageReader(
             bot=bot,
             http_client=http_client,
@@ -170,12 +186,57 @@ class GroupChatMessageBuilder:
         video_messages = await self._build_video_messages(
             msg=msg, reply_message=reply_message
         ) if self.config.videos.enabled else []
+        recent_chat_messages = await self._build_recent_chat_messages(msg=msg)
         return BuiltTurnMessages(
             turn_messages=[user_message, *video_messages],
+            recent_chat_messages=recent_chat_messages,
             image_items=image_items,
             truncated_image_count=truncated_image_count,
             question=self._format_message_text(msg=msg, images_attached=True),
         )
+
+    async def _build_recent_chat_messages(
+        self, *, msg: GroupMessage
+    ) -> list[ChatMessage]:
+        """读取本进程启动后、当前消息之前的最近群聊，重启后的上下文保持干净。"""
+        recent_chat = self.config.recent_chat
+        if recent_chat is None or self.recent_chat_formatter is None:
+            return []
+        stored_messages = await self.group_messages.list_around(
+            scope=GroupDataScope(bot_id=msg.self_id, group_id=msg.group_id),
+            message_id=msg.message_id,
+            before_count=recent_chat.max_messages,
+            after_count=0,
+        )
+        previous_messages = [
+            message
+            for message in stored_messages
+            if message.message_id != msg.message_id
+        ]
+        recent_messages = [
+            message
+            for message in previous_messages
+            if message.occurred_at >= self.context_started_at
+        ]
+        log_event(
+            level="DEBUG",
+            event="ai_group_chat.recent_chat.loaded",
+            category="plugin",
+            message="已读取被艾特前的最近群聊",
+            group_id=msg.group_id,
+            message_id=msg.message_id,
+            requested_count=recent_chat.max_messages,
+            loaded_count=len(recent_messages),
+            skipped_before_start_count=len(previous_messages) - len(recent_messages),
+            context_started_at=self.context_started_at.isoformat(),
+        )
+        recent_chat_message = self.recent_chat_formatter.build_message(
+            messages=recent_messages,
+            bot_id=msg.self_id,
+            group_name=msg.group_name,
+            now=datetime.fromtimestamp(msg.time, tz=BEIJING_TIMEZONE),
+        )
+        return [recent_chat_message] if recent_chat_message is not None else []
 
     def _build_user_message_text(
         self,
@@ -185,24 +246,26 @@ class GroupChatMessageBuilder:
         current_images_available: bool,
         reply_images_available: bool,
     ) -> ChatMessage:
-        """构造不直接携带图片字节的用户消息。"""
-        text_blocks = [
-            self._format_current_message_markdown(
-                msg=msg,
-                images_attached=current_images_available,
-            )
+        """把当前消息写成一条聊天记录，引用内容像 QQ 一样放在正文之前。"""
+        lines = [
+            f"[{self._format_event_time(timestamp=msg.time)}] "
+            f"{self._format_member_label(msg=msg)} @你（消息 ID {msg.message_id}）："
         ]
         if reply_message is not None:
-            text_blocks.append(
-                self._format_quoted_message_markdown(
+            lines.append(
+                self._format_quoted_block(
                     msg=reply_message,
+                    bot_id=msg.self_id,
                     images_attached=reply_images_available,
                 )
             )
-        return ChatMessage(
-            role="user",
-            text="\n\n".join(text_blocks),
+        lines.append(
+            self._format_current_body(
+                msg=msg,
+                images_attached=current_images_available,
+            )
         )
+        return ChatMessage(role="user", text="\n".join(lines))
 
     def _build_image_resources(
         self, *, segments: Sequence[MessageSegment], source_label: str
@@ -344,88 +407,65 @@ class GroupChatMessageBuilder:
         )
         return stored_message
 
-    def _format_current_message_markdown(
-        self, *, msg: GroupMessage, images_attached: bool
+    def _format_quoted_block(
+        self, *, msg: StoredGroupMessage, bot_id: str, images_attached: bool
     ) -> str:
-        """把当前群消息格式化为低噪音 Markdown。"""
-        return "\n".join(
-            [
-                "## 当前消息",
-                "",
-                f"- 消息 ID: {msg.message_id}",
-                f"- 时间: {self._current_time()}",
-                f"- 群: {self._format_group_label(msg=msg)}",
-                f"- 群员: {self._format_member_label(msg=msg)}",
-                "",
-                "### 消息",
-                "",
-                self._format_message_text(
-                    msg=msg,
-                    images_attached=images_attached,
-                ),
-            ]
+        """把被引用的历史消息写成引用块，避免模型把它当成这次说的话。"""
+        if msg.direction == "outgoing" or msg.sender_id == bot_id:
+            speaker = "你"
+        else:
+            display_name = self._clean_text(msg.sender_name) or "未知群员"
+            speaker = (
+                f" {self._format_person(name=display_name, user_id=msg.sender_id, role=msg.sender_role)} "
+            )
+        body = self._format_segments(
+            segments=msg.segments,
+            images_attached=images_attached,
         )
+        lines = [
+            f"引用了{speaker}之前的消息（消息 ID {msg.message_id}）：",
+            *body.splitlines(),
+        ]
+        return "\n".join(f"> {line}".rstrip() for line in lines)
 
-    def _format_quoted_message_markdown(
-        self, *, msg: StoredGroupMessage, images_attached: bool
-    ) -> str:
-        """把被引用的历史消息格式化为 Markdown。"""
-        return "\n".join(
-            [
-                "## 引用消息",
-                "",
-                "<small>注意：下面内容是本次发言引用的历史消息，只用于理解上下文，不是用户这次真正说的正文。</small>",
-                "",
-                f"- 消息 ID: {msg.message_id}",
-                f"- 群: {self._format_group_identity(group_id=msg.scope.group_id, group_name=msg.group_name)}",
-                f"- 群员: {self._format_stored_member_label(msg=msg)}",
-                "",
-                "### 引用内容",
-                "",
-                self._format_segments(
-                    segments=msg.segments,
-                    images_attached=images_attached,
-                ),
-            ]
+    def _format_current_body(self, *, msg: GroupMessage, images_attached: bool) -> str:
+        """格式化当前消息正文；艾特机器人已由标题表达，艾特其他群员保留。"""
+        segments = [
+            segment
+            for segment in msg.message
+            if not (isinstance(segment, At) and segment.data.qq == msg.self_id)
+        ]
+        if all(
+            isinstance(segment, Text) and segment.data.text.strip() == ""
+            for segment in segments
+        ):
+            return "（只 @ 了你，没说别的）"
+        return self.message_formatter.format_segments(
+            segments=segments,
+            images_attached=images_attached,
+            include_at=True,
+            include_reply=False,
+            include_image_details=False,
         )
-
-    def _format_group_label(self, *, msg: GroupMessage) -> str:
-        """格式化群名称和群号。"""
-        return self._format_group_identity(
-            group_id=msg.group_id,
-            group_name=msg.group_name,
-        )
-
-    def _format_group_identity(
-        self, *, group_id: NapCatId, group_name: str | None
-    ) -> str:
-        """格式化群名称和群号。"""
-        group_name = self._clean_text(group_name)
-        if group_name is None:
-            return group_id
-        return f"{group_name} ({group_id})"
 
     def _format_member_label(self, *, msg: GroupMessage) -> str:
-        """格式化群员昵称、QQ 号和角色。"""
+        """格式化当前发言人的群名片、QQ 号和管理身份。"""
         display_name = self._clean_text(msg.sender.card)
         if display_name is None:
             display_name = self._clean_text(msg.sender.nickname)
         if display_name is None:
             display_name = "未知群员"
-        role = self._format_role(msg.sender.role)
-        return f"{display_name} ({msg.user_id}, {role})"
+        return self._format_person(
+            name=display_name,
+            user_id=msg.user_id,
+            role=msg.sender.role,
+        )
 
-    def _format_stored_member_label(self, *, msg: StoredGroupMessage) -> str:
-        """格式化已持久化消息的群员身份。"""
-        display_name = self._clean_text(msg.sender_name) or "未知群员"
-        role = self._format_role(msg.sender_role)
-        return f"{display_name} ({msg.sender_id}, {role})"
-
-    def _format_role(self, role: str | None) -> str:
-        """把 NapCat 群角色转换为中文标签。"""
-        if role is None:
-            return "未知角色"
-        return ROLE_LABELS.get(role, role)
+    def _format_person(self, *, name: str, user_id: NapCatId, role: str | None) -> str:
+        """QQ 号用于 `<At>`；只有群主和管理员才标出身份。"""
+        if role is not None and role in NOTABLE_ROLES:
+            return f"{name}({user_id}, {ROLE_LABELS[role]})"
+        return f"{name}({user_id})"
 
     def _format_message_text(self, *, msg: GroupMessage, images_attached: bool) -> str:
         """格式化消息正文，保留 AI 可理解的非文本消息段摘要。"""
@@ -462,7 +502,8 @@ class GroupChatMessageBuilder:
             return None
         return cleaned_value
 
-    def _current_time(self) -> str:
-        """返回当前北京时间字符串。"""
-        now = datetime.now(BEIJING_TIMEZONE)
-        return now.strftime("%Y-%m-%d %H:%M:%S")
+    def _format_event_time(self, *, timestamp: int) -> str:
+        """格式化消息发出的北京时间，带上星期方便模型感知日程。"""
+        local_time = datetime.fromtimestamp(timestamp, tz=BEIJING_TIMEZONE)
+        weekday = WEEKDAY_LABELS[local_time.weekday()]
+        return f"{local_time:%Y-%m-%d} {weekday} {local_time:%H:%M}"

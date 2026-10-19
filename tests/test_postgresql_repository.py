@@ -1070,6 +1070,7 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
                 builder = GroupChatMessageBuilder(
                     config=build_ai_group_chat_config(supports_images=True, overrides={"videos": {"enabled": True}}),
                     group_messages=repository, bot=bot, http_client=client,
+                    context_started_at=datetime.now(UTC),
                 )
                 turn = await builder.build_turn_messages(msg=self._message(
                     message_id="quote", segments=[Reply.new("video"), Text.new("说说视频")],

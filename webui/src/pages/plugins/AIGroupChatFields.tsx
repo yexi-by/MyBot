@@ -18,10 +18,20 @@ import {
   TextField,
   TextareaField,
 } from "@/lib/fields";
-import type { AIVisionConfig, MyBotConfigData } from "@/lib/types";
+import type {
+  AIRecentChatConfig,
+  AIVisionConfig,
+  MyBotConfigData,
+} from "@/lib/types";
 
 const VISION_BASE = "plugins.ai_group_chat.vision" as const;
+const RECENT_CHAT_BASE = "plugins.ai_group_chat.recent_chat" as const;
 const GROUPS_BASE = "plugins.ai_group_chat.groups" as const;
+
+const DEFAULT_RECENT_CHAT: AIRecentChatConfig = {
+  max_messages: 30,
+  max_chars_per_message: 200,
+};
 
 function defaultVision(provider: string): AIVisionConfig {
   return {
@@ -133,6 +143,48 @@ function VisionSection() {
       ) : (
         <p className="text-sm text-muted-foreground xl:col-span-2">
           未配置视觉模型；direct 模式下图片只会交给主模型。
+        </p>
+      )}
+    </SectionCard>
+  );
+}
+
+function RecentChatSection() {
+  const { watch, setValue } = useFormContext<MyBotConfigData>();
+  const enabled = watch(RECENT_CHAT_BASE) != null;
+
+  return (
+    <SectionCard
+      title="最近群聊"
+      description="被 @ 时附带本次启动以来、该消息之前的群聊，只随本轮请求发送，不写入长期上下文。"
+      actions={
+        <Switch
+          aria-label="启用最近群聊"
+          checked={enabled}
+          onCheckedChange={(checked) => {
+            setValue(RECENT_CHAT_BASE, checked ? DEFAULT_RECENT_CHAT : null, {
+              shouldDirty: true,
+            });
+          }}
+        />
+      }
+    >
+      {enabled ? (
+        <>
+          <NumberField
+            path={`${RECENT_CHAT_BASE}.max_messages`}
+            label="最多条数"
+            placeholder="例如 30"
+          />
+          <NumberField
+            path={`${RECENT_CHAT_BASE}.max_chars_per_message`}
+            label="单条字符上限"
+            description="0 表示不截断"
+          />
+        </>
+      ) : (
+        <p className="text-sm text-muted-foreground xl:col-span-2">
+          未开启；模型只能看到 @ 它的那条消息和引用内容。
         </p>
       )}
     </SectionCard>
@@ -270,6 +322,8 @@ export default function AIGroupChatFields() {
         />
       </SectionCard>
 
+      <RecentChatSection />
+
       <SectionCard title="历史工具" description="群历史分页和锚点默认数量。">
         <NumberField
           path="plugins.ai_group_chat.history.default_limit"
@@ -344,6 +398,12 @@ export default function AIGroupChatFields() {
           path="plugins.ai_group_chat.extra_requirements_file"
           label="通用要求文件"
           placeholder="ai_group_chat/prompts/extra_requirements.md"
+        />
+        <TextField
+          path="plugins.ai_group_chat.turn_instruction_file"
+          label="发言要求文件"
+          description="每次请求追加在最末尾的简短说话要求，不写入长期上下文"
+          placeholder="留空不使用"
         />
         <div className="xl:col-span-2">
           <TextareaField

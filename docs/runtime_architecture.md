@@ -52,10 +52,10 @@ MCP 每个服务的初始化和工具调用分别受 `initialization_timeout_sec
 
 AI 群聊由以下组件组成：
 
-- `GroupChatMessageBuilder`：读取当前消息、引用和图片。
+- `GroupChatMessageBuilder`：把当前消息整理为聊天记录行（时间、发送者、消息 ID、引用块、正文），并读取引用和图片。配置 `recent_chat` 时，经 `GroupMessageReader.list_around` 读取当前消息之前的群聊，只保留 `ConversationContextStore.started_at` 之后的消息，由 `RecentChatFormatter` 整理为临时记录；该记录只进入本轮请求，不进入长期上下文。
 - `VisionDescriptionTool`：按 `images.delivery_mode` 把原图交给主模型或生成事实描述，并执行显式超限策略。
-- `GroupChatToolLoop`：执行主模型、工具、回复标记解析和消息发送。
-- `max_context_tokens` 只约束长期上下文：每轮开始检查已保存的系统提示词与历史；超限时压缩历史，摘要仍过长则继续缩减。工具定义、本轮输入、工具结果、推理、图片、纠错消息及压缩请求属于临时上下文，可超出该预算。工具结果完整交付，按配置保存后若使历史超限，下一轮再压缩。
+- `GroupChatToolLoop`：执行主模型、工具、回复标记解析和消息发送。配置 `turn_instruction_file` 时，每次请求都把发言要求作为 system 消息附加在末尾（本轮纠错消息仍排在其后），不写入长期上下文。
+- `max_context_tokens` 只约束长期上下文：每轮开始检查已保存的系统提示词与历史；超限时压缩历史，摘要仍过长则继续缩减。工具定义、本轮输入（含最近群聊记录）、发言要求、工具结果、推理、图片、纠错消息及压缩请求属于临时上下文，可超出该预算。工具结果完整交付，按配置保存后若使历史超限，下一轮再压缩。
 - `GroupChatContextCompressor`：把历史整理为独立摘要，并保留当前输入的消息与图片边界。空摘要或无法缩短的摘要会反馈失败，原历史保留供后续重试；压缩通知发送失败只记录日志。Provider 自身的上下文窗口限制继续生效。
 - `AIGroupChatDebugDumper`：向 `debug_dump_directory` 配置的目录写调试记录，不参与恢复。
 

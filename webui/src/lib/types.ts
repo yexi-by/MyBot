@@ -191,6 +191,11 @@ export interface AIHistoryConfig {
   default_after_count?: number;
 }
 
+export interface AIRecentChatConfig {
+  max_messages: number;
+  max_chars_per_message: number;
+}
+
 export interface AIFileToolConfig {
   default_count?: number;
   max_per_call?: number;
@@ -212,6 +217,7 @@ export interface AIGroupChatConfig {
   videos?: AIVideoConfig;
   formatting?: AIMessageFormattingConfig;
   history?: AIHistoryConfig;
+  recent_chat?: AIRecentChatConfig | null;
   files?: AIFileToolConfig;
   token_estimator?: AITokenEstimatorConfig;
   max_tool_rounds?: number;
@@ -223,6 +229,7 @@ export interface AIGroupChatConfig {
   debug_dump_messages?: boolean;
   debug_dump_directory?: string;
   extra_requirements_file?: string;
+  turn_instruction_file?: string | null;
   allow_mention_all?: boolean;
   tool_result_retention?: ToolResultRetention;
   groups?: AIGroupConfig[];

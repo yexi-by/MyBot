@@ -96,6 +96,7 @@ def build_config(
             else None
         ),
         vision_user_prompt="结合当前问题描述图片。" if source.vision is not None else None,
+        turn_instruction=None,
     )
 
 

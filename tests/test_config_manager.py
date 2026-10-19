@@ -26,6 +26,7 @@ def write_ai_files(config_root: Path) -> None:
     """写入 AI 配置实际引用的文本文件。"""
     files = {
         "ai/extra.md": "通用要求",
+        "ai/turn.md": "发言要求",
         "ai/system.md": "角色提示",
         "ai/knowledge.md": "知识内容",
         "ai/vision-system.md": "只描述事实",
@@ -53,8 +54,13 @@ def ai_config() -> str:
         debug_dump_messages = false
         debug_dump_directory = "logs/ai_group_chat_debug"
         extra_requirements_file = "ai/extra.md"
+        turn_instruction_file = "ai/turn.md"
         allow_mention_all = false
         tool_result_retention = "off"
+
+        [plugins.ai_group_chat.recent_chat]
+        max_messages = 30
+        max_chars_per_message = 200
 
         [plugins.ai_group_chat.vision]
         model = { provider = "main", name = "vision" }
@@ -128,7 +134,7 @@ class ConfigManagerTest(unittest.IsolatedAsyncioTestCase):
     """验证配置边界、部分应用和 watcher 生命周期。"""
 
     def test_materializes_only_referenced_files(self) -> None:
-        """AI 运行快照直接包含组合后的 system prompt。"""
+        """AI 运行快照直接包含组合后的 system prompt 和单独的发言要求。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config_file = root / "mybot.toml"
@@ -145,7 +151,9 @@ class ConfigManagerTest(unittest.IsolatedAsyncioTestCase):
             ai.groups[0].system_prompt,
             "角色提示\n\n知识内容\n\n通用要求",
         )
-        self.assertEqual(len(loaded.plugins.referenced_files), 6)
+        # 发言要求每次请求追加在末尾，不并入会触发上下文重置的 system prompt。
+        self.assertEqual(ai.turn_instruction, "发言要求")
+        self.assertEqual(len(loaded.plugins.referenced_files), 7)
 
     def test_rejects_file_outside_config_directory(self) -> None:
         """prompt 不能通过父目录逃出统一配置目录。"""

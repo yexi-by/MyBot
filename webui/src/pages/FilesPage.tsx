@@ -69,7 +69,10 @@ const MarkdownPreview = lazy(async () => {
 function requiredPromptFiles(config: MyBotConfigData): Set<string> {
   const ai = config.plugins?.ai_group_chat;
   if (!ai) return new Set();
-  const files = new Set<string>([ai.extra_requirements_file ?? ""]);
+  const files = new Set<string>([
+    ai.extra_requirements_file ?? "",
+    ai.turn_instruction_file ?? "",
+  ]);
   if (ai.vision) {
     files.add(ai.vision.system_prompt_file);
     files.add(ai.vision.user_prompt_file);
