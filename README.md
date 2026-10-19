@@ -240,9 +240,9 @@ max_chars_per_message = 200
 
 ### 默认提示词与人格
 
-仓库的 `config.example/` 与 `config/` 目录结构一致，提供 `config.example.toml` 引用的全部提示词，默认人格是猫娘「耄耋」：
+仓库的 `config.example/` 与 `config/` 目录结构一致，提供 `config.example.toml` 引用的全部提示词，默认人格是性格温柔的猫娘「耄耋」：
 
-- `ai_group_chat/prompts/roles/maodie.md`：群聊角色提示词，写耄耋的性格、说话方式和分寸。
+- `ai_group_chat/prompts/roles/maodie.md`：群聊角色提示词，写耄耋的性格、说话方式、联网查资料的习惯和分寸。
 - `ai_group_chat/knowledge/default.md`：群知识库模板，可写群友称呼、群梗和群规；删空后不会附加到提示词。
 - `ai_group_chat/prompts/extra_requirements.md`：所有群共用的通用要求，说明 `<Reply>`、`<At>` 标记和纯文本输出。
 - `ai_group_chat/prompts/turn_instruction.md`：每次请求末尾的发言要求。
