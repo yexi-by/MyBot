@@ -28,6 +28,7 @@ from app.models import (
     Video,
 )
 from app.services import ChatMessage
+from app.services.napcat.model_context import isolate_bot_message_text
 
 from .constants import BEIJING_TIMEZONE
 
@@ -123,7 +124,10 @@ class RecentChatFormatter:
             )
             for segment in message.segments
         ]
-        content = " ".join("".join(parts).split())
+        content = isolate_bot_message_text(
+            message, bot_id=bot_id, text="".join(parts)
+        )
+        content = " ".join(content.split())
         if content == "":
             return "[空消息]"
         limit = self.max_chars_per_message

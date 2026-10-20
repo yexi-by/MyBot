@@ -30,6 +30,7 @@ from app.services import (
 )
 from app.services.llm.tools import LLMImageArtifact, LLMImageError, LLMImageItem
 from app.services.napcat.message_formatter import NapCatMessageTextFormatter
+from app.services.napcat.model_context import isolate_bot_message_text
 from app.services.napcat.video_reader import (
     NapCatMediaBot, NapCatVideoReader, NapCatVideoResource,
 )
@@ -422,6 +423,7 @@ class GroupChatMessageBuilder:
             segments=msg.segments,
             images_attached=images_attached,
         )
+        body = isolate_bot_message_text(msg, bot_id=bot_id, text=body)
         lines = [
             f"引用了{speaker}之前的消息（消息 ID {msg.message_id}）：",
             *body.splitlines(),

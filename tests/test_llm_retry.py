@@ -11,6 +11,7 @@ from openai import AsyncOpenAI, AuthenticationError
 from pydantic import SecretStr
 
 from app.config import LLMProviderConfig, NetworkConfig
+from app.models import JsonObject
 from app.services.llm.base import LLMProvider
 from app.services.llm.handler import LLMHandler
 from app.services.llm.schemas import ChatMessage, LLMProviderWrapper
@@ -59,6 +60,12 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
         invalid_cases: list[tuple[str, str, dict[str, object], str, str | None]] = [
             ("text_call", "text", {"content": f"<call:default_api:inspect>{rejected_marker}</call:default_api:inspect>"}, "stop", None),
             ("no_tools_thought", "no_tools", {"content": f"<thought\n>{rejected_marker}</thought>公开回复"}, "stop", None),
+            ("thought_header", "text", {"content": f"🫧thought\n{rejected_marker}公开回复"}, "stop", None),
+            ("embedded_thought", "tools", {"content": f"公开片段🫧thought\n{rejected_marker}", "tool_calls": [valid_call]}, "tool_calls", None),
+            ("quoted_thought_header", "no_tools", {"content": f"`💭thinking`\n{rejected_marker}"}, "stop", None),
+            ("channel_marker", "text", {"content": f"<|channel|>analysis\n{rejected_marker}"}, "stop", None),
+            ("invalid_reasoning_details", "tools", {"reasoning_details": {"secret": rejected_marker}, "tool_calls": [valid_call]}, "tool_calls", None),
+            ("invalid_tool_state", "tools", {"tool_calls": [{**valid_call, "extra_content": rejected_marker}]}, "tool_calls", None),
             ("malformed_arguments", "tools", {"tool_calls": [malformed_call]}, "tool_calls", None),
             ("non_object_arguments", "tools", {"tool_calls": [{**valid_call, "function": {"name": "inspect", "arguments": "[]"}}]}, "tool_calls", None),
             ("truncated_content", "text", {"content": rejected_marker}, "length", None),
@@ -120,6 +127,61 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(request_messages[1][:len(request_messages[0])], request_messages[0])
                 self.assertGreater(len(request_messages[1]), len(request_messages[0]))
                 self.assertNotIn(rejected_marker, json.dumps(request_messages))
+
+    async def test_structured_reasoning_and_tool_state_survive_protocol_round_trip(self) -> None:
+        """隐藏思考时仍能回传结构化状态，签名和加密内容不会拼进可见正文。"""
+        requests: list[dict[str, object]] = []
+        details: list[JsonObject] = [
+            {"type": "reasoning.text", "text": "内部规划", "signature": "signed-detail"},
+            {"type": "reasoning.encrypted", "data": "encrypted-state"},
+        ]
+        extra: JsonObject = {"google": {"thought_signature": "signed-tool-state"}}
+
+        async def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(cast(dict[str, object], json.loads(request.content)))
+            first = len(requests) == 1
+            message: dict[str, object] = {
+                "role": "assistant", "content": None,
+                "reasoning_details": details,
+                "tool_calls": [{
+                    "id": "lookup-1", "type": "function", "extra_content": extra,
+                    "function": {"name": "lookup", "arguments": '{"item":"book"}'},
+                }],
+            } if first else {"role": "assistant", "content": "查询结果已确认"}
+            return httpx.Response(200, json={
+                "id": "test", "object": "chat.completion", "created": 0,
+                "model": "test", "choices": [{
+                    "index": 0, "finish_reason": "tool_calls" if first else "stop",
+                    "message": message,
+                }],
+            })
+
+        async with AsyncOpenAI(
+            api_key="test", base_url="https://model.invalid/v1", max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        ) as client:
+            service = OpenAIService(client)
+            tools = [LLMToolDefinition(name="lookup", description="查询", parameters={})]
+            messages = [ChatMessage(role="user", text="查询库存")]
+            first = await service.get_ai_response_with_tools(messages, "test", tools)
+            self.assertIsNone(first.content)
+            self.assertEqual(first.reasoning_content, "内部规划")
+            messages.extend([
+                ChatMessage(
+                    role="assistant", tool_calls=first.tool_calls,
+                    reasoning_content=first.reasoning_content,
+                    reasoning_details=first.reasoning_details,
+                ),
+                ChatMessage(role="tool", tool_call_id="lookup-1", text='{"count":3}'),
+            ])
+            final = await service.get_ai_response_with_tools(messages, "test", tools)
+
+        replay = cast(list[dict[str, object]], requests[1]["messages"])[1]
+        self.assertEqual(replay["reasoning_details"], details)
+        call_data = cast(list[dict[str, object]], replay["tool_calls"])[0]
+        self.assertEqual(call_data["extra_content"], extra)
+        self.assertIsNone(replay["content"])
+        self.assertEqual(final.content, "查询结果已确认")
 
     async def test_protocol_retry_exhaustion_keeps_error_and_requests_clean(self) -> None:
         """持续泄漏不会越过重试预算，异常与纠错请求均不携带模型私有正文。"""

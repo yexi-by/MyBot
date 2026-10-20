@@ -310,6 +310,59 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
         self.assertNotIn("重启前的消息", recent_text)
         self.assertNotIn("今天食堂", result.turn_messages[0].text or "")
 
+    def test_recent_chat_and_quotes_isolate_only_abnormal_bot_text(self) -> None:
+        """自动最近群聊与引用都隔离旧泄漏，成员讨论和正常机器人发言仍保留。"""
+        leaked = build_message(
+            message_id="29991", user_id="10000", post_type="message_sent",
+            message=[Text.new("🫧"), Text.new("thought\nprivate-leaked-history")],
+            time=1_777_132_800,
+        )
+        original = leaked.model_copy(deep=True)
+        current = build_message(message=[
+            Reply.new(leaked.message_id), At.new("10000"), Text.new("请继续正常聊天"),
+        ])
+        records = [to_stored_message(message) for message in (
+            leaked,
+            build_message(
+                message_id="29992", user_id="10000", post_type="message_sent",
+                message=[Text.new("正常约定周六出发")], time=1_777_132_820,
+            ),
+            build_message(
+                message_id="29993", message=[Text.new("🫧thought\n成员讨论内容")],
+                time=1_777_132_840,
+            ),
+            current,
+        )]
+        database = RecentChatDatabase(records)
+        recent = asyncio.run(build_builder(
+            database=database,
+            config=build_config(recent_chat={"max_messages": 10, "max_chars_per_message": 0}),
+        ).build_turn_messages(msg=current))
+        recent_text = recent.recent_chat_messages[0].text or ""
+        self.assertNotIn("private-leaked-history", recent_text)
+        self.assertIn("正常约定周六出发", recent_text)
+        self.assertIn("成员讨论内容", recent_text)
+        self.assertEqual(database.messages, records)
+
+        for quoted_segments in (
+            leaked.message,
+            [Forward.new("cached-reply", content=to_json_value([
+                Node.new(user_id="10000", nickname="机器人", content=leaked.message),
+            ]))],
+        ):
+            with self.subTest(segments=quoted_segments):
+                quoted = leaked.model_copy(update={"message": quoted_segments})
+                quote_database = ReplyDatabase(quoted)
+                reply = asyncio.run(build_builder(
+                    database=quote_database,
+                ).build_turn_messages(msg=current))
+                reply_text = reply.turn_messages[0].text or ""
+                self.assertNotIn("private-leaked-history", reply_text)
+                self.assertIn(leaked.message_id, reply_text)
+                self.assertIn("请继续正常聊天", reply_text)
+                self.assertEqual(quote_database.reply_message.segments, tuple(quoted_segments))
+        self.assertEqual(leaked, original)
+
     def test_recent_chat_is_empty_right_after_restart(self) -> None:
         """启动后还没有新消息时不附带群聊记录，重启后的上下文保持干净。"""
         database = RecentChatDatabase(

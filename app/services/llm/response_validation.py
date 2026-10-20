@@ -1,6 +1,7 @@
 """在模型输出产生副作用前检查响应完整性和正文中的协议残片。"""
 
 import re
+from collections.abc import Sequence
 from typing import Final
 
 from .errors import LLMResponseError
@@ -9,7 +10,7 @@ from .schemas import ChatMessage, LLMResponse
 
 # 只匹配协议外壳，不根据「思考」「工具」等普通词语判断正文。
 CONTROL_TAG_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"</?\s*(?:think|thought|analysis|reasoning|tool_call|tool_calls|"
+    r"</?\s*(?:think|thinking|thought|analysis|reasoning|tool_call|tool_calls|"
     r"function_call|function_calls)(?=[\s>/]|$)|</?\s*call\s*:",
     re.IGNORECASE,
 )
@@ -19,10 +20,23 @@ TEXT_TOOL_CALL_PATTERN: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 LITERAL_TAG_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"(?<!`)`</?\s*(?:think|thought|analysis|reasoning|tool_call|tool_calls|"
+    r"(?<!`)`</?\s*(?:think|thinking|thought|analysis|reasoning|tool_call|tool_calls|"
     r"function_call|function_calls)\s*>`(?!`)",
     re.IGNORECASE,
 )
+THOUGHT_HEADER_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?:🫧|💭)\ufe0f?\s*(?:thought|thinking|analysis|reasoning)(?=[\s:：`]|$)",
+    re.IGNORECASE,
+)
+LITERAL_THOUGHT_HEADER_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?<!`)`(?:🫧|💭)\ufe0f?[ \t]*(?:thought|thinking|analysis|reasoning)`(?!`)",
+    re.IGNORECASE,
+)
+CONTROL_TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"<\|(?:channel|analysis|begin_of_thought|end_of_thought)\|>",
+    re.IGNORECASE,
+)
+QUARANTINED_ASSISTANT_TEXT: Final[str] = "（这条机器人回复包含异常内部内容，已从模型上下文隔离）"
 NATIVE_FAILURE_REASONS: Final[frozenset[str]] = frozenset({
     "length", "max_tokens", "malformed_function_call", "unexpected_tool_call",
     "content_filter", "safety", "recitation", "blocklist", "prohibited_content",
@@ -68,17 +82,55 @@ def validate_response(response: LLMResponse, *, tools_allowed: bool = True) -> N
 
 def validate_response_content(content: str | None) -> None:
     """阻止内部协议片段进入正文；单独引用一个标签的行内示例可正常展示。"""
-    if content is None:
-        return
-    # 仅豁免唯一一个行内标签示例。成对反引号标签仍可能包着实际思考，
-    # 不能逐个删除后放行；代码围栏和完整协议块也不享受豁免。
-    literal_tags = list(LITERAL_TAG_PATTERN.finditer(content))
-    text = LITERAL_TAG_PATTERN.sub("", content) if len(literal_tags) == 1 else content
-    if CONTROL_TAG_PATTERN.search(text) or TEXT_TOOL_CALL_PATTERN.search(text):
+    if has_response_control_content(content):
         raise LLMResponseError(
             "control_content",
             "回复正文混入了工具调用协议或内部思考标记。",
         )
+
+
+def has_response_control_content(content: str | None) -> bool:
+    """只识别明确的内部标记，普通英文和 thought 等词语不构成异常。"""
+    if content is None:
+        return False
+    # 仅豁免唯一一个行内标签示例。成对反引号标签仍可能包着实际思考，
+    # 不能逐个删除后放行；代码围栏和完整协议块也不享受豁免。
+    literal_tags = [
+        *LITERAL_TAG_PATTERN.finditer(content),
+        *LITERAL_THOUGHT_HEADER_PATTERN.finditer(content),
+    ]
+    text = content
+    if len(literal_tags) == 1:
+        literal = literal_tags[0]
+        before = content[:literal.start()].rsplit("\n", 1)[-1].strip()
+        after = content[literal.end():].split("\n", 1)[0].strip()
+        # 独占一行的反引号标记仍可能是思考段标题，不能把后面的分析一起放行。
+        if before or after or content.strip() == literal.group():
+            text = content[:literal.start()] + content[literal.end():]
+    return any(pattern.search(text) is not None for pattern in (
+        CONTROL_TAG_PATTERN, TEXT_TOOL_CALL_PATTERN,
+        THOUGHT_HEADER_PATTERN, CONTROL_TOKEN_PATTERN,
+    ))
+
+
+def isolate_assistant_history(
+    messages: Sequence[ChatMessage],
+) -> tuple[list[ChatMessage], int]:
+    """隔离历史助手的异常正文，不改原消息；已发生的工具调用及结果仍能配对。"""
+    safe_messages: list[ChatMessage] = []
+    quarantined = 0
+    for message in messages:
+        if message.role != "assistant" or not has_response_control_content(message.text):
+            safe_messages.append(message)
+            continue
+        quarantined += 1
+        if message.tool_calls:
+            # 工具已经在历史轮次执行过，保留调用与协议状态，避免留下孤立 tool 消息。
+            safe_messages.append(message.model_copy(update={
+                "text": None,
+                "reasoning_content": None,
+            }))
+    return safe_messages, quarantined
 
 
 def build_response_repair_message(error: LLMResponseError) -> ChatMessage:

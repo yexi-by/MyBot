@@ -10,6 +10,7 @@ from app.database import (
 )
 from app.models import GroupMessage, Image, JsonObject, JsonValue, to_json_value
 from app.services.napcat.message_formatter import NapCatMessageTextFormatter
+from app.services.napcat.model_context import isolate_bot_message_text
 from app.services.llm.tools import LLMToolRegistry
 
 from .arguments import (
@@ -51,6 +52,8 @@ class GroupHistoryToolset:
                 "需要近期上下文、确认某人说过什么、回看某条消息前后对话时主动调用。"
                 "query_mode 支持 recent_count、recent_duration、date_range、around_message；"
                 "按 QQ 过滤填 user_id，查消息上下文填 context_message_id。"
+                "含明确内部协议标记的机器人旧回复会以隔离提示返回，"
+                "并标注 content_quarantined；原始聊天记录保留。"
             ),
             parameters_model=GetGroupHistoryMessagesArgs,
             handler=self.get_group_history_messages,
@@ -247,6 +250,12 @@ class GroupHistoryToolset:
     ) -> JsonObject:
         """将群消息压缩成适合模型阅读的历史记录。"""
         timestamp = int(message.occurred_at.timestamp())
+        text = self.message_formatter.format_segments(
+            segments=list(message.segments), images_attached=False,
+        )
+        safe_text = isolate_bot_message_text(
+            message, bot_id=str(self.event.self_id), text=text,
+        )
         result: JsonObject = {
             "time": timestamp,
             "time_text": self._format_history_time(timestamp=timestamp),
@@ -254,13 +263,12 @@ class GroupHistoryToolset:
             "user_id": to_json_value(message.sender_id),
             "member_name": message.sender_name or "未知群员",
             "role": message.sender_role,
-            "text": self.message_formatter.format_segments(
-                segments=list(message.segments),
-                images_attached=False,
-            ),
+            "text": safe_text,
             "segment_types": [segment.type for segment in message.segments],
             "has_image": any(isinstance(segment, Image) for segment in message.segments),
         }
+        if safe_text != text:
+            result["content_quarantined"] = True
         if is_anchor:
             result["is_anchor"] = True
         return result

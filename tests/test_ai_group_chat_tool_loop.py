@@ -463,6 +463,8 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             f"call:default_api:qq__get_group_history_messages{{secret:{rejected_marker}}}",
             f"```xml\n<think>{rejected_marker}</think>\n```",
             f"`<thought>`{rejected_marker}`</thought>`",
+            f"🫧thought\n{rejected_marker}这也是未校验的回答",
+            f"正常片段💭analysis:\n{rejected_marker}",
         )
         for leaked_content in leaked_contents:
             with self.subTest(content=leaked_content):
@@ -501,7 +503,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         rejected_marker = "不应公开的异常模型正文"
         llm = RecordingLLM(responses=[
             LLMResponse(
-                content=f"<think>{rejected_marker}</think>",
+                content=f"🫧thought\n{rejected_marker}",
                 reasoning_content=rejected_marker,
                 tool_calls=[build_tool_call("blocked-call")],
             ),
@@ -543,7 +545,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
                     content="已发送的正常正文", tool_calls=[build_tool_call("completed-call")],
                 )] if has_sent_content else []
                 responses.extend(LLMResponse(
-                    content=f"<thought>{rejected_marker}</thought>",
+                    content=f"🫧thought\n{rejected_marker}",
                     reasoning_content=rejected_marker,
                     tool_calls=[build_tool_call("blocked-call")],
                 ) for _ in range(3))
@@ -579,6 +581,57 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("已发送的正常正文", [message.text for message in handler.messages_lst])
                 else:
                     self.assertEqual([message.role for message in handler.messages_lst], ["system", "user"])
+
+    async def test_history_quarantine_preserves_normal_turns_and_tool_pairs(self) -> None:
+        """污染只从请求视图隔离，预算和摘要也使用同一份干净历史。"""
+        for compress in (False, True):
+            with self.subTest(compress=compress):
+                llm = RecordingLLM(
+                    responses=[LLMResponse(content="继续正常聊天")],
+                    text_response="群友约好周六出发，查询结果为三本。",
+                )
+                context = FakeContext(llm=llm)
+                handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
+                normal = "约好周六出发。" * (2000 if compress else 1)
+                user = ChatMessage(role="user", text="用户在讨论 🫧thought 这个现象。")
+                old_call = build_tool_call("old-completed-call").model_copy(update={
+                    "extra_content": {"vendor": {"signature": "old-state"}},
+                })
+                history = [
+                    user,
+                    ChatMessage(role="assistant", text=normal),
+                    ChatMessage(role="assistant", text="🫧thought\nprivate-plan" + "x" * 30000),
+                    ChatMessage(
+                        role="assistant", text="💭thinking\nprivate-tool-plan",
+                        reasoning_content="private-reasoning", tool_calls=[old_call],
+                    ),
+                    ChatMessage(role="tool", tool_call_id=old_call.id, text="历史查询结果：三本"),
+                ]
+                original = [message.model_copy(deep=True) for message in history]
+                handler.add_msg(msg_list=history)
+                await run_turn(
+                    loop=build_loop(config=build_config(), context=context),
+                    chat_handler=handler,
+                )
+
+                self.assertEqual(history, original)
+                self.assertEqual(len(llm.text_requests), int(compress))
+                for request in [*llm.formal_requests, *llm.text_requests]:
+                    text = "\n".join((m.text or "") + (m.reasoning_content or "") for m in request)
+                    self.assertNotIn("private-", text)
+                request = llm.text_requests[0] if compress else llm.formal_requests[0]
+                text = "\n".join(m.text or "" for m in request)
+                self.assertIn(normal, text)
+                self.assertIn(user.text or "", text)
+                self.assertIn("历史查询结果：三本", text)
+                if not compress:
+                    replay = next(m for m in request if m.tool_calls)
+                    self.assertIsNone(replay.text)
+                    self.assertEqual(replay.tool_calls, [old_call])
+                    self.assertIn(old_call.id, [m.tool_call_id for m in request if m.role == "tool"])
+                    self.assertEqual(handler.messages_lst[1:1 + len(history)], original)
+                self.assertEqual(context.mcp_tool_manager.calls, [])
+                self.assertEqual(handler.messages_lst[-1].text, "继续正常聊天")
 
     async def test_large_tool_results_finish_then_compress_only_retained_history(self) -> None:
         """完整交付多轮大结果；full 保存后触发压缩，off 和 summary 不积累原文。"""
@@ -860,11 +913,15 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_tool_round_passes_back_reasoning_field(self) -> None:
         """工具续问带回 reasoning，但关闭长期保留后不跨用户轮次保存。"""
+        details: list[JsonObject] = [
+            {"type": "reasoning.text", "text": "工具前思考", "signature": "signed-state"},
+        ]
         llm = RecordingLLM(
             responses=[
                 LLMResponse(
                     content="我先查一下",
                     reasoning_content="工具前思考",
+                    reasoning_details=details,
                     tool_calls=[build_tool_call()],
                 ),
                 LLMResponse(content="工具后回复"),
@@ -885,10 +942,11 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             message for message in llm.formal_requests[1] if message.tool_calls
         )
         self.assertEqual(assistant_tool_message.reasoning_content, "工具前思考")
+        self.assertEqual(assistant_tool_message.reasoning_details, details)
         self.assertEqual(context.bot.sent_texts, ["我先查一下", "工具后回复"])
         self.assertTrue(
             all(
-                message.reasoning_content is None
+                message.reasoning_content is None and message.reasoning_details is None
                 for message in chat_handler.messages_lst
             )
         )
@@ -1416,23 +1474,22 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_plain_content_sends_once_and_finishes(self) -> None:
         """正常正文、HTML 和单个协议标签的引用示例均可发送，无需纠错。"""
-        content = "第一句。I think so。HTML 示例：<div>普通内容</div>；标签名示例：`<thought>`。"
-        llm = RecordingLLM(responses=[LLMResponse(content=content)])
-        context = FakeContext(llm=llm)
-        config = build_config()
-        chat_handler = ContextHandler(
-            system_prompt="系统提示词", max_context_tokens=1000000
-        )
-
-        await run_turn(
-            loop=build_loop(config=config, context=context),
-            chat_handler=chat_handler,
-            question="继续说",
-        )
-
-        self.assertEqual(context.bot.sent_texts, [content])
-        self.assertEqual(len(llm.formal_requests), 1)
-        self.assertEqual(chat_handler.messages_lst[-1].text, content)
+        for content in (
+            "第一句。I think so。HTML 示例：<div>普通内容</div>；标签名示例：`<thought>`。",
+            "这个标记的字面写法是 `🫧thought`，不是正常聊天里的单词。",
+            "I thought we should meet at six. Let's check the timetable.",
+        ):
+            with self.subTest(content=content):
+                llm = RecordingLLM(responses=[LLMResponse(content=content)])
+                context = FakeContext(llm=llm)
+                chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+                await run_turn(
+                    loop=build_loop(config=build_config(), context=context),
+                    chat_handler=chat_handler, question="继续说",
+                )
+                self.assertEqual(context.bot.sent_texts, [content])
+                self.assertEqual(len(llm.formal_requests), 1)
+                self.assertEqual(chat_handler.messages_lst[-1].text, content)
 
     async def test_send_failure_persists_status_without_assistant_content(
         self,

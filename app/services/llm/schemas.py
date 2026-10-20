@@ -14,6 +14,7 @@ class ChatMessage(StrictModel):
     role: Literal["system", "user", "assistant", "tool"]
     text: str | None = None
     reasoning_content: str | None = None
+    reasoning_details: list[JsonObject] | None = None
     image: list[bytes] | None = None
     image_detail: Literal["auto", "low", "high"] | None = None
     video: list[bytes] | None = None
@@ -129,6 +130,8 @@ class LLMToolCall(StrictModel):
     id: str
     name: str
     arguments: JsonObject = Field(default_factory=dict)
+    # 兼容协议随调用返回的签名等状态，工具参数和可见正文都不消费它。
+    extra_content: JsonObject | None = None
 
 
 class LLMResponse(StrictModel):
@@ -136,6 +139,7 @@ class LLMResponse(StrictModel):
 
     content: str | None = None
     reasoning_content: str | None = None
+    reasoning_details: list[JsonObject] | None = None
     tool_calls: list[LLMToolCall] = Field(default_factory=list)
     finish_reason: str | None = None
     native_finish_reason: str | None = None

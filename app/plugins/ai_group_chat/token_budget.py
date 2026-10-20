@@ -65,6 +65,8 @@ class ConservativeTokenEstimator:
         tokens += self._estimate_text(text=message.role)
         tokens += self._estimate_text(text=message.text)
         tokens += self._estimate_text(text=message.reasoning_content)
+        if message.reasoning_details is not None:
+            tokens += self._estimate_text(text=str(message.reasoning_details))
         tokens += self.image_tokens * len(message.image or [])
         tokens += self._estimate_text(text=message.tool_call_id)
         for tool_call in message.tool_calls or []:
@@ -72,6 +74,8 @@ class ConservativeTokenEstimator:
             tokens += self._estimate_text(text=tool_call.id)
             tokens += self._estimate_text(text=tool_call.name)
             tokens += self._estimate_text(text=str(tool_call.arguments))
+            if tool_call.extra_content is not None:
+                tokens += self._estimate_text(text=str(tool_call.extra_content))
         return tokens
 
     def _estimate_text(self, *, text: str | None) -> int:

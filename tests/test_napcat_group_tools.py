@@ -840,6 +840,36 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             ["at", "text", "image", "file", "share"],
         )
 
+    async def test_history_tool_quarantines_leaked_bot_text_without_changing_records(self) -> None:
+        """历史工具只屏蔽自己的异常正文，保留正常发言、成员原文及消息定位信息。"""
+        history = [
+            build_group_message(
+                message_id="29991", user_id="10000",
+                message=[Text.new("🫧"), Text.new("thought\nprivate-plan")],
+            ),
+            build_group_message(message_id="29992", user_id="10000", text="正常回复"),
+            build_group_message(message_id="29993", text="🫧thought\n成员讨论原文"),
+        ]
+        database = HistoryDatabase(history)
+        original = list(database.messages)
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, FakeBot()),
+            group_messages=database, event=build_group_message(),
+        )
+        result = cast(JsonObject, await executor.call_tool(
+            "qq__get_group_history_messages", {"query_mode": "recent_count", "limit": 3},
+        ))
+        messages = cast(list[JsonObject], result["messages"])
+        by_id = {message["message_id"]: message for message in messages}
+        self.assertTrue(result["ok"])
+        self.assertTrue(by_id["29991"]["content_quarantined"])
+        self.assertNotIn("private-plan", str(by_id["29991"]["text"]))
+        self.assertIn("正常回复", str(by_id["29992"]["text"]))
+        self.assertIn("成员讨论原文", str(by_id["29993"]["text"]))
+        self.assertNotIn("content_quarantined", by_id["29992"])
+        self.assertNotIn("content_quarantined", by_id["29993"])
+        self.assertEqual(database.messages, original)
+
     async def test_history_messages_push_user_filter_into_recent_query(self) -> None:
         """指定 QQ 号查询会把成员条件交给群消息仓库。"""
         database = HistoryDatabase(

@@ -17,7 +17,7 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_message_function_tool_call import Function
 from openai.types.images_response import ImagesResponse
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from app.models import JsonObject
 from app.utils.file_type import detect_mime_type
@@ -38,6 +38,9 @@ REASONING_FIELD_NAMES: Final[tuple[str, ...]] = (
     "reasoning",
     "reasoning_summary",
     "reasoning_text",
+    "reasoning_details",
+    "thinking",
+    "thought",
 )
 REASONING_TEXT_KEYS: Final[tuple[str, ...]] = (
     "reasoning_content",
@@ -45,8 +48,12 @@ REASONING_TEXT_KEYS: Final[tuple[str, ...]] = (
     "text",
     "summary",
     "output_text",
+    "thinking",
+    "thought",
 )
 FINISH_REASON_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
+REASONING_DETAILS_ADAPTER: TypeAdapter[list[JsonObject]] = TypeAdapter(list[JsonObject])
+EXTRA_CONTENT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 
 class OpenAIService(LLMProvider):
@@ -72,6 +79,16 @@ class OpenAIService(LLMProvider):
         content: object = getattr(message, "content", None)
         if content is not None and not isinstance(content, str):
             raise LLMResponseError("invalid_content", "模型响应正文类型无效")
+        raw_reasoning_details: object = getattr(message, "reasoning_details", None)
+        try:
+            reasoning_details = (
+                REASONING_DETAILS_ADAPTER.validate_python(raw_reasoning_details, strict=True)
+                if raw_reasoning_details is not None else None
+            )
+        except ValidationError:
+            raise LLMResponseError(
+                "invalid_reasoning_details", "模型响应思考明细结构无效"
+            ) from None
         if getattr(message, "function_call", None) is not None:
             raise LLMResponseError(
                 "unsupported_tool_call", "模型响应使用了未支持的旧工具调用格式"
@@ -107,15 +124,24 @@ class OpenAIService(LLMProvider):
                 getattr(function, "arguments", None)
             )
             try:
-                tool_call = LLMToolCall(id=call_id, name=name, arguments=arguments)
+                raw_extra_content: object = getattr(raw_call, "extra_content", None)
+                extra_content = (
+                    EXTRA_CONTENT_ADAPTER.validate_python(raw_extra_content, strict=True)
+                    if raw_extra_content is not None else None
+                )
+                tool_call = LLMToolCall(
+                    id=call_id, name=name, arguments=arguments,
+                    extra_content=extra_content,
+                )
             except ValidationError:
                 raise LLMResponseError(
-                    "invalid_tool_arguments", "模型响应工具参数结构无效"
+                    "invalid_tool_arguments", "模型响应工具参数或扩展状态结构无效"
                 ) from None
             tool_calls.append(tool_call)
         decoded = LLMResponse(
             content=content,
             reasoning_content=self._extract_reasoning_content(message),
+            reasoning_details=reasoning_details,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             native_finish_reason=native_finish_reason,
@@ -191,11 +217,15 @@ class OpenAIService(LLMProvider):
                                 tool_call.arguments, ensure_ascii=False
                             ),
                         },
+                        **({"extra_content": tool_call.extra_content}
+                           if tool_call.extra_content is not None else {}),
                     }
                     for tool_call in msg.tool_calls
                 ]
             if msg.role == "assistant" and msg.reasoning_content is not None:
                 raw_message["reasoning_content"] = msg.reasoning_content
+            if msg.role == "assistant" and msg.reasoning_details is not None:
+                raw_message["reasoning_details"] = msg.reasoning_details
             chat_messages.append(
                 cast(ChatCompletionMessageParam, cast(object, raw_message))
             )

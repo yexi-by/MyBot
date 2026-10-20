@@ -16,6 +16,7 @@ from app.services.llm.schemas import LLMResponse, LLMToolCall
 from app.services.llm.errors import LLMRequestError, LLMResponseError
 from app.services.llm.response_validation import (
     build_response_repair_message,
+    isolate_assistant_history,
     validate_response,
 )
 from app.services.llm.tools import (
@@ -52,6 +53,7 @@ class ReplyContent:
     visible_content: str | None
     memory_content: str | None
     memory_reasoning_content: str | None
+    memory_reasoning_details: list[JsonObject] | None
 
 
 @dataclass(frozen=True)
@@ -341,6 +343,7 @@ class GroupChatToolLoop:
                 reply_content = self._build_reply_content(
                     content=content,
                     reasoning_content=response.reasoning_content,
+                    reasoning_details=response.reasoning_details,
                 )
                 log_event(
                     level="DEBUG",
@@ -480,6 +483,17 @@ class GroupChatToolLoop:
                 stripped_image_count=stripped_history_image_count,
                 history_messages_count=len(history_messages),
             )
+        history_messages, quarantined_count = isolate_assistant_history(history_messages)
+        if quarantined_count:
+            log_event(
+                level="WARNING",
+                event="ai_group_chat.context.response_quarantined",
+                category="plugin",
+                message="已从本轮请求及摘要输入隔离异常助手正文，保留原始聊天记录",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                quarantined_messages_count=quarantined_count,
+            )
         current_persisted_messages = [
             *(message.without_videos() for message in turn_messages),
             *input_vision_history_messages,
@@ -535,6 +549,7 @@ class GroupChatToolLoop:
             msg=msg,
             chat_handler=chat_handler,
             budget=budget,
+            history_messages=history_messages[1:],
         )
         rebuilt_working_messages = [
             chat_handler.system_prompt,
@@ -567,9 +582,9 @@ class GroupChatToolLoop:
         msg: GroupMessage,
         chat_handler: ContextHandler,
         budget: TokenBudgetEstimate,
+        history_messages: list[ChatMessage],
     ) -> ChatMessage:
         """用压缩专用 LLM 请求整理历史上下文，不包含本轮新消息。"""
-        history_messages = chat_handler.messages_lst[1:]
         compression_input = self.context_compressor.format_history(
             messages=history_messages
         )
@@ -744,6 +759,7 @@ class GroupChatToolLoop:
                 role="assistant",
                 text=reply_content.memory_content,
                 reasoning_content=reply_content.memory_reasoning_content,
+                reasoning_details=reply_content.memory_reasoning_details,
             )
             if reply_content.memory_content is not None
             else None
@@ -832,6 +848,7 @@ class GroupChatToolLoop:
             role="assistant",
             text=response.content,
             reasoning_content=self._normalize_content(response.reasoning_content),
+            reasoning_details=response.reasoning_details,
             tool_calls=tool_calls,
         )
         working_messages.append(assistant_message)
@@ -842,6 +859,9 @@ class GroupChatToolLoop:
                     self._normalize_content(response.reasoning_content)
                     if self.config.retain_reasoning
                     else None
+                ),
+                reasoning_details=(
+                    response.reasoning_details if self.config.retain_reasoning else None
                 ),
                 tool_calls=tool_calls,
             )
@@ -1105,17 +1125,20 @@ class GroupChatToolLoop:
         return stripped_content
 
     def _build_reply_content(
-        self, *, content: str | None, reasoning_content: str | None
+        self, *, content: str | None, reasoning_content: str | None,
+        reasoning_details: list[JsonObject] | None,
     ) -> ReplyContent:
         """构造群内可见回复，并保持长期上下文只记录正式回复。"""
         memory_reasoning_content = self._build_memory_reasoning_content(
             reasoning_content
         )
+        memory_reasoning_details = reasoning_details if self.config.retain_reasoning else None
         if content is None:
             return ReplyContent(
                 visible_content=None,
                 memory_content=None,
                 memory_reasoning_content=memory_reasoning_content,
+                memory_reasoning_details=memory_reasoning_details,
             )
         reasoning_text = self._normalize_content(reasoning_content)
         if not self.config.show_reasoning or reasoning_text is None:
@@ -1123,6 +1146,7 @@ class GroupChatToolLoop:
                 visible_content=content,
                 memory_content=content,
                 memory_reasoning_content=memory_reasoning_content,
+                memory_reasoning_details=memory_reasoning_details,
             )
         visible_content = (
             "【模型原生思维链】\n"
@@ -1136,6 +1160,7 @@ class GroupChatToolLoop:
             visible_content=visible_content,
             memory_content=content,
             memory_reasoning_content=memory_reasoning_content,
+            memory_reasoning_details=memory_reasoning_details,
         )
 
     def _build_memory_reasoning_content(
