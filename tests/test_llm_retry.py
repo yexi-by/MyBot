@@ -61,6 +61,7 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
             ("text_call", "text", {"content": f"<call:default_api:inspect>{rejected_marker}</call:default_api:inspect>"}, "stop", None),
             ("no_tools_thought", "no_tools", {"content": f"<thought\n>{rejected_marker}</thought>公开回复"}, "stop", None),
             ("thought_header", "text", {"content": f"🫧thought\n{rejected_marker}公开回复"}, "stop", None),
+            ("bare_thought_header", "tools", {"content": f"💭\nLet's check the repository. {rejected_marker}", "tool_calls": [valid_call]}, "tool_calls", None),
             ("embedded_thought", "tools", {"content": f"公开片段🫧thought\n{rejected_marker}", "tool_calls": [valid_call]}, "tool_calls", None),
             ("quoted_thought_header", "no_tools", {"content": f"`💭thinking`\n{rejected_marker}"}, "stop", None),
             ("channel_marker", "text", {"content": f"<|channel|>analysis\n{rejected_marker}"}, "stop", None),

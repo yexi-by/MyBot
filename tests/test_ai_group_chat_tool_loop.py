@@ -465,6 +465,9 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             f"`<thought>`{rejected_marker}`</thought>`",
             f"🫧thought\n{rejected_marker}这也是未校验的回答",
             f"正常片段💭analysis:\n{rejected_marker}",
+            f"💭\nThe user asks a question. {rejected_marker}\n正式回复",
+            f"正常片段\n 🫧\ufe0f \r\n\r\n{rejected_marker}",
+            f"`💭`\n{rejected_marker}",
         )
         for leaked_content in leaked_contents:
             with self.subTest(content=leaked_content):
@@ -503,7 +506,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         rejected_marker = "不应公开的异常模型正文"
         llm = RecordingLLM(responses=[
             LLMResponse(
-                content=f"🫧thought\n{rejected_marker}",
+                content=f"💭\nLet's check the repository. {rejected_marker}",
                 reasoning_content=rejected_marker,
                 tool_calls=[build_tool_call("blocked-call")],
             ),
@@ -545,7 +548,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
                     content="已发送的正常正文", tool_calls=[build_tool_call("completed-call")],
                 )] if has_sent_content else []
                 responses.extend(LLMResponse(
-                    content=f"🫧thought\n{rejected_marker}",
+                    content=f"💭\n{rejected_marker}",
                     reasoning_content=rejected_marker,
                     tool_calls=[build_tool_call("blocked-call")],
                 ) for _ in range(3))
@@ -593,16 +596,16 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
                 context = FakeContext(llm=llm)
                 handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
                 normal = "约好周六出发。" * (2000 if compress else 1)
-                user = ChatMessage(role="user", text="用户在讨论 🫧thought 这个现象。")
+                user = ChatMessage(role="user", text="💭\n用户在讨论这个现象。")
                 old_call = build_tool_call("old-completed-call").model_copy(update={
                     "extra_content": {"vendor": {"signature": "old-state"}},
                 })
                 history = [
                     user,
                     ChatMessage(role="assistant", text=normal),
-                    ChatMessage(role="assistant", text="🫧thought\nprivate-plan" + "x" * 30000),
+                    ChatMessage(role="assistant", text="💭\nprivate-plan" + "x" * 30000),
                     ChatMessage(
-                        role="assistant", text="💭thinking\nprivate-tool-plan",
+                        role="assistant", text="🫧\nprivate-tool-plan",
                         reasoning_content="private-reasoning", tool_calls=[old_call],
                     ),
                     ChatMessage(role="tool", tool_call_id=old_call.id, text="历史查询结果：三本"),
@@ -1478,6 +1481,9 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             "第一句。I think so。HTML 示例：<div>普通内容</div>；标签名示例：`<thought>`。",
             "这个标记的字面写法是 `🫧thought`，不是正常聊天里的单词。",
             "I thought we should meet at six. Let's check the timetable.",
+            "💭 我再想想，明天八点见。",
+            "💭",
+            "这个符号 `💭` 表示思考。\n计算过程可以正常解释：9 点减去 60 分钟就是 8 点。",
         ):
             with self.subTest(content=content):
                 llm = RecordingLLM(responses=[LLMResponse(content=content)])

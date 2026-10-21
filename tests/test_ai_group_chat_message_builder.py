@@ -314,7 +314,7 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
         """自动最近群聊与引用都隔离旧泄漏，成员讨论和正常机器人发言仍保留。"""
         leaked = build_message(
             message_id="29991", user_id="10000", post_type="message_sent",
-            message=[Text.new("🫧"), Text.new("thought\nprivate-leaked-history")],
+            message=[Text.new("💭"), Text.new("\nprivate-leaked-history")],
             time=1_777_132_800,
         )
         original = leaked.model_copy(deep=True)
@@ -328,7 +328,7 @@ class GroupChatMessageBuilderTest(unittest.TestCase):
                 message=[Text.new("正常约定周六出发")], time=1_777_132_820,
             ),
             build_message(
-                message_id="29993", message=[Text.new("🫧thought\n成员讨论内容")],
+                message_id="29993", message=[Text.new("💭\n成员讨论内容")],
                 time=1_777_132_840,
             ),
             current,

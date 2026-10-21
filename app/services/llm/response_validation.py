@@ -28,6 +28,11 @@ THOUGHT_HEADER_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?:🫧|💭)\ufe0f?\s*(?:thought|thinking|analysis|reasoning)(?=[\s:：`]|$)",
     re.IGNORECASE,
 )
+# 气泡独占一行且后面还有正文时也是思考标题；句中表情和单独的表情消息不拦截。
+BARE_THOUGHT_HEADER_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[ \t]*(?:`(?:🫧|💭)\ufe0f?`|(?:🫧|💭)\ufe0f?)[ \t]*\r?\n(?=\s*\S)",
+    re.MULTILINE,
+)
 LITERAL_THOUGHT_HEADER_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?<!`)`(?:🫧|💭)\ufe0f?[ \t]*(?:thought|thinking|analysis|reasoning)`(?!`)",
     re.IGNORECASE,
@@ -109,7 +114,7 @@ def has_response_control_content(content: str | None) -> bool:
             text = content[:literal.start()] + content[literal.end():]
     return any(pattern.search(text) is not None for pattern in (
         CONTROL_TAG_PATTERN, TEXT_TOOL_CALL_PATTERN,
-        THOUGHT_HEADER_PATTERN, CONTROL_TOKEN_PATTERN,
+        THOUGHT_HEADER_PATTERN, BARE_THOUGHT_HEADER_PATTERN, CONTROL_TOKEN_PATTERN,
     ))
 
 

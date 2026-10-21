@@ -845,10 +845,10 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         history = [
             build_group_message(
                 message_id="29991", user_id="10000",
-                message=[Text.new("🫧"), Text.new("thought\nprivate-plan")],
+                message=[Text.new("💭"), Text.new("\nprivate-plan")],
             ),
             build_group_message(message_id="29992", user_id="10000", text="正常回复"),
-            build_group_message(message_id="29993", text="🫧thought\n成员讨论原文"),
+            build_group_message(message_id="29993", text="💭\n成员讨论原文"),
         ]
         database = HistoryDatabase(history)
         original = list(database.messages)
