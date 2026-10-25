@@ -1,0 +1,70 @@
+# QQ Agent Harness；不要提交真实密钥。
+active_provider = "default"
+persona_file = "persona.md"
+knowledge_files = ["knowledge.md"]
+
+[server]
+host = "0.0.0.0"
+port = 6055
+
+[napcat]
+token = ""
+expected_bot_id = ""
+action_timeout = 30.0
+media_timeout = 30.0
+media_max_bytes = 50000000
+media_concurrency = 4
+
+[runtime]
+concurrent_conversations = 4
+max_model_rounds = 20
+turn_timeout = 600.0
+history_count = 60
+max_pending_conversations = 100
+max_pending_messages = 20
+context_char_limit = 120000
+tool_result_char_limit = 24000
+activity_limit = 200
+
+[providers.default]
+protocol = "responses"
+base_url = "https://api.openai.com/v1"
+api_key = ""
+model = ""
+timeout = 120.0
+modalities = ["text", "image"]
+store_supported = true
+
+[groups]
+
+[private]
+enabled = false
+keywords = []
+
+[private.policy]
+allow_at_all = false
+cross_groups = []
+cross_private = false
+max_sends_per_turn = 5
+
+[private.policy.categories]
+"messages.read" = true
+"messages.send" = true
+"members.read" = true
+
+[private.policy.tools]
+
+[private.policy.parameters]
+
+[mcp]
+
+[sandbox]
+enabled = false
+runner_url = "http://127.0.0.1:6060"
+runner_token = ""
+quota_bytes = 50000000000
+cpus = 2.0
+memory_bytes = 4294967296
+pids_limit = 256
+command_timeout = 120.0
+output_limit = 1048576

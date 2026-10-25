@@ -28,9 +28,11 @@
   --shadow-pop: 0 18px 48px -12px rgba(22, 32, 58, 0.28);
   --shadow-thumb: 0 1px 2px rgba(22, 32, 58, 0.3);
 
-  --font-ui: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
-    "Noto Sans SC", system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
+  --font-ui:
+    "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI",
+    "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono:
+    "IBM Plex Mono", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
   --font-display: "Smiley Sans Oblique", "Microsoft YaHei UI", sans-serif;
 
   --r: 3px;

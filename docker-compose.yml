@@ -1,64 +1,59 @@
+name: qq-agent-harness
 services:
-  postgres:
-    image: postgres:18.4-bookworm
-    container_name: mybot-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: mybot
-      POSTGRES_USER: mybot
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-      TZ: Asia/Shanghai
-    secrets:
-      - postgres_password
+  harness:
+    image: ${HARNESS_IMAGE:?use an explicit application image tag}
+    command: ["qq-agent-harness", "--config", "/app/config/harness.toml"]
+    network_mode: host
     volumes:
-      - mybot-postgres-data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mybot -d mybot"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      start_period: 10s
-
-  migrate:
-    image: ${MYBOT_IMAGE:-docker.io/yexi12345/mybot:latest}
-    container_name: mybot-migrate
-    restart: "no"
-    depends_on:
-      postgres:
-        condition: service_healthy
+      - ./config:/app/config:rw
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: 5m
+        max-file: "3"
+  runner:
+    user: "0:0"
+    image: ${HARNESS_IMAGE:?use an explicit application image tag}
+    command: ["qq-harness-runner"]
+    network_mode: host
+    cap_add: [SYS_ADMIN, NET_ADMIN]
     environment:
-      - TZ=Asia/Shanghai
-      - PYTHONUNBUFFERED=1
-    command: ["python", "-m", "app.database.migrations", "upgrade"]
+      HARNESS_CONFIG: /app/config/harness.toml
+      HARNESS_WORKSPACE: /workspace-data
+      HARNESS_WORKSPACE_HOST: ${SANDBOX_WORKSPACE:?dedicated Btrfs subvolume required}
+      HARNESS_SANDBOX_IMAGE: ${SANDBOX_IMAGE:-qq-agent-harness-sandbox:1.0.0}
     volumes:
       - ./config:/app/config:ro
-    secrets:
-      - postgres_password
-
-  mybot:
-    image: ${MYBOT_IMAGE:-docker.io/yexi12345/mybot:latest}
-    container_name: mybot
+      - ${SANDBOX_WORKSPACE}:/workspace-data:rw
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-    ports:
-      - "6055:6055"
-    environment:
-      - TZ=Asia/Shanghai
-      - PYTHONUNBUFFERED=1
-    volumes:
-      - ./logs:/app/logs
-      - ./config:/app/config:rw
-      - ./images:/app/images
-    secrets:
-      - postgres_password
-
-volumes:
-  mybot-postgres-data:
-
-secrets:
-  postgres_password:
-    file: ./secrets/postgres_password
-
-    
+  egress:
+    image: ${HARNESS_IMAGE:?use an explicit application image tag}
+    command: ["python", "-m", "qq_agent_harness.sandbox.egress"]
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    networks:
+      sandbox:
+        ipv4_address: 172.30.240.2
+      internet:
+        gw_priority: 1
+    restart: unless-stopped
+networks:
+  sandbox:
+    name: qah-sandbox
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.name: br-qah-sbx
+    ipam:
+      config:
+        - subnet: 172.30.240.0/24
+  internet:
+    driver: bridge

@@ -1,75 +1,27 @@
-# Git 与本地工程状态
 .git/
 .github/
-.idea/
 .vscode/
-.vs/
+.idea/
 AGENTS.md
-
-# Python 构建与缓存
-__pycache__/
-*.py[cod]
-*$py.class
-build/
-dist/
-wheels/
-*.egg-info/
-.venv/
-venv/
-env/
-node_modules/
-
-# 真实配置、密钥与个人隐私
-setting.toml
-setting.local.toml
+**/AGENTS.md
+.venv*/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+**/node_modules/
+webui/dist/
 config/
-!app/config/
-!app/config/**
-*.secret.toml
+secrets/
 .env
 .env.*
-!.env.example
-*.pem
 *.key
-*.crt
-*.p12
-*.pfx
-secrets/
-
-# 插件真实配置包含群号、提示词和私有开关，禁止进入镜像上下文
-plugins_config/
-
-# 运行产物与调试产物
+*.pem
 logs/
-debug/
-data/
-image/
-images/
 tmp/
-*.log
-*.trace
-*.tmp
-*.bak
-test.txt
-
-# 历史归档代码只用于本地临时迁移
-archived_plugins/
-archived_plugins_config/
-
-# WebUI 前端本地产物（镜像内重新构建）
-webui/node_modules/
-webui/dist/
-.playwright-cli/
+data/
+images/
 .playwright-mcp/
-.pytest_cache/
-
-# 无需进入镜像上下文的本地说明和脚本
+.playwright-cli/
 docs/
-config.example/
-run.bat
-docker-compose.yml
-
-# 保留构建所需文件和可公开示例
-!Dockerfile
-!README.md
-!config.example.toml
+tests/
+*.log

@@ -1,49 +1,37 @@
 [project]
-name = "mybot-dev"
-version = "0.1.0"
-description = "通过 NapCat 接入 QQ 群聊的多模态 AI 机器人"
+name = "qq-agent-harness"
+version = "1.0.0"
+description = "QQ 环境中的自主对话 Agent Harness"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14,<3.15"
 dependencies = [
-    "aiofiles>=25.1.0",
-    "alembic>=1.19.1",
-    "asyncpg>=0.31.0",
-    "dishka>=1.7.2",
-    "fastapi>=0.128.0",
-    "filetype>=1.2.0",
-    "httpx>=0.28.1",
-    "loguru>=0.7.3",
-    "mcp>=1.27.0",
-    "openai>=2.14.0",
-    "pillow>=11.0.0",
-    "pydantic>=2.12.5",
-    "sqlalchemy[asyncio]>=2.0.52",
-    "tenacity>=9.1.2",
-    "tomlkit>=0.15.1",
-    "uvicorn[standard]>=0.40.0",
-    "watchfiles>=1.1.1",
-    "websockets>=15.0.1",
+  "fastapi>=0.128.0", "httpx>=0.28.1", "pydantic>=2.12.5",
+  "tomlkit>=0.15.1", "uvicorn[standard]>=0.40.0", "mcp>=1.27.0",
+  "jsonschema>=4.25.0",
+  "anyio>=4.12.0",
 ]
-
+[project.scripts]
+qq-agent-harness = "qq_agent_harness.main:main"
+qq-harness-runner = "qq_agent_harness.sandbox.runner:main"
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+[tool.hatch.build.targets.wheel]
+packages = ["qq_agent_harness"]
 [dependency-groups]
-dev = [
-    "basedpyright>=1.38.4",
-    "pytest>=9.0.3",
-]
-
+dev = ["basedpyright>=1.38.4", "pytest>=9.0.3", "pytest-asyncio>=1.2.0", "ruff>=0.14.0", "types-jsonschema>=4.25.0"]
 [tool.basedpyright]
-typeCheckingMode = "strict"
-exclude = [
-    "archived_plugins",
-    ".venv",
-    "data",
-    "debug",
-    "docs",
-    "image",
-    "logs",
-    "tmp",
-]
-
+typeCheckingMode = "standard"
+pythonVersion = "3.14"
+include = ["qq_agent_harness", "tests"]
+exclude = [".venv", "tmp", "webui"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+include = ["qq_agent_harness/**/*.py", "tests/**/*.py"]
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]

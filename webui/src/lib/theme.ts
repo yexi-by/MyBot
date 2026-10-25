@@ -1,58 +1,28 @@
-/** 亮 / 暗主题：localStorage.theme 取 light / dark / system，与 index.html 的预初始化脚本一致。 */
-
-import { Store, useStore } from "./store";
-import { withTransition } from "./transition";
-
-export type ThemeChoice = "light" | "dark" | "system";
-
-const KEY = "theme";
+import { transition } from "./navigation";
+export type Theme = "light" | "dark" | "system";
 const media = window.matchMedia("(prefers-color-scheme: dark)");
-
-function readChoice(): ThemeChoice {
+export function readTheme(): Theme {
   try {
-    const stored = localStorage.getItem(KEY);
-    if (stored === "light" || stored === "dark" || stored === "system") return stored;
+    const value = localStorage.getItem("theme");
+    return value === "light" || value === "dark" ? value : "system";
   } catch {
-    // 无法访问 localStorage 时跟随系统。
+    return "system";
   }
-  return "system";
 }
-
-function resolve(choice: ThemeChoice): boolean {
-  return choice === "dark" || (choice === "system" && media.matches);
+function apply(theme: Theme) {
+  document.documentElement.classList.toggle(
+    "dark",
+    theme === "dark" || (theme === "system" && media.matches),
+  );
 }
-
-export const themeStore = new Store<{ choice: ThemeChoice; dark: boolean }>({
-  choice: readChoice(),
-  dark: document.documentElement.classList.contains("dark"),
-});
-
-function paint(dark: boolean): void {
-  if (document.documentElement.classList.contains("dark") === dark) return;
-  withTransition(() => {
-    document.documentElement.classList.toggle("dark", dark);
-    themeStore.set({ dark });
-  });
-}
-
-export function setTheme(choice: ThemeChoice): void {
+export function setTheme(theme: Theme) {
   try {
-    localStorage.setItem(KEY, choice);
+    localStorage.setItem("theme", theme);
   } catch {
-    // 忽略存储失败，本次会话仍然生效。
+    /* 存储被浏览器禁用时仍允许本次切换。 */
   }
-  themeStore.set({ choice });
-  paint(resolve(choice));
+  transition(() => apply(theme));
 }
-
-export function toggleTheme(): void {
-  setTheme(themeStore.get().dark ? "light" : "dark");
-}
-
 media.addEventListener("change", () => {
-  if (themeStore.get().choice === "system") paint(media.matches);
+  if (readTheme() === "system") apply("system");
 });
-
-export function useTheme() {
-  return useStore(themeStore, (state) => state);
-}

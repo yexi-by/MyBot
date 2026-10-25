@@ -9,6 +9,9 @@ wheels/
 
 # 本地虚拟环境
 .venv/
+.venv-harness/
+.venv-retired/
+.ruff_cache/
 venv/
 env/
 

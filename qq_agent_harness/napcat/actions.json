@@ -1,0 +1,1282 @@
+{
+  "version": "v4.18.41",
+  "commit": "859eb530c5801577633c2c3ae871d23586edf281",
+  "source_url": "https://github.com/NapNeko/NapCatQQ/tree/859eb530c5801577633c2c3ae871d23586edf281/packages/napcat-onebot/action",
+  "aliases": "上游为注册动作自动生成 _async 和 _rate_limited 别名；Harness 不调用这些异步/限流别名，只使用可等待最终回执的基础动作。",
+  "actions": [
+    {
+      "action": ".get_word_slices",
+      "status": "excluded",
+      "tool": null,
+      "reason": "锁定版本未在动作注册表提供可用实现",
+      "source": "packages/napcat-onebot/action/router.ts"
+    },
+    {
+      "action": ".handle_quick_operation",
+      "status": "excluded",
+      "tool": null,
+      "reason": "可任意组合原始动作，绕过类型、群作用范围及统一发送检查",
+      "source": "packages/napcat-onebot/action/go-cqhttp/QuickAction.ts"
+    },
+    {
+      "action": ".ocr_image",
+      "status": "excluded",
+      "tool": null,
+      "reason": "锁定上游OCR仅Windows端支持；首版Linux部署将原图直接交给模型，不添加OCR替代链",
+      "source": "packages/napcat-onebot/action/extends/OCRImage.ts"
+    },
+    {
+      "action": "ArkShareGroup",
+      "status": "excluded",
+      "tool": null,
+      "reason": "首版结构化发送未接入Ark/小程序卡片模板；不保留未经验证的原始卡片构造入口",
+      "source": "packages/napcat-onebot/action/extends/ShareContact.ts"
+    },
+    {
+      "action": "ArkSharePeer",
+      "status": "excluded",
+      "tool": null,
+      "reason": "首版结构化发送未接入Ark/小程序卡片模板；不保留未经验证的原始卡片构造入口",
+      "source": "packages/napcat-onebot/action/extends/ShareContact.ts"
+    },
+    {
+      "action": "_del_group_notice",
+      "status": "implemented",
+      "tool": "qq__del_group_notice",
+      "reason": "删除当前群指定公告",
+      "source": "packages/napcat-onebot/action/group/DelGroupNotice.ts"
+    },
+    {
+      "action": "_get_group_notice",
+      "status": "implemented",
+      "tool": "qq__get_group_notice",
+      "reason": "查看当前群公告",
+      "source": "packages/napcat-onebot/action/group/GetGroupNotice.ts"
+    },
+    {
+      "action": "_get_model_show",
+      "status": "excluded",
+      "tool": null,
+      "reason": "锁定上游实现返回固定内容或空操作，不伪装成有效能力",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GoCQHTTPGetModelShow.ts"
+    },
+    {
+      "action": "_mark_all_as_read",
+      "status": "implemented",
+      "tool": "qq__mark_all_as_read",
+      "reason": "将机器人账号所有会话标记已读",
+      "source": "packages/napcat-onebot/action/msg/MarkMsgAsRead.ts"
+    },
+    {
+      "action": "_send_group_notice",
+      "status": "implemented",
+      "tool": "qq__send_group_notice",
+      "reason": "发布当前群公告",
+      "source": "packages/napcat-onebot/action/go-cqhttp/SendGroupNotice.ts"
+    },
+    {
+      "action": "_set_model_show",
+      "status": "excluded",
+      "tool": null,
+      "reason": "锁定上游实现返回固定内容或空操作，不伪装成有效能力",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GoCQHTTPSetModelShow.ts"
+    },
+    {
+      "action": "add_custom_face",
+      "status": "excluded",
+      "tool": null,
+      "reason": "上游需要NapCat宿主本地文件；不开放宿主路径读取入口",
+      "source": "packages/napcat-onebot/action/extends/CustomFace.ts"
+    },
+    {
+      "action": "bot_exit",
+      "status": "implemented",
+      "tool": "qq__bot_exit",
+      "reason": "退出 NapCat 进程；将中断所有 QQ 会话连接",
+      "source": "packages/napcat-onebot/action/extends/BotExit.ts"
+    },
+    {
+      "action": "can_send_image",
+      "status": "implemented",
+      "tool": "qq__can_send_image",
+      "reason": "检查图片发送能力",
+      "source": "packages/napcat-onebot/action/system/CanSendImage.ts"
+    },
+    {
+      "action": "can_send_record",
+      "status": "implemented",
+      "tool": "qq__can_send_record",
+      "reason": "检查语音发送能力",
+      "source": "packages/napcat-onebot/action/system/CanSendRecord.ts"
+    },
+    {
+      "action": "cancel_group_album_media_like",
+      "status": "implemented",
+      "tool": "qq__cancel_group_album_media_like",
+      "reason": "取消当前群相册媒体点赞",
+      "source": "packages/napcat-onebot/action/extends/SetGroupAlbumMediaLike.ts"
+    },
+    {
+      "action": "cancel_group_todo",
+      "status": "implemented",
+      "tool": "qq__cancel_group_todo",
+      "reason": "取消当前群消息对应的 QQ 群待办",
+      "source": "packages/napcat-onebot/action/packet/CancelGroupTodo.ts"
+    },
+    {
+      "action": "cancel_online_file",
+      "status": "excluded",
+      "tool": null,
+      "reason": "在线文件是独立的协商传输会话；首版不维护跨轮次传输状态",
+      "source": "packages/napcat-onebot/action/file/online/CancelOnlineFile.ts"
+    },
+    {
+      "action": "check_url_safely",
+      "status": "implemented",
+      "tool": "qq__check_url_safely",
+      "reason": "核对 QQ 对公网链接的风险判断",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GoCQHTTPCheckUrlSafely.ts"
+    },
+    {
+      "action": "clean_cache",
+      "status": "implemented",
+      "tool": "qq__clean_cache",
+      "reason": "清除 NapCat 和 QQ 媒体缓存；可能使旧媒体不可再次读取",
+      "source": "packages/napcat-onebot/action/system/CleanCache.ts"
+    },
+    {
+      "action": "clean_stream_temp_file",
+      "status": "excluded",
+      "tool": null,
+      "reason": "底层传输维护协议不直接披露；当前媒体管道使用受限下载流及base64上传",
+      "source": "packages/napcat-onebot/action/stream/CleanStreamTempFile.ts"
+    },
+    {
+      "action": "click_inline_keyboard_button",
+      "status": "excluded",
+      "tool": null,
+      "reason": "当前消息模型未验证按钮来源与回调数据，不开放可伪造按钮回调",
+      "source": "packages/napcat-onebot/action/extends/ClickInlineKeyboardButton.ts"
+    },
+    {
+      "action": "complete_group_todo",
+      "status": "implemented",
+      "tool": "qq__complete_group_todo",
+      "reason": "完成当前群消息对应的 QQ 群待办",
+      "source": "packages/napcat-onebot/action/packet/CompleteGroupTodo.ts"
+    },
+    {
+      "action": "create_collection",
+      "status": "implemented",
+      "tool": "qq__create_collection",
+      "reason": "保存内容到 QQ 收藏",
+      "source": "packages/napcat-onebot/action/extends/CreateCollection.ts"
+    },
+    {
+      "action": "create_flash_task",
+      "status": "excluded",
+      "tool": null,
+      "reason": "闪传是独立的文件集及传输协议；首版使用受限媒体读取和统一文件发送，不维护闪传会话",
+      "source": "packages/napcat-onebot/action/file/flash/CreateFlashTask.ts"
+    },
+    {
+      "action": "create_group_file_folder",
+      "status": "implemented",
+      "tool": "qq__create_group_file_folder",
+      "reason": "创建当前群文件夹",
+      "source": "packages/napcat-onebot/action/go-cqhttp/CreateGroupFileFolder.ts"
+    },
+    {
+      "action": "del_group_album_media",
+      "status": "implemented",
+      "tool": "qq__del_group_album_media",
+      "reason": "删除当前群相册媒体",
+      "source": "packages/napcat-onebot/action/extends/DelGroupAlbumMedia.ts"
+    },
+    {
+      "action": "delete_custom_face",
+      "status": "implemented",
+      "tool": "qq__delete_custom_face",
+      "reason": "删除机器人收藏的指定表情",
+      "source": "packages/napcat-onebot/action/extends/CustomFace.ts"
+    },
+    {
+      "action": "delete_essence_msg",
+      "status": "implemented",
+      "tool": "qq__delete_essence_msg",
+      "reason": "移除当前群消息的精华标记",
+      "source": "packages/napcat-onebot/action/group/DelEssenceMsg.ts"
+    },
+    {
+      "action": "delete_friend",
+      "status": "implemented",
+      "tool": "qq__delete_friend",
+      "reason": "删除指定好友关系",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GoCQHTTPDeleteFriend.ts"
+    },
+    {
+      "action": "delete_group_file",
+      "status": "implemented",
+      "tool": "qq__delete_group_file",
+      "reason": "删除当前群指定文件",
+      "source": "packages/napcat-onebot/action/go-cqhttp/DeleteGroupFile.ts"
+    },
+    {
+      "action": "delete_group_folder",
+      "status": "implemented",
+      "tool": "qq__delete_group_folder",
+      "reason": "删除当前群指定文件夹",
+      "source": "packages/napcat-onebot/action/go-cqhttp/DeleteGroupFileFolder.ts"
+    },
+    {
+      "action": "delete_msg",
+      "status": "implemented",
+      "tool": "qq__delete_msg",
+      "reason": "撤回当前会话中的指定消息",
+      "source": "packages/napcat-onebot/action/msg/DeleteMsg.ts"
+    },
+    {
+      "action": "delete_qzone_msg",
+      "status": "excluded",
+      "tool": null,
+      "reason": "QQ空间发布不属于首版群聊/私聊交付范围",
+      "source": "packages/napcat-onebot/action/extends/DeleteQzoneMsg.ts"
+    },
+    {
+      "action": "do_group_album_comment",
+      "status": "implemented",
+      "tool": "qq__do_group_album_comment",
+      "reason": "评论当前群相册媒体",
+      "source": "packages/napcat-onebot/action/extends/DoGroupAlbumComment.ts"
+    },
+    {
+      "action": "download_file",
+      "status": "excluded",
+      "tool": null,
+      "reason": "Harness 已有按权限读取公网资源的本地 HTTP 客户端；不让模型在 NapCat 宿主发起任意下载",
+      "source": "packages/napcat-onebot/action/go-cqhttp/DownloadFile.ts"
+    },
+    {
+      "action": "download_file_image_stream",
+      "status": "excluded",
+      "tool": null,
+      "reason": "底层传输维护协议不直接披露；当前媒体管道使用受限下载流及base64上传",
+      "source": "packages/napcat-onebot/action/stream/DownloadFileImageStream.ts"
+    },
+    {
+      "action": "download_file_record_stream",
+      "status": "internal",
+      "tool": "qq__read_media / qq__save_media_to_workspace",
+      "reason": "仅使用已验证消息中的媒体标识；直接HTTP失败后刷新/读取流，不暴露任意路径参数",
+      "source": "packages/napcat-onebot/action/stream/DownloadFileRecordStream.ts"
+    },
+    {
+      "action": "download_file_stream",
+      "status": "internal",
+      "tool": "qq__read_media / qq__save_media_to_workspace",
+      "reason": "仅使用已验证消息中的媒体标识；直接HTTP失败后刷新/读取流，不暴露任意路径参数",
+      "source": "packages/napcat-onebot/action/stream/DownloadFileStream.ts"
+    },
+    {
+      "action": "download_fileset",
+      "status": "excluded",
+      "tool": null,
+      "reason": "闪传是独立的文件集及传输协议；首版使用受限媒体读取和统一文件发送，不维护闪传会话",
+      "source": "packages/napcat-onebot/action/file/flash/DownloadFileset.ts"
+    },
+    {
+      "action": "fetch_custom_face",
+      "status": "implemented",
+      "tool": "qq__fetch_custom_face",
+      "reason": "查找机器人收藏的表情图片",
+      "source": "packages/napcat-onebot/action/extends/FetchCustomFace.ts"
+    },
+    {
+      "action": "fetch_custom_face_detail",
+      "status": "implemented",
+      "tool": "qq__fetch_custom_face_detail",
+      "reason": "查看收藏表情的原生资源信息",
+      "source": "packages/napcat-onebot/action/extends/CustomFace.ts"
+    },
+    {
+      "action": "fetch_emoji_like",
+      "status": "implemented",
+      "tool": "qq__fetch_emoji_like",
+      "reason": "分页查看当前会话消息的表情回应",
+      "source": "packages/napcat-onebot/action/extends/FetchEmojiLike.ts"
+    },
+    {
+      "action": "fetch_ptt_text",
+      "status": "excluded",
+      "tool": null,
+      "reason": "首版将音频直接交给支持的模型，不自动添加语音转文字处理链",
+      "source": "packages/napcat-onebot/action/msg/FetchPttText.ts"
+    },
+    {
+      "action": "forward_friend_single_msg",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/msg/ForwardSingleMsg.ts"
+    },
+    {
+      "action": "forward_group_single_msg",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/msg/ForwardSingleMsg.ts"
+    },
+    {
+      "action": "friend_poke",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/packet/SendPoke.ts"
+    },
+    {
+      "action": "get_ai_characters",
+      "status": "implemented",
+      "tool": "qq__get_ai_characters",
+      "reason": "查看当前群可用 AI 语音角色",
+      "source": "packages/napcat-onebot/action/extends/GetAiCharacters.ts"
+    },
+    {
+      "action": "get_ai_record",
+      "status": "implemented",
+      "tool": "qq__get_ai_record",
+      "reason": "为当前群生成 QQ AI 语音资源",
+      "source": "packages/napcat-onebot/action/group/GetAiRecord.ts"
+    },
+    {
+      "action": "get_clientkey",
+      "status": "excluded",
+      "tool": null,
+      "reason": "账号凭据和签名素材不能进入模型上下文；资源刷新由媒体读取层处理",
+      "source": "packages/napcat-onebot/action/extends/GetClientkey.ts"
+    },
+    {
+      "action": "get_collection_list",
+      "status": "implemented",
+      "tool": "qq__get_collection_list",
+      "reason": "查看机器人收藏内容",
+      "source": "packages/napcat-onebot/action/extends/GetCollectionList.ts"
+    },
+    {
+      "action": "get_cookies",
+      "status": "excluded",
+      "tool": null,
+      "reason": "账号凭据和签名素材不能进入模型上下文；资源刷新由媒体读取层处理",
+      "source": "packages/napcat-onebot/action/user/GetCookies.ts"
+    },
+    {
+      "action": "get_credentials",
+      "status": "excluded",
+      "tool": null,
+      "reason": "账号凭据和签名素材不能进入模型上下文；资源刷新由媒体读取层处理",
+      "source": "packages/napcat-onebot/action/system/GetCredentials.ts"
+    },
+    {
+      "action": "get_csrf_token",
+      "status": "excluded",
+      "tool": null,
+      "reason": "账号凭据和签名素材不能进入模型上下文；资源刷新由媒体读取层处理",
+      "source": "packages/napcat-onebot/action/system/GetCSRF.ts"
+    },
+    {
+      "action": "get_doubt_friends_add_request",
+      "status": "implemented",
+      "tool": "qq__get_doubt_friends_add_request",
+      "reason": "查看可疑好友申请",
+      "source": "packages/napcat-onebot/action/new/GetDoubtFriendsAddRequest.ts"
+    },
+    {
+      "action": "get_emoji_likes",
+      "status": "implemented",
+      "tool": "qq__get_emoji_likes",
+      "reason": "查看当前群消息的表情回应",
+      "source": "packages/napcat-onebot/action/extends/GetEmojiLikes.ts"
+    },
+    {
+      "action": "get_essence_msg_list",
+      "status": "implemented",
+      "tool": "qq__get_essence_msg_list",
+      "reason": "查看当前群精华消息",
+      "source": "packages/napcat-onebot/action/group/GetGroupEssence.ts"
+    },
+    {
+      "action": "get_file",
+      "status": "internal",
+      "tool": "qq__read_media / qq__save_media_to_workspace",
+      "reason": "仅使用已验证消息中的媒体标识；直接HTTP失败后刷新/读取流，不暴露任意路径参数",
+      "source": "packages/napcat-onebot/action/file/GetFile.ts"
+    },
+    {
+      "action": "get_fileset_id",
+      "status": "excluded",
+      "tool": null,
+      "reason": "闪传是独立的文件集及传输协议；首版使用受限媒体读取和统一文件发送，不维护闪传会话",
+      "source": "packages/napcat-onebot/action/file/flash/GetFilesetIdByCode.ts"
+    },
+    {
+      "action": "get_fileset_info",
+      "status": "excluded",
+      "tool": null,
+      "reason": "闪传是独立的文件集及传输协议；首版使用受限媒体读取和统一文件发送，不维护闪传会话",
+      "source": "packages/napcat-onebot/action/file/flash/GetFilesetInfo.ts"
+    },
+    {
+      "action": "get_flash_file_list",
+      "status": "excluded",
+      "tool": null,
+      "reason": "闪传是独立的文件集及传输协议；首版使用受限媒体读取和统一文件发送，不维护闪传会话",
+      "source": "packages/napcat-onebot/action/file/flash/GetFlashFileList.ts"
+    },
+    {
+      "action": "get_flash_file_url",
+      "status": "excluded",
+      "tool": null,
+      "reason": "闪传是独立的文件集及传输协议；首版使用受限媒体读取和统一文件发送，不维护闪传会话",
+      "source": "packages/napcat-onebot/action/file/flash/GetFlashFileUrl.ts"
+    },
+    {
+      "action": "get_forward_msg",
+      "status": "adapted",
+      "tool": "qq__get_forward_messages",
+      "reason": "必须以当前会话的外层消息为锚点，不接受任意转发资源 ID",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GetForwardMsg.ts"
+    },
+    {
+      "action": "get_friend_list",
+      "status": "implemented",
+      "tool": "qq__get_friend_list",
+      "reason": "查看机器人好友列表",
+      "source": "packages/napcat-onebot/action/user/GetFriendList.ts"
+    },
+    {
+      "action": "get_friend_msg_history",
+      "status": "adapted",
+      "tool": "qq__get_history",
+      "reason": "按当前会话绑定查询并返回有界历史覆盖说明",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GetFriendMsgHistory.ts"
+    },
+    {
+      "action": "get_friends_with_category",
+      "status": "implemented",
+      "tool": "qq__get_friends_with_category",
+      "reason": "查看分组后的好友列表",
+      "source": "packages/napcat-onebot/action/extends/GetFriendWithCategory.ts"
+    },
+    {
+      "action": "get_group_album_media_list",
+      "status": "implemented",
+      "tool": "qq__get_group_album_media_list",
+      "reason": "浏览当前群相册中的媒体",
+      "source": "packages/napcat-onebot/action/extends/GetGroupAlbumMediaList.ts"
+    },
+    {
+      "action": "get_group_at_all_remain",
+      "status": "implemented",
+      "tool": "qq__get_group_at_all_remain",
+      "reason": "检查当前群艾特全体的剩余次数",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GetGroupAtAllRemain.ts"
+    },
+    {
+      "action": "get_group_detail_info",
+      "status": "implemented",
+      "tool": "qq__get_group_detail_info",
+      "reason": "查看当前群详细资料",
+      "source": "packages/napcat-onebot/action/group/GetGroupDetailInfo.ts"
+    },
+    {
+      "action": "get_group_file_system_info",
+      "status": "implemented",
+      "tool": "qq__get_group_file_system_info",
+      "reason": "了解当前群文件空间",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GetGroupFileSystemInfo.ts"
+    },
+    {
+      "action": "get_group_file_url",
+      "status": "implemented",
+      "tool": "qq__get_group_file_url",
+      "reason": "取得当前群文件下载地址",
+      "source": "packages/napcat-onebot/action/file/GetGroupFileUrl.ts"
+    },
+    {
+      "action": "get_group_files_by_folder",
+      "status": "implemented",
+      "tool": "qq__get_group_files_by_folder",
+      "reason": "浏览当前群文件夹",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GetGroupFilesByFolder.ts"
+    },
+    {
+      "action": "get_group_honor_info",
+      "status": "implemented",
+      "tool": "qq__get_group_honor_info",
+      "reason": "查看当前群荣誉信息",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GetGroupHonorInfo.ts"
+    },
+    {
+      "action": "get_group_ignore_add_request",
+      "status": "implemented",
+      "tool": "qq__get_group_ignore_add_request",
+      "reason": "查看当前群被忽略的加群请求",
+      "source": "packages/napcat-onebot/action/extends/GetGroupAddRequest.ts"
+    },
+    {
+      "action": "get_group_ignored_notifies",
+      "status": "implemented",
+      "tool": "qq__get_group_ignored_notifies",
+      "reason": "查看当前群被忽略的通知",
+      "source": "packages/napcat-onebot/action/group/GetGroupIgnoredNotifies.ts"
+    },
+    {
+      "action": "get_group_info",
+      "status": "implemented",
+      "tool": "qq__get_group_info",
+      "reason": "了解当前群名称与规模",
+      "source": "packages/napcat-onebot/action/group/GetGroupInfo.ts"
+    },
+    {
+      "action": "get_group_info_ex",
+      "status": "implemented",
+      "tool": "qq__get_group_info_ex",
+      "reason": "了解当前群的扩展资料",
+      "source": "packages/napcat-onebot/action/extends/GetGroupInfoEx.ts"
+    },
+    {
+      "action": "get_group_list",
+      "status": "implemented",
+      "tool": "qq__get_group_list",
+      "reason": "了解机器人加入的群",
+      "source": "packages/napcat-onebot/action/group/GetGroupList.ts"
+    },
+    {
+      "action": "get_group_member_info",
+      "status": "implemented",
+      "tool": "qq__get_group_member_info",
+      "reason": "核实当前群某位成员的资料",
+      "source": "packages/napcat-onebot/action/group/GetGroupMemberInfo.ts"
+    },
+    {
+      "action": "get_group_member_list",
+      "status": "implemented",
+      "tool": "qq__get_group_member_list",
+      "reason": "了解当前群成员",
+      "source": "packages/napcat-onebot/action/group/GetGroupMemberList.ts"
+    },
+    {
+      "action": "get_group_msg_history",
+      "status": "adapted",
+      "tool": "qq__get_history",
+      "reason": "按当前会话绑定查询并返回有界历史覆盖说明",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GetGroupMsgHistory.ts"
+    },
+    {
+      "action": "get_group_root_files",
+      "status": "implemented",
+      "tool": "qq__get_group_root_files",
+      "reason": "浏览当前群根目录文件",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GetGroupRootFiles.ts"
+    },
+    {
+      "action": "get_group_share_link",
+      "status": "implemented",
+      "tool": "qq__get_group_share_link",
+      "reason": "取得当前群的分享链接",
+      "source": "packages/napcat-onebot/action/extends/GetGroupShareLink.ts"
+    },
+    {
+      "action": "get_group_shut_list",
+      "status": "implemented",
+      "tool": "qq__get_group_shut_list",
+      "reason": "查看当前群禁言情况",
+      "source": "packages/napcat-onebot/action/group/GetGroupShutList.ts"
+    },
+    {
+      "action": "get_group_signed_list",
+      "status": "implemented",
+      "tool": "qq__get_group_signed_list",
+      "reason": "查看当前群今日打卡成员",
+      "source": "packages/napcat-onebot/action/extends/GetGroupSignedList.ts"
+    },
+    {
+      "action": "get_group_system_msg",
+      "status": "implemented",
+      "tool": "qq__get_group_system_msg",
+      "reason": "查看当前群的入群请求与邀请",
+      "source": "packages/napcat-onebot/action/system/GetSystemMsg.ts"
+    },
+    {
+      "action": "get_guild_list",
+      "status": "excluded",
+      "tool": null,
+      "reason": "QQ频道不属于当前群聊/私聊会话模型",
+      "source": "packages/napcat-onebot/action/guild/GetGuildList.ts"
+    },
+    {
+      "action": "get_guild_service_profile",
+      "status": "excluded",
+      "tool": null,
+      "reason": "QQ频道不属于当前群聊/私聊会话模型",
+      "source": "packages/napcat-onebot/action/guild/GetGuildProfile.ts"
+    },
+    {
+      "action": "get_image",
+      "status": "internal",
+      "tool": "qq__read_media / qq__save_media_to_workspace",
+      "reason": "仅使用已验证消息中的媒体标识；直接HTTP失败后刷新/读取流，不暴露任意路径参数",
+      "source": "packages/napcat-onebot/action/file/GetImage.ts"
+    },
+    {
+      "action": "get_login_info",
+      "status": "implemented",
+      "tool": "qq__get_login_info",
+      "reason": "了解机器人账号身份",
+      "source": "packages/napcat-onebot/action/system/GetLoginInfo.ts"
+    },
+    {
+      "action": "get_mini_app_ark",
+      "status": "excluded",
+      "tool": null,
+      "reason": "首版结构化发送未接入Ark/小程序卡片模板；不保留未经验证的原始卡片构造入口",
+      "source": "packages/napcat-onebot/action/extends/GetMiniAppArk.ts"
+    },
+    {
+      "action": "get_msg",
+      "status": "adapted",
+      "tool": "qq__get_message",
+      "reason": "读取后验证会话归属；私聊自身发送消息需要定向历史证明对端",
+      "source": "packages/napcat-onebot/action/msg/GetMsg.ts"
+    },
+    {
+      "action": "get_online_clients",
+      "status": "implemented",
+      "tool": "qq__get_online_clients",
+      "reason": "查看账号的在线客户端",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GetOnlineClient.ts"
+    },
+    {
+      "action": "get_online_file_msg",
+      "status": "excluded",
+      "tool": null,
+      "reason": "在线文件是独立的协商传输会话；首版不维护跨轮次传输状态",
+      "source": "packages/napcat-onebot/action/file/online/GetOnlineFileMessages.ts"
+    },
+    {
+      "action": "get_private_file_url",
+      "status": "excluded",
+      "tool": null,
+      "reason": "私聊文件通过绑定消息的媒体读取处理，避免向模型开放未验证归属的任意文件ID",
+      "source": "packages/napcat-onebot/action/file/GetPrivateFileUrl.ts"
+    },
+    {
+      "action": "get_profile_like",
+      "status": "implemented",
+      "tool": "qq__get_profile_like",
+      "reason": "查看机器人资料点赞情况",
+      "source": "packages/napcat-onebot/action/extends/GetProfileLike.ts"
+    },
+    {
+      "action": "get_qun_album_list",
+      "status": "implemented",
+      "tool": "qq__get_qun_album_list",
+      "reason": "浏览当前群相册",
+      "source": "packages/napcat-onebot/action/extends/GetQunAlbumList.ts"
+    },
+    {
+      "action": "get_recent_contact",
+      "status": "implemented",
+      "tool": "qq__get_recent_contact",
+      "reason": "了解近期联系对象",
+      "source": "packages/napcat-onebot/action/user/GetRecentContact.ts"
+    },
+    {
+      "action": "get_record",
+      "status": "internal",
+      "tool": "qq__read_media / qq__save_media_to_workspace",
+      "reason": "仅使用已验证消息中的媒体标识；直接HTTP失败后刷新/读取流，不暴露任意路径参数",
+      "source": "packages/napcat-onebot/action/file/GetRecord.ts"
+    },
+    {
+      "action": "get_rkey",
+      "status": "excluded",
+      "tool": null,
+      "reason": "账号凭据和签名素材不能进入模型上下文；资源刷新由媒体读取层处理",
+      "source": "packages/napcat-onebot/action/packet/GetRkeyEx.ts"
+    },
+    {
+      "action": "get_rkey_server",
+      "status": "excluded",
+      "tool": null,
+      "reason": "账号凭据和签名素材不能进入模型上下文；资源刷新由媒体读取层处理",
+      "source": "packages/napcat-onebot/action/packet/GetRkeyServer.ts"
+    },
+    {
+      "action": "get_robot_uin_range",
+      "status": "implemented",
+      "tool": "qq__get_robot_uin_range",
+      "reason": "核实 QQ 机器人账号范围",
+      "source": "packages/napcat-onebot/action/extends/GetRobotUinRange.ts"
+    },
+    {
+      "action": "get_share_link",
+      "status": "excluded",
+      "tool": null,
+      "reason": "闪传是独立的文件集及传输协议；首版使用受限媒体读取和统一文件发送，不维护闪传会话",
+      "source": "packages/napcat-onebot/action/file/flash/GetShareLink.ts"
+    },
+    {
+      "action": "get_status",
+      "status": "implemented",
+      "tool": "qq__get_status",
+      "reason": "确认 QQ 在线状态",
+      "source": "packages/napcat-onebot/action/system/GetStatus.ts"
+    },
+    {
+      "action": "get_stranger_info",
+      "status": "implemented",
+      "tool": "qq__get_stranger_info",
+      "reason": "核实指定 QQ 账号的公开资料",
+      "source": "packages/napcat-onebot/action/go-cqhttp/GetStrangerInfo.ts"
+    },
+    {
+      "action": "get_unidirectional_friend_list",
+      "status": "implemented",
+      "tool": "qq__get_unidirectional_friend_list",
+      "reason": "查看单向好友信息",
+      "source": "packages/napcat-onebot/action/extends/GetUnidirectionalFriendList.ts"
+    },
+    {
+      "action": "get_version_info",
+      "status": "implemented",
+      "tool": "qq__get_version_info",
+      "reason": "确认 NapCat 版本与接口可用性",
+      "source": "packages/napcat-onebot/action/system/GetVersionInfo.ts"
+    },
+    {
+      "action": "group_poke",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/packet/SendPoke.ts"
+    },
+    {
+      "action": "mark_group_msg_as_read",
+      "status": "adapted",
+      "tool": "qq__mark_msg_as_read",
+      "reason": "归并消息已读操作，必须验证消息的会话归属",
+      "source": "packages/napcat-onebot/action/msg/MarkMsgAsRead.ts"
+    },
+    {
+      "action": "mark_msg_as_read",
+      "status": "implemented",
+      "tool": "qq__mark_msg_as_read",
+      "reason": "标记当前会话的指定消息为已读",
+      "source": "packages/napcat-onebot/action/msg/MarkMsgAsRead.ts"
+    },
+    {
+      "action": "mark_private_msg_as_read",
+      "status": "adapted",
+      "tool": "qq__mark_msg_as_read",
+      "reason": "归并消息已读操作，必须验证消息的会话归属",
+      "source": "packages/napcat-onebot/action/msg/MarkMsgAsRead.ts"
+    },
+    {
+      "action": "move_group_file",
+      "status": "implemented",
+      "tool": "qq__move_group_file",
+      "reason": "移动当前群文件",
+      "source": "packages/napcat-onebot/action/extends/MoveGroupFile.ts"
+    },
+    {
+      "action": "nc_get_packet_status",
+      "status": "implemented",
+      "tool": "qq__nc_get_packet_status",
+      "reason": "核实扩展协议能力是否可用",
+      "source": "packages/napcat-onebot/action/packet/GetPacketStatus.ts"
+    },
+    {
+      "action": "nc_get_rkey",
+      "status": "excluded",
+      "tool": null,
+      "reason": "账号凭据和签名素材不能进入模型上下文；资源刷新由媒体读取层处理",
+      "source": "packages/napcat-onebot/action/extends/GetRkey.ts"
+    },
+    {
+      "action": "nc_get_user_status",
+      "status": "implemented",
+      "tool": "qq__nc_get_user_status",
+      "reason": "确认指定 QQ 账号在线状态",
+      "source": "packages/napcat-onebot/action/extends/GetUserStatus.ts"
+    },
+    {
+      "action": "ocr_image",
+      "status": "excluded",
+      "tool": null,
+      "reason": "锁定上游OCR仅Windows端支持；首版Linux部署将原图直接交给模型，不添加OCR替代链",
+      "source": "packages/napcat-onebot/action/extends/OCRImage.ts"
+    },
+    {
+      "action": "receive_online_file",
+      "status": "excluded",
+      "tool": null,
+      "reason": "在线文件是独立的协商传输会话；首版不维护跨轮次传输状态",
+      "source": "packages/napcat-onebot/action/file/online/ReceiveOnlineFile.ts"
+    },
+    {
+      "action": "refuse_online_file",
+      "status": "excluded",
+      "tool": null,
+      "reason": "在线文件是独立的协商传输会话；首版不维护跨轮次传输状态",
+      "source": "packages/napcat-onebot/action/file/online/RefuseOnlineFile.ts"
+    },
+    {
+      "action": "rename_group_file",
+      "status": "implemented",
+      "tool": "qq__rename_group_file",
+      "reason": "重命名当前群文件",
+      "source": "packages/napcat-onebot/action/extends/RenameGroupFile.ts"
+    },
+    {
+      "action": "send_ark_share",
+      "status": "excluded",
+      "tool": null,
+      "reason": "首版结构化发送未接入Ark/小程序卡片模板；不保留未经验证的原始卡片构造入口",
+      "source": "packages/napcat-onebot/action/extends/ShareContact.ts"
+    },
+    {
+      "action": "send_flash_msg",
+      "status": "excluded",
+      "tool": null,
+      "reason": "闪传是独立的文件集及传输协议；首版使用受限媒体读取和统一文件发送，不维护闪传会话",
+      "source": "packages/napcat-onebot/action/file/flash/SendFlashMsg.ts"
+    },
+    {
+      "action": "send_forward_msg",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/go-cqhttp/SendForwardMsg.ts"
+    },
+    {
+      "action": "send_group_ai_record",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/group/SendGroupAiRecord.ts"
+    },
+    {
+      "action": "send_group_ark_share",
+      "status": "excluded",
+      "tool": null,
+      "reason": "首版结构化发送未接入Ark/小程序卡片模板；不保留未经验证的原始卡片构造入口",
+      "source": "packages/napcat-onebot/action/extends/ShareContact.ts"
+    },
+    {
+      "action": "send_group_forward_msg",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/go-cqhttp/SendForwardMsg.ts"
+    },
+    {
+      "action": "send_group_msg",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/group/SendGroupMsg.ts"
+    },
+    {
+      "action": "send_group_sign",
+      "status": "adapted",
+      "tool": "qq__set_group_sign",
+      "reason": "相同签到能力归并为一个工具",
+      "source": "packages/napcat-onebot/action/extends/SetGroupSign.ts"
+    },
+    {
+      "action": "send_like",
+      "status": "implemented",
+      "tool": "qq__send_like",
+      "reason": "给 QQ 资料点赞",
+      "source": "packages/napcat-onebot/action/user/SendLike.ts"
+    },
+    {
+      "action": "send_msg",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/msg/SendMsg.ts"
+    },
+    {
+      "action": "send_online_file",
+      "status": "excluded",
+      "tool": null,
+      "reason": "在线文件是独立的协商传输会话；首版不维护跨轮次传输状态",
+      "source": "packages/napcat-onebot/action/file/online/SendOnlineFile.ts"
+    },
+    {
+      "action": "send_online_folder",
+      "status": "excluded",
+      "tool": null,
+      "reason": "在线文件是独立的协商传输会话；首版不维护跨轮次传输状态",
+      "source": "packages/napcat-onebot/action/file/online/SendOnlineFolder.ts"
+    },
+    {
+      "action": "send_packet",
+      "status": "excluded",
+      "tool": null,
+      "reason": "可任意组合原始动作，绕过类型、群作用范围及统一发送检查",
+      "source": "packages/napcat-onebot/action/extends/SendPacket.ts"
+    },
+    {
+      "action": "send_poke",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/packet/SendPoke.ts"
+    },
+    {
+      "action": "send_private_forward_msg",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/go-cqhttp/SendForwardMsg.ts"
+    },
+    {
+      "action": "send_private_msg",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/msg/SendPrivateMsg.ts"
+    },
+    {
+      "action": "send_qzone_msg",
+      "status": "excluded",
+      "tool": null,
+      "reason": "QQ空间发布不属于首版群聊/私聊交付范围",
+      "source": "packages/napcat-onebot/action/extends/SendQzoneMsg.ts"
+    },
+    {
+      "action": "set_custom_face_desc",
+      "status": "excluded",
+      "tool": null,
+      "reason": "首版未接入表情包元数据编辑；保留获取详情和删除原生资源能力",
+      "source": "packages/napcat-onebot/action/extends/CustomFace.ts"
+    },
+    {
+      "action": "set_diy_online_status",
+      "status": "implemented",
+      "tool": "qq__set_diy_online_status",
+      "reason": "修改机器人自定义在线状态",
+      "source": "packages/napcat-onebot/action/extends/SetDiyOnlineStatus.ts"
+    },
+    {
+      "action": "set_doubt_friends_add_request",
+      "status": "implemented",
+      "tool": "qq__set_doubt_friends_add_request",
+      "reason": "接受可疑好友申请",
+      "source": "packages/napcat-onebot/action/new/SetDoubtFriendsAddRequest.ts"
+    },
+    {
+      "action": "set_essence_msg",
+      "status": "implemented",
+      "tool": "qq__set_essence_msg",
+      "reason": "将当前群消息设为精华",
+      "source": "packages/napcat-onebot/action/group/SetEssenceMsg.ts"
+    },
+    {
+      "action": "set_friend_add_request",
+      "status": "implemented",
+      "tool": "qq__set_friend_add_request",
+      "reason": "处理好友申请",
+      "source": "packages/napcat-onebot/action/user/SetFriendAddRequest.ts"
+    },
+    {
+      "action": "set_friend_remark",
+      "status": "implemented",
+      "tool": "qq__set_friend_remark",
+      "reason": "修改好友备注",
+      "source": "packages/napcat-onebot/action/user/SetFriendRemark.ts"
+    },
+    {
+      "action": "set_group_add_option",
+      "status": "implemented",
+      "tool": "qq__set_group_add_option",
+      "reason": "设置当前群入群条件",
+      "source": "packages/napcat-onebot/action/extends/SetGroupAddOption.ts"
+    },
+    {
+      "action": "set_group_add_request",
+      "status": "implemented",
+      "tool": "qq__set_group_add_request",
+      "reason": "类型化、绑定当前作用范围的专用处理",
+      "source": "packages/napcat-onebot/action/group/SetGroupAddRequest.ts"
+    },
+    {
+      "action": "set_group_admin",
+      "status": "implemented",
+      "tool": "qq__set_group_admin",
+      "reason": "调整当前群的 QQ 平台管理员",
+      "source": "packages/napcat-onebot/action/group/SetGroupAdmin.ts"
+    },
+    {
+      "action": "set_group_album_media_like",
+      "status": "implemented",
+      "tool": "qq__set_group_album_media_like",
+      "reason": "点赞当前群相册媒体",
+      "source": "packages/napcat-onebot/action/extends/SetGroupAlbumMediaLike.ts"
+    },
+    {
+      "action": "set_group_ban",
+      "status": "implemented",
+      "tool": "qq__set_group_ban",
+      "reason": "管理当前群成员的禁言状态",
+      "source": "packages/napcat-onebot/action/group/SetGroupBan.ts"
+    },
+    {
+      "action": "set_group_card",
+      "status": "implemented",
+      "tool": "qq__set_group_card",
+      "reason": "修改当前群成员名片",
+      "source": "packages/napcat-onebot/action/group/SetGroupCard.ts"
+    },
+    {
+      "action": "set_group_kick",
+      "status": "implemented",
+      "tool": "qq__set_group_kick",
+      "reason": "移出当前群成员",
+      "source": "packages/napcat-onebot/action/group/SetGroupKick.ts"
+    },
+    {
+      "action": "set_group_kick_members",
+      "status": "implemented",
+      "tool": "qq__set_group_kick_members",
+      "reason": "批量移出当前群成员",
+      "source": "packages/napcat-onebot/action/extends/SetGroupKickMembers.ts"
+    },
+    {
+      "action": "set_group_leave",
+      "status": "implemented",
+      "tool": "qq__set_group_leave",
+      "reason": "退出或解散当前群",
+      "source": "packages/napcat-onebot/action/group/SetGroupLeave.ts"
+    },
+    {
+      "action": "set_group_member_invite_policy",
+      "status": "implemented",
+      "tool": "qq__set_group_member_invite_policy",
+      "reason": "设置当前群的成员邀请规则",
+      "source": "packages/napcat-onebot/action/group/SetGroupMemberInvitePolicy.ts"
+    },
+    {
+      "action": "set_group_member_permissions",
+      "status": "implemented",
+      "tool": "qq__set_group_member_permissions",
+      "reason": "设置 QQ 平台群功能开关",
+      "source": "packages/napcat-onebot/action/group/SetGroupMemberPermissions.ts"
+    },
+    {
+      "action": "set_group_name",
+      "status": "implemented",
+      "tool": "qq__set_group_name",
+      "reason": "修改当前群名称",
+      "source": "packages/napcat-onebot/action/group/SetGroupName.ts"
+    },
+    {
+      "action": "set_group_new_member_history_visibility",
+      "status": "implemented",
+      "tool": "qq__set_group_new_member_history_visibility",
+      "reason": "设置 QQ 平台新成员历史可见性",
+      "source": "packages/napcat-onebot/action/group/SetGroupNewMemberHistoryVisibility.ts"
+    },
+    {
+      "action": "set_group_portrait",
+      "status": "implemented",
+      "tool": "qq__set_group_portrait",
+      "reason": "类型化、绑定当前作用范围的专用处理",
+      "source": "packages/napcat-onebot/action/go-cqhttp/SetGroupPortrait.ts"
+    },
+    {
+      "action": "set_group_remark",
+      "status": "implemented",
+      "tool": "qq__set_group_remark",
+      "reason": "修改当前群在机器人账号中的备注",
+      "source": "packages/napcat-onebot/action/extends/SetGroupRemark.ts"
+    },
+    {
+      "action": "set_group_robot_add_option",
+      "status": "excluded",
+      "tool": null,
+      "reason": "上游参数语义未完整说明，不把未知数字开关包装成可靠工具；群成员邀请和功能权限有明确接口",
+      "source": "packages/napcat-onebot/action/extends/SetGroupRobotAddOption.ts"
+    },
+    {
+      "action": "set_group_search",
+      "status": "excluded",
+      "tool": null,
+      "reason": "上游参数语义未完整说明，不把未知数字开关包装成可靠工具；群成员邀请和功能权限有明确接口",
+      "source": "packages/napcat-onebot/action/extends/SetGroupSearch.ts"
+    },
+    {
+      "action": "set_group_sign",
+      "status": "implemented",
+      "tool": "qq__set_group_sign",
+      "reason": "在当前群打卡",
+      "source": "packages/napcat-onebot/action/extends/SetGroupSign.ts"
+    },
+    {
+      "action": "set_group_special_title",
+      "status": "implemented",
+      "tool": "qq__set_group_special_title",
+      "reason": "修改当前群成员头衔",
+      "source": "packages/napcat-onebot/action/extends/SetSpecialTitle.ts"
+    },
+    {
+      "action": "set_group_todo",
+      "status": "implemented",
+      "tool": "qq__set_group_todo",
+      "reason": "将当前群消息设置为 QQ 群待办",
+      "source": "packages/napcat-onebot/action/packet/SetGroupTodo.ts"
+    },
+    {
+      "action": "set_group_whole_ban",
+      "status": "implemented",
+      "tool": "qq__set_group_whole_ban",
+      "reason": "调整当前群全员禁言",
+      "source": "packages/napcat-onebot/action/group/SetGroupWholeBan.ts"
+    },
+    {
+      "action": "set_input_status",
+      "status": "implemented",
+      "tool": "qq__set_input_status",
+      "reason": "在当前私聊展示输入状态",
+      "source": "packages/napcat-onebot/action/extends/SetInputStatus.ts"
+    },
+    {
+      "action": "set_msg_emoji_like",
+      "status": "implemented",
+      "tool": "qq__set_msg_emoji_like",
+      "reason": "对当前会话消息作表情回应",
+      "source": "packages/napcat-onebot/action/msg/SetMsgEmojiLike.ts"
+    },
+    {
+      "action": "set_online_status",
+      "status": "implemented",
+      "tool": "qq__set_online_status",
+      "reason": "修改机器人在线状态",
+      "source": "packages/napcat-onebot/action/extends/SetOnlineStatus.ts"
+    },
+    {
+      "action": "set_qq_avatar",
+      "status": "implemented",
+      "tool": "qq__set_qq_avatar",
+      "reason": "类型化、绑定当前作用范围的专用处理",
+      "source": "packages/napcat-onebot/action/extends/SetQQAvatar.ts"
+    },
+    {
+      "action": "set_qq_profile",
+      "status": "implemented",
+      "tool": "qq__set_qq_profile",
+      "reason": "修改机器人公开资料",
+      "source": "packages/napcat-onebot/action/go-cqhttp/SetQQProfile.ts"
+    },
+    {
+      "action": "set_restart",
+      "status": "implemented",
+      "tool": "qq__set_restart",
+      "reason": "重启 NapCat 服务；将中断所有 QQ 会话连接",
+      "source": "packages/napcat-onebot/action/system/SetRestart.ts"
+    },
+    {
+      "action": "set_self_longnick",
+      "status": "implemented",
+      "tool": "qq__set_self_longnick",
+      "reason": "修改机器人个性签名",
+      "source": "packages/napcat-onebot/action/extends/SetLongNick.ts"
+    },
+    {
+      "action": "test_auto_register_01",
+      "status": "excluded",
+      "tool": null,
+      "reason": "上游内部测试动作，不属于对话业务能力",
+      "source": "packages/napcat-onebot/action/test/TestAutoRegister01.ts"
+    },
+    {
+      "action": "test_auto_register_02",
+      "status": "excluded",
+      "tool": null,
+      "reason": "上游内部测试动作，不属于对话业务能力",
+      "source": "packages/napcat-onebot/action/test/TestAutoRegister02.ts"
+    },
+    {
+      "action": "test_download_stream",
+      "status": "excluded",
+      "tool": null,
+      "reason": "上游内部测试动作，不属于对话业务能力",
+      "source": "packages/napcat-onebot/action/stream/TestStreamDownload.ts"
+    },
+    {
+      "action": "trans_group_file",
+      "status": "excluded",
+      "tool": null,
+      "reason": "群文件交付统一走已授权源读取和发送入口，不提供独立的隐式转存路径",
+      "source": "packages/napcat-onebot/action/extends/TransGroupFile.ts"
+    },
+    {
+      "action": "translate_en2zh",
+      "status": "implemented",
+      "tool": "qq__translate_en2zh",
+      "reason": "翻译不熟悉的英文词句",
+      "source": "packages/napcat-onebot/action/extends/TranslateEnWordToZn.ts"
+    },
+    {
+      "action": "unknown",
+      "status": "excluded",
+      "tool": null,
+      "reason": "可任意组合原始动作，绕过类型、群作用范围及统一发送检查",
+      "source": "packages/napcat-onebot/action/router.ts"
+    },
+    {
+      "action": "upload_file_stream",
+      "status": "excluded",
+      "tool": null,
+      "reason": "底层传输维护协议不直接披露；当前媒体管道使用受限下载流及base64上传",
+      "source": "packages/napcat-onebot/action/stream/UploadFileStream.ts"
+    },
+    {
+      "action": "upload_group_file",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/go-cqhttp/UploadGroupFile.ts"
+    },
+    {
+      "action": "upload_image_to_qun_album",
+      "status": "excluded",
+      "tool": null,
+      "reason": "群相册专用上传流程未纳入首版；不暴露原始宿主路径上传，已提供相册读取/评论/点赞/删除",
+      "source": "packages/napcat-onebot/action/extends/UploadImageToQunAlbum.ts"
+    },
+    {
+      "action": "upload_images_to_qun_album",
+      "status": "excluded",
+      "tool": null,
+      "reason": "群相册专用上传流程未纳入首版；不暴露原始宿主路径上传，已提供相册读取/评论/点赞/删除",
+      "source": "packages/napcat-onebot/action/extends/UploadImagesToQunAlbum.ts"
+    },
+    {
+      "action": "upload_private_file",
+      "status": "adapted",
+      "tool": "qq__send_message",
+      "reason": "归并到有序 parts 的唯一发送入口；按目标类型选择实际接口并逐项返回回执",
+      "source": "packages/napcat-onebot/action/go-cqhttp/UploadPrivateFile.ts"
+    },
+    {
+      "action": "upload_video_to_qun_album",
+      "status": "excluded",
+      "tool": null,
+      "reason": "群相册专用上传流程未纳入首版；不暴露原始宿主路径上传，已提供相册读取/评论/点赞/删除",
+      "source": "packages/napcat-onebot/action/extends/UploadVideoToQunAlbum.ts"
+    }
+  ]
+}
