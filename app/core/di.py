@@ -12,8 +12,6 @@ from app.api import BOTClient
 from app.config import ConfigManager, ConfigWatcher, MyBotConfig
 from app.database import (
     DatabaseMigrator,
-    PluginMigrationRegistry,
-    PluginRepositoryBuilder,
     PostgreSQLMessageRepository,
     PostgreSQLRuntime,
 )
@@ -22,7 +20,6 @@ from app.plugins import (
     PLUGINS,
     BasePlugin,
     Context,
-    discover_plugin_migrations,
     load_all_plugins,
 )
 from app.services import ConversationContextStore, LLMHandler, MCPToolManager
@@ -37,7 +34,6 @@ from .event_parser import EventTypeChecker
 from .plugin_manager import PluginController
 
 DirectHttpx = NewType("DirectHttpx", httpx.AsyncClient)
-ProxyHttpx = NewType("ProxyHttpx", httpx.AsyncClient)
 PostgreSQLUrl = NewType("PostgreSQLUrl", str)
 
 
@@ -122,31 +118,13 @@ class MyProvider(Provider):
         )
 
     @provide(scope=Scope.APP)
-    def get_plugin_repository_builder(
-        self,
-        runtime: PostgreSQLRuntime,
-    ) -> PluginRepositoryBuilder:
-        """创建只按 plugin_id 构造类型化 repository 的入口。"""
-        return PluginRepositoryBuilder(engine=runtime.engine)
-
-    @provide(scope=Scope.APP)
-    def get_plugin_migration_registry(self) -> PluginMigrationRegistry:
-        """收集当前启用插件实际声明的 migration。"""
-        registry = PluginMigrationRegistry()
-        for migration in discover_plugin_migrations():
-            registry.register(migration)
-        return registry
-
-    @provide(scope=Scope.APP)
     def get_database_migrator(
         self,
         database_url: PostgreSQLUrl,
-        plugin_registry: PluginMigrationRegistry,
     ) -> DatabaseMigrator:
         """创建只检查版本、不会在应用启动时改表的 migration 服务。"""
         return DatabaseMigrator(
             database_url=database_url,
-            plugin_registry=plugin_registry,
         )
 
     @provide(scope=Scope.APP)
@@ -158,16 +136,6 @@ class MyProvider(Provider):
     def get_event_type_checker(self) -> EventTypeChecker:
         """创建事件类型解析器。"""
         return EventTypeChecker()
-
-    @provide(scope=Scope.APP)
-    def get_proxy_httpx(self, config: MyBotConfig) -> ProxyHttpx | None:
-        """初始化可选代理 HTTP 客户端。"""
-        proxy = config.network.proxy
-        if proxy is None:
-            return None
-        return ProxyHttpx(
-            httpx.AsyncClient(proxy=proxy, timeout=config.network.timeout_seconds)
-        )
 
     @provide(scope=Scope.APP)
     def get_llm_handler(self, config: MyBotConfig) -> LLMHandler | None:
@@ -252,11 +220,9 @@ class MyProvider(Provider):
         self,
         bot: BOTClient,
         repository: PostgreSQLMessageRepository,
-        repository_builder: PluginRepositoryBuilder,
         conversation_contexts: ConversationContextStore,
         config_manager: ConfigManager,
         directhttpx: DirectHttpx,
-        proxy_httpx: ProxyHttpx | None,
         llm: LLMHandler | None,
         mcp_tool_manager: MCPToolManager,
     ) -> PluginController:
@@ -276,13 +242,10 @@ class MyProvider(Provider):
             context = Context(
                 bot=bot,
                 group_messages=repository,
-                plugin_id=cls.plugin_id,
-                repository_builder=repository_builder,
                 conversation_contexts=conversation_contexts,
                 llm=llm,
                 mcp_tool_manager=mcp_tool_manager,
                 direct_httpx=directhttpx,
-                proxy_httpx=proxy_httpx,
             )
             plugin_objects.append(
                 cls(
@@ -298,13 +261,11 @@ class MyProvider(Provider):
     def get_event_dispatcher(
         self,
         plugincontroller: PluginController,
-        bot: BOTClient,
         config_manager: ConfigManager,
     ) -> EventDispatcher:
         """创建会话事件分发器。"""
         return EventDispatcher(
             plugincontroller=plugincontroller,
-            bot=bot,
             blocked_user_ids=frozenset(
                 config_manager.boot_config.plugin_execution.blocked_user_ids
             ),

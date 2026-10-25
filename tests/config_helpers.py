@@ -70,6 +70,7 @@ def minimal_config_toml(
         compression = "gz"
 
         [llm.providers.main]
+        api_format = "chat_completions"
         api_key = "test-api-key"
         inherit_network_proxy = true
         timeout_seconds = 0
@@ -123,33 +124,16 @@ def minimal_config_toml(
 
 def build_ai_group_chat_config(
     *,
-    supports_images: bool = False,
     provider: str = "main-provider",
     model_name: str = "main-model",
-    vision_enabled: bool | None = None,
     overrides: dict[str, object] | None = None,
 ) -> AIGroupChatConfig:
     """构造字段完整的 AI 群聊测试配置。"""
-    use_vision = not supports_images if vision_enabled is None else vision_enabled
     values: dict[str, object] = {
         "model": {
             "provider": provider,
             "name": model_name,
-            "supports_images": supports_images,
         },
-        "vision": (
-            {
-                "model": {"provider": "vision-provider", "name": "vision-model"},
-                "system_prompt_file": "vision/system.md",
-                "user_prompt_file": "vision/user.md",
-                "max_attempts": 5,
-                "retry_delay_seconds": 0.25,
-                "retry_max_delay_seconds": 10,
-                "retain_descriptions": True,
-            }
-            if use_vision
-            else None
-        ),
         "images": {
             "max_per_turn": 0,
             "fetch_concurrency": 16,
@@ -159,7 +143,6 @@ def build_ai_group_chat_config(
             "max_width": 0,
             "max_height": 0,
             "allowed_mime_types": [],
-            "delivery_mode": "vision" if use_vision else "direct",
             "oversize_behavior": "skip",
             "image_detail": "auto",
             "retain_images": False,
@@ -204,10 +187,6 @@ def build_ai_group_chat_config(
         "token_safety_factor": 1.05,
         "context_compression_notice": "正在整理上下文",
         "forward_reply_threshold_chars": 1000,
-        "show_reasoning": False,
-        "retain_reasoning": False,
-        "debug_dump_messages": False,
-        "debug_dump_directory": "logs/ai_group_chat_debug",
         "extra_requirements_file": "extra.md",
         "allow_mention_all": False,
         "tool_result_retention": "off",

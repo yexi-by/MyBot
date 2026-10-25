@@ -13,12 +13,10 @@ from app.services.napcat import InlineImageArchiver
 
 from .mixins import (
     AccountMixin,
-    AlbumMixin,
     BaseMixin,
     FileMixin,
     GroupMixin,
     MessageMixin,
-    SystemMixin,
 )
 
 
@@ -26,22 +24,18 @@ class BOTClient(
     MessageMixin,
     GroupMixin,
     FileMixin,
-    AlbumMixin,
     AccountMixin,
-    SystemMixin,
     BaseMixin,
 ):
     """BOT 客户端
 
-    通过多重继承组合各功能 Mixin，实现完整的 QQ Bot API 接口。
+    组合当前插件和 NapCat 本地工具所需的 Action 接口。
 
     Mixins:
         - MessageMixin: 消息相关 API（发送消息、撤回、转发等）
-        - GroupMixin: 群聊相关 API（群管理、群成员、群公告等）
-        - FileMixin: 文件相关 API（文件上传、下载、管理等）
-        - AlbumMixin: 群相册相关 API
-        - AccountMixin: 账号相关 API（好友、个人信息等）
-        - SystemMixin: 系统相关 API（版本、cookies、密钥等）
+        - GroupMixin: 群禁言与解禁
+        - FileMixin: 群文件列表、文件信息与下载链接
+        - AccountMixin: 用户资料查询
     """
 
     def __init__(
@@ -69,7 +63,6 @@ class BOTClient(
         self.sent_message_recorder: SentMessageRecorder = sent_message_recorder
         self.inline_image_archiver: InlineImageArchiver = inline_image_archiver
         self.echo_dict: dict[str, asyncio.Future[Response]] = {}
-        self.stream_dict: dict[str, asyncio.Queue[Response]] = {}
         self.persistence_failed_event: asyncio.Event = asyncio.Event()
         self.boot_id: NapCatId = ""
         self.timeout: float = action_timeout_seconds

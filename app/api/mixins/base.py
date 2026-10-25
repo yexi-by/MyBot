@@ -9,7 +9,7 @@ from fastapi import WebSocket
 from app.database import SentMessageRecorder
 from app.models.api import ActionPayload
 from app.models.common import JsonObject, NapCatId, to_json_value
-from app.models.events.response import Response, StreamTransferResult
+from app.models.events.response import Response
 from app.services.napcat import InlineImageArchiver
 from app.utils.log import log_event
 
@@ -26,9 +26,6 @@ class BaseMixin:
     )
     echo_dict: dict[str, asyncio.Future[Response]] = cast(
         dict[str, asyncio.Future[Response]], cast(object, None)
-    )
-    stream_dict: dict[str, asyncio.Queue[Response]] = cast(
-        dict[str, asyncio.Queue[Response]], cast(object, None)
     )
     persistence_failed_event: asyncio.Event = cast(
         asyncio.Event, cast(object, None)
@@ -59,49 +56,9 @@ class BaseMixin:
         echo = response.echo
         if not echo:
             return
-        stream_queue = self.stream_dict.get(echo)
-        if stream_queue is not None:
-            await stream_queue.put(response)
-            return
         future = self.echo_dict.get(echo)
         if future and not future.done():
             future.set_result(response)
-
-    def _is_stream_transfer_done(self, response: Response) -> bool:
-        """判断 Stream Action 是否已经抵达最终响应包。"""
-        if response.stream != "stream-action":
-            return True
-        data = response.data
-        if not isinstance(data, dict):
-            return False
-        packet_type = data.get("type")
-        return packet_type in {"response", "error"}
-
-    async def create_stream_transfer(
-        self, echo: str, queue: asyncio.Queue[Response]
-    ) -> StreamTransferResult:
-        """持续收集同一 echo 的 Stream Action 回包。"""
-        packets: list[Response] = []
-        try:
-            while True:
-                response = await asyncio.wait_for(queue.get(), timeout=self.timeout)
-                packets.append(response)
-                if self._is_stream_transfer_done(response):
-                    return StreamTransferResult(
-                        packets=packets, final_response=response
-                    )
-        except asyncio.TimeoutError as exc:
-            log_event(
-                level="ERROR",
-                event="napcat.stream_action.timeout",
-                category="napcat_api",
-                message="等待 NapCat Stream 响应超时",
-                echo=echo,
-                timeout=self.timeout,
-            )
-            raise TimeoutError(f"等待 NapCat Stream 响应超时: {echo}") from exc
-        finally:
-            self.stream_dict.pop(echo, None)
 
     async def _send_action(
         self, action: str, params: JsonObject | None = None
@@ -157,19 +114,3 @@ class BaseMixin:
             self.echo_dict.pop(echo, None)
             if not future.done():
                 _ = future.cancel()
-
-    async def _call_stream_action(
-        self, action: str, params: JsonObject | None = None
-    ) -> StreamTransferResult:
-        """发送 Stream Action 并收集同一 echo 下的完整回包序列。"""
-        self._ensure_persistence_healthy()
-        echo = self._generate_echo()
-        queue: asyncio.Queue[Response] = asyncio.Queue()
-        self.stream_dict[echo] = queue
-        payload = ActionPayload(action=action, params=params, echo=echo)
-        try:
-            await self.websocket.send_text(payload.model_dump_json(exclude_none=True))
-        except Exception:
-            self.stream_dict.pop(echo, None)
-            raise
-        return await self.create_stream_transfer(echo=echo, queue=queue)

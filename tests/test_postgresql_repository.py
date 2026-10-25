@@ -1068,7 +1068,7 @@ class PostgreSQLRepositoryTest(unittest.IsolatedAsyncioTestCase):
                 assert isinstance(video, Video) and video.data.path is not None
                 self.assertEqual(Path(video.data.path).read_bytes(), VIDEO_BYTES)
                 builder = GroupChatMessageBuilder(
-                    config=build_ai_group_chat_config(supports_images=True, overrides={"videos": {"enabled": True}}),
+                    config=build_ai_group_chat_config(overrides={"videos": {"enabled": True}}),
                     group_messages=repository, bot=bot, http_client=client,
                     context_started_at=datetime.now(UTC),
                 )

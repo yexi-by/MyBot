@@ -3,7 +3,6 @@
 import unittest
 from typing import cast
 
-from app.api import BOTClient
 from app.core.dispatcher import EventDispatcher
 from app.core.plugin_manager import PluginController
 from app.models import AllEvent, GroupBanEvent, GroupMessage, PrivateMessage, Sender, Text
@@ -75,7 +74,6 @@ class PluginRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.controller = PluginController(plugin_objects=[plugin])
         self.dispatcher = EventDispatcher(
             plugincontroller=self.controller,
-            bot=cast(BOTClient, object()),
             blocked_user_ids=frozenset(),
         )
 
@@ -97,7 +95,6 @@ class PluginRoutingTest(unittest.IsolatedAsyncioTestCase):
         """被屏蔽用户的群聊和私聊消息均在插件调用之前被忽略。"""
         dispatcher = EventDispatcher(
             plugincontroller=self.controller,
-            bot=cast(BOTClient, object()),
             blocked_user_ids=frozenset({"20000"}),
         )
         group = build_group_message()
@@ -120,7 +117,6 @@ class PluginRoutingTest(unittest.IsolatedAsyncioTestCase):
         """其他用户的消息以及被屏蔽成员的通知事件继续进入插件链。"""
         dispatcher = EventDispatcher(
             plugincontroller=self.controller,
-            bot=cast(BOTClient, object()),
             blocked_user_ids=frozenset({"20000"}),
         )
         other = build_group_message().model_copy(update={"user_id": "20001"})

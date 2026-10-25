@@ -9,7 +9,7 @@ class LLMRequestError(RuntimeError):
 
 
 class LLMResponseError(ValueError):
-    """可通过重新生成恢复的响应错误；仅携带本地生成的分类与说明。"""
+    """响应结构或内容不可交付；仅携带本地生成的分类与说明。"""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -18,6 +18,8 @@ class LLMResponseError(ValueError):
 
 def provider_error_message(error: Exception) -> str:
     """省略供应商响应正文、请求 URL 和密钥，返回可执行的失败说明。"""
+    if isinstance(error, LLMResponseError) and error.code == "unsupported_video_input":
+        return str(error)
     if isinstance(error, (TimeoutError, httpx.TimeoutException, APITimeoutError)):
         return "模型服务请求超时，请稍后重试。"
     if isinstance(error, APIStatusError):

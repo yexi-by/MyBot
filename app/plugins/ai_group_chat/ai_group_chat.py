@@ -10,10 +10,9 @@ from app.services import ConversationContextKey, ContextHandler
 from app.services.llm.errors import LLMRequestError
 from app.utils.log import log_event
 
-from .debug_dump import AIGroupChatDebugDumper
 from .message_builder import GroupChatMessageBuilder
 from .tool_loop import GroupChatToolLoop, GroupChatTurnError, TurnContextState
-from .vision_tool import ImageDeliveryError, VisionDescriptionTool, VisionTurnState
+from .image_delivery import ImageDeliveryError, ImageDeliveryService, ImageTurnState
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,9 +22,8 @@ class _AIGroupChatRuntime:
     revision: int
     config: MaterializedAIGroupChatConfig
     groups: Mapping[str, MaterializedAIGroupConfig]
-    debug_dumper: AIGroupChatDebugDumper
     message_builder: GroupChatMessageBuilder
-    vision_tool: VisionDescriptionTool
+    image_delivery: ImageDeliveryService
     tool_loop: GroupChatToolLoop
 
 
@@ -36,10 +34,9 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
     plugin_id: ClassVar[str] = "ai_group_chat"
     @override
     def setup(self) -> None:
-        """初始化配置缓存和调试转储版本。"""
+        """初始化插件配置缓存。"""
         self._runtime_revision = 0
         self._runtime: _AIGroupChatRuntime | None = None
-        self._debug_initialized_revision: dict[ConversationContextKey, int] = {}
 
     def _current_runtime(self) -> _AIGroupChatRuntime | None:
         """为当前插件配置版本构造一次完整运行对象。"""
@@ -52,7 +49,6 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             runtime = None
         else:
             config = materialized.source
-            debug_dumper = AIGroupChatDebugDumper(config=config)
             message_builder = GroupChatMessageBuilder(
                 config=config,
                 group_messages=self.context.group_messages,
@@ -60,23 +56,20 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 http_client=self.context.direct_httpx,
                 context_started_at=self.context.conversation_contexts.started_at,
             )
-            vision_tool = VisionDescriptionTool(
-                config=materialized,
-                context=self.context,
+            image_delivery = ImageDeliveryService(
+                config=config.images,
             )
             tool_loop = GroupChatToolLoop(
                 config=config,
                 context=self.context,
-                vision_tool=vision_tool,
-                turn_instruction=materialized.turn_instruction,
+                image_delivery=image_delivery,
             )
             runtime = _AIGroupChatRuntime(
                 revision=revision,
                 config=materialized,
                 groups={str(group.source.id): group for group in materialized.groups},
-                debug_dumper=debug_dumper,
                 message_builder=message_builder,
-                vision_tool=vision_tool,
+                image_delivery=image_delivery,
                 tool_loop=tool_loop,
             )
             log_event(
@@ -87,8 +80,6 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 revision=revision,
                 model_name=config.model.name,
                 provider=config.model.provider,
-                supports_images=config.model.supports_images,
-                debug_dump_messages=config.debug_dump_messages,
                 group_count=len(runtime.groups),
             )
         self._runtime = runtime
@@ -115,7 +106,6 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             if group is not None and not prompt_changed:
                 continue
             store.remove(key=key)
-            self._debug_initialized_revision.pop(key, None)
             if group is None:
                 continue
             log_event(
@@ -170,22 +160,6 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
         else:
             handler.max_context_tokens = group.source.max_context_tokens
 
-        if self._debug_initialized_revision.get(key) != runtime.revision:
-            dump_path = runtime.debug_dumper.initialize_group(
-                group_config=group.source,
-                messages=handler.messages_lst,
-            )
-            self._debug_initialized_revision[key] = runtime.revision
-            if dump_path is not None:
-                log_event(
-                    level="DEBUG",
-                    event="ai_group_chat.debug_dump.initialized",
-                    category="plugin",
-                    message="AI 群聊调试转储已按新配置初始化",
-                    bot_id=key.bot_id,
-                    group_id=key.conversation_id,
-                    debug_dump_path=str(dump_path),
-                )
         return handler
 
     async def _commit_turn_context(
@@ -237,7 +211,6 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                     latest_group is None or prompt_changed
                 ):
                     store.remove(key=context_key)
-                    self._debug_initialized_revision.pop(context_key, None)
                 log_event(
                     level="INFO",
                     event="ai_group_chat.context.commit_skipped",
@@ -258,6 +231,12 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 key=context_key,
             )
             temporary_messages = temporary_context.messages_lst
+            fallback_turn_messages = state.fallback_turn_messages
+            if not latest_runtime.config.source.images.retain_images:
+                temporary_messages = [message.without_images() for message in temporary_messages]
+                fallback_turn_messages = [
+                    message.without_images() for message in fallback_turn_messages
+                ]
             persisted_prefix_count = state.persisted_prefix_count
             if persisted_prefix_count > len(temporary_messages):
                 raise RuntimeError("临时上下文提交边界超出消息数量")
@@ -275,8 +254,8 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 current_context.replace_history(messages=temporary_messages[1:])
                 commit_mode = "replace_compressed_history"
             else:
-                current_context.build_chatmessage(
-                    message_lst=[*state.fallback_turn_messages, *tail_messages]
+                current_context.add_msg(
+                    msg_list=[*fallback_turn_messages, *tail_messages]
                 )
                 commit_mode = (
                     "append_after_stale_compression"
@@ -298,18 +277,13 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 sent_content_messages_count=state.sent_content_messages_count,
                 tool_history_messages_count=state.tool_history_messages_count,
                 retained_tool_messages_count=state.retained_tool_messages_count,
-                vision_history_messages_count=state.vision_history_messages_count,
+                image_history_messages_count=state.image_history_messages_count,
                 tool_result_retention=(
                     latest_runtime.config.source.tool_result_retention
                 ),
                 replace_existing_history=can_replace_history,
                 stripped_history_image_count=stripped_history_image_count,
                 current_messages_count=len(committed_messages),
-            )
-            await latest_runtime.debug_dumper.append_context_snapshot(
-                group_id=msg.group_id,
-                title=state.title,
-                messages=committed_messages,
             )
             return len(committed_messages)
 
@@ -396,13 +370,12 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
         built_turn_messages = await runtime.message_builder.build_turn_messages(
             msg=msg,
         )
-        vision_turn_state = VisionTurnState()
-        input_vision_delivery = await runtime.vision_tool.deliver(
+        image_turn_state = ImageTurnState()
+        input_image_delivery = runtime.image_delivery.deliver(
             items=built_turn_messages.image_items,
             truncated_count=built_turn_messages.truncated_image_count,
-            question=built_turn_messages.question,
             source_name="当前消息和引用消息",
-            turn_state=vision_turn_state,
+            turn_state=image_turn_state,
         )
         log_event(
             level="DEBUG",
@@ -421,20 +394,20 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
             image_count=built_turn_messages.loaded_image_count,
             image_errors_count=len(built_turn_messages.image_errors),
             truncated_image_count=built_turn_messages.truncated_image_count,
-            vision_messages_count=len(input_vision_delivery.working_messages),
-            vision_ok=(
-                input_vision_delivery.result.ok
-                if input_vision_delivery.result is not None
+            image_messages_count=len(input_image_delivery.working_messages),
+            images_ok=(
+                input_image_delivery.result.ok
+                if input_image_delivery.result is not None
                 else None
             ),
-            vision_is_error=(
-                input_vision_delivery.result.is_error
-                if input_vision_delivery.result is not None
+            images_is_error=(
+                input_image_delivery.result.is_error
+                if input_image_delivery.result is not None
                 else None
             ),
-            vision_observed_count=(
-                input_vision_delivery.result.observed_count
-                if input_vision_delivery.result is not None
+            images_observed_count=(
+                input_image_delivery.result.observed_count
+                if input_image_delivery.result is not None
                 else 0
             ),
             model_name=runtime.config.source.model.name,
@@ -448,10 +421,9 @@ class AIGroupChatPlugin(BasePlugin[GroupMessage]):
                 chat_handler=temporary_context,
                 recent_chat_messages=built_turn_messages.recent_chat_messages,
                 turn_messages=built_turn_messages.turn_messages,
-                input_vision_messages=input_vision_delivery.working_messages,
-                input_vision_history_messages=input_vision_delivery.history_messages,
-                question=built_turn_messages.question,
-                vision_turn_state=vision_turn_state,
+                input_image_messages=input_image_delivery.working_messages,
+                input_image_history_messages=input_image_delivery.history_messages,
+                image_turn_state=image_turn_state,
                 turn_context_state=turn_context_state,
             )
         finally:

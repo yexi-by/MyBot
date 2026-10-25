@@ -1,5 +1,6 @@
 """LLM provider 公共导出。"""
 
-from .openai import OpenAIService
+from .chat_completions import ChatCompletionsService
+from .responses import ResponsesService
 
-__all__ = ["OpenAIService"]
+__all__ = ["ChatCompletionsService", "ResponsesService"]

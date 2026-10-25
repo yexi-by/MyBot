@@ -4,7 +4,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from app.database import PluginMigrationSpec
 from app.utils.log import log_event
 
 from .base import PLUGINS, BasePlugin, Context
@@ -12,7 +11,6 @@ from .base import PLUGINS, BasePlugin, Context
 _INIT_FILE = "__init__.py"
 _BASE_FILE = "base.py"
 _PY_PATTERN = "*.py"
-_MIGRATION_DIRECTORY = "migrations"
 
 
 def load_all_plugins() -> None:
@@ -22,8 +20,6 @@ def load_all_plugins() -> None:
 
     for file_path in current_dir.rglob(_PY_PATTERN):
         if file_path.name in skip_files:
-            continue
-        if _MIGRATION_DIRECTORY in file_path.relative_to(current_dir).parts:
             continue
 
         module_name = f"{__name__}.{file_path.relative_to(current_dir).with_suffix('').as_posix().replace('/', '.')}"
@@ -46,35 +42,9 @@ def load_all_plugins() -> None:
             module_name=module_name,
         )
 
-def discover_plugin_migrations() -> tuple[PluginMigrationSpec, ...]:
-    """读取启用插件明确声明的 Alembic migration package。"""
-    load_all_plugins()
-    migrations: list[PluginMigrationSpec] = []
-    for plugin in PLUGINS:
-        package_name = plugin.migration_package
-        if package_name is None:
-            continue
-        spec = importlib.util.find_spec(package_name)
-        if spec is None or spec.submodule_search_locations is None:
-            raise RuntimeError(f"插件 migration package 不存在: {package_name}")
-        locations = tuple(spec.submodule_search_locations)
-        if len(locations) != 1:
-            raise RuntimeError(
-                f"插件 migration package 必须对应单个目录: {package_name}"
-            )
-        migrations.append(
-            PluginMigrationSpec(
-                plugin_id=plugin.plugin_id,
-                script_location=Path(locations[0]).resolve(),
-            )
-        )
-    return tuple(sorted(migrations, key=lambda item: item.plugin_id))
-
-
 __all__ = [
     "PLUGINS",
     "BasePlugin",
     "Context",
-    "discover_plugin_migrations",
     "load_all_plugins",
 ]

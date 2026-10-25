@@ -13,8 +13,8 @@ class ChatMessage(StrictModel):
 
     role: Literal["system", "user", "assistant", "tool"]
     text: str | None = None
-    reasoning_content: str | None = None
-    reasoning_details: list[JsonObject] | None = None
+    # 仅在当前工具循环续接 Responses，不作为正式正文或长期记忆。
+    response_items: list[JsonObject] = Field(default_factory=list, repr=False)
     image: list[bytes] | None = None
     image_detail: Literal["auto", "low", "high"] | None = None
     video: list[bytes] | None = None
@@ -43,13 +43,13 @@ class ChatMessage(StrictModel):
     @model_validator(mode="after")
     def check_at_least_one(self) -> "ChatMessage":
         """确保不同角色消息都满足 OpenAI 工具调用协议约束。"""
+        if (self.tool_calls or self.response_items) and self.role != "assistant":
+            raise ValueError("只有 assistant 消息可以携带模型输出项或工具调用")
         if self.role == "tool":
             if self.tool_call_id is None or self.text is None:
                 raise ValueError("tool 消息必须提供 tool_call_id 和 text")
             return self
-        if self.tool_calls:
-            if self.role != "assistant":
-                raise ValueError("只有 assistant 消息可以携带 tool_calls")
+        if self.tool_calls or self.response_items:
             return self
         if self.text is None and self.image is None and self.video is None:
             raise ValueError("必须提供 text、image、video 或 tool_calls")
@@ -77,11 +77,8 @@ class LLMProviderProtocol(Protocol):
         self,
         messages: list[ChatMessage],
         model: str,
-        max_attempts: int | None = None,
-        retry_delay_seconds: float | None = None,
-        retry_max_delay_seconds: float | None = None,
     ) -> str:
-        """获取文本响应，并允许当前请求覆盖供应商重试参数。"""
+        """获取文本响应。"""
         ...
 
     async def get_ai_response_with_tools(
@@ -130,11 +127,9 @@ class LLMResponse(StrictModel):
     """LLM 单轮结构化响应。"""
 
     content: str | None = None
-    reasoning_content: str | None = None
-    reasoning_details: list[JsonObject] | None = None
+    response_items: list[JsonObject] = Field(default_factory=list, repr=False)
     tool_calls: list[LLMToolCall] = Field(default_factory=list)
     finish_reason: str | None = None
-    native_finish_reason: str | None = None
 
 
 class LLMToolExecutor(Protocol):

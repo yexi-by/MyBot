@@ -1,16 +1,14 @@
 """LLM 提供商重试包装器。"""
 
-from typing import Literal, override
+from typing import override
 
-from openai import APIConnectionError, APITimeoutError, RateLimitError
+from openai import APIConnectionError, InternalServerError, RateLimitError
 
 from app.config.schemas import LLMProviderConfig
-from app.utils.log import log_event
 from app.utils.retry_utils import create_retry_manager
 
 from .base import LLMProvider
 from .errors import LLMResponseError
-from .response_validation import build_response_repair_message
 from .schemas import (
     ChatMessage,
     LLMResponse,
@@ -19,24 +17,7 @@ from .schemas import (
 )
 
 
-def _repair_request_messages(
-    messages: list[ChatMessage],
-    error: LLMResponseError,
-    *,
-    attempt_number: int,
-    response_kind: Literal["text", "tools"],
-) -> list[ChatMessage]:
-    """纠正提示仅存在于本次请求副本，不回放异常输出，也不累积提示。"""
-    log_event(
-        level="WARNING",
-        event="llm.response.rejected",
-        category="llm",
-        message="模型响应格式异常，已阻止交付",
-        error_code=error.code,
-        attempt=attempt_number,
-        response_kind=response_kind,
-    )
-    return [*messages, build_response_repair_message(error)]
+RETRYABLE_ERRORS = (APIConnectionError, InternalServerError, RateLimitError, TimeoutError)
 
 
 class ResilientLLMProvider(LLMProvider):
@@ -54,51 +35,21 @@ class ResilientLLMProvider(LLMProvider):
         self,
         messages: list[ChatMessage],
         model: str,
-        max_attempts: int | None = None,
-        retry_delay_seconds: float | None = None,
-        retry_max_delay_seconds: float | None = None,
     ) -> str:
-        """调用底层文本接口，并按供应商默认值或当前请求覆盖值重试。"""
+        """按配置重试网络与暂时服务错误，重试时保持原始请求不变。"""
         retrier = create_retry_manager(
-            max_attempts=(
-                self.provider_config.max_attempts
-                if max_attempts is None
-                else max_attempts
-            ),
-            retry_delay_seconds=(
-                self.provider_config.retry_delay_seconds
-                if retry_delay_seconds is None
-                else retry_delay_seconds
-            ),
-            retry_max_delay_seconds=(
-                self.provider_config.retry_max_delay_seconds
-                if retry_max_delay_seconds is None
-                else retry_max_delay_seconds
-            ),
-            error_types=(
-                RateLimitError,
-                APIConnectionError,
-                APITimeoutError,
-                ValueError,
-            ),
+            max_attempts=self.provider_config.max_attempts,
+            retry_delay_seconds=self.provider_config.retry_delay_seconds,
+            retry_max_delay_seconds=self.provider_config.retry_max_delay_seconds,
+            error_types=RETRYABLE_ERRORS,
         )
-        request_messages = list(messages)
         async for attempt in retrier:
             with attempt:
-                try:
-                    response = await self.inner_provider.get_ai_response(
-                        messages=request_messages, model=model
-                    )
-                except LLMResponseError as error:
-                    request_messages = _repair_request_messages(
-                        messages,
-                        error,
-                        attempt_number=attempt.retry_state.attempt_number,
-                        response_kind="text",
-                    )
-                    raise
-                if not response:
-                    raise ValueError("LLM 提供商返回了空响应")
+                response = await self.inner_provider.get_ai_response(
+                    messages=messages, model=model
+                )
+                if not response.strip():
+                    raise LLMResponseError("empty_response", "LLM 提供商返回了空响应")
                 return response
         raise RuntimeError("LLM 文本接口重试次数已耗尽")
 
@@ -111,38 +62,23 @@ class ResilientLLMProvider(LLMProvider):
         tool_choice: LLMToolChoice = "auto",
         parallel_tool_calls: bool = True,
     ) -> LLMResponse:
-        """调用底层工具接口，并在可恢复错误时重试。"""
+        """调用底层工具接口，只重试网络与暂时服务错误。"""
         retrier = create_retry_manager(
             max_attempts=self.provider_config.max_attempts,
             retry_delay_seconds=self.provider_config.retry_delay_seconds,
             retry_max_delay_seconds=self.provider_config.retry_max_delay_seconds,
-            error_types=(
-                RateLimitError,
-                APIConnectionError,
-                APITimeoutError,
-                ValueError,
-            ),
+            error_types=RETRYABLE_ERRORS,
         )
-        request_messages = list(messages)
         async for attempt in retrier:
             with attempt:
-                try:
-                    response = await self.inner_provider.get_ai_response_with_tools(
-                        messages=request_messages,
-                        model=model,
-                        tools=tools,
-                        tool_choice=tool_choice,
-                        parallel_tool_calls=parallel_tool_calls,
-                    )
-                except LLMResponseError as error:
-                    request_messages = _repair_request_messages(
-                        messages,
-                        error,
-                        attempt_number=attempt.retry_state.attempt_number,
-                        response_kind="tools",
-                    )
-                    raise
-                if response.content is None and not response.tool_calls:
-                    raise ValueError("LLM 提供商返回了空工具响应")
+                response = await self.inner_provider.get_ai_response_with_tools(
+                    messages=messages,
+                    model=model,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    parallel_tool_calls=parallel_tool_calls,
+                )
+                if not (response.content or "").strip() and not response.tool_calls:
+                    raise LLMResponseError("empty_response", "LLM 提供商返回了空工具响应")
                 return response
         raise RuntimeError("LLM 工具接口重试次数已耗尽")

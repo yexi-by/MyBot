@@ -34,8 +34,6 @@ from app.models import (
 from app.plugins.ai_group_chat.message_builder import GroupChatMessageBuilder
 from tests.config_helpers import build_ai_group_chat_config
 
-VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
-VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
 # 测试消息时间为 1_777_132_900，进程上下文起点设在其前 10 分钟。
 CONTEXT_STARTED_AT = datetime.fromtimestamp(1_777_132_300, tz=timezone.utc)
 
@@ -116,16 +114,11 @@ class MissingImageBot:
 
 
 def build_config(**overrides: object) -> AIGroupChatConfig:
-    """构造使用独立视觉工具的测试配置。"""
+    """构造多模态直传的测试配置。"""
     return build_ai_group_chat_config(
         provider="main-vendor",
         model_name="text-model",
         overrides={
-            "vision": {
-                "model": {"provider": "vision-vendor", "name": "vision-model"},
-                "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
-                "user_prompt_file": VISION_USER_PROMPT_PATH,
-            },
             "groups": [
             AIGroupConfig(
                 id="40000",

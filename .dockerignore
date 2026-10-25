@@ -60,6 +60,8 @@ archived_plugins_config/
 webui/node_modules/
 webui/dist/
 .playwright-cli/
+.playwright-mcp/
+.pytest_cache/
 
 # 无需进入镜像上下文的本地说明和脚本
 docs/

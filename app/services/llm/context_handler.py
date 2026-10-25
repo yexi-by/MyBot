@@ -1,11 +1,6 @@
 """LLM 对话上下文管理。"""
 
-from typing import Literal, overload
-
-from app.utils.encoding import base64_to_bytes
 from .schemas import ChatMessage
-
-ChatRole = Literal["system", "user", "assistant"]
 
 
 class ContextHandler:
@@ -73,81 +68,3 @@ class ContextHandler:
         ]
         self._revision += 1
         return image_count
-
-    @overload
-    def build_chatmessage(self, *, role: ChatRole, text: str) -> None:
-        """追加纯文本聊天消息。"""
-        ...
-
-    @overload
-    def build_chatmessage(
-        self, *, role: ChatRole, image: list[bytes] | list[str]
-    ) -> None:
-        """追加纯图片聊天消息。"""
-        ...
-
-    @overload
-    def build_chatmessage(
-        self,
-        *,
-        role: ChatRole,
-        image: list[bytes] | list[str],
-        text: str,
-    ) -> None:
-        """追加图文混合聊天消息。"""
-        ...
-
-    @overload
-    def build_chatmessage(self, *, message: ChatMessage) -> None:
-        """追加已经构造好的聊天消息。"""
-        ...
-
-    @overload
-    def build_chatmessage(self, *, message_lst: list[ChatMessage]) -> None:
-        """批量追加已经构造好的聊天消息。"""
-        ...
-
-    def build_chatmessage(
-        self,
-        *,
-        role: ChatRole | None = None,
-        text: str | None = None,
-        image: list[bytes] | list[str] | None = None,
-        message: ChatMessage | None = None,
-        message_lst: list[ChatMessage] | None = None,
-    ) -> None:
-        """根据结构化参数构造消息并写入上下文。"""
-        if message_lst is not None:
-            self.add_msg(msg_list=message_lst)
-            return
-        if message is not None:
-            self.add_msg(msg=message)
-            return
-        if role is None:
-            raise ValueError("role在message_list缺失时 必须存在")
-
-        image_bytes = self._normalize_images(image=image)
-        if role == "system":
-            if not text or image_bytes is not None:
-                raise ValueError("系统提示词应该并且必须是字符串")
-            self.system_prompt = ChatMessage(role="system", text=text)
-            self._messages_lst[0] = self.system_prompt
-            self._revision += 1
-            return
-
-        chatmessage = ChatMessage(role=role, text=text, image=image_bytes)
-        self.add_msg(msg=chatmessage)
-
-    def _normalize_images(
-        self, image: list[bytes] | list[str] | None
-    ) -> list[bytes] | None:
-        """将上下文图片统一收窄为字节列表。"""
-        if image is None:
-            return None
-        image_bytes: list[bytes] = []
-        for item in image:
-            if isinstance(item, str):
-                image_bytes.append(base64_to_bytes(data=item))
-                continue
-            image_bytes.append(item)
-        return image_bytes

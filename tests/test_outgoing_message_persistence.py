@@ -100,7 +100,6 @@ class FakeMessageClient(MessageMixin):
         self.websocket = cast(WebSocket, self.fake_websocket)
         self.persistence_failed_event = asyncio.Event()
         self.echo_dict: dict[str, asyncio.Future[Response]] = {}
-        self.stream_dict: dict[str, asyncio.Queue[Response]] = {}
         self.sent_actions: list[tuple[str, JsonObject | None]] = []
         self.responses: list[Response | Exception] = list(responses) or [
             Response(status="ok", retcode=0, data={"message_id": 90000})
@@ -195,7 +194,7 @@ class OutgoingMessagePersistenceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(client.persistence_failed_event.is_set())
         with self.assertRaisesRegex(RuntimeError, "PostgreSQL 持久化失败"):
-            await client.delete_msg("90000")
+            await client.delete_msg_with_response("90000")
 
     async def test_missing_message_id_closes_session_but_keeps_send_success(
         self,

@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import type { PageKey } from "@/schema";
+import { PLUGINS } from "@/schema/plugins";
 
 import type { PluginId } from "./types";
 
@@ -26,6 +27,13 @@ export interface NavItem {
   plugin?: PluginId;
 }
 
+const PLUGIN_ICONS: Record<PluginId, LucideIcon> = {
+  ai_group_chat: MessageCircle,
+  group_notice: Bell,
+  auto_unban: ShieldCheck,
+  recall_bot_image: Undo2,
+};
+
 export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "系统",
@@ -37,12 +45,14 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   },
   {
     title: "插件",
-    items: [
-      { key: "plugin:ai_group_chat", label: "AI 群聊", group: "插件", table: "plugins.ai_group_chat", icon: MessageCircle, plugin: "ai_group_chat" },
-      { key: "plugin:group_notice", label: "群通知", group: "插件", table: "plugins.group_notice", icon: Bell, plugin: "group_notice" },
-      { key: "plugin:auto_unban", label: "自动解禁", group: "插件", table: "plugins.auto_unban", icon: ShieldCheck, plugin: "auto_unban" },
-      { key: "plugin:recall_bot_image", label: "撤回图片", group: "插件", table: "plugins.recall_bot_image", icon: Undo2, plugin: "recall_bot_image" },
-    ],
+    items: PLUGINS.map(({ id, name }) => ({
+      key: `plugin:${id}`,
+      label: name,
+      group: "插件",
+      table: `plugins.${id}`,
+      icon: PLUGIN_ICONS[id],
+      plugin: id,
+    })),
   },
   {
     title: "文件",

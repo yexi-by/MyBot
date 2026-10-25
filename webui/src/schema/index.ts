@@ -49,7 +49,7 @@ export function pageForPath(path: Path): PageKey {
 
 export interface FieldHit {
   field: FieldDef;
-  /** 字段所在分节或动态条目的名字，例如「图片处理」「Provider deepseek」。 */
+  /** 字段所在分节或动态条目的名字，例如「图片处理」「Provider main」。 */
   scope: string;
   section?: SectionDef;
 }
@@ -315,7 +315,6 @@ export function validateClient(config: JsonObject): IssueMap {
     if (getIn(config, execution.base) != null) checkSection(issues, config, execution.base, execution.fields);
   }
   if (isRecord(plugins) && isRecord(plugins.ai_group_chat)) {
-    checkRetryPair(issues, config, ["plugins", "ai_group_chat", "vision"], "retry_delay_seconds", "retry_max_delay_seconds");
     const groups = getIn(config, AI_GROUPS_BASE);
     if (Array.isArray(groups)) {
       const seen = new Set<string>();
@@ -376,5 +375,3 @@ export function humanizeIssue(errorType: string, message: string): string {
       return stripped;
   }
 }
-
-export const ALL_PLUGIN_IDS = PLUGIN_IDS;

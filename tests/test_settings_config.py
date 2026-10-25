@@ -143,6 +143,7 @@ class SettingsConfigTest(unittest.TestCase):
         )
         provider = LLMProviderConfig.model_validate(
             {
+                "api_format": "chat_completions",
                 "api_key": "",
                 "inherit_network_proxy": True,
                 "timeout_seconds": 0,

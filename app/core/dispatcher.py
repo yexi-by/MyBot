@@ -1,6 +1,5 @@
 """事件分发器。"""
 
-from app.api import BOTClient
 from app.models import AllEvent, GroupMessage, NapCatId, PrivateMessage
 from app.utils.log import log_event
 
@@ -13,12 +12,10 @@ class EventDispatcher:
     def __init__(
         self,
         plugincontroller: PluginController,
-        bot: BOTClient,
         blocked_user_ids: frozenset[NapCatId],
     ) -> None:
-        """保存插件控制器和机器人客户端。"""
+        """保存插件控制器和消息发送者屏蔽规则。"""
         self.plugincontroller: PluginController = plugincontroller
-        self.bot: BOTClient = bot
         self.blocked_user_ids = blocked_user_ids
 
     async def dispatch_event(self, event: AllEvent) -> None:

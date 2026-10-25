@@ -189,27 +189,14 @@ class WebUIConfigIOTest(unittest.TestCase):
             """
 
             [plugins.ai_group_chat]
-            model = { provider = "main", name = "chat", supports_images = false }
+            model = { provider = "main", name = "chat" }
             max_tool_rounds = 16
             token_safety_factor = 1.05
             context_compression_notice = "正在整理上下文"
             forward_reply_threshold_chars = 1000
-            show_reasoning = false
-            retain_reasoning = false
-            debug_dump_messages = false
-            debug_dump_directory = "logs/ai_group_chat_debug"
             extra_requirements_file = "extra.md"
             allow_mention_all = false
             tool_result_retention = "off"
-
-            [plugins.ai_group_chat.vision]
-            model = { provider = "main", name = "vision" }
-            system_prompt_file = "vs.md"
-            user_prompt_file = "vu.md"
-            max_attempts = 5
-            retry_delay_seconds = 0.25
-            retry_max_delay_seconds = 10
-            retain_descriptions = true
 
             [plugins.ai_group_chat.images]
             max_per_turn = 0
@@ -220,7 +207,6 @@ class WebUIConfigIOTest(unittest.TestCase):
             max_width = 0
             max_height = 0
             allowed_mime_types = []
-            delivery_mode = "vision"
             oversize_behavior = "skip"
             image_detail = "auto"
             retain_images = false
@@ -269,7 +255,7 @@ class WebUIConfigIOTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            for name in ("extra.md", "vs.md", "vu.md", "sys.md"):
+            for name in ("extra.md", "sys.md"):
                 (root / name).write_text("内容", encoding="utf-8")
             config_file = root / "mybot.toml"
             config_file.write_text(raw, encoding="utf-8")
@@ -318,7 +304,8 @@ class WebUIConfigIOTest(unittest.TestCase):
             payload["llm"] = {
                 "providers": {
                     **current.config["llm"]["providers"],
-                    "deep.seek": {
+                    "model.service": {
+                        "api_format": "chat_completions",
                         "api_key": "dot-key",
                         "base_url": "https://example.com/v1",
                         "proxy": None,
@@ -353,8 +340,8 @@ class WebUIConfigIOTest(unittest.TestCase):
             )
             written = tomllib.loads(config_file.read_text(encoding="utf-8"))
 
-        self.assertIn("deep.seek", written["llm"]["providers"])
-        self.assertNotIn("deep", written["llm"]["providers"])
+        self.assertIn("model.service", written["llm"]["providers"])
+        self.assertNotIn("model", written["llm"]["providers"])
         self.assertIn("vendor.tool", written["mcp"]["servers"])
         self.assertEqual(
             written["mcp"]["servers"]["vendor.tool"]["env"]["API.KEY"],
@@ -441,6 +428,7 @@ class WebUIConfigIOTest(unittest.TestCase):
             new_llm = dict(payload.config["llm"])
             new_providers = dict(payload.config["llm"]["providers"])
             new_providers["second"] = {
+                "api_format": "chat_completions",
                 "api_key": "sk-second",
                 "inherit_network_proxy": True,
                 "timeout_seconds": 0,
@@ -453,7 +441,7 @@ class WebUIConfigIOTest(unittest.TestCase):
             new_plugins = dict(payload.config["plugins"])
             (Path(temp_dir) / "extra.md").write_text("通用要求", encoding="utf-8")
             new_plugins["ai_group_chat"] = build_ai_group_chat_config(
-                supports_images=True, provider="second"
+                provider="second"
             ).model_dump(mode="json", exclude_none=True)
             new_config["plugins"] = new_plugins
             result = write_config_payload(

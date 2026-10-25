@@ -42,21 +42,12 @@ CONTROL_TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 QUARANTINED_ASSISTANT_TEXT: Final[str] = "（这条机器人回复包含异常内部内容，已从模型上下文隔离）"
-NATIVE_FAILURE_REASONS: Final[frozenset[str]] = frozenset({
-    "length", "max_tokens", "malformed_function_call", "unexpected_tool_call",
-    "content_filter", "safety", "recitation", "blocklist", "prohibited_content",
-    "spii", "image_safety", "image_prohibited_content", "image_other", "no_image",
-    "model_armor", "refusal", "error", "other",
-})
 
 
 def validate_response(response: LLMResponse, *, tools_allowed: bool = True) -> None:
     """整份响应通过检查后才允许发送、执行工具或保存上下文。"""
     finish_reason = (response.finish_reason or "").lower()
-    native_finish_reason = (response.native_finish_reason or "").lower()
-    if finish_reason not in {"", "stop", "tool_calls"} or (
-        native_finish_reason in NATIVE_FAILURE_REASONS
-    ):
+    if finish_reason not in {"", "stop", "tool_calls"}:
         raise LLMResponseError(
             "invalid_finish_reason",
             "模型响应被截断或以异常状态结束，不能使用其中的正文和工具调用。",
@@ -133,22 +124,6 @@ def isolate_assistant_history(
             # 工具已经在历史轮次执行过，保留调用与协议状态，避免留下孤立 tool 消息。
             safe_messages.append(message.model_copy(update={
                 "text": None,
-                "reasoning_content": None,
+                "response_items": [],
             }))
     return safe_messages, quarantined
-
-
-def build_response_repair_message(error: LLMResponseError) -> ChatMessage:
-    """生成仅用于本次重试的纠错说明，不回放被拒绝的模型内容。"""
-    return ChatMessage(
-        role="user",
-        text=(
-            "上一条模型响应未通过格式检查，整条响应已丢弃，"
-            "其中的文字没有交付，工具也没有执行。"
-            f"原因：{error}"
-            "请重新生成完整响应：需要使用已提供的工具时，通过原生 tool_calls 字段"
-            "提交调用，并使用合法 JSON 对象参数和唯一调用 ID；"
-            "回复正文只包含可直接交付的内容，不要混入内部思考或工具调用协议。"
-            "若服务限制了输出，请遵守该限制并返回简短说明。"
-        ),
-    )

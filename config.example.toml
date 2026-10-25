@@ -46,10 +46,11 @@ rotation = "50 MB"
 retention = "30 days"
 compression = "gz"
 
-[llm.providers.deepseek]
+[llm.providers.main]
+api_format = "chat_completions" # chat_completions 或 responses
 api_key = "sk-CHANGE_ME"
 # 无鉴权的 OpenAI 兼容服务可删除 api_key。
-base_url = "https://api.deepseek.com"
+base_url = "https://api.openai.com/v1"
 inherit_network_proxy = true
 timeout_seconds = 0
 max_attempts = 5
@@ -61,11 +62,11 @@ enabled = false
 initialization_timeout_seconds = 30
 call_timeout_seconds = 60
 
-[mcp.servers.node_stdio_example]
+[mcp.servers.github]
 transport = "stdio"
-command = "npx"
-args = ["-y", "your-node-mcp-server-package"]
-env = { EXAMPLE_API_KEY = "CHANGE_ME" }
+command = "github-mcp-server"
+args = ["stdio"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "CHANGE_ME" }
 disabled = true
 
 [mcp.servers.firecrawl]
@@ -111,18 +112,12 @@ priority = 90
 
 [plugins.ai_group_chat]
 # 引用的提示词默认由仓库 config.example/ 提供（默认人格：耄耋），复制到 config/ 后即可使用。
-model = { provider = "deepseek", name = "deepseek-chat", supports_images = false }
+model = { provider = "main", name = "your-multimodal-model" }
 max_tool_rounds = 16
 token_safety_factor = 1.05
 context_compression_notice = "上下文有点长，我先整理一下记忆，稍等我几秒喵~"
 forward_reply_threshold_chars = 1000
-show_reasoning = false
-retain_reasoning = false
-debug_dump_messages = true
-debug_dump_directory = "logs/ai_group_chat_debug"
 extra_requirements_file = "ai_group_chat/prompts/extra_requirements.md"
-# 可选：每次请求都追加在末尾的简短发言要求，不进入长期上下文；删除即关闭。
-turn_instruction_file = "ai_group_chat/prompts/turn_instruction.md"
 allow_mention_all = false
 tool_result_retention = "off"
 
@@ -131,15 +126,6 @@ tool_result_retention = "off"
 max_messages = 30
 # 单条群消息在记录里的最大字符数，0 表示不截断。
 max_chars_per_message = 200
-
-[plugins.ai_group_chat.vision]
-model = { provider = "deepseek", name = "vision-model" }
-system_prompt_file = "ai_group_chat/prompts/vision/system.md"
-user_prompt_file = "ai_group_chat/prompts/vision/user.md"
-max_attempts = 5
-retry_delay_seconds = 0.25
-retry_max_delay_seconds = 10
-retain_descriptions = true
 
 [plugins.ai_group_chat.images]
 max_per_turn = 0
@@ -150,7 +136,6 @@ max_total_bytes_per_request = 0
 max_width = 0
 max_height = 0
 allowed_mime_types = []
-delivery_mode = "vision"
 oversize_behavior = "skip"
 image_detail = "auto"
 retain_images = false
@@ -159,7 +144,7 @@ forward_max_per_call = 0
 forward_max_per_turn = 0
 
 [plugins.ai_group_chat.videos]
-# 主模型与服务端需支持 video_url 原生视频输入。
+# 仅适用于支持 video_url 的 Chat Completions 兼容服务；Responses 不支持视频输入。
 enabled = false
 max_per_turn = 2
 fetch_concurrency = 2

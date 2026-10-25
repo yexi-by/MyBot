@@ -8,7 +8,7 @@ from openai import APIError, AsyncOpenAI, DefaultAsyncHttpxClient
 from app.config.schemas import LLMProviderConfig, NetworkConfig
 
 from .errors import LLMRequestError, provider_error_message
-from .providers.openai import OpenAIService
+from .providers import ChatCompletionsService, ResponsesService
 from .schemas import (
     ChatMessage,
     LLMProviderWrapper,
@@ -68,7 +68,11 @@ class LLMHandler:
                 ),
             )
             clients.append(client)
-            raw_service = OpenAIService(client=client)
+            raw_service = (
+                ResponsesService(client=client)
+                if provider_config.api_format == "responses"
+                else ChatCompletionsService(client=client)
+            )
             safe_service = ResilientLLMProvider(
                 inner_provider=raw_service, provider_config=provider_config
             )
@@ -89,11 +93,8 @@ class LLMHandler:
         messages: list[ChatMessage],
         provider: str,
         model_name: str,
-        max_attempts: int | None = None,
-        retry_delay_seconds: float | None = None,
-        retry_max_delay_seconds: float | None = None,
     ) -> str:
-        """获取指定模型厂商的文本响应，可覆盖当前请求的重试参数。"""
+        """获取指定模型厂商的文本响应，重试策略统一使用 provider 配置。"""
         llm = self.services.get(provider)
         if llm is None:
             raise ValueError(f"未定义的 LLM provider: {provider}")
@@ -101,9 +102,6 @@ class LLMHandler:
             return await llm.provider.get_ai_response(
                 messages=messages,
                 model=model_name,
-                max_attempts=max_attempts,
-                retry_delay_seconds=retry_delay_seconds,
-                retry_max_delay_seconds=retry_max_delay_seconds,
             )
         except (APIError, httpx.RequestError, TimeoutError, ValueError) as exc:
             raise LLMRequestError(provider_error_message(exc)) from None

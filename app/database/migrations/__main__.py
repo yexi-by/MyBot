@@ -4,17 +4,13 @@ import argparse
 import asyncio
 import sys
 
-from app.database.migration import DatabaseMigrator, PluginMigrationRegistry
+from app.database.migration import DatabaseMigrator
 from app.utils.log import configure_logging
 
 
-async def _run(
-    command_name: str,
-    plugin_registry: PluginMigrationRegistry | None = None,
-) -> None:
+async def _run(command_name: str) -> None:
     """读取本机配置并执行升级或版本检查。"""
     from app.config import ConfigManager
-    from app.plugins import discover_plugin_migrations
 
     config = ConfigManager.create().boot_config
     configure_logging(
@@ -25,14 +21,8 @@ async def _run(
         rotation=config.logging.rotation,
         compression=config.logging.compression,
     )
-    actual_registry = plugin_registry
-    if actual_registry is None:
-        actual_registry = PluginMigrationRegistry()
-        for spec in discover_plugin_migrations():
-            actual_registry.register(spec)
     migrator = DatabaseMigrator(
         database_url=config.database.build_url(),
-        plugin_registry=actual_registry,
     )
     if command_name == "upgrade":
         await migrator.upgrade_all()

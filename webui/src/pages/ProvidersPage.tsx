@@ -20,13 +20,12 @@ const PROVIDER_SECTION: SectionDef = {
   title: "Provider",
   base: ["llm", "providers"],
   restart: true,
-  desc: "OpenAI 兼容服务。",
+  desc: "按服务支持的接口选择 Chat Completions 或 Responses API。",
   fields: PROVIDER_FIELDS,
 };
 
 const REFERENCES: [PathSeg[], string][] = [
   [["plugins", "ai_group_chat", "model", "provider"], "AI 群聊 · 主模型"],
-  [["plugins", "ai_group_chat", "vision", "model", "provider"], "AI 群聊 · 视觉模型"],
 ];
 
 function providerRefs(config: JsonObject, id: string): string[] {
@@ -92,7 +91,7 @@ function AddProvider({ existing }: { existing: string[] }) {
           新增 Provider
         </h2>
         <code className="sec-path">[llm.providers.&lt;id&gt;]</code>
-        <p className="sec-desc">ID 是插件引用它的名字，例如 deepseek 或 local.qwen；写入后不能改名，只能删除重建。</p>
+        <p className="sec-desc">ID 是插件引用它的名字，例如 main 或 openai；写入后不能改名，只能删除重建。</p>
       </header>
       <div className="sec-body">
         <div className="add-row">
@@ -100,7 +99,7 @@ function AddProvider({ existing }: { existing: string[] }) {
             <input
               className={cls("inp is-mono", error && "is-error")}
               value={id}
-              placeholder="provider ID，如 deepseek"
+              placeholder="provider ID，如 main"
               aria-label="新 Provider ID"
               spellCheck={false}
               autoComplete="off"
@@ -150,7 +149,7 @@ export default function ProvidersPage() {
         kicker="系统"
         table="[llm.providers]"
         title="模型服务"
-        desc="OpenAI 兼容的模型服务。插件的模型引用从这里选择 Provider；ID 可以包含点号，界面按完整键名写回。"
+        desc="使用 Chat Completions 或 Responses API 的模型服务。插件从这里选择 Provider；ID 可以包含点号，界面按完整键名写回。"
         notice="Provider 改动写入后，要重启进程才生效"
         filter={filter}
         onFilter={setFilter}

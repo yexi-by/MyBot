@@ -156,7 +156,7 @@ class WebUIRoutesTest(unittest.IsolatedAsyncioTestCase):
                 payload: dict[str, Any] = current["config"]
                 (root / "extra.md").write_text("通用要求", encoding="utf-8")
                 payload["plugins"]["ai_group_chat"] = build_ai_group_chat_config(
-                    supports_images=True, provider="missing"
+                    provider="missing"
                 ).model_dump(mode="json", exclude_none=True)
                 response = await client.put(
                     "/api/config",

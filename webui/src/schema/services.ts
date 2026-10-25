@@ -2,15 +2,19 @@
 
 import type { JsonObject } from "@/lib/types";
 
-import { int, keyvalue, num, secret, seg, sw, tags, text } from "./helpers";
+import { int, keyvalue, num, secret, seg, select, sw, tags, text } from "./helpers";
 import type { FieldDef, SectionDef } from "./types";
 
 export const PROVIDER_FIELDS: FieldDef[] = [
-  secret("api_key", "API Key", { span: 2, desc: "留空表示上游服务不需要鉴权" }),
-  text("base_url", "Base URL", { mono: true, nullable: true, placeholder: "https://api.example.com/v1" }),
-  text("proxy", "Provider 代理", { mono: true, nullable: true, placeholder: "http://127.0.0.1:7890", desc: "留空时按「继承全局代理」决定" }),
-  sw("inherit_network_proxy", "继承全局代理", { desc: "Provider 代理为空时使用「系统设置 · 网络」的代理" }),
+  select("api_format", "API 协议", [
+    ["chat_completions", "Chat Completions"],
+    ["responses", "Responses API"],
+  ], { desc: "按服务支持的接口选择，不自动切换协议" }),
+  secret("api_key", "API Key", { wide: true, desc: "留空表示上游服务不需要鉴权" }),
+  text("base_url", "Base URL", { mono: true, nullable: true, wide: true, placeholder: "https://api.example.com/v1" }),
   num("timeout_seconds", "请求超时", { unit: "秒", min: 0, zero: "使用全局网络超时" }),
+  text("proxy", "Provider 代理", { mono: true, nullable: true, wide: true, placeholder: "http://127.0.0.1:7890", desc: "留空时按「继承全局代理」决定" }),
+  sw("inherit_network_proxy", "继承全局代理", { desc: "Provider 代理为空时使用「系统设置 · 网络」的代理" }),
   int("max_attempts", "最大尝试次数", { unit: "次", min: 1 }),
   num("retry_delay_seconds", "初始重试间隔", { unit: "秒", min: 0 }),
   num("retry_max_delay_seconds", "最大重试间隔", { unit: "秒", min: 0, zero: "不限制退避上限" }),
@@ -18,6 +22,7 @@ export const PROVIDER_FIELDS: FieldDef[] = [
 
 export function defaultProvider(): JsonObject {
   return {
+    api_format: "chat_completions",
     inherit_network_proxy: true,
     timeout_seconds: 0,
     max_attempts: 5,

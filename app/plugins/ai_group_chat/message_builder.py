@@ -54,7 +54,6 @@ class BuiltTurnMessages:
     recent_chat_messages: list[ChatMessage]
     image_items: list[LLMImageItem]
     truncated_image_count: int
-    question: str
 
     @property
     def image_artifacts(self) -> list[LLMImageArtifact]:
@@ -105,11 +104,7 @@ class GroupChatMessageBuilder:
             http_client=http_client,
             fetch_concurrency=config.images.fetch_concurrency,
             download_timeout_seconds=config.images.download_timeout_seconds,
-            max_image_bytes=(
-                None
-                if config.images.oversize_behavior == "describe"
-                else config.images.max_image_bytes or None
-            ),
+            max_image_bytes=config.images.max_image_bytes or None,
         )
         self.video_reader = NapCatVideoReader(
             bot=bot,
@@ -193,7 +188,6 @@ class GroupChatMessageBuilder:
             recent_chat_messages=recent_chat_messages,
             image_items=image_items,
             truncated_image_count=truncated_image_count,
-            question=self._format_message_text(msg=msg, images_attached=True),
         )
 
     async def _build_recent_chat_messages(

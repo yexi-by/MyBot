@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from abc import ABC, ABCMeta, abstractmethod
-from collections.abc import Callable
 from typing import ClassVar, cast
 
 import httpx
 
 from app.config import PluginConfigView
 from app.api import BOTClient
-from app.database import (
-    GroupMessageReader,
-    PluginRepositoryBuilder,
-    validate_plugin_id,
-)
+from app.database import GroupMessageReader
 from app.models import AllEvent
 from app.services import ConversationContextStore, LLMHandler, MCPToolManager
 from app.utils.log import log_event, log_exception
@@ -46,10 +42,11 @@ class PluginMeta(ABCMeta):
                 raise ValueError(f"{name}插件缺少 name 属性,请重新定义")
             if not isinstance(plugin_id, str):
                 raise ValueError(f"{name}插件缺少合法 plugin_id")
-            try:
-                _ = validate_plugin_id(plugin_id)
-            except ValueError as exc:
-                raise ValueError(f"{name}插件的 {exc}") from exc
+            if re.fullmatch(r"[a-z][a-z0-9_]*", plugin_id) is None:
+                raise ValueError(
+                    f"{name}插件的 plugin_id 必须以小写字母开头，"
+                    "且只能包含 a-z、0-9 和下划线"
+                )
             for plugin in PLUGINS:
                 if plugin.name == plugin_name:
                     raise ValueError(
@@ -70,34 +67,18 @@ class Context:
         self,
         bot: BOTClient,
         group_messages: GroupMessageReader,
-        plugin_id: str,
-        repository_builder: PluginRepositoryBuilder,
         conversation_contexts: ConversationContextStore,
         direct_httpx: httpx.AsyncClient,
-        proxy_httpx: httpx.AsyncClient | None = None,
         llm: LLMHandler | None = None,
         mcp_tool_manager: MCPToolManager | None = None,
     ) -> None:
         """保存插件运行期可用服务。"""
         self.bot: BOTClient = bot
         self.group_messages: GroupMessageReader = group_messages
-        self.plugin_id: str = plugin_id
-        self._repository_builder: PluginRepositoryBuilder = repository_builder
         self.conversation_contexts: ConversationContextStore = conversation_contexts
         self.direct_httpx: httpx.AsyncClient = direct_httpx
         self._llm: LLMHandler | None = llm
         self._mcp_tool_manager: MCPToolManager | None = mcp_tool_manager
-        self._proxy_httpx: httpx.AsyncClient | None = proxy_httpx
-
-    def create_repository[RepositoryT](
-        self,
-        repository_type: Callable[..., RepositoryT],
-    ) -> RepositoryT:
-        """构造只绑定当前插件 schema 的类型化 repository。"""
-        return self._repository_builder.create(
-            plugin_id=self.plugin_id,
-            repository_type=repository_type,
-        )
 
     @property
     def llm(self) -> LLMHandler:
@@ -105,13 +86,6 @@ class Context:
         if self._llm is None:
             raise RuntimeError("上下文中的 LLMHandler 未正确初始化，请检查配置文件。")
         return self._llm
-
-    @property
-    def proxy_httpx(self) -> httpx.AsyncClient:
-        """返回代理 HTTP 客户端，未配置时显式报错。"""
-        if self._proxy_httpx is None:
-            raise RuntimeError("上下文中的 AsyncClient 未正确初始化，请检查代理配置。")
-        return self._proxy_httpx
 
     @property
     def mcp_tool_manager(self) -> MCPToolManager:
@@ -126,7 +100,7 @@ class BasePlugin[T: AllEvent](ABC, metaclass=PluginMeta):
 
     name: ClassVar[str]
     plugin_id: ClassVar[str]
-    migration_package: ClassVar[str | None] = None
+
     def __init__(
         self,
         context: Context,

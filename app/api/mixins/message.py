@@ -221,7 +221,7 @@ class MessageMixin(BaseMixin):
             params = self._build_params(
                 message_type="group", group_id=group_id, message=message_segment
             )
-        response = await self._call_send_msg_with_retry(params=params)
+        response = await self._call_send_action_with_retry(action="send_msg", params=params)
         if group_id is not None:
             await self._store_sent_message(
                 response=response,
@@ -229,10 +229,6 @@ class MessageMixin(BaseMixin):
                 message_segment=message_segment,
             )
         return response
-
-    async def _call_send_msg_with_retry(self, *, params: JsonObject) -> Response:
-        """调用 NapCat send_msg，并对可恢复发送失败执行配置化重试。"""
-        return await self._call_send_action_with_retry(action="send_msg", params=params)
 
     async def _call_send_action_with_retry(
         self, *, action: str, params: JsonObject
@@ -446,115 +442,16 @@ class MessageMixin(BaseMixin):
                 return forward_id
         return None
 
-    async def delete_msg(self, message_id: NapCatId) -> None:
-        """撤回消息。"""
-        await self._send_action("delete_msg", self._build_params(message_id=message_id))
-
     async def delete_msg_with_response(self, message_id: NapCatId) -> Response:
         """撤回消息并等待 NapCat 回包，以便调用方判断腾讯侧是否接受。"""
         return await self._call_action(
             "delete_msg", self._build_params(message_id=message_id)
         )
 
-    async def get_msg(self, message_id: NapCatId) -> Response:
-        """获取消息详情。"""
-        return await self._call_action("get_msg", self._build_params(message_id=message_id))
-
     async def get_forward_msg(self, message_id: NapCatId) -> Response:
         """获取合并转发消息。"""
         return await self._call_action(
             "get_forward_msg", self._build_params(message_id=message_id)
-        )
-
-    async def set_msg_emoji_like(
-        self, message_id: NapCatId, emoji_id: NapCatId, set: bool = True
-    ) -> None:
-        """设置消息表情回应。"""
-        await self._send_action(
-            "set_msg_emoji_like",
-            self._build_params(message_id=message_id, emoji_id=emoji_id, set=set),
-        )
-
-    async def fetch_emoji_like(
-        self,
-        message_id: NapCatId,
-        emoji_id: NapCatId,
-        emoji_type: NapCatId,
-        count: int = 20,
-        cookie: str = "",
-    ) -> Response:
-        """获取消息表情回应详情。"""
-        return await self._call_action(
-            "fetch_emoji_like",
-            self._build_params(
-                message_id=message_id,
-                emojiId=emoji_id,
-                emojiType=emoji_type,
-                count=count,
-                cookie=cookie,
-            ),
-        )
-
-    async def get_group_msg_history(
-        self,
-        group_id: NapCatId,
-        message_seq: NapCatId | None = None,
-        count: int = 20,
-        reverse_order: bool = False,
-        disable_get_url: bool = False,
-        parse_mult_msg: bool = True,
-        quick_reply: bool = False,
-    ) -> Response:
-        """获取群历史消息。"""
-        return await self._call_action(
-            "get_group_msg_history",
-            self._build_params(
-                group_id=group_id,
-                message_seq=message_seq,
-                count=count,
-                reverse_order=reverse_order,
-                reverseOrder=reverse_order,
-                disable_get_url=disable_get_url,
-                parse_mult_msg=parse_mult_msg,
-                quick_reply=quick_reply,
-            ),
-        )
-
-    async def get_friend_msg_history(
-        self,
-        user_id: NapCatId,
-        message_seq: NapCatId | None = None,
-        count: int = 20,
-        reverse_order: bool = False,
-        disable_get_url: bool = False,
-        parse_mult_msg: bool = True,
-        quick_reply: bool = False,
-    ) -> Response:
-        """获取好友历史消息。"""
-        return await self._call_action(
-            "get_friend_msg_history",
-            self._build_params(
-                user_id=user_id,
-                message_seq=message_seq,
-                count=count,
-                reverse_order=reverse_order,
-                reverseOrder=reverse_order,
-                disable_get_url=disable_get_url,
-                parse_mult_msg=parse_mult_msg,
-                quick_reply=quick_reply,
-            ),
-        )
-
-    async def get_record(
-        self,
-        file: str | None = None,
-        file_id: str | None = None,
-        out_format: str = "mp3",
-    ) -> Response:
-        """获取语音文件信息。"""
-        return await self._call_action(
-            "get_record",
-            self._build_params(file=file, file_id=file_id, out_format=out_format),
         )
 
     async def get_image(
@@ -564,43 +461,3 @@ class MessageMixin(BaseMixin):
         return await self._call_action(
             "get_image", self._build_params(file_id=file_id, file=file)
         )
-
-    async def send_poke(
-        self,
-        user_id: NapCatId,
-        group_id: NapCatId | None = None,
-        target_id: NapCatId | None = None,
-    ) -> None:
-        """发送戳一戳。"""
-        await self._send_action(
-            "send_poke",
-            self._build_params(user_id=user_id, group_id=group_id, target_id=target_id),
-        )
-
-    async def forward_group_single_msg(
-        self, group_id: NapCatId, message_id: NapCatId
-    ) -> None:
-        """转发单条消息到群。"""
-        await self._send_action(
-            "forward_group_single_msg",
-            self._build_params(group_id=group_id, message_id=message_id),
-        )
-
-    async def forward_friend_single_msg(
-        self, user_id: NapCatId, message_id: NapCatId
-    ) -> None:
-        """转发单条消息到私聊。"""
-        await self._send_action(
-            "forward_friend_single_msg",
-            self._build_params(user_id=user_id, message_id=message_id),
-        )
-
-    async def group_poke(self, group_id: NapCatId, user_id: NapCatId) -> None:
-        """发送群聊戳一戳。"""
-        await self._send_action(
-            "group_poke", self._build_params(group_id=group_id, user_id=user_id)
-        )
-
-    async def friend_poke(self, user_id: NapCatId) -> None:
-        """发送私聊戳一戳。"""
-        await self._send_action("friend_poke", self._build_params(user_id=user_id))

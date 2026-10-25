@@ -16,6 +16,7 @@ env/
 node_modules/
 *.tsbuildinfo
 .playwright-cli/
+.playwright-mcp/
 
 # 真实配置、密钥与个人隐私
 AGENTS.md

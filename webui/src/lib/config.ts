@@ -124,7 +124,6 @@ export function issueCount(state: ConfigState): number {
 }
 
 const TOGGLE_ROOTS = new Set([
-  pathKey(["plugins", "ai_group_chat", "vision"]),
   pathKey(["plugins", "ai_group_chat", "recent_chat"]),
 ]);
 
@@ -506,10 +505,6 @@ export const config = new ConfigController();
 
 export function useConfig<T>(selector: (state: ConfigState) => T, isEqual?: (a: T, b: T) => boolean): T {
   return useStore(config.store, selector, isEqual);
-}
-
-export function useValue(path: Path): unknown {
-  return useConfig((state) => getIn(state.draft, path));
 }
 
 export function useFieldState(path: Path): { value: unknown; dirty: boolean; issue: string | null } {

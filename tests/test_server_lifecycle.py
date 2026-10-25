@@ -9,7 +9,7 @@ from dishka import AsyncContainer
 from fastapi import FastAPI, WebSocket, status
 
 from app.config import ConfigWatcher, MyBotConfig
-from app.core.di import DirectHttpx, ProxyHttpx
+from app.core.di import DirectHttpx
 from app.core.server import NapCatServer
 from app.database import (
     DatabaseMigrator,
@@ -164,7 +164,6 @@ class NapCatServerLifespanTest(unittest.IsolatedAsyncioTestCase):
             DatabaseMigrator: _FakeMigrator(),
             MCPToolManager: mcp,
             DirectHttpx: direct_httpx,
-            ProxyHttpx | None: None,
             ConfigWatcher: _FakeConfigWatcher(),
             PostgreSQLMessageRepository: object(),
             MediaArchiveWorkerFactory: object(),

@@ -2,10 +2,8 @@
 
 import asyncio
 import re
-import tempfile
 import unittest
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
@@ -125,10 +123,10 @@ class EmptyToolManager:
 
 
 class SmokeLLM:
-    """视觉请求返回描述，正式请求返回最终 content。"""
+    """记录压缩请求，正式请求返回最终 content。"""
 
     def __init__(self) -> None:
-        self.vision_models: list[tuple[str, str]] = []
+        self.text_models: list[tuple[str, str]] = []
         self.formal_models: list[tuple[str, str]] = []
         self.formal_messages: list[list[ChatMessage]] = []
         self.formal_entered = asyncio.Event()
@@ -141,15 +139,10 @@ class SmokeLLM:
         messages: list[ChatMessage],
         provider: str,
         model_name: str,
-        max_attempts: int | None = None,
-        retry_delay_seconds: float | None = None,
-        retry_max_delay_seconds: float | None = None,
     ) -> str:
-        _ = (max_attempts, retry_delay_seconds, retry_max_delay_seconds)
-        self.vision_models.append((provider, model_name))
-        if [message.role for message in messages] != ["system", "user"]:
-            raise AssertionError("视觉请求不应携带群聊历史")
-        return "图片中写着“测试成功”。"
+        self.text_models.append((provider, model_name))
+        _ = messages
+        return "历史摘要"
 
     async def get_ai_response_with_tools(
         self,
@@ -174,7 +167,7 @@ class SmokeLLM:
                 await self.formal_release.wait()
             return LLMResponse(
                 content="图片里写着测试成功。",
-                reasoning_content="这段内容不能发到群里",
+
             )
         finally:
             self.active_formal_requests -= 1
@@ -263,90 +256,24 @@ def ai_plugin_config(manager: FakeConfigManager) -> PluginConfigView:
 
 
 def build_snapshot(
-    *,
-    revision: int = 1,
-    system_prompt: str = "角色、知识库和通用群聊要求",
-    max_context_tokens: int = 1_000_000,
-    model_name: str = "main-model",
-    include_second_group: bool = False,
-    debug_dump_messages: bool = False,
-    supports_images: bool = False,
-    retain_images: bool = False,
-    tool_result_retention: str = "off",
-    recent_chat: dict[str, int] | None = None,
-    turn_instruction: str | None = None,
+    *, revision: int = 1, system_prompt: str = "角色、知识库和通用群聊要求",
+    max_context_tokens: int = 1_000_000, model_name: str = "main-model",
+    include_second_group: bool = False, retain_images: bool = False,
+    tool_result_retention: str = "off", recent_chat: dict[str, int] | None = None,
 ) -> PluginConfigSnapshot:
-    """构造已经读取提示词文件的 AI 配置快照。"""
-    group = AIGroupConfig(
-        id="40000",
-        system_prompt_file="roles/default.md",
-        max_context_tokens=max_context_tokens,
-    )
-    group_configs = [group]
-    if include_second_group:
-        group_configs.append(
-            AIGroupConfig(
-                id="40001",
-                system_prompt_file="roles/default.md",
-                max_context_tokens=max_context_tokens,
-            )
-        )
+    """构造已读取人格、知识库和通用要求的配置快照。"""
+    groups = [AIGroupConfig(id=group_id, system_prompt_file="roles/default.md", max_context_tokens=max_context_tokens)
+              for group_id in (["40000", "40001"] if include_second_group else ["40000"])]
     source = build_ai_group_chat_config(
-        supports_images=supports_images,
-        provider="main-vendor",
-        model_name=model_name,
-        overrides={
-            **(
-                {
-                    "vision": {
-                        "model": {
-                            "provider": "vision-vendor",
-                            "name": "vision-model",
-                        },
-                        "system_prompt_file": "vision/system.md",
-                        "user_prompt_file": "vision/user.md",
-                        "retain_descriptions": True,
-                    }
-                }
-                if not supports_images
-                else {}
-            ),
-            "images": {"retain_images": retain_images},
-            "show_reasoning": False,
-            "tool_result_retention": tool_result_retention,
-            "debug_dump_messages": debug_dump_messages,
-            "recent_chat": recent_chat,
-            "turn_instruction_file": (
-                "turn_instruction.md" if turn_instruction is not None else None
-            ),
-            "groups": group_configs,
-        },
+        provider="main-vendor", model_name=model_name,
+        overrides={"images": {"retain_images": retain_images}, "tool_result_retention": tool_result_retention,
+                   "recent_chat": recent_chat, "groups": groups},
     )
     materialized = MaterializedAIGroupChatConfig(
-        source=source,
-        groups=tuple(
-            MaterializedAIGroupConfig(
-                source=group_config,
-                system_prompt=system_prompt,
-            )
-            for group_config in group_configs
-        ),
-        vision_system_prompt=(
-            "只描述可见事实。" if source.vision is not None else None
-        ),
-        vision_user_prompt=(
-            "结合当前问题描述图片。" if source.vision is not None else None
-        ),
-        turn_instruction=turn_instruction,
+        source=source, groups=tuple(MaterializedAIGroupConfig(source=group, system_prompt=system_prompt) for group in groups),
     )
-    return PluginConfigSnapshot(
-        revision=revision,
-        ai_group_chat=materialized,
-        group_notice=None,
-        auto_unban=None,
-        recall_bot_image=None,
-        referenced_files=frozenset(),
-    )
+    return PluginConfigSnapshot(revision=revision, ai_group_chat=materialized,
+                                group_notice=None, auto_unban=None, recall_bot_image=None, referenced_files=frozenset())
 
 
 def build_event(
@@ -411,7 +338,7 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         plugin = AIGroupChatPlugin(
             context=cast(Context, context),
             plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot(
-                supports_images=True,
+
                 max_context_tokens=9000,
                 tool_result_retention="full",
             ))),
@@ -479,7 +406,7 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         context = SmokeContext()
         plugin = AIGroupChatPlugin(
             context=cast(Context, context),
-            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot(supports_images=True))),
+            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
             consumers_count=1, stop_timeout_seconds=1,
         )
         event = build_event().model_copy(update={"message": [At.new("10000"), Text.new("hello")]})
@@ -495,36 +422,23 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await plugin.stop_consumers()
 
-    async def test_non_image_main_model_uses_internal_vision_tool(self) -> None:
-        """独立视觉模型描述图片，正式回复始终由主模型生成。"""
-        smoke_context = SmokeContext()
-        plugin = AIGroupChatPlugin(
-            context=cast(Context, smoke_context),
-            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
-            consumers_count=1,
-            stop_timeout_seconds=1,
-        )
+    async def test_current_images_go_directly_to_main_model(self) -> None:
+        """当前图片原始字节直达主模型，没有第二次描述请求或默认长期保存。"""
+        context = SmokeContext()
+        plugin = AIGroupChatPlugin(context=cast(Context, context),
+            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())), consumers_count=1, stop_timeout_seconds=1)
         try:
             handled = await plugin.run(build_event())
         finally:
             await plugin.stop_consumers()
-
         self.assertTrue(handled)
-        self.assertEqual(smoke_context.bot.image_calls, [(None, "smoke.png")])
-        self.assertEqual(
-            smoke_context.llm.vision_models,
-            [("vision-vendor", "vision-model")],
-        )
-        self.assertEqual(
-            smoke_context.llm.formal_models,
-            [("main-vendor", "main-model")],
-        )
-        request_text = "\n".join(
-            message.text or "" for message in smoke_context.llm.formal_messages[0]
-        )
-        self.assertIn("系统生成，不是用户原话", request_text)
-        self.assertIn("图片中写着“测试成功”", request_text)
-        self.assertEqual(smoke_context.bot.sent_texts, ["图片里写着测试成功。"])
+        self.assertEqual(context.llm.text_models, [])
+        self.assertEqual(context.llm.formal_models, [("main-vendor", "main-model")])
+        self.assertEqual([image for message in context.llm.formal_messages[0] for image in message.image or []], [b"smoke-image"])
+        saved = context.conversation_contexts.get(key=conversation_key())
+        assert saved is not None
+        self.assertTrue(all(not message.image for message in saved.messages_lst))
+        self.assertEqual(context.bot.sent_texts, ["图片里写着测试成功。"])
 
     async def test_direct_multimodal_image_can_remain_in_persistent_context(
         self,
@@ -535,7 +449,7 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
             context=cast(Context, smoke_context),
             plugin_config=ai_plugin_config(
                 FakeConfigManager(
-                    build_snapshot(supports_images=True, retain_images=True)
+                    build_snapshot( retain_images=True)
                 )
             ),
             consumers_count=1,
@@ -547,7 +461,7 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
             await plugin.stop_consumers()
 
         self.assertTrue(handled)
-        self.assertEqual(smoke_context.llm.vision_models, [])
+        self.assertEqual(smoke_context.llm.text_models, [])
         direct_message = next(
             message
             for message in smoke_context.llm.formal_messages[0]
@@ -566,10 +480,10 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_recent_chat_and_turn_instruction_stay_out_of_persistent_context(
+    async def test_recent_chat_stays_out_of_persistent_context(
         self,
     ) -> None:
-        """最近群聊和发言要求只随本轮请求发送，长期上下文只保存 @ 消息与回复。"""
+        """最近群聊只随本轮请求发送，长期上下文只保存 @ 消息与回复。"""
         smoke_context = SmokeContext()
         smoke_context.conversation_contexts.started_at = datetime.fromtimestamp(
             1_777_132_000, tz=UTC
@@ -586,14 +500,13 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
                 occurred_at=1_777_132_800,
             ),
         ]
-        instruction = "像群友一样随口回一两句。"
         plugin = AIGroupChatPlugin(
             context=cast(Context, smoke_context),
             plugin_config=ai_plugin_config(
                 FakeConfigManager(
                     build_snapshot(
                         recent_chat={"max_messages": 20, "max_chars_per_message": 0},
-                        turn_instruction=instruction,
+
                     )
                 )
             ),
@@ -607,7 +520,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         request = smoke_context.llm.formal_messages[0]
-        self.assertEqual(request[-1], ChatMessage(role="system", text=instruction))
+        self.assertEqual([message.role for message in request].count("system"), 1)
+        self.assertEqual(request[0].role, "system")
         request_text = "\n".join(message.text or "" for message in request)
         self.assertIn("刚才在聊食堂涨价", request_text)
         self.assertNotIn("重启前的旧话题", request_text)
@@ -620,7 +534,6 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("请看图回答", committed_text)
         self.assertIn("图片里写着测试成功。", committed_text)
         self.assertNotIn("刚才在聊食堂涨价", committed_text)
-        self.assertNotIn(instruction, committed_text)
 
     async def test_same_group_requests_use_isolated_context_and_commit_by_completion(
         self,
@@ -636,16 +549,11 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         plugin = AIGroupChatPlugin(
             context=cast(Context, smoke_context),
             plugin_config=ai_plugin_config(
-                FakeConfigManager(build_snapshot(debug_dump_messages=True))
+                FakeConfigManager(build_snapshot())
             ),
             consumers_count=1,
             stop_timeout_seconds=1,
         )
-        dump_directory = tempfile.TemporaryDirectory()
-        self.addCleanup(dump_directory.cleanup)
-        runtime = plugin._current_runtime()  # pyright: ignore[reportPrivateUsage]
-        assert runtime is not None
-        runtime.debug_dumper.root_dir = Path(dump_directory.name)
         first = asyncio.create_task(plugin.run(build_event("30001")))
         second: asyncio.Task[bool] | None = None
         try:
@@ -724,10 +632,6 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(fast_user_index, fast_reply_index)
         self.assertLess(fast_reply_index, slow_user_index)
         self.assertLess(slow_user_index, slow_reply_index)
-        dump_files = list(Path(dump_directory.name).glob("40000/*.md"))
-        self.assertEqual(len(dump_files), 1)
-        dump_content = dump_files[0].read_text(encoding="utf-8")
-        self.assertLess(dump_content.index("回复 30002"), dump_content.index("回复 30001"))
 
     async def test_different_groups_can_run_in_parallel(self) -> None:
         """不同群使用不同锁，正式请求可以同时进行。"""
@@ -781,8 +685,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
                 group=group,
                 key=key,
             )
-            persistent.build_chatmessage(
-                message=ChatMessage(role="assistant", text="压缩前历史")
+            persistent.add_msg(
+                msg=ChatMessage(role="assistant", text="压缩前历史")
             )
             base_revision = persistent.revision
             fast_temporary = persistent.fork()
@@ -906,6 +810,53 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             await plugin.stop_consumers()
+
+    async def test_disabling_image_retention_before_commit_clears_inflight_images(self) -> None:
+        """热停用图片保留后，普通追加和压缩替换都不重新写入旧请求的图片。"""
+        for compress_history in (False, True):
+            with self.subTest(compress_history=compress_history):
+                budget = 4000 if compress_history else 1_000_000
+                manager = FakeConfigManager(build_snapshot(
+                    retain_images=True, max_context_tokens=budget,
+                ))
+                context = SmokeContext()
+                release = asyncio.Event()
+                plugin = AIGroupChatPlugin(
+                    context=cast(Context, context),
+                    plugin_config=ai_plugin_config(manager),
+                    consumers_count=1, stop_timeout_seconds=1,
+                )
+                inflight: asyncio.Task[bool] | None = None
+                try:
+                    self.assertTrue(await plugin.run(build_event("31001")))
+                    saved = context.conversation_contexts.get(key=conversation_key())
+                    assert saved is not None
+                    self.assertTrue(any(message.image for message in saved.messages_lst))
+                    if compress_history:
+                        saved.add_msg(ChatMessage(role="user", text="待压缩的旧记录" * 2000))
+
+                    context.llm.formal_entered.clear()
+                    context.llm.formal_release = release
+                    inflight = asyncio.create_task(plugin.run(build_event("31002")))
+                    await asyncio.wait_for(context.llm.formal_entered.wait(), timeout=1)
+                    manager.plugins = build_snapshot(
+                        revision=2, retain_images=False, max_context_tokens=budget,
+                    )
+                    release.set()
+                    self.assertTrue(await inflight)
+
+                    committed = context.conversation_contexts.get(key=conversation_key())
+                    assert committed is not None
+                    self.assertTrue(all(not message.image for message in committed.messages_lst))
+                    self.assertTrue(any("31002" in (message.text or "") for message in committed.messages_lst))
+                    self.assertEqual(committed.messages_lst[-1].text, "图片里写着测试成功。")
+                    self.assertTrue(any(message.image for message in context.llm.formal_messages[-1]))
+                    self.assertEqual(bool(context.llm.text_models), compress_history)
+                finally:
+                    release.set()
+                    if inflight is not None and not inflight.done():
+                        await inflight
+                    await plugin.stop_consumers()
 
     async def test_active_request_keeps_old_runtime_and_next_uses_new_runtime(
         self,

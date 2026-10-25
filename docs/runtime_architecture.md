@@ -36,28 +36,30 @@ PostgreSQL 保存入站和出站群消息、撤回字段及顶层图片和视频
 
 ## 插件与数据库
 
-插件使用稳定 `plugin_id`。核心群消息由窄接口读取和写入；插件不能写核心表。需要私有数据的插件在 `plugin_<plugin_id>` schema 中维护自己的表、Alembic migration 和类型化 repository。`Context.create_repository(...)` 只提供绑定插件身份的短生命周期 session factory，业务代码不接触原始 `AsyncSession`。
+插件使用稳定 `plugin_id`，通过 `GroupMessageReader` 读取当前机器人和群的核心消息，写入由运行期核心持久化服务负责。业务代码不接触原始 `AsyncSession`。
 
 当前插件被视为可信的本地代码；单一数据库用户提供的是代码接口边界，不是不可信插件的权限沙箱。
 
 ## LLM、MCP 与本地工具
 
-`LLMHandler` 按 provider ID 查找启动时创建的 OpenAI 兼容服务。插件通过 `{ provider, name }` 选择模型。`OpenAIService` 负责转换 `ChatMessage`，并把正文、工具调用和 reasoning 收敛为内部结构。
+`LLMHandler` 按 provider ID 查找启动时创建的服务。`LLMProviderConfig.api_format` 明确选择 `chat_completions` 或 `responses`，分别创建 `ChatCompletionsService` 与 `ResponsesService`；插件通过 `{ provider, name }` 选择模型。两个适配器分别转换 `ChatMessage`、图片和工具调用，不自动切换协议。
 
-模型请求最终失败由 `LLMHandler` 转换为 `LLMRequestError`，反馈只包含错误分类和状态码，异常链不携带供应商原始响应。重试日志记录尝试次数及异常类型，日志诊断不打印局部变量。AI 群聊在一次请求边界向当前消息反馈预期失败；代码缺陷继续向外报告。
+Chat Completions 从 `message.content` 提取正式回复，缺少正文时读取 `message.refusal`，不猜测附加的 reasoning 字段；工具调用的 `extra_content` 原样传回以保留签名。Responses 将文字、图片、函数调用及结果转换成各自的输入项；以 `store=False` 执行请求，保留本轮原始输出项用于工具续问，并请求 `reasoning.encrypted_content` 以维持协议状态，不使用 `previous_response_id`。这些原始输出项不作为群回复或长期上下文保存。
 
-本地工具由 `LLMToolRegistry` 注册。NapCat 群聊工具绑定当前事件的机器人和群，不允许模型传入其他群号。MCP manager 启动配置中的 stdio server，并以 `mcp__{server}__{tool}` 暴露工具。
+模型响应的结构或内容异常会直接结束本轮，不追加纠错提示；只有网络连接失败、超时、限流和 HTTP 5xx 按配置重试，重试输入保持不变。模型请求最终失败由 `LLMHandler` 转换为 `LLMRequestError`，反馈只包含错误分类和状态码，异常链不携带供应商原始响应。重试日志记录尝试次数及异常类型，日志诊断不打印局部变量。AI 群聊在一次请求边界向当前消息反馈预期失败；代码缺陷继续向外报告。
+
+本地工具由 `LLMToolRegistry` 注册。NapCat 群聊工具绑定当前事件的机器人和群，不允许模型传入其他群号。`app/api/` 保留运行期实际使用的 Action 封装，工具层负责业务组合。MCP manager 连接配置中的 stdio 或 Streamable HTTP server，并以 `mcp__{server}__{tool}` 暴露工具。
 
 MCP 每个服务的初始化和工具调用分别受 `initialization_timeout_seconds`、`call_timeout_seconds` 限制。初始化失败释放已经建立的资源；工具调用超时返回结构化错误。结构化工具输出以 `{is_error, data}` 传递，保留 MCP 协议中的失败标记。
 
 AI 群聊由以下组件组成：
 
 - `GroupChatMessageBuilder`：把当前消息整理为聊天记录行（时间、发送者、消息 ID、引用块、正文），并读取引用和图片。配置 `recent_chat` 时，经 `GroupMessageReader.list_around` 读取当前消息之前的群聊，只保留 `ConversationContextStore.started_at` 之后的消息，由 `RecentChatFormatter` 整理为临时记录；该记录只进入本轮请求，不进入长期上下文。
-- `VisionDescriptionTool`：按 `images.delivery_mode` 把原图交给主模型或生成事实描述，并执行显式超限策略。
-- `GroupChatToolLoop`：执行主模型、工具、回复标记解析和消息发送。配置 `turn_instruction_file` 时，每次请求都把发言要求作为 system 消息附加在末尾（本轮纠错消息仍排在其后），不写入长期上下文。
-- `max_context_tokens` 只约束长期上下文：每轮开始检查已保存的系统提示词与历史；超限时压缩历史，摘要仍过长则继续缩减。工具定义、本轮输入（含最近群聊记录）、发言要求、工具结果、推理、图片、纠错消息及压缩请求属于临时上下文，可超出该预算。工具结果完整交付，按配置保存后若使历史超限，下一轮再压缩。
+- 图片读取服务按数量、大小、宽高和 MIME 配置校验原图，超限时只执行 `error` 或 `skip`。通过读取的原始字节直接进入主模型请求，图片是否进入长期上下文由 `retain_images` 控制。
+- 视频输入仅用于当前轮，适用于支持 `video_url` 的 Chat Completions 兼容服务；Responses 遇到视频输入时明确报错，不转码或降级。启用视频但本轮没有视频时，文字与图片仍可正常发送。
+- `GroupChatToolLoop`：执行主模型、工具、回复标记解析和消息发送。系统提示词固定按人格、知识库、通用要求组成。无效 `<Reply>`、`<At>` 标记会把发送失败事实返回模型继续处理，不附加重写指令。
+- `max_context_tokens` 只约束长期上下文：每轮开始检查已保存的系统提示词与历史；超限时压缩历史，摘要仍过长则继续缩减。工具定义、本轮输入（含最近群聊记录）、工具结果、图片及压缩请求属于临时上下文，可超出该预算。工具结果完整交付，按配置保存后若使历史超限，下一轮再压缩。
 - `GroupChatContextCompressor`：把历史整理为独立摘要，并保留当前输入的消息与图片边界。空摘要或无法缩短的摘要会反馈失败，原历史保留供后续重试；压缩通知发送失败只记录日志。Provider 自身的上下文窗口限制继续生效。
-- `AIGroupChatDebugDumper`：向 `debug_dump_directory` 配置的目录写调试记录，不参与恢复。
 
 AI 插件为每个群保留一把只保护长期上下文快照、提交和重置的 `asyncio.Lock`。同群事件使用各自的临时上下文并发执行，完成后短暂持锁，按完成顺序提交整轮消息。并发压缩只能在其基础版本未变化时替换历史，否则只追加当前轮，不能覆盖先完成的请求。system prompt、知识库或通用要求变化后，旧配置下尚未完成的请求不会写入新上下文；其他配置变化保留上下文，并在下一轮使用新值。
 
@@ -68,8 +70,8 @@ AI 插件为每个群保留一把只保护长期上下文快照、提交和重�
 - `config.example/`：示例配置引用的默认提示词（默认人格「耄耋」），结构与 `config/` 一致，复制后使用；不作为已部署环境的配置来源。
 - `webui/`：配置控制台前端工程（React + TypeScript + Vite，原生 CSS 主题变量，CodeMirror 6 编辑文本），构建产物由 FastAPI 伺服。
 - `app/webui/`：WebUI 后端（`/api/*` 配置与文本文件路由、tomlkit 保注释写回、SPA 挂载）。
-- `images/`：永久群图片。
-- `logs/`：日志和 AI 调试转储。
+- `images/`：永久群图片与视频。
+- `logs/`：结构化运行日志。
 
 WebUI 与主服务同端口，不另建配置状态。配置表单停止编辑 800ms 后自动校验并写回，文本文件停止编辑 1 秒后自动写回；每次请求都使用读取时的内容哈希，外部修改发生后不会被静默覆盖。文件接口允许访问 `config/` 内任意扩展名的 UTF-8 文本，因此可在 TOML 语法损坏时直接修复 `mybot.toml`；二进制文件和目录逃逸仍被拒绝。Markdown 文件使用语法高亮编辑器，并可并排实时预览 GFM 渲染结果。生产 Compose 允许 MyBot 写入配置目录，migration 服务仍使用只读挂载。
 

@@ -12,7 +12,7 @@ import { fieldPath, type FieldDef, type SectionDef } from "./types";
 export interface FieldEntry {
   path: PathSeg[];
   label: string;
-  /** 所在分节或条目，例如「图片处理」「Provider deepseek」。 */
+  /** 所在分节或条目，例如「图片处理」「Provider main」。 */
   scope: string;
   field: FieldDef;
   page: PageKey;

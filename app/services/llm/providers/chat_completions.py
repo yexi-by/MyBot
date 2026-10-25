@@ -1,9 +1,8 @@
-"""OpenAI 协议 LLM 服务实现。"""
+"""OpenAI Chat Completions 格式适配。"""
 
 import base64
 import json
-import re
-from typing import Final, cast, override
+from typing import cast, override
 
 from openai import AsyncOpenAI
 from openai.types.chat import (
@@ -32,30 +31,10 @@ from ..schemas import (
     LLMToolDefinition,
 )
 
-REASONING_FIELD_NAMES: Final[tuple[str, ...]] = (
-    "reasoning_content",
-    "reasoning",
-    "reasoning_summary",
-    "reasoning_text",
-    "reasoning_details",
-    "thinking",
-    "thought",
-)
-REASONING_TEXT_KEYS: Final[tuple[str, ...]] = (
-    "reasoning_content",
-    "content",
-    "text",
-    "summary",
-    "output_text",
-    "thinking",
-    "thought",
-)
-FINISH_REASON_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
-REASONING_DETAILS_ADAPTER: TypeAdapter[list[JsonObject]] = TypeAdapter(list[JsonObject])
 EXTRA_CONTENT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 
-class OpenAIService(LLMProvider):
+class ChatCompletionsService(LLMProvider):
     """通过 OpenAI Chat Completions 协议访问模型服务。"""
 
     def __init__(self, client: AsyncOpenAI) -> None:
@@ -78,26 +57,20 @@ class OpenAIService(LLMProvider):
         content: object = getattr(message, "content", None)
         if content is not None and not isinstance(content, str):
             raise LLMResponseError("invalid_content", "模型响应正文类型无效")
-        raw_reasoning_details: object = getattr(message, "reasoning_details", None)
-        try:
-            reasoning_details = (
-                REASONING_DETAILS_ADAPTER.validate_python(raw_reasoning_details, strict=True)
-                if raw_reasoning_details is not None else None
-            )
-        except ValidationError:
-            raise LLMResponseError(
-                "invalid_reasoning_details", "模型响应思考明细结构无效"
-            ) from None
+        refusal: object = getattr(message, "refusal", None)
+        if refusal is not None and not isinstance(refusal, str):
+            raise LLMResponseError("invalid_refusal", "模型拒绝回复类型无效")
+        if not content:
+            content = refusal
         if getattr(message, "function_call", None) is not None:
             raise LLMResponseError(
                 "unsupported_tool_call", "模型响应使用了未支持的旧工具调用格式"
             )
-        finish_reason = self._normalize_finish_reason(
-            getattr(choice, "finish_reason", None)
-        )
-        native_finish_reason = self._normalize_finish_reason(
-            getattr(choice, "native_finish_reason", None)
-        )
+        finish_reason: object = getattr(choice, "finish_reason", None)
+        if not isinstance(finish_reason, str) or finish_reason not in {"stop", "tool_calls"}:
+            raise LLMResponseError(
+                "invalid_finish_reason", "Chat Completions 响应未以完整状态结束"
+            )
         raw_calls: object = getattr(message, "tool_calls", None)
         if raw_calls is not None and not isinstance(raw_calls, list):
             raise LLMResponseError("invalid_tool_calls", "模型响应工具调用列表无效")
@@ -139,22 +112,11 @@ class OpenAIService(LLMProvider):
             tool_calls.append(tool_call)
         decoded = LLMResponse(
             content=content,
-            reasoning_content=self._extract_reasoning_content(message),
-            reasoning_details=reasoning_details,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
-            native_finish_reason=native_finish_reason,
         )
         validate_response(decoded, tools_allowed=tools_allowed)
         return decoded
-
-    def _normalize_finish_reason(self, value: object) -> str | None:
-        """只保留短 ASCII 状态标记，防止上游错误正文混入状态或日志。"""
-        if value is None:
-            return None
-        if not isinstance(value, str) or FINISH_REASON_PATTERN.fullmatch(value) is None:
-            raise LLMResponseError("invalid_finish_reason", "模型响应结束状态格式无效")
-        return value.lower()
 
     def _format_chat_messages(
         self, messages: list[ChatMessage]
@@ -221,10 +183,6 @@ class OpenAIService(LLMProvider):
                     }
                     for tool_call in msg.tool_calls
                 ]
-            if msg.role == "assistant" and msg.reasoning_content is not None:
-                raw_message["reasoning_content"] = msg.reasoning_content
-            if msg.role == "assistant" and msg.reasoning_details is not None:
-                raw_message["reasoning_details"] = msg.reasoning_details
             chat_messages.append(
                 cast(ChatCompletionMessageParam, cast(object, raw_message))
             )
@@ -247,63 +205,6 @@ class OpenAIService(LLMProvider):
             }
             formatted_tools.append(cast(ChatCompletionToolParam, cast(object, raw_tool)))
         return formatted_tools
-
-    def _extract_reasoning_content(
-        self, message: ChatCompletionMessage
-    ) -> str | None:
-        """提取模型服务显式返回的可展示思考内容。"""
-        candidates: list[object] = []
-        raw_extra = cast(object, message.model_extra)
-        if isinstance(raw_extra, dict):
-            extra_items = cast(dict[str, object], raw_extra)
-            candidates.extend(
-                extra_items.get(field_name)
-                for field_name in REASONING_FIELD_NAMES
-            )
-        raw_dump = cast(
-            object, message.model_dump(mode="json", exclude_none=True)
-        )
-        if isinstance(raw_dump, dict):
-            dumped_items = cast(dict[str, object], raw_dump)
-            candidates.extend(
-                dumped_items.get(field_name)
-                for field_name in REASONING_FIELD_NAMES
-            )
-        reasoning_parts: list[str] = []
-        for candidate in candidates:
-            reasoning_text = self._extract_reasoning_text(candidate)
-            if reasoning_text is not None:
-                reasoning_parts.append(reasoning_text)
-        if not reasoning_parts:
-            return None
-        return "\n".join(dict.fromkeys(reasoning_parts))
-
-    def _extract_reasoning_text(self, value: object) -> str | None:
-        """从常见 reasoning 字段形态中提取文本。"""
-        if isinstance(value, str):
-            stripped_value = value.strip()
-            if stripped_value:
-                return stripped_value
-            return None
-        if isinstance(value, list):
-            text_parts: list[str] = []
-            # reasoning 明细数组来自服务端扩展字段，入口处收窄为 object 列表逐项解析。
-            items = cast(list[object], value)
-            for item in items:
-                item_text = self._extract_reasoning_text(item)
-                if item_text is not None:
-                    text_parts.append(item_text)
-            if text_parts:
-                return "\n".join(text_parts)
-            return None
-        if isinstance(value, dict):
-            raw_items = cast(dict[str, object], value)
-            for key in REASONING_TEXT_KEYS:
-                item_text = self._extract_reasoning_text(raw_items.get(key))
-                if item_text is not None:
-                    return item_text
-            return None
-        return None
 
     @override
     async def get_ai_response(

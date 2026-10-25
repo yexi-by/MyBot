@@ -7,7 +7,7 @@ from typing import Final, cast
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
-from app.services.llm.providers.openai import OpenAIService
+from app.services.llm.providers.chat_completions import ChatCompletionsService
 from app.services.llm.schemas import ChatMessage
 
 PNG_1X1_BASE64: Final[str] = (
@@ -16,7 +16,7 @@ PNG_1X1_BASE64: Final[str] = (
 PNG_1X1_BYTES: Final[bytes] = base64.b64decode(PNG_1X1_BASE64)
 
 
-class InspectableOpenAIService(OpenAIService):
+class InspectableChatCompletionsService(ChatCompletionsService):
     """向测试公开聊天消息格式化结果。"""
 
     def format_chat_messages(
@@ -32,7 +32,7 @@ class OpenAIChatMessageFormattingTest(unittest.TestCase):
     def setUp(self) -> None:
         """创建只用于消息格式化的 OpenAI 服务。"""
         fake_client = object()
-        self.service = InspectableOpenAIService(
+        self.service = InspectableChatCompletionsService(
             client=cast(AsyncOpenAI, fake_client)
         )
 

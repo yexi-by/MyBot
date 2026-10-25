@@ -1,4 +1,4 @@
-/** 插件页字段表、启用时写入的完整初始配置，以及 AI 群聊图片策略的联动规则。 */
+/** 插件页字段表与启用时写入的完整初始配置。 */
 
 import { getIn, setIn } from "@/lib/path";
 import type { JsonObject, PathSeg, PluginId } from "@/lib/types";
@@ -12,7 +12,6 @@ import {
   num,
   provider,
   select,
-  seg,
   sw,
   tags,
   text,
@@ -80,82 +79,10 @@ export function executionSection(id: PluginId): SectionDef {
 const AI: PathSeg[] = ["plugins", "ai_group_chat"];
 const at = (...rest: PathSeg[]): PathSeg[] => [...AI, ...rest];
 
-const VISION = at("vision");
-const SUPPORTS_IMAGES = at("model", "supports_images");
-const DELIVERY = at("images", "delivery_mode");
-const OVERSIZE = at("images", "oversize_behavior");
-const RETAIN_IMAGES = at("images", "retain_images");
-
 export const DEFAULT_ROLE_PROMPT = "ai_group_chat/prompts/roles/maodie.md";
 
 function firstProvider(config: JsonObject): string {
   return Object.keys((getIn(config, ["llm", "providers"]) as JsonObject | undefined) ?? {})[0] ?? "";
-}
-
-function defaultVision(config: JsonObject): JsonObject {
-  const provider = String(getIn(config, at("model", "provider")) ?? "") || firstProvider(config);
-  return {
-    model: { provider, name: "" },
-    system_prompt_file: "ai_group_chat/prompts/vision/system.md",
-    user_prompt_file: "ai_group_chat/prompts/vision/user.md",
-    max_attempts: 5,
-    retry_delay_seconds: 0.25,
-    retry_max_delay_seconds: 0,
-    retain_descriptions: true,
-  };
-}
-
-const hasVision = (config: JsonObject) => getIn(config, VISION) != null;
-
-/** 开启视觉模型：图片改为先生成描述。 */
-function enableVision(config: JsonObject): JsonObject {
-  let next = setIn(config, VISION, defaultVision(config));
-  next = setIn(next, DELIVERY, "vision");
-  next = setIn(next, OVERSIZE, "skip");
-  return setIn(next, RETAIN_IMAGES, false);
-}
-
-/** 关闭视觉模型：图片改为原图直达（开关只在主模型支持图片时可用）。 */
-function disableVision(config: JsonObject): JsonObject {
-  let next = config;
-  if (getIn(next, DELIVERY) === "vision") next = setIn(next, DELIVERY, "direct");
-  if (getIn(next, OVERSIZE) === "describe") next = setIn(next, OVERSIZE, "skip");
-  return setIn(next, VISION, null);
-}
-
-function applySupportsImages(config: JsonObject, value: unknown): JsonObject {
-  let next = setIn(config, SUPPORTS_IMAGES, value === true);
-  if (value === true) {
-    return hasVision(next) ? next : setIn(next, DELIVERY, "direct");
-  }
-  if (!hasVision(next)) next = setIn(next, VISION, defaultVision(next));
-  next = setIn(next, DELIVERY, "vision");
-  next = setIn(next, OVERSIZE, "skip");
-  return setIn(next, RETAIN_IMAGES, false);
-}
-
-function applyDeliveryMode(config: JsonObject, value: unknown): JsonObject {
-  let next = setIn(config, DELIVERY, value);
-  if (value === "vision") {
-    if (!hasVision(next)) next = setIn(next, VISION, defaultVision(next));
-    next = setIn(next, RETAIN_IMAGES, false);
-    if (getIn(next, OVERSIZE) === "describe") next = setIn(next, OVERSIZE, "skip");
-    return next;
-  }
-  if (getIn(next, SUPPORTS_IMAGES) !== true) next = setIn(next, SUPPORTS_IMAGES, true);
-  if (hasVision(next) && getIn(next, OVERSIZE) !== "describe") next = setIn(next, OVERSIZE, "describe");
-  return next;
-}
-
-function applyOversize(config: JsonObject, value: unknown): JsonObject {
-  let next = setIn(config, OVERSIZE, value);
-  if (value !== "describe") {
-    if (getIn(next, DELIVERY) === "direct" && hasVision(next)) next = setIn(next, VISION, null);
-    return next;
-  }
-  if (!hasVision(next)) next = setIn(next, VISION, defaultVision(next));
-  next = setIn(next, SUPPORTS_IMAGES, true);
-  return setIn(next, DELIVERY, "direct");
 }
 
 export const GROUP_FIELDS: FieldDef[] = [
@@ -173,14 +100,11 @@ const AI_MODEL: SectionDef = {
   id: "model",
   title: "主模型",
   base: at("model"),
-  desc: "群聊对话使用的聊天模型。",
+  desc: "群聊对话使用的模型；图片以原始内容随请求发送，需选择支持图片输入的模型。",
+  cols: 2,
   fields: [
     provider("provider"),
     model("name", "provider"),
-    sw("supports_images", "支持图片输入", {
-      desc: "只声明模型能力；原图是否直达由图片交付方式决定",
-      apply: applySupportsImages,
-    }),
   ],
 };
 
@@ -202,52 +126,17 @@ const AI_RECENT: SectionDef = {
   ],
 };
 
-const AI_VISION: SectionDef = {
-  id: "vision",
-  title: "视觉模型",
-  base: VISION,
-  desc: "图片交付方式为「先生成图片描述」，或超限图片交给视觉模型描述时才会调用。",
-  optional: {
-    switchLabel: "开启视觉模型",
-    offText: "未配置视觉模型：图片只以原图交给主模型。",
-    enable: enableVision,
-    disable: disableVision,
-    disabled: (config) =>
-      hasVision(config) && getIn(config, SUPPORTS_IMAGES) !== true
-        ? "主模型不支持图片输入时必须保留视觉模型"
-        : false,
-  },
-  fields: [
-    provider("model.provider"),
-    model("model.name", "model.provider"),
-    int("max_attempts", "最大尝试次数", { unit: "次", min: 1 }),
-    file("system_prompt_file", "系统提示词文件", { required: true, wide: true }),
-    num("retry_delay_seconds", "重试间隔", { unit: "秒", min: 0 }),
-    file("user_prompt_file", "用户提示词文件", { required: true, wide: true }),
-    num("retry_max_delay_seconds", "最大重试间隔", { unit: "秒", min: 0, zero: "不限制退避上限" }),
-    sw("retain_descriptions", "保留图片描述", { span: 3, desc: "把视觉描述写入长期上下文" }),
-  ],
-};
-
 const AI_IMAGES: SectionDef = {
   id: "images",
   title: "图片处理",
   base: at("images"),
-  desc: "群聊图片的交付方式、数量与体积限制，以及合并转发图片工具。",
+  desc: "原图直接交给主模型；配置读取限制、历史保留与合并转发图片工具。",
   fields: [
-    seg("delivery_mode", "图片交付方式", [
-      ["direct", "原图直达主模型"],
-      ["vision", "先生成图片描述"],
-    ], { span: 2, apply: applyDeliveryMode }),
-    sw("retain_images", "图片跨轮保留", {
-      desc: "开启后原图进入长期上下文",
-      disabled: (config) => (getIn(config, DELIVERY) === "direct" ? false : "仅「原图直达主模型」时可用"),
-    }),
+    sw("retain_images", "图片跨轮保留", { wide: true, desc: "开启后原图进入长期上下文" }),
     select("oversize_behavior", "超限处理", [
       ["skip", "跳过并告知模型"],
       ["error", "立即报错"],
-      ["describe", "交给视觉模型描述"],
-    ], { apply: applyOversize }),
+    ]),
     int("max_per_turn", "每轮最多图片", { unit: "张", min: 0, zero: "不限" }),
     int("max_image_bytes", "单图体积上限", { unit: "字节", min: 0, zero: "不限", bytes: true }),
     int("max_total_bytes_per_request", "单次请求总体积", { unit: "字节", min: 0, zero: "不限", bytes: true }),
@@ -260,7 +149,7 @@ const AI_IMAGES: SectionDef = {
       ["high", "high"],
     ]),
     int("fetch_concurrency", "取图并发数", { min: 1 }),
-    num("download_timeout_seconds", "下载超时", { unit: "秒", gt: 0 }),
+    num("download_timeout_seconds", "下载超时", { unit: "秒", gt: 0, wide: true }),
     tags("allowed_mime_types", "允许的 MIME 类型", { span: 3, mono: true, unique: true, placeholder: "image/png", desc: "留空接受读取器能识别并交给 provider 的全部格式", addLabel: "添加 MIME 类型" }),
     sw("forward_tool_enabled", "合并转发图片工具", { desc: "允许模型把图片打包成合并转发发出" }),
     int("forward_max_per_call", "单次转发上限", { unit: "张", min: 0, zero: "不限" }),
@@ -272,7 +161,7 @@ const AI_VIDEOS: SectionDef = {
   id: "videos",
   title: "视频输入",
   base: at("videos"),
-  desc: "把当前消息和引用消息里的视频交给主模型；需要模型与服务端支持原生视频输入。",
+  desc: "仅适用于支持 video_url 的 Chat Completions 兼容服务；Responses API 收到视频时返回不支持错误，不会自动降级。",
   fields: [
     sw("enabled", "接受视频输入", { span: 2, desc: "视频只用于当前轮，长期上下文保留文字" }),
     int("max_per_turn", "每轮视频数量", { unit: "个", min: 0, zero: "不限", desc: "优先读取当前消息" }),
@@ -287,7 +176,7 @@ const AI_BEHAVIOR: SectionDef = {
   title: "对话行为",
   base: AI,
   table: "[plugins.ai_group_chat]",
-  desc: "工具循环、提示词文件、回复方式与调试转储。",
+  desc: "工具循环、通用要求、回复方式与上下文保留。人格、知识库与通用要求共同组成固定系统提示词。",
   fields: [
     int("max_tool_rounds", "最大工具轮数", { unit: "轮", min: 1 }),
     num("token_safety_factor", "Token 安全系数", { gt: 0, desc: "估算值乘以该系数后再与预算比较" }),
@@ -298,13 +187,8 @@ const AI_BEHAVIOR: SectionDef = {
       ["summary", "summary · 名称与状态"],
       ["full", "full · 参数与完整结果"],
     ]),
-    file("turn_instruction_file", "发言要求文件", { nullable: true, wide: true, placeholder: "留空不使用", desc: "每次请求追加在最末尾的简短说话要求，不写入长期上下文" }),
     sw("allow_mention_all", "允许 @全体", { desc: "关闭时模型写出 <At>all</At> 会收到可恢复错误" }),
-    area("context_compression_notice", "上下文压缩提示语", { span: 3, desc: "压缩长期上下文前发到群里的提示" }),
-    sw("show_reasoning", "展示推理过程"),
-    sw("retain_reasoning", "推理写入上下文"),
-    sw("debug_dump_messages", "调试消息转储", { desc: "把长期上下文增量写入转储目录" }),
-    text("debug_dump_directory", "调试转储目录", { mono: true, span: 3, required: true }),
+    area("context_compression_notice", "上下文压缩提示语", { wide: true, desc: "压缩长期上下文前发到群里的提示" }),
   ],
 };
 
@@ -369,7 +253,6 @@ export const AI_ROWS_TOP: SectionDef[][] = [[AI_MODEL]];
 
 export const AI_ROWS_REST: SectionDef[][] = [
   [AI_RECENT],
-  [AI_VISION],
   [AI_IMAGES],
   [AI_VIDEOS],
   [AI_BEHAVIOR],
@@ -385,16 +268,7 @@ export const AI_SECTIONS: SectionDef[] = [...AI_ROWS_TOP, ...AI_ROWS_REST].flat(
 function defaultAIGroupChat(config: JsonObject): JsonObject {
   const provider = firstProvider(config);
   return {
-    model: { provider, name: "", supports_images: false },
-    vision: {
-      model: { provider, name: "" },
-      system_prompt_file: "ai_group_chat/prompts/vision/system.md",
-      user_prompt_file: "ai_group_chat/prompts/vision/user.md",
-      max_attempts: 5,
-      retry_delay_seconds: 0.25,
-      retry_max_delay_seconds: 0,
-      retain_descriptions: true,
-    },
+    model: { provider, name: "" },
     images: {
       max_per_turn: 0,
       fetch_concurrency: 16,
@@ -404,7 +278,6 @@ function defaultAIGroupChat(config: JsonObject): JsonObject {
       max_width: 0,
       max_height: 0,
       allowed_mime_types: [],
-      delivery_mode: "vision",
       oversize_behavior: "skip",
       image_detail: "auto",
       retain_images: false,
@@ -442,12 +315,7 @@ function defaultAIGroupChat(config: JsonObject): JsonObject {
     token_safety_factor: 1.05,
     context_compression_notice: "上下文有点长，我先整理一下记忆，稍等我几秒喵~",
     forward_reply_threshold_chars: 1000,
-    show_reasoning: false,
-    retain_reasoning: false,
-    debug_dump_messages: true,
-    debug_dump_directory: "logs/ai_group_chat_debug",
     extra_requirements_file: "ai_group_chat/prompts/extra_requirements.md",
-    turn_instruction_file: "ai_group_chat/prompts/turn_instruction.md",
     allow_mention_all: false,
     tool_result_retention: "off",
     groups: [],
@@ -494,10 +362,6 @@ export const PLUGIN_ROWS: Record<Exclude<PluginId, "ai_group_chat">, SectionDef[
   recall_bot_image: [[RECALL]],
 };
 
-export function pluginSections(id: PluginId): SectionDef[] {
-  return id === "ai_group_chat" ? AI_SECTIONS : PLUGIN_ROWS[id].flat();
-}
-
 export function defaultPluginConfig(id: PluginId, config: JsonObject): JsonObject {
   switch (id) {
     case "ai_group_chat":
@@ -520,9 +384,6 @@ export function requiredPromptFiles(config: JsonObject): Set<string> {
     if (typeof value === "string" && value.trim() !== "") files.add(value.trim());
   };
   add(ai.extra_requirements_file);
-  add(ai.turn_instruction_file);
-  add(getIn(ai, ["vision", "system_prompt_file"]));
-  add(getIn(ai, ["vision", "user_prompt_file"]));
   for (const group of (Array.isArray(ai.groups) ? ai.groups : []) as JsonObject[]) {
     add(group?.system_prompt_file);
   }
@@ -545,9 +406,6 @@ export function fileReferences(config: JsonObject): Map<string, FileReference[]>
   const ai = getIn(config, AI) as JsonObject | undefined;
   if (ai) {
     push(ai.extra_requirements_file, "通用要求", true);
-    push(ai.turn_instruction_file, "发言要求", true);
-    push(getIn(ai, ["vision", "system_prompt_file"]), "视觉系统提示词", true);
-    push(getIn(ai, ["vision", "user_prompt_file"]), "视觉用户提示词", true);
     const groups = (Array.isArray(ai.groups) ? ai.groups : []) as JsonObject[];
     groups.forEach((group, index) => {
       const name = typeof group?.id === "string" && group.id ? `群 ${group.id}` : `第 ${index + 1} 个群`;

@@ -51,7 +51,6 @@ from .events import (
     RequestEvent,
     Response,
     Sender,
-    StreamTransferResult,
 )
 from .media_archive import MediaArchiveTask, MediaType, StoredMedia
 from .segments import (
@@ -152,7 +151,6 @@ __all__ = [
     "Rps",
     "Sender",
     "Share",
-    "StreamTransferResult",
     "StoredMedia",
     "StrictModel",
     "Text",

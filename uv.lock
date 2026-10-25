@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.13"
 
 [[package]]
@@ -615,6 +615,7 @@ dependencies = [
     { name = "dishka" },
     { name = "fastapi" },
     { name = "filetype" },
+    { name = "httpx" },
     { name = "loguru" },
     { name = "mcp" },
     { name = "openai" },
@@ -642,6 +643,7 @@ requires-dist = [
     { name = "dishka", specifier = ">=1.7.2" },
     { name = "fastapi", specifier = ">=0.128.0" },
     { name = "filetype", specifier = ">=1.2.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mcp", specifier = ">=1.27.0" },
     { name = "openai", specifier = ">=2.14.0" },

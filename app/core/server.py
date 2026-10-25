@@ -27,7 +27,7 @@ from app.services.napcat import MediaArchiveWorkerFactory
 from app.utils.log import log_event, log_exception, log_run_end, log_run_start
 from app.webui import PowerController, create_webui_router, mount_webui_static
 
-from .di import DirectHttpx, ProxyHttpx
+from .di import DirectHttpx
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
 
@@ -99,7 +99,6 @@ class NapCatServer:
         runtime: PostgreSQLRuntime | None = None
         mcp_tool_manager: MCPToolManager | None = None
         direct_httpx: DirectHttpx | None = None
-        proxy_httpx: ProxyHttpx | None = None
         llm_handler: LLMHandler | None = None
         config_watcher: ConfigWatcher | None = None
         config_watcher_task: asyncio.Task[None] | None = None
@@ -109,7 +108,6 @@ class NapCatServer:
             migrator = await self.container.get(DatabaseMigrator)
             mcp_tool_manager = await self.container.get(MCPToolManager)
             direct_httpx = await self.container.get(DirectHttpx)
-            proxy_httpx = await self.container.get(ProxyHttpx | None)
             config_watcher = await self.container.get(ConfigWatcher)
             await runtime.check_connection()
             await migrator.assert_current()
@@ -184,11 +182,6 @@ class NapCatServer:
                 await close_resource(
                     resource_name="direct_httpx",
                     operation=direct_httpx.aclose,
-                )
-            if proxy_httpx is not None:
-                await close_resource(
-                    resource_name="proxy_httpx",
-                    operation=proxy_httpx.aclose,
                 )
             if runtime is not None:
                 await close_resource(

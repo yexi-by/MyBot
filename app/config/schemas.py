@@ -23,8 +23,7 @@ type LogLevelName = Literal[
     "TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"
 ]
 type ImageDetail = Literal["omit", "auto", "low", "high"]
-type ImageOversizeBehavior = Literal["error", "skip", "describe"]
-type ImageDeliveryMode = Literal["direct", "vision"]
+type ImageOversizeBehavior = Literal["error", "skip"]
 type ToolResultRetention = Literal["off", "summary", "full"]
 
 
@@ -250,6 +249,7 @@ class LoggingConfig(ConfigModel):
 class LLMProviderConfig(ConfigModel):
     """单个 OpenAI 兼容 LLM provider 配置。"""
 
+    api_format: Literal["chat_completions", "responses"]
     api_key: SecretStr | None = None
     base_url: str | None = None
     proxy: str | None = None
@@ -380,12 +380,6 @@ class ModelRef(ConfigModel):
         return cleaned_value
 
 
-class ChatModelRef(ModelRef):
-    """引用聊天模型及其图片输入能力。"""
-
-    supports_images: bool
-
-
 class AIGroupConfig(ConfigModel):
     """单个群的 AI 对话配置。"""
 
@@ -416,28 +410,6 @@ class AIGroupConfig(ConfigModel):
         return cleaned_value or None
 
 
-class AIVisionConfig(ConfigModel):
-    """独立视觉描述工具配置。"""
-
-    model: ModelRef
-    system_prompt_file: str
-    user_prompt_file: str
-    max_attempts: int = Field(ge=1)
-    retry_delay_seconds: float = Field(ge=0)
-    retry_max_delay_seconds: float = Field(ge=0)
-    retain_descriptions: bool
-
-    @model_validator(mode="after")
-    def validate_retry_delays(self) -> "AIVisionConfig":
-        """最大退避不能小于初始退避。"""
-        if (
-            self.retry_max_delay_seconds > 0
-            and self.retry_max_delay_seconds < self.retry_delay_seconds
-        ):
-            raise ValueError("retry_max_delay_seconds 不能小于初始重试延迟")
-        return self
-
-
 class AIImageConfig(ConfigModel):
     """AI 群聊图片读取和合并转发配置。"""
 
@@ -449,7 +421,6 @@ class AIImageConfig(ConfigModel):
     max_width: int = Field(ge=0)
     max_height: int = Field(ge=0)
     allowed_mime_types: tuple[str, ...]
-    delivery_mode: ImageDeliveryMode
     oversize_behavior: ImageOversizeBehavior
     image_detail: ImageDetail
     retain_images: bool
@@ -527,8 +498,7 @@ class AITokenEstimatorConfig(ConfigModel):
 class AIGroupChatConfig(ConfigModel):
     """AI 群聊插件配置。"""
 
-    model: ChatModelRef
-    vision: AIVisionConfig | None = None
+    model: ModelRef
     images: AIImageConfig
     videos: AIVideoConfig
     formatting: AIMessageFormattingConfig
@@ -540,54 +510,19 @@ class AIGroupChatConfig(ConfigModel):
     token_safety_factor: float = Field(gt=0, allow_inf_nan=False)
     context_compression_notice: str
     forward_reply_threshold_chars: int = Field(ge=0)
-    show_reasoning: bool
-    retain_reasoning: bool
-    debug_dump_messages: bool
-    debug_dump_directory: str
     extra_requirements_file: str
-    turn_instruction_file: str | None = None
     allow_mention_all: bool
     tool_result_retention: ToolResultRetention
     groups: tuple[AIGroupConfig, ...]
 
-    @field_validator("turn_instruction_file")
-    @classmethod
-    def normalize_turn_instruction_file(cls, value: str | None) -> str | None:
-        """空发言要求路径等同于未配置。"""
-        if value is None:
-            return None
-        cleaned_value = value.strip()
-        return cleaned_value or None
-
     @model_validator(mode="after")
-    def validate_vision_and_groups(self) -> "AIGroupChatConfig":
-        """确保视觉配置与主模型能力一致，并拒绝重复群号。"""
-        delivery_mode = self.images.delivery_mode
-        oversize_behavior = self.images.oversize_behavior
-        if delivery_mode == "direct" and not self.model.supports_images:
-            raise ValueError("主模型不支持图片时 images.delivery_mode 不能为 direct")
-        if delivery_mode == "vision" and self.vision is None:
-            raise ValueError("images.delivery_mode 为 vision 时必须配置 vision")
-        if oversize_behavior == "describe":
-            if delivery_mode != "direct":
-                raise ValueError("oversize_behavior=describe 只用于 direct 模式")
-            if self.vision is None:
-                raise ValueError("oversize_behavior=describe 时必须配置 vision")
-        if (
-            self.vision is not None
-            and delivery_mode != "vision"
-            and oversize_behavior != "describe"
-        ):
-            raise ValueError("当前图片策略不会使用 vision，请删除该配置或调整图片策略")
-        if self.images.retain_images and delivery_mode != "direct":
-            raise ValueError("retain_images 只适用于 direct 模式")
+    def validate_groups(self) -> "AIGroupChatConfig":
+        """拒绝重复群号和空通用要求路径。"""
         group_ids = [item.id for item in self.groups]
         if len(group_ids) != len(set(group_ids)):
             raise ValueError("AI 群聊 groups 不能包含重复群号")
         if self.extra_requirements_file.strip() == "":
             raise ValueError("extra_requirements_file 不能为空")
-        if self.debug_dump_directory.strip() == "":
-            raise ValueError("debug_dump_directory 不能为空")
         return self
 
 

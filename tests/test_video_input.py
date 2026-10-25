@@ -19,7 +19,7 @@ from app.services.napcat.video_reader import NapCatVideoReader, NapCatVideoResou
 from tests.test_ai_group_chat_message_builder import (
     CONTEXT_STARTED_AT, EmptyDatabase, MissingImageBot, ReplyDatabase, build_config, build_message,
 )
-from tests.test_openai_chat_formatting import InspectableOpenAIService
+from tests.test_openai_chat_formatting import InspectableChatCompletionsService
 
 
 VIDEO_BYTES = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
@@ -143,7 +143,7 @@ class VideoInputTest(unittest.IsolatedAsyncioTestCase):
     async def test_native_protocol_and_serialization(self) -> None:
         client = AsyncOpenAI(api_key="test", base_url="https://model.test/v1")
         try:
-            service = InspectableOpenAIService(client=client)
+            service = InspectableChatCompletionsService(client=client)
             message = ChatMessage(role="user", text="看视频", video=[VIDEO_BYTES])
             payload = service.format_chat_messages([message])
             self.assertEqual(payload, [{"role": "user", "content": [

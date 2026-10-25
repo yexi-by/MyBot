@@ -1,100 +1,24 @@
-"""PostgreSQL migration 和插件 session 基础集成测试。"""
+"""PostgreSQL 核心 migration 与连接持久性集成测试。"""
 
-from collections.abc import Awaitable, Callable
-import os
 import asyncio
+import os
+import unittest
 
 from alembic import command
 from alembic.config import Config
-import tempfile
-import unittest
-from pathlib import Path
-from types import SimpleNamespace
-from typing import cast
-from unittest.mock import AsyncMock, Mock, patch
-from uuid import uuid4
-
 from sqlalchemy import text
 
 from app.database import (
     DatabaseMigrationStateError,
     DatabaseMigrator,
-    MAX_PLUGIN_ID_LENGTH,
-    PluginMigrationRegistry,
-    PluginMigrationSpec,
-    PluginSessionFactory,
     PostgreSQLRuntime,
-    plugin_schema_name,
-    validate_plugin_id,
 )
-from app.database.migrations import __main__ as migration_cli
-from app.plugins.base import PluginMeta
 
 TEST_DATABASE_ENV = "MYBOT_TEST_DATABASE_URL"
 
 
-class MigrationCliTest(unittest.IsolatedAsyncioTestCase):
-    """验证独立 migration 入口在加载插件前建立日志配置。"""
-
-    async def test_logging_is_configured_before_plugin_discovery(self) -> None:
-        """migration 不能依赖日志模块的隐式兜底配置。"""
-        events: list[str] = []
-        logging = SimpleNamespace(
-            directory="logs",
-            console_level="INFO",
-            file_level="DEBUG",
-            retention="30 days",
-            rotation="50 MB",
-            compression="gz",
-        )
-        database = SimpleNamespace(
-            build_url=Mock(return_value="postgresql+asyncpg://example")
-        )
-        manager = SimpleNamespace(
-            boot_config=SimpleNamespace(logging=logging, database=database)
-        )
-        migrator = SimpleNamespace(
-            upgrade_all=AsyncMock(),
-            assert_current=AsyncMock(),
-        )
-
-        def configure(**_kwargs: object) -> None:
-            events.append("logging")
-
-        def discover() -> tuple[PluginMigrationSpec, ...]:
-            events.append("plugins")
-            return ()
-
-        with (
-            patch("app.config.ConfigManager.create", return_value=manager),
-            patch(
-                "app.database.migrations.__main__.configure_logging",
-                side_effect=configure,
-            ),
-            patch(
-                "app.plugins.discover_plugin_migrations",
-                side_effect=discover,
-            ),
-            patch(
-                "app.database.migrations.__main__.DatabaseMigrator",
-                return_value=migrator,
-            ),
-        ):
-            run_command = cast(
-                Callable[
-                    [str, PluginMigrationRegistry | None],
-                    Awaitable[None],
-                ],
-                getattr(migration_cli, "_run"),
-            )
-            await run_command("check", None)
-
-        self.assertEqual(events, ["logging", "plugins"])
-        migrator.assert_current.assert_awaited_once_with()
-
-
 class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
-    """验证空 schema 升级、版本拒绝和插件 schema 绑定。"""
+    """验证核心 schema 升级、版本拒绝和连接持久性。"""
 
     async def asyncSetUp(self) -> None:
         """连接专用测试库。"""
@@ -197,44 +121,6 @@ class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
                     {"revision": actual},
                 )
 
-    async def test_plugin_session_uses_bound_schema_and_new_transaction(self) -> None:
-        """插件 repository 的事务只使用由 plugin_id 确定的 schema。"""
-        plugin_id = f"test_{uuid4().hex}"
-        schema = f"plugin_{plugin_id}"
-        async with self.runtime.engine.begin() as connection:
-            _ = await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            _ = await connection.execute(
-                text(f'CREATE TABLE "{schema}".items (value integer NOT NULL)')
-            )
-        try:
-            sessions = PluginSessionFactory(
-                engine=self.runtime.engine,
-                plugin_id=plugin_id,
-            )
-            async with sessions.transaction() as first_session:
-                first_schema = await first_session.scalar(text("SELECT current_schema()"))
-            async with sessions.transaction() as second_session:
-                second_schema = await second_session.scalar(
-                    text("SELECT current_schema()")
-                )
-            self.assertEqual(first_schema, schema)
-            self.assertEqual(second_schema, schema)
-            self.assertIsNot(first_session, second_session)
-            with self.assertRaisesRegex(RuntimeError, "rollback"):
-                async with sessions.transaction() as failed_session:
-                    _ = await failed_session.execute(
-                        text("INSERT INTO items (value) VALUES (1)")
-                    )
-                    raise RuntimeError("rollback")
-            async with sessions.transaction() as verification_session:
-                item_count = await verification_session.scalar(
-                    text("SELECT count(*) FROM items")
-                )
-            self.assertEqual(item_count, 0)
-        finally:
-            async with self.runtime.engine.begin() as connection:
-                _ = await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-
     async def test_runtime_applies_durability_and_statement_timeout(self) -> None:
         """每条连接都启用持久提交和配置的语句超时。"""
         runtime = PostgreSQLRuntime.create(
@@ -256,124 +142,3 @@ class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(statement_timeout, "1250ms")
         finally:
             await runtime.dispose()
-
-    async def test_real_plugin_migration_uses_independent_schema_and_version_table(
-        self,
-    ) -> None:
-        """真实运行临时插件 migration，不与 core 共用 schema 或版本表。"""
-        plugin_id = f"migration_test_{uuid4().hex}"
-        schema = f"plugin_{plugin_id}"
-        revision = "plugin000001"
-        with tempfile.TemporaryDirectory() as directory:
-            script_location = Path(directory)
-            versions = script_location / "versions"
-            versions.mkdir()
-            (script_location / "env.py").write_text(
-                "from app.database import run_plugin_migration_environment\n"
-                "run_plugin_migration_environment()\n",
-                encoding="utf-8",
-            )
-            (versions / "plugin000001_create_state.py").write_text(
-                "from alembic import op\n"
-                "import sqlalchemy as sa\n"
-                f"revision = {revision!r}\n"
-                "down_revision = None\n"
-                "branch_labels = None\n"
-                "depends_on = None\n"
-                "def upgrade():\n"
-                "    schema = op.get_context().config.attributes['plugin_schema']\n"
-                "    op.create_table('state', "
-                "sa.Column('id', sa.Integer(), primary_key=True), schema=schema)\n"
-                "def downgrade():\n"
-                "    schema = op.get_context().config.attributes['plugin_schema']\n"
-                "    op.drop_table('state', schema=schema)\n",
-                encoding="utf-8",
-            )
-            registry = PluginMigrationRegistry()
-            registry.register(
-                PluginMigrationSpec(
-                    plugin_id=plugin_id,
-                    script_location=script_location,
-                )
-            )
-            migrator = DatabaseMigrator(
-                database_url=self.database_url,
-                plugin_registry=registry,
-            )
-            try:
-                await migrator.upgrade_all()
-                await migrator.assert_current()
-                async with self.runtime.engine.connect() as connection:
-                    state_table = await connection.scalar(
-                        text("SELECT to_regclass(:table_name)"),
-                        {"table_name": f"{schema}.state"},
-                    )
-                    plugin_revision = await connection.scalar(
-                        text(f'SELECT version_num FROM "{schema}".alembic_version')
-                    )
-                    core_revision = await connection.scalar(
-                        text("SELECT version_num FROM core.alembic_version")
-                    )
-                self.assertEqual(state_table, f"{schema}.state")
-                self.assertEqual(plugin_revision, revision)
-                self.assertNotEqual(plugin_revision, core_revision)
-            finally:
-                async with self.runtime.engine.begin() as connection:
-                    _ = await connection.execute(
-                        text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-                    )
-
-
-class PluginMigrationRegistryTest(unittest.TestCase):
-    """不连接数据库的插件 migration 注册契约测试。"""
-
-    def test_registry_orders_plugins_and_rejects_duplicate_identity(self) -> None:
-        """插件 migration 按 ASCII ID 排序且不允许重复。"""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            first = root / "first"
-            second = root / "second"
-            first.mkdir()
-            second.mkdir()
-            (first / "env.py").touch()
-            (second / "env.py").touch()
-            registry = PluginMigrationRegistry()
-            beta = PluginMigrationSpec(plugin_id="beta", script_location=second)
-            alpha = PluginMigrationSpec(plugin_id="alpha", script_location=first)
-            registry.register(beta)
-            registry.register(alpha)
-
-            self.assertEqual(
-                [spec.plugin_id for spec in registry.ordered_specs()],
-                ["alpha", "beta"],
-            )
-            with self.assertRaises(ValueError):
-                registry.register(alpha)
-
-    def test_plugin_id_rejects_postgresql_identifier_truncation(self) -> None:
-        """两个可能被 PostgreSQL 截成同一 schema 的长 ID 都必须被拒绝。"""
-        maximum_id = "a" * MAX_PLUGIN_ID_LENGTH
-        self.assertEqual(validate_plugin_id(maximum_id), maximum_id)
-        self.assertEqual(
-            plugin_schema_name(maximum_id),
-            f"plugin_{maximum_id}",
-        )
-
-        shared_prefix = "a" * MAX_PLUGIN_ID_LENGTH
-        for suffix in ("x", "y"):
-            with self.subTest(suffix=suffix):
-                with self.assertRaisesRegex(ValueError, "PostgreSQL 会截断 schema 名"):
-                    _ = validate_plugin_id(f"{shared_prefix}{suffix}")
-
-        with self.assertRaisesRegex(ValueError, "PostgreSQL 会截断 schema 名"):
-            _ = PluginMeta(
-                "TooLongPluginId",
-                (object,),
-                {
-                    "__module__": __name__,
-                    "name": "超长插件标识测试",
-                    "plugin_id": f"{shared_prefix}z",
-                    "consumers_count": 1,
-                    "priority": 0,
-                },
-            )
