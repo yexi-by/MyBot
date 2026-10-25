@@ -6,6 +6,7 @@ import { equal, getAt, object } from "../lib/types";
 import type { Json, ObjectValue, Path } from "../lib/types";
 import type { FieldDef, SectionDef } from "../schema/fields";
 import { ask } from "../lib/ui";
+import { Combobox } from "./Combobox";
 
 function Lines({
   id,
@@ -13,12 +14,14 @@ function Lines({
   onChange,
   options,
   typed = false,
+  disabled = false,
 }: {
   id: string;
   value: Json | undefined;
   onChange: (value: Json) => void;
   options?: FieldDef["options"];
   typed?: boolean;
+  disabled?: boolean;
 }) {
   const entries = Array.isArray(value) ? value : [];
   const [input, setInput] = useState("");
@@ -56,19 +59,14 @@ function Lines({
       </div>
       <div className="inline-input">
         {options ? (
-          <select
+          <Combobox
             id={id}
-            aria-label="选择一个值"
+            label="选择模态"
             value={input}
-            onChange={(event) => setInput(event.target.value)}
-          >
-            <option value="">选择模态</option>
-            {options.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+            onChange={setInput}
+            disabled={disabled}
+            options={[{ value: "", label: "选择模态" }, ...options]}
+          />
         ) : (
           <input
             id={id}
@@ -165,26 +163,33 @@ function ModelInput({
   value,
   onChange,
   providerId,
+  disabled,
 }: {
   id: string;
   value: string;
   onChange: (value: Json) => void;
   providerId: string;
+  disabled: boolean;
 }) {
   const [models, setModels] = useState<string[]>([]),
     [hint, setHint] = useState(""),
     [loading, setLoading] = useState(false);
   const generation = useRef(0);
-  const load = async () => {
+  const load = async (refresh = false) => {
     const ticket = ++generation.current;
     setLoading(true);
+    setHint("");
     try {
       const result = await request<{ models: string[] }>(
-        "/api/providers/" + encodeURIComponent(providerId) + "/models",
+        "/api/providers/" +
+          encodeURIComponent(providerId) +
+          "/models" +
+          (refresh ? "?refresh=true" : ""),
       );
       if (ticket === generation.current) {
-        setModels(result.models);
-        setHint(result.models.length ? "" : "列表为空，可手动输入");
+        setModels(
+          [...new Set(result.models)].sort((a, b) => a.localeCompare(b)),
+        );
       }
     } catch (error) {
       if (ticket === generation.current)
@@ -201,32 +206,22 @@ function ModelInput({
       generation.current++;
     };
   }, [providerId]);
-  const listId = "models-" + providerId;
   return (
-    <div>
-      <div className="inline-input">
-        <input
-          id={id}
-          list={listId}
-          value={value}
-          aria-label="模型名称"
-          onChange={(event) => onChange(event.target.value)}
-        />
-        <button
-          className="small"
-          onClick={() => void load()}
-          disabled={loading}
-        >
-          {loading ? "读取中" : "刷新"}
-        </button>
-      </div>
-      <datalist id={listId}>
-        {models.map((model) => (
-          <option key={model} value={model} />
-        ))}
-      </datalist>
-      {hint && <small className="field-hint">{hint}</small>}
-    </div>
+    <Combobox
+      id={id}
+      label="模型名称"
+      value={value}
+      onChange={onChange}
+      options={models.map((model) => ({ value: model, label: model }))}
+      editable
+      disabled={disabled}
+      placeholder="选择或输入模型名"
+      listLabel={providerId}
+      loading={loading}
+      error={hint}
+      emptyText="该 Provider 未返回模型，可直接输入模型名"
+      onRefresh={() => void load(true)}
+    />
   );
 }
 export function Field({
@@ -310,19 +305,14 @@ export function Field({
       break;
     case "select":
       control = (
-        <select
+        <Combobox
           id={id}
+          label={definition.label}
           value={String(value ?? "")}
           disabled={!!disabled}
-          onChange={(event) => update(event.target.value)}
-        >
-          <option value="">请选择</option>
-          {options.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+          onChange={update}
+          options={[{ value: "", label: "请选择" }, ...options]}
+        />
       );
       break;
     case "list":
@@ -333,6 +323,7 @@ export function Field({
           onChange={update}
           options={definition.options}
           typed={definition.key === "allowed"}
+          disabled={!!disabled}
         />
       );
       break;
@@ -342,10 +333,12 @@ export function Field({
     case "model":
       control = (
         <ModelInput
+          key={String(base[1] || "")}
           id={id}
           value={String(value ?? "")}
           onChange={update}
           providerId={String(base[1] || "")}
+          disabled={!!disabled}
         />
       );
       break;

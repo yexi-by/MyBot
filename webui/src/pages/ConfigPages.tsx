@@ -6,6 +6,7 @@ import { ask, notify } from "../lib/ui";
 import { Section } from "../components/Forms";
 import { PolicyEditor } from "../components/PolicyEditor";
 import { ToolCoverage } from "../components/ToolCoverage";
+import { Combobox } from "../components/Combobox";
 import {
   activeProviderSection,
   conversationSection,
@@ -264,17 +265,15 @@ export function ToolsPage({ filter }: { filter: string }) {
       <div className="scope-picker">
         <label>
           查看和编辑策略{" "}
-          <select
+          <Combobox
+            label="查看和编辑策略"
             value={selected}
-            onChange={(event) => setSelected(event.target.value)}
-          >
-            <option value="private">统一私聊策略</option>
-            {ids.map((id) => (
-              <option key={id} value={id}>
-                群 {id}
-              </option>
-            ))}
-          </select>
+            onChange={setSelected}
+            options={[
+              { value: "private", label: "统一私聊策略" },
+              ...ids.map((id) => ({ value: id, label: "群 " + id })),
+            ]}
+          />
         </label>
         <span className="muted">目录只披露能力，调用时仍重新检查权限。</span>
       </div>

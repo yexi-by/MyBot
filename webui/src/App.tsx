@@ -23,6 +23,7 @@ import { answer, ask, dismissNotice, notify, useUi } from "./lib/ui";
 import type { ConfigEnvelope } from "./lib/types";
 import { fieldInstances } from "./schema/fields";
 import { Dialog } from "./components/Dialog";
+import { Combobox } from "./components/Combobox";
 import {
   ConnectionsPage,
   GroupsPage,
@@ -125,6 +126,7 @@ export default function App() {
         !(
           event.target instanceof HTMLElement &&
           (["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName) ||
+            event.target.closest('[role="combobox"], [role="listbox"]') ||
             event.target.isContentEditable)
         )
       ) {
@@ -365,20 +367,20 @@ export default function App() {
             >
               ⌕ <kbd>Ctrl K</kbd>
             </button>
-            <select
+            <Combobox
               className="theme-select"
-              aria-label="主题"
+              label="主题"
               value={theme}
-              onChange={(event) => {
-                const value = event.target.value as Theme;
-                setTheme(value);
-                updateTheme(value);
+              onChange={(value) => {
+                setTheme(value as Theme);
+                updateTheme(value as Theme);
               }}
-            >
-              <option value="system">跟随系统</option>
-              <option value="light">亮色</option>
-              <option value="dark">暗色</option>
-            </select>
+              options={[
+                { value: "system", label: "跟随系统" },
+                { value: "light", label: "亮色" },
+                { value: "dark", label: "暗色" },
+              ]}
+            />
             <button
               className="icon-button"
               title="重启"

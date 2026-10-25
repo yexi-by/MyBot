@@ -301,8 +301,8 @@ export const mcpSection: SectionDef = {
     }),
     text(
       "read_only_tools",
-      "明确的只读工具",
-      "由配置声明；不信任远端注解自动放行。",
+      "只读工具标记",
+      "填写远端原始工具名。标记为只读后，失败可由 Agent 再次尝试；调用权限仍由群或私聊策略控制。",
       { type: "list", span: 3 },
     ),
   ],

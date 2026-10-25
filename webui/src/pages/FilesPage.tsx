@@ -17,6 +17,7 @@ import { navigate, setNavigationGuard } from "../lib/navigation";
 import type { FileEnvelope } from "../lib/types";
 import { ask, notify, setFileStatus } from "../lib/ui";
 import { Dialog } from "../components/Dialog";
+import { Combobox } from "../components/Combobox";
 const Editor = lazy(() => import("../components/CodeEditor"));
 const Preview = lazy(() => import("../components/MarkdownPreview"));
 export function FilesPage({ path }: { path: string }) {
@@ -192,17 +193,17 @@ export function FilesPage({ path }: { path: string }) {
       <div className="file-toolbar">
         <label>
           文件{" "}
-          <select
+          <Combobox
+            label="配置文件"
             value={path}
-            onChange={(event) => void openFile(event.target.value)}
-          >
-            <option value="">选择配置文件</option>
-            {[...new Set([...files, ...(path ? [path] : [])])].map((file) => (
-              <option key={file} value={file}>
-                {file}
-              </option>
-            ))}
-          </select>
+            onChange={(value) => void openFile(value)}
+            options={[
+              { value: "", label: "选择配置文件" },
+              ...[...new Set([...files, ...(path ? [path] : [])])].map(
+                (file) => ({ value: file, label: file }),
+              ),
+            ]}
+          />
         </label>
         <button
           onClick={async () => {

@@ -12,6 +12,7 @@ import type {
 import { ask, notify } from "../lib/ui";
 import { FieldGrid, Section } from "./Forms";
 import { Dialog } from "./Dialog";
+import { Combobox } from "./Combobox";
 import { parameterSection, policySection } from "../schema/fields";
 
 const categoryLabels: Record<string, string> = {
@@ -126,17 +127,18 @@ export function PolicyEditor({
         <div className="catalogue-toolbar">
           <label>
             分类{" "}
-            <select
+            <Combobox
+              label="工具分类"
               value={tab}
-              onChange={(event) => setTab(event.target.value)}
-            >
-              <option value="all">全部分类</option>
-              {categoryNames.map((name) => (
-                <option key={name} value={name}>
-                  {categoryLabels[name] || name}
-                </option>
-              ))}
-            </select>
+              onChange={setTab}
+              options={[
+                { value: "all", label: "全部分类" },
+                ...categoryNames.map((name) => ({
+                  value: name,
+                  label: categoryLabels[name] || name,
+                })),
+              ]}
+            />
           </label>
           <span className="muted">
             显示 {tools.length} 项 · 变更随配置自动写入
@@ -172,8 +174,8 @@ export function PolicyEditor({
                   ) : (
                     <label className="tool-override">
                       <span>工具覆盖</span>
-                      <select
-                        aria-label={tool.name + " 权限"}
+                      <Combobox
+                        label={tool.name + " 权限"}
                         value={
                           configured === undefined
                             ? "inherit"
@@ -181,19 +183,18 @@ export function PolicyEditor({
                               ? "allow"
                               : "deny"
                         }
-                        onChange={(event) =>
+                        onChange={(value) =>
                           change(
                             [...base, "tools", tool.name],
-                            event.target.value === "inherit"
-                              ? undefined
-                              : event.target.value === "allow",
+                            value === "inherit" ? undefined : value === "allow",
                           )
                         }
-                      >
-                        <option value="inherit">跟随分类</option>
-                        <option value="allow">允许</option>
-                        <option value="deny">禁止</option>
-                      </select>
+                        options={[
+                          { value: "inherit", label: "跟随分类" },
+                          { value: "allow", label: "允许" },
+                          { value: "deny", label: "禁止" },
+                        ]}
+                      />
                     </label>
                   )}
                 </div>
