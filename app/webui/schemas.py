@@ -2,13 +2,14 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ConfigIssuePayload(BaseModel):
     """一条脱敏的配置错误，直接对应 config.ConfigIssue。"""
 
     location: str
+    path: list[str | int] = Field(default_factory=list)
     error_type: str
     message: str
 
@@ -86,6 +87,13 @@ class FileSaveResponse(BaseModel):
     """文本文件保存结果。"""
 
     sha256: str
+
+
+class ProviderModelsResponse(BaseModel):
+    """指定 provider 的可用模型 id 列表。"""
+
+    provider: str
+    models: list[str]
 
 
 class PowerResponse(BaseModel):

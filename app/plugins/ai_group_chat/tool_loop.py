@@ -1,6 +1,6 @@
 """AI 群聊插件的工具调用循环。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.api.mixins.message import NapCatSendMessageError
 from app.config import AIGroupChatConfig
@@ -12,23 +12,38 @@ from app.services import (
     ContextHandler,
     NapCatGroupToolExecutor,
 )
-from app.services.llm.schemas import LLMResponse, LLMToolCall, LLMToolDefinition
+from app.services.llm.schemas import LLMResponse, LLMToolCall
+from app.services.llm.errors import LLMRequestError, LLMResponseError
+from app.services.llm.response_validation import (
+    build_response_repair_message,
+    isolate_assistant_history,
+    validate_response,
+)
 from app.services.llm.tools import (
     LLMImageArtifact,
     LLMImageError,
     LLMImageItem,
     build_tool_result_message,
 )
+from app.services.napcat.message_formatter import NapCatMessageTextFormatter
 from app.utils.log import log_event
 
 from .context_compressor import GroupChatContextCompressor
-from .debug_dump import AIGroupChatDebugDumper
 from .forward_image_auto_fetch import (
     FORWARD_MESSAGE_IMAGES_TOOL_NAME,
     ForwardImageAutoFetcher,
 )
 from .token_budget import ConservativeTokenEstimator, TokenBudgetEstimate
 from .vision_tool import VisionDescriptionTool, VisionTurnState
+
+
+class GroupChatTurnError(RuntimeError):
+    """本轮遇到配置限制或工具轮数耗尽，需要向群成员说明结束原因。"""
+
+
+# Provider 已按 max_attempts 处理协议错误；这里只为绕过该入口的响应兜底，
+# 不使用可能很大的 max_tool_rounds 反复生成异常正文。
+MAX_RESPONSE_RETRIES = 2
 
 
 @dataclass(frozen=True)
@@ -38,6 +53,7 @@ class ReplyContent:
     visible_content: str | None
     memory_content: str | None
     memory_reasoning_content: str | None
+    memory_reasoning_details: list[JsonObject] | None
 
 
 @dataclass(frozen=True)
@@ -55,7 +71,24 @@ class PreparedTurnContext:
 
     working_messages: list[ChatMessage]
     persisted_turn_messages: list[ChatMessage]
+    fallback_turn_messages: list[ChatMessage]
     replace_existing_history: bool
+
+
+@dataclass
+class TurnContextState:
+    """记录一次临时上下文完成后需要提交的边界和统计。"""
+
+    fallback_turn_messages: list[ChatMessage] = field(default_factory=list)
+    persisted_prefix_count: int | None = None
+    replace_existing_history: bool = False
+    commit_requested: bool = False
+    title: str = "异常结束后的长期上下文"
+    turn_messages_count: int = 0
+    sent_content_messages_count: int = 0
+    tool_history_messages_count: int = 0
+    retained_tool_messages_count: int = 0
+    vision_history_messages_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -78,6 +111,14 @@ class ToolCallResultForModel:
         return sum(isinstance(item, LLMImageError) for item in self.image_items)
 
 
+@dataclass(frozen=True)
+class ToolCallStatus:
+    """描述允许进入长期上下文的有界工具调用状态。"""
+
+    name: str
+    is_error: bool
+
+
 class GroupChatToolLoop:
     """执行群聊专用的 OpenAI 工具调用流程。"""
 
@@ -86,16 +127,30 @@ class GroupChatToolLoop:
         *,
         config: AIGroupChatConfig,
         context: Context,
-        debug_dumper: AIGroupChatDebugDumper,
         vision_tool: VisionDescriptionTool,
+        turn_instruction: str | None,
     ) -> None:
         """保存工具循环所需的配置和运行上下文。"""
         self.config: AIGroupChatConfig = config
         self.context: Context = context
-        self.debug_dumper: AIGroupChatDebugDumper = debug_dumper
         self.vision_tool: VisionDescriptionTool = vision_tool
+        # 每次请求都放在末尾：长上下文和工具结果之后，开头的人设要求容易被稀释。
+        self.turn_instruction_message: ChatMessage | None = (
+            ChatMessage(role="system", text=turn_instruction)
+            if turn_instruction is not None
+            else None
+        )
+        token_config = config.token_estimator
         self.token_estimator: ConservativeTokenEstimator = ConservativeTokenEstimator(
-            safety_factor=config.token_safety_factor
+            safety_factor=config.token_safety_factor,
+            request_overhead_tokens=token_config.request_overhead_tokens,
+            message_overhead_tokens=token_config.message_overhead_tokens,
+            tool_call_overhead_tokens=token_config.tool_call_overhead_tokens,
+            image_tokens=token_config.image_tokens,
+            ascii_tokens_per_character=token_config.ascii_tokens_per_character,
+            non_ascii_tokens_per_character=(
+                token_config.non_ascii_tokens_per_character
+            ),
         )
         self.context_compressor: GroupChatContextCompressor = (
             GroupChatContextCompressor()
@@ -109,16 +164,29 @@ class GroupChatToolLoop:
         *,
         msg: GroupMessage,
         chat_handler: ContextHandler,
+        recent_chat_messages: list[ChatMessage],
         turn_messages: list[ChatMessage],
         input_vision_messages: list[ChatMessage],
         input_vision_history_messages: list[ChatMessage],
         question: str,
         vision_turn_state: VisionTurnState,
+        turn_context_state: TurnContextState | None = None,
     ) -> None:
         """执行群聊专用工具调用循环。"""
+        context_state = turn_context_state or TurnContextState()
         tool_history_messages: list[ChatMessage] = []
         vision_history_messages: list[ChatMessage] = []
-        sent_content_messages: list[ChatMessage] = []
+        sent_content_messages_count = 0
+        retained_tool_messages_count = 0
+        formatting = self.config.formatting
+        message_formatter = NapCatMessageTextFormatter(
+            field_text_limit=formatting.field_text_limit,
+            json_text_limit=formatting.json_text_limit,
+            markdown_text_limit=formatting.markdown_text_limit,
+            forward_max_items=formatting.forward_max_items,
+            forward_max_depth=formatting.forward_max_depth,
+            nested_text_search_max_depth=formatting.nested_text_search_max_depth,
+        )
         napcat_executor = NapCatGroupToolExecutor(
             bot=self.context.bot,
             group_messages=self.context.group_messages,
@@ -128,13 +196,40 @@ class GroupChatToolLoop:
             forward_image_max_images_per_call=(
                 self.config.images.forward_max_per_call
             ),
-            forward_image_max_all_images=self.config.images.forward_max_per_turn,
+            forward_image_max_images_per_turn=(
+                self.config.images.forward_max_per_turn
+            ),
             image_fetch_concurrency=self.config.images.fetch_concurrency,
             image_download_timeout_seconds=(
                 self.config.images.download_timeout_seconds
             ),
-            max_reply_chars=self.config.max_reply_chars,
+            image_max_bytes=(
+                None
+                if self.config.images.oversize_behavior == "describe"
+                else self.config.images.max_image_bytes or None
+            ),
+            forward_reply_threshold_chars=(
+                self.config.forward_reply_threshold_chars
+            ),
             http_client=self.context.direct_httpx,
+            message_formatter=message_formatter,
+            history_default_limit=self.config.history.default_limit,
+            history_max_per_call=self.config.history.max_per_call,
+            history_default_before_count=(
+                self.config.history.default_before_count
+            ),
+            history_default_after_count=self.config.history.default_after_count,
+            file_default_count=self.config.files.default_count,
+            file_max_per_call=self.config.files.max_per_call,
+            remaining_image_delivery_slots=lambda: (
+                None
+                if self.config.images.max_per_turn == 0
+                else max(
+                    0,
+                    self.config.images.max_per_turn
+                    - vision_turn_state.consumed_image_slots,
+                )
+            ),
         )
         tool_executor = CompositeToolExecutor(
             [napcat_executor, self.context.mcp_tool_manager]
@@ -143,14 +238,30 @@ class GroupChatToolLoop:
         prepared_context = await self._prepare_turn_context(
             msg=msg,
             chat_handler=chat_handler,
+            recent_chat_messages=recent_chat_messages,
             turn_messages=turn_messages,
             input_vision_messages=input_vision_messages,
             input_vision_history_messages=input_vision_history_messages,
-            tools=tools,
         )
         working_messages = prepared_context.working_messages
+        if self.config.images.delivery_mode == "direct":
+            vision_turn_state.consumed_image_bytes = sum(
+                len(image)
+                for message in working_messages
+                for image in message.image or []
+            )
         persisted_turn_messages = prepared_context.persisted_turn_messages
         replace_existing_history = prepared_context.replace_existing_history
+        self._persist_turn_input(
+            chat_handler=chat_handler,
+            turn_messages=persisted_turn_messages,
+            replace_existing_history=replace_existing_history,
+        )
+        context_state.fallback_turn_messages = (
+            prepared_context.fallback_turn_messages
+        )
+        context_state.persisted_prefix_count = len(chat_handler.messages_lst)
+        context_state.replace_existing_history = replace_existing_history
         log_event(
             level="DEBUG",
             event="ai_group_chat.tool_loop.start",
@@ -161,144 +272,205 @@ class GroupChatToolLoop:
             model_name=self.config.model.name,
             provider=self.config.model.provider,
             supports_images=self.config.model.supports_images,
+            image_delivery_mode=self.config.images.delivery_mode,
             working_messages_count=len(working_messages),
             tools_count=len(tools),
             tool_names=[tool.name for tool in tools],
         )
-        for round_index in range(1, self.config.max_tool_rounds + 1):
-            log_event(
-                level="DEBUG",
-                event="ai_group_chat.llm.request",
-                category="plugin",
-                message="准备请求 LLM",
-                group_id=msg.group_id,
-                message_id=msg.message_id,
-                round_index=round_index,
-                messages_count=len(working_messages),
-                working_messages_count=len(working_messages),
-                model_name=self.config.model.name,
-                provider=self.config.model.provider,
-                tools_count=len(tools),
-                tool_choice="auto",
-            )
-            response = await self.context.llm.get_ai_response_with_tools(
-                messages=working_messages,
-                provider=self.config.model.provider,
-                model_name=self.config.model.name,
-                tools=tools,
-            )
-            content = self._normalize_content(response.content)
-            reply_content = self._build_reply_content(
-                content=content,
-                reasoning_content=response.reasoning_content,
-            )
-            log_event(
-                level="DEBUG",
-                event="ai_group_chat.llm.response",
-                category="plugin",
-                message="LLM 返回群聊响应",
-                group_id=msg.group_id,
-                message_id=msg.message_id,
-                round_index=round_index,
-                content_chars=len(content or ""),
-                visible_content_chars=len(reply_content.visible_content or ""),
-                memory_content_chars=len(reply_content.memory_content or ""),
-                reasoning_chars=len(response.reasoning_content or ""),
-                tool_calls_count=len(response.tool_calls),
-                tool_call_names=[tool_call.name for tool_call in response.tool_calls],
-            )
-            content_sent = False
-            if reply_content.visible_content is not None:
-                send_result = await self._send_reply_content(
-                    msg=msg,
-                    napcat_executor=napcat_executor,
-                    working_messages=working_messages,
-                    reply_content=reply_content,
-                    sent_content_messages=sent_content_messages,
-                    round_index=round_index,
-                    event_name="ai_group_chat.reply.sent",
-                    log_message="模型返回正文，已解析 content 标记并发送群消息",
+        snapshot_title = "异常结束后的长期上下文"
+        round_index = 0
+        response_retries = 0
+        repair_message: ChatMessage | None = None
+        try:
+            while round_index < self.config.max_tool_rounds:
+                request_messages = [
+                    *working_messages,
+                    *(
+                        [self.turn_instruction_message]
+                        if self.turn_instruction_message is not None
+                        else []
+                    ),
+                    *([repair_message] if repair_message is not None else []),
+                ]
+                log_event(
+                    level="DEBUG",
+                    event="ai_group_chat.llm.request",
+                    category="plugin",
+                    message="准备请求 LLM",
+                    group_id=msg.group_id,
+                    message_id=msg.message_id,
+                    round_index=round_index + 1,
+                    messages_count=len(request_messages),
+                    working_messages_count=len(working_messages),
+                    model_name=self.config.model.name,
+                    provider=self.config.model.provider,
+                    tools_count=len(tools),
+                    tool_choice="auto",
                 )
-                if send_result.should_retry_model:
+                try:
+                    response = await self.context.llm.get_ai_response_with_tools(
+                        messages=request_messages,
+                        provider=self.config.model.provider,
+                        model_name=self.config.model.name,
+                        tools=tools,
+                    )
+                    # 必须在发送正文、调用工具和保存 reasoning 之前整份检查。
+                    validate_response(response, tools_allowed=bool(tools))
+                except LLMResponseError as exc:
+                    response_retries += 1
+                    log_event(
+                        level="WARNING",
+                        event="ai_group_chat.response.rejected",
+                        category="plugin",
+                        message="模型响应未通过发送前检查，未发送或执行该响应",
+                        group_id=msg.group_id,
+                        message_id=msg.message_id,
+                        round_index=round_index + 1,
+                        error_code=exc.code,
+                        rejected_responses=response_retries,
+                        will_retry=response_retries <= MAX_RESPONSE_RETRIES,
+                    )
+                    if response_retries > MAX_RESPONSE_RETRIES:
+                        snapshot_title = "响应格式重试耗尽后的长期上下文"
+                        raise GroupChatTurnError(
+                            "模型多次返回异常格式，本轮已停止，请稍后重试。"
+                        ) from None
+                    repair_message = build_response_repair_message(exc)
                     continue
-                if send_result.failure_status_message is not None:
-                    await self._finish_turn(
+                round_index += 1
+                repair_message = None
+                content = self._normalize_content(response.content)
+                reply_content = self._build_reply_content(
+                    content=content,
+                    reasoning_content=response.reasoning_content,
+                    reasoning_details=response.reasoning_details,
+                )
+                log_event(
+                    level="DEBUG",
+                    event="ai_group_chat.llm.response",
+                    category="plugin",
+                    message="LLM 返回群聊响应",
+                    group_id=msg.group_id,
+                    message_id=msg.message_id,
+                    round_index=round_index,
+                    content_chars=len(content or ""),
+                    visible_content_chars=len(reply_content.visible_content or ""),
+                    memory_content_chars=len(reply_content.memory_content or ""),
+                    reasoning_chars=len(response.reasoning_content or ""),
+                    finish_reason=response.finish_reason,
+                    native_finish_reason=response.native_finish_reason,
+                    tool_calls_count=len(response.tool_calls),
+                    tool_call_names=[
+                        tool_call.name for tool_call in response.tool_calls
+                    ],
+                )
+                content_sent = False
+                if reply_content.visible_content is not None:
+                    send_result = await self._send_reply_content(
+                        msg=msg,
+                        napcat_executor=napcat_executor,
+                        chat_handler=chat_handler,
+                        working_messages=working_messages,
+                        reply_content=reply_content,
+                        round_index=round_index,
+                        event_name="ai_group_chat.reply.sent",
+                        log_message="模型返回正文，已解析 content 标记并发送群消息",
+                    )
+                    if send_result.should_retry_model:
+                        continue
+                    if send_result.failure_status_message is not None:
+                        chat_handler.build_chatmessage(
+                            message=send_result.failure_status_message
+                        )
+                        snapshot_title = "群消息发送失败后的长期上下文"
+                        context_state.commit_requested = True
+                        return
+                    content_sent = send_result.content_sent
+                    if content_sent:
+                        sent_content_messages_count += 1
+
+                if response.tool_calls:
+                    napcat_executor.begin_image_delivery_batch()
+                    retained_tool_messages_count += await self._handle_tool_response(
                         msg=msg,
                         chat_handler=chat_handler,
-                        turn_messages=persisted_turn_messages,
-                        sent_content_messages=sent_content_messages,
+                        working_messages=working_messages,
+                        response=response,
+                        tool_executor=tool_executor,
                         tool_history_messages=tool_history_messages,
                         vision_history_messages=vision_history_messages,
-                        replace_existing_history=replace_existing_history,
-                        title="群消息发送失败后的长期上下文",
-                        failure_status_message=send_result.failure_status_message,
+                        round_index=round_index,
+                        question=question,
+                        vision_turn_state=vision_turn_state,
                     )
+                    continue
+
+                if content_sent:
+                    snapshot_title = "无工具调用自动结束后的长期上下文"
+                    context_state.commit_requested = True
                     return
-                content_sent = send_result.content_sent
 
-            if response.tool_calls:
-                await self._handle_tool_response(
-                    msg=msg,
-                    working_messages=working_messages,
-                    response=response,
-                    tool_executor=tool_executor,
-                    tool_history_messages=tool_history_messages,
-                    vision_history_messages=vision_history_messages,
+                log_event(
+                    level="DEBUG",
+                    event="ai_group_chat.empty_without_tools",
+                    category="plugin",
+                    message="模型没有正文，也没有信息工具调用，本轮静默结束",
+                    group_id=msg.group_id,
+                    message_id=msg.message_id,
                     round_index=round_index,
-                    question=question,
-                    vision_turn_state=vision_turn_state,
                 )
-                continue
-
-            if content_sent:
-                await self._finish_turn(
-                    msg=msg,
-                    chat_handler=chat_handler,
-                    turn_messages=persisted_turn_messages,
-                    sent_content_messages=sent_content_messages,
-                    tool_history_messages=tool_history_messages,
-                    vision_history_messages=vision_history_messages,
-                    replace_existing_history=replace_existing_history,
-                    title="无工具调用自动结束后的长期上下文",
-                )
+                snapshot_title = "空响应自动结束后的长期上下文"
+                context_state.commit_requested = True
                 return
-
-            log_event(
-                level="DEBUG",
-                event="ai_group_chat.empty_without_tools",
-                category="plugin",
-                message="模型没有正文，也没有信息工具调用，本轮静默结束",
-                group_id=msg.group_id,
-                message_id=msg.message_id,
-                round_index=round_index,
+            snapshot_title = "工具轮数耗尽后的长期上下文"
+            raise GroupChatTurnError(
+                f"AI 群聊工具调用超过最大轮数: {self.config.max_tool_rounds}"
             )
-            await self._finish_turn(
-                msg=msg,
-                chat_handler=chat_handler,
-                turn_messages=persisted_turn_messages,
-                sent_content_messages=sent_content_messages,
-                tool_history_messages=tool_history_messages,
-                vision_history_messages=vision_history_messages,
-                replace_existing_history=replace_existing_history,
-                title="空响应自动结束后的长期上下文",
+        finally:
+            context_state.title = snapshot_title
+            context_state.turn_messages_count = len(persisted_turn_messages)
+            context_state.sent_content_messages_count = sent_content_messages_count
+            if sent_content_messages_count > 0:
+                context_state.commit_requested = True
+            context_state.tool_history_messages_count = len(tool_history_messages)
+            context_state.retained_tool_messages_count = retained_tool_messages_count
+            context_state.vision_history_messages_count = len(
+                vision_history_messages
             )
-            return
-        raise RuntimeError(f"AI 群聊工具调用超过最大轮数: {self.config.max_tool_rounds}")
 
     async def _prepare_turn_context(
         self,
         *,
         msg: GroupMessage,
         chat_handler: ContextHandler,
+        recent_chat_messages: list[ChatMessage],
         turn_messages: list[ChatMessage],
         input_vision_messages: list[ChatMessage],
         input_vision_history_messages: list[ChatMessage],
-        tools: list[LLMToolDefinition],
     ) -> PreparedTurnContext:
-        """在请求模型前按 token 预算决定是否压缩历史上下文。"""
+        """按长期上下文预算整理历史，本轮输入和工具定义留在临时请求中。"""
         stored_messages = chat_handler.messages_lst
-        stripped_history_image_count = self._count_images(messages=stored_messages)
-        history_messages = self._strip_history_images(messages=stored_messages)
+        if self.config.images.retain_images:
+            history_messages = list(stored_messages)
+            stripped_history_image_count = 0
+        else:
+            stripped_history_image_count = self._count_images(
+                messages=stored_messages
+            )
+            history_messages = self._strip_history_images(messages=stored_messages)
+        # 最近群聊只服务本轮请求，不进入下方的长期保存列表。
+        current_working_messages = [
+            *recent_chat_messages,
+            *turn_messages,
+            *input_vision_messages,
+        ]
+        history_messages, byte_limit_stripped_count = (
+            self._fit_history_images_to_byte_limit(
+                history_messages=history_messages,
+                current_messages=current_working_messages,
+            )
+        )
+        stripped_history_image_count += byte_limit_stripped_count
         if stripped_history_image_count > 0:
             chat_handler.replace_history(messages=history_messages[1:])
             log_event(
@@ -311,22 +483,36 @@ class GroupChatToolLoop:
                 stripped_image_count=stripped_history_image_count,
                 history_messages_count=len(history_messages),
             )
-        current_working_messages = [*turn_messages, *input_vision_messages]
+        history_messages, quarantined_count = isolate_assistant_history(history_messages)
+        if quarantined_count:
+            log_event(
+                level="WARNING",
+                event="ai_group_chat.context.response_quarantined",
+                category="plugin",
+                message="已从本轮请求及摘要输入隔离异常助手正文，保留原始聊天记录",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                quarantined_messages_count=quarantined_count,
+            )
         current_persisted_messages = [
-            *turn_messages,
+            *(message.without_videos() for message in turn_messages),
             *input_vision_history_messages,
         ]
+        fallback_turn_messages = (
+            list(current_persisted_messages)
+            if self.config.images.retain_images
+            else self._strip_history_images(messages=current_persisted_messages)
+        )
         candidate_messages = [*history_messages, *current_working_messages]
-        budget = self.token_estimator.check_request(
-            messages=candidate_messages,
-            tools=tools,
+        budget = self.token_estimator.check_context(
+            messages=history_messages,
             max_context_tokens=chat_handler.max_context_tokens,
         )
         log_event(
             level="DEBUG",
             event="ai_group_chat.context_budget.checked",
             category="plugin",
-            message="AI 群聊上下文预算检查完成",
+            message="AI 群聊长期上下文预算检查完成",
             group_id=msg.group_id,
             message_id=msg.message_id,
             estimated_tokens=budget.estimated_tokens,
@@ -336,44 +522,40 @@ class GroupChatToolLoop:
             turn_messages_count=len(current_working_messages),
             persisted_turn_messages_count=len(current_persisted_messages),
             request_messages_count=len(candidate_messages),
-            tools_count=len(tools),
         )
-        if not budget.should_compress:
+        if not budget.should_compress or len(history_messages) <= 1:
             return PreparedTurnContext(
                 working_messages=candidate_messages,
                 persisted_turn_messages=current_persisted_messages,
+                fallback_turn_messages=fallback_turn_messages,
                 replace_existing_history=False,
             )
-        _ = await self.context.bot.send_msg(
-            group_id=msg.group_id,
-            text=self.config.context_compression_notice,
-        )
-        summary = await self._compress_existing_context(
+        try:
+            _ = await self.context.bot.send_msg(
+                group_id=msg.group_id,
+                text=self.config.context_compression_notice,
+            )
+        except NapCatSendMessageError as exc:
+            log_event(
+                level="WARNING",
+                event="ai_group_chat.context_compression.notice_failed",
+                category="plugin",
+                message="压缩通知发送失败，继续整理长期上下文",
+                group_id=msg.group_id,
+                message_id=msg.message_id,
+                error=str(exc),
+            )
+        summary_message = await self._compress_existing_context(
             msg=msg,
             chat_handler=chat_handler,
             budget=budget,
-        )
-        rebuilt_working_user_message = (
-            self.context_compressor.build_rebuilt_user_message(
-                summary=summary,
-                current_turn_messages=current_working_messages,
-            )
-        )
-        rebuilt_persisted_user_message = (
-            self.context_compressor.build_rebuilt_user_message(
-                summary=summary,
-                current_turn_messages=current_persisted_messages,
-            )
+            history_messages=history_messages[1:],
         )
         rebuilt_working_messages = [
             chat_handler.system_prompt,
-            rebuilt_working_user_message,
+            summary_message,
+            *current_working_messages,
         ]
-        rebuilt_budget = self.token_estimator.check_request(
-            messages=rebuilt_working_messages,
-            tools=tools,
-            max_context_tokens=chat_handler.max_context_tokens,
-        )
         log_event(
             level="DEBUG",
             event="ai_group_chat.context_compressed.rebuilt",
@@ -381,22 +563,16 @@ class GroupChatToolLoop:
             message="AI 群聊上下文压缩后已重建本轮请求",
             group_id=msg.group_id,
             message_id=msg.message_id,
-            rebuilt_estimated_tokens=rebuilt_budget.estimated_tokens,
-            max_context_tokens=rebuilt_budget.max_context_tokens,
-            rebuilt_should_still_compress=rebuilt_budget.should_compress,
-            rebuilt_user_chars=len(rebuilt_working_user_message.text or ""),
-            rebuilt_image_count=len(rebuilt_working_user_message.image or []),
+            summary_chars=len(summary_message.text or ""),
+            rebuilt_image_count=self._count_images(
+                messages=rebuilt_working_messages
+            ),
             rebuilt_request_messages_count=len(rebuilt_working_messages),
         )
-        if rebuilt_budget.should_compress:
-            raise RuntimeError(
-                "AI 群聊上下文压缩后仍超过最大上下文预算，"
-                f"estimated={rebuilt_budget.estimated_tokens}, "
-                f"max={rebuilt_budget.max_context_tokens}"
-            )
         return PreparedTurnContext(
             working_messages=rebuilt_working_messages,
-            persisted_turn_messages=[rebuilt_persisted_user_message],
+            persisted_turn_messages=[summary_message, *current_persisted_messages],
+            fallback_turn_messages=fallback_turn_messages,
             replace_existing_history=True,
         )
 
@@ -406,14 +582,11 @@ class GroupChatToolLoop:
         msg: GroupMessage,
         chat_handler: ContextHandler,
         budget: TokenBudgetEstimate,
-    ) -> str:
+        history_messages: list[ChatMessage],
+    ) -> ChatMessage:
         """用压缩专用 LLM 请求整理历史上下文，不包含本轮新消息。"""
-        history_messages = chat_handler.messages_lst[1:]
-        compression_messages, compression_input = (
-            self.context_compressor.build_compression_messages(
-                system_prompt=chat_handler.system_prompt,
-                history_messages=history_messages,
-            )
+        compression_input = self.context_compressor.format_history(
+            messages=history_messages
         )
         log_event(
             level="WARNING",
@@ -427,14 +600,54 @@ class GroupChatToolLoop:
             history_messages_count=len(history_messages),
             dropped_image_count=compression_input.dropped_image_count,
         )
-        summary = await self.context.llm.get_ai_text_response(
-            messages=compression_messages,
-            provider=self.config.model.provider,
-            model_name=self.config.model.name,
+        empty_summary = self.context_compressor.build_summary_message(summary="")
+        fixed_tokens = self.token_estimator.estimate_messages(
+            messages=[chat_handler.system_prompt, empty_summary],
         )
-        normalized_summary = self._normalize_content(summary)
-        if normalized_summary is None:
-            raise ValueError("AI 群聊上下文压缩返回了空摘要")
+        summary_token_budget = chat_handler.max_context_tokens - fixed_tokens
+        if summary_token_budget <= 0:
+            raise GroupChatTurnError(
+                "系统提示词与摘要标记已占满长期上下文预算，"
+                "请缩短系统提示词或增大当前群的 max_context_tokens。"
+            )
+        pending_text = compression_input.formatted_context
+        request_count = 0
+        while True:
+            # 压缩请求也属于临时上下文，允许读取已超过长期预算的完整历史。
+            request = self.context_compressor.build_compression_messages(
+                system_prompt=chat_handler.system_prompt,
+                formatted_context=pending_text,
+                summary_token_budget=summary_token_budget,
+            )
+            response = await self.context.llm.get_ai_text_response(
+                messages=request,
+                provider=self.config.model.provider,
+                model_name=self.config.model.name,
+            )
+            request_count += 1
+            summary = self._normalize_content(response)
+            if summary is None:
+                raise LLMRequestError("模型返回了空历史摘要，本轮已停止，请稍后重试。")
+            summary_message = self.context_compressor.build_summary_message(
+                summary=summary
+            )
+            summary_budget = self.token_estimator.check_context(
+                messages=[chat_handler.system_prompt, summary_message],
+                max_context_tokens=chat_handler.max_context_tokens,
+            )
+            if not summary_budget.should_compress:
+                break
+            previous_tokens = self.token_estimator.estimate_messages(
+                messages=[ChatMessage(role="user", text=pending_text)],
+            )
+            reduced_tokens = self.token_estimator.estimate_messages(
+                messages=[ChatMessage(role="user", text=summary)],
+            )
+            if reduced_tokens >= previous_tokens:
+                raise LLMRequestError(
+                    "模型生成的历史摘要未能缩短内容，请调整模型或上下文预算后重试。"
+                )
+            pending_text = summary
         log_event(
             level="DEBUG",
             event="ai_group_chat.context_compression.finished",
@@ -442,14 +655,18 @@ class GroupChatToolLoop:
             message="AI 群聊历史上下文压缩完成",
             group_id=msg.group_id,
             message_id=msg.message_id,
-            summary_chars=len(normalized_summary),
+            summary_chars=len(summary),
+            estimated_tokens=summary_budget.estimated_tokens,
+            max_context_tokens=summary_budget.max_context_tokens,
+            request_count=request_count,
         )
-        return normalized_summary
+        return summary_message
 
     async def _handle_tool_response(
         self,
         *,
         msg: GroupMessage,
+        chat_handler: ContextHandler,
         working_messages: list[ChatMessage],
         response: LLMResponse,
         tool_executor: CompositeToolExecutor,
@@ -458,8 +675,8 @@ class GroupChatToolLoop:
         round_index: int,
         question: str,
         vision_turn_state: VisionTurnState,
-    ) -> None:
-        """处理模型请求的信息工具调用，并把工具结果写回本轮工作上下文。"""
+    ) -> int:
+        """把原始工具结果留在本轮，并按配置决定长期保存形式。"""
         log_event(
             level="DEBUG",
             event="ai_group_chat.tool_response.handle",
@@ -470,6 +687,7 @@ class GroupChatToolLoop:
             round_index=round_index,
             tool_names=[tool_call.name for tool_call in response.tool_calls],
         )
+        history_start = len(tool_history_messages)
         tool_history_messages.extend(
             self._append_tool_call_response(
                 working_messages=working_messages,
@@ -477,7 +695,8 @@ class GroupChatToolLoop:
                 tool_calls=response.tool_calls,
             )
         )
-        tool_result_history = await self._execute_tool_call_results(
+        previous_vision_count = len(vision_history_messages)
+        tool_result_history, tool_statuses = await self._execute_tool_call_results(
             working_messages=working_messages,
             tool_calls=response.tool_calls,
             tool_executor=tool_executor,
@@ -487,35 +706,38 @@ class GroupChatToolLoop:
             vision_turn_state=vision_turn_state,
         )
         tool_history_messages.extend(tool_result_history)
+        retained_count = 0
+        if self.config.tool_result_retention == "summary" and tool_statuses:
+            chat_handler.build_chatmessage(
+                message=self._build_tool_status_summary(statuses=tool_statuses)
+            )
+            retained_count = 1
+        elif self.config.tool_result_retention == "full":
+            retained_messages = tool_history_messages[history_start:]
+            if retained_messages:
+                chat_handler.build_chatmessage(message_lst=retained_messages)
+                retained_count = len(retained_messages)
+        new_vision_messages = vision_history_messages[previous_vision_count:]
+        if new_vision_messages:
+            chat_handler.build_chatmessage(message_lst=new_vision_messages)
+        return retained_count
 
-    async def _finish_turn(
+    def _persist_turn_input(
         self,
         *,
-        msg: GroupMessage,
         chat_handler: ContextHandler,
         turn_messages: list[ChatMessage],
-        sent_content_messages: list[ChatMessage],
-        tool_history_messages: list[ChatMessage],
-        vision_history_messages: list[ChatMessage],
         replace_existing_history: bool,
-        title: str,
-        failure_status_message: ChatMessage | None = None,
     ) -> None:
-        """把本次群聊处理落入长期上下文并写入调试快照。"""
-        self._persist_turn(
-            chat_handler=chat_handler,
-            turn_messages=turn_messages,
-            sent_content_messages=sent_content_messages,
-            tool_history_messages=tool_history_messages,
-            vision_history_messages=vision_history_messages,
-            replace_existing_history=replace_existing_history,
-            failure_status_message=failure_status_message,
+        """在请求模型前提交本轮用户输入和输入图片描述。"""
+        sanitized_messages = (
+            list(turn_messages)
+            if self.config.images.retain_images
+            else self._strip_history_images(messages=turn_messages)
         )
-        await self.debug_dumper.append_context_snapshot(
-            group_id=msg.group_id,
-            title=title,
-            messages=chat_handler.messages_lst,
-        )
+        if replace_existing_history:
+            chat_handler.replace_history(messages=[])
+        chat_handler.build_chatmessage(message_lst=sanitized_messages)
 
     async def _send_reply_content(
         self,
@@ -523,15 +745,25 @@ class GroupChatToolLoop:
         msg: GroupMessage,
         reply_content: ReplyContent,
         napcat_executor: NapCatGroupToolExecutor,
+        chat_handler: ContextHandler,
         working_messages: list[ChatMessage],
-        sent_content_messages: list[ChatMessage],
         round_index: int,
         event_name: str,
         log_message: str,
     ) -> ReplySendResult:
-        """只要模型返回正文，就立即发送，并把正文记入长期上下文候选。"""
+        """发送模型正文，并在成功返回后立即提交 assistant 上下文。"""
         if reply_content.visible_content is None:
             return ReplySendResult(content_sent=False)
+        memory_message = (
+            ChatMessage(
+                role="assistant",
+                text=reply_content.memory_content,
+                reasoning_content=reply_content.memory_reasoning_content,
+                reasoning_details=reply_content.memory_reasoning_details,
+            )
+            if reply_content.memory_content is not None
+            else None
+        )
         try:
             _ = await napcat_executor.send_content(reply_content.visible_content)
         except ValueError as exc:
@@ -577,14 +809,8 @@ class GroupChatToolLoop:
                 content_sent=False,
                 failure_status_message=failure_status_message,
             )
-        if reply_content.memory_content is not None:
-            sent_content_messages.append(
-                ChatMessage(
-                    role="assistant",
-                    text=reply_content.memory_content,
-                    reasoning_content=reply_content.memory_reasoning_content,
-                )
-            )
+        if memory_message is not None:
+            chat_handler.build_chatmessage(message=memory_message)
         log_event(
             level="DEBUG",
             event=event_name,
@@ -621,13 +847,25 @@ class GroupChatToolLoop:
         assistant_message = ChatMessage(
             role="assistant",
             text=response.content,
-            reasoning_content=self._build_memory_reasoning_content(
-                response.reasoning_content
-            ),
+            reasoning_content=self._normalize_content(response.reasoning_content),
+            reasoning_details=response.reasoning_details,
             tool_calls=tool_calls,
         )
         working_messages.append(assistant_message)
-        return [assistant_message]
+        return [
+            ChatMessage(
+                role="assistant",
+                reasoning_content=(
+                    self._normalize_content(response.reasoning_content)
+                    if self.config.retain_reasoning
+                    else None
+                ),
+                reasoning_details=(
+                    response.reasoning_details if self.config.retain_reasoning else None
+                ),
+                tool_calls=tool_calls,
+            )
+        ]
 
     async def _execute_tool_call_results(
         self,
@@ -639,15 +877,19 @@ class GroupChatToolLoop:
         vision_history_messages: list[ChatMessage],
         question: str,
         vision_turn_state: VisionTurnState,
-    ) -> list[ChatMessage]:
-        """执行工具调用，并只返回 tool 结果消息。"""
+    ) -> tuple[list[ChatMessage], list[ToolCallStatus]]:
+        """执行工具调用，并返回本轮原始结果与有界状态。"""
         history_messages: list[ChatMessage] = []
+        statuses: list[ToolCallStatus] = []
         image_items: list[LLMImageItem] = []
         truncated_image_count = 0
-        explicit_forward_image_call = any(
-            tool_call.name == FORWARD_MESSAGE_IMAGES_TOOL_NAME
+        explicit_forward_image_message_ids = {
+            message_id
             for tool_call in tool_calls
-        )
+            if tool_call.name == FORWARD_MESSAGE_IMAGES_TOOL_NAME
+            for message_id in [tool_call.arguments.get("message_id")]
+            if isinstance(message_id, str)
+        }
         for tool_call in tool_calls:
             log_event(
                 level="DEBUG",
@@ -663,10 +905,15 @@ class GroupChatToolLoop:
                 tool_call=tool_call,
                 tool_executor=tool_executor,
                 group_id=group_id,
-                explicit_forward_image_call=explicit_forward_image_call,
+                explicit_forward_image_message_ids=(
+                    explicit_forward_image_message_ids
+                ),
             )
             working_messages.append(outcome.message)
             history_messages.append(outcome.message)
+            statuses.append(
+                ToolCallStatus(name=tool_call.name, is_error=outcome.is_error)
+            )
             image_items.extend(outcome.image_items)
             truncated_image_count += outcome.truncated_image_count
             log_event(
@@ -731,7 +978,28 @@ class GroupChatToolLoop:
                     else 0
                 ),
             )
-        return history_messages
+        return history_messages, statuses
+
+    def _build_tool_status_summary(
+        self, *, statuses: list[ToolCallStatus]
+    ) -> ChatMessage:
+        """按工具名聚合成功与失败次数，不保存参数和原始结果。"""
+        counts_by_name: dict[str, list[int]] = {}
+        for status in statuses:
+            counts = counts_by_name.setdefault(status.name, [0, 0])
+            counts[1 if status.is_error else 0] += 1
+        parts: list[str] = []
+        for name, (success_count, error_count) in counts_by_name.items():
+            status_parts: list[str] = []
+            if success_count > 0:
+                status_parts.append(f"成功 {success_count} 次")
+            if error_count > 0:
+                status_parts.append(f"失败 {error_count} 次")
+            parts.append(f"{name}（{'，'.join(status_parts)}）")
+        return ChatMessage(
+            role="system",
+            text="运行记录：本轮调用了信息工具：" + "；".join(parts) + "。",
+        )
 
     async def _call_tool_for_model(
         self,
@@ -739,7 +1007,7 @@ class GroupChatToolLoop:
         tool_call: LLMToolCall,
         tool_executor: CompositeToolExecutor,
         group_id: str,
-        explicit_forward_image_call: bool,
+        explicit_forward_image_message_ids: set[str],
     ) -> ToolCallResultForModel:
         """调用工具并把成功或失败结果都整理为模型可读的 tool 消息。"""
         result: JsonValue
@@ -756,7 +1024,9 @@ class GroupChatToolLoop:
             if self.forward_image_auto_fetcher.should_fetch(
                 tool_call=tool_call,
                 result=result,
-                explicit_forward_image_call=explicit_forward_image_call,
+                explicit_forward_image_message_ids=(
+                    explicit_forward_image_message_ids
+                ),
             ):
                 auto_image_result = await self.forward_image_auto_fetcher.fetch(
                     forward_result=result,
@@ -796,75 +1066,54 @@ class GroupChatToolLoop:
         is_error = result.get("is_error")
         return is_error is True
 
-    def _persist_turn(
-        self,
-        *,
-        chat_handler: ContextHandler,
-        turn_messages: list[ChatMessage],
-        sent_content_messages: list[ChatMessage],
-        tool_history_messages: list[ChatMessage],
-        vision_history_messages: list[ChatMessage],
-        replace_existing_history: bool,
-        failure_status_message: ChatMessage | None = None,
-    ) -> None:
-        """把本轮用户输入和最终回复写入群上下文。"""
-        stripped_turn_image_count = self._count_images(messages=turn_messages)
-        sanitized_turn_messages = self._strip_history_images(messages=turn_messages)
-        history_messages = sanitized_turn_messages[:]
-        if self.config.retain_tool_results:
-            history_messages.extend(tool_history_messages)
-        history_messages.extend(vision_history_messages)
-        history_messages.extend(sent_content_messages)
-        if failure_status_message is not None:
-            history_messages.append(failure_status_message)
-        log_event(
-            level="DEBUG",
-            event="ai_group_chat.context.persist",
-            category="plugin",
-            message="AI 群聊本轮消息写入长期上下文",
-            turn_messages_count=len(turn_messages),
-            stripped_turn_image_count=stripped_turn_image_count,
-            sent_content_messages_count=len(sent_content_messages),
-            tool_history_messages_count=len(tool_history_messages),
-            vision_history_messages_count=len(vision_history_messages),
-            persisted_messages_count=len(history_messages),
-            retain_tool_results=self.config.retain_tool_results,
-            retain_vision_descriptions=(
-                self.config.vision.retain_descriptions
-                if self.config.vision is not None
-                else False
-            ),
-            replace_existing_history=replace_existing_history,
-        )
-        if replace_existing_history:
-            chat_handler.replace_history(messages=[])
-        chat_handler.build_chatmessage(message_lst=history_messages)
-
     def _strip_history_images(self, *, messages: list[ChatMessage]) -> list[ChatMessage]:
         """生成不含图片字节的历史消息，避免图片跨轮次进入普通模型请求。"""
         return [
-            self._strip_message_images(message=message)
+            message.without_images()
             for message in messages
         ]
-
-    def _strip_message_images(self, *, message: ChatMessage) -> ChatMessage:
-        """复制聊天消息并移除只应服务于本轮请求的图片字节。"""
-        if not message.image:
-            return message
-        text = message.text
-        if text is None:
-            text = "（图片内容已用于当轮多模态请求，长期上下文不保存图片字节）"
-        return ChatMessage(
-            role=message.role,
-            text=text,
-            reasoning_content=message.reasoning_content,
-            tool_calls=message.tool_calls,
-            tool_call_id=message.tool_call_id,
-        )
 
     def _count_images(self, *, messages: list[ChatMessage]) -> int:
         """统计消息列表中仍携带的图片字节数量。"""
         return sum(len(message.image or []) for message in messages)
+
+    def _fit_history_images_to_byte_limit(
+        self,
+        *,
+        history_messages: list[ChatMessage],
+        current_messages: list[ChatMessage],
+    ) -> tuple[list[ChatMessage], int]:
+        """需要时从最旧历史开始移除图片，使当前请求符合总字节配置。"""
+        byte_limit = self.config.images.max_total_bytes_per_request
+        if byte_limit == 0:
+            return history_messages, 0
+        current_bytes = sum(
+            len(image)
+            for message in current_messages
+            for image in message.image or []
+        )
+        history_bytes = sum(
+            len(image)
+            for message in history_messages
+            for image in message.image or []
+        )
+        if current_bytes + history_bytes <= byte_limit:
+            return history_messages, 0
+        if self.config.images.oversize_behavior == "error":
+            raise GroupChatTurnError(
+                "历史与当前图片总字节超过 images.max_total_bytes_per_request"
+            )
+        fitted = list(history_messages)
+        stripped_count = 0
+        for index, message in enumerate(fitted):
+            if current_bytes + history_bytes <= byte_limit:
+                break
+            if not message.image:
+                continue
+            history_bytes -= sum(len(image) for image in message.image)
+            stripped_count += len(message.image)
+            fitted[index] = message.without_images()
+        return fitted, stripped_count
 
     def _normalize_content(self, content: str | None) -> str | None:
         """清理模型文本输出，空白内容视为无回复。"""
@@ -876,17 +1125,20 @@ class GroupChatToolLoop:
         return stripped_content
 
     def _build_reply_content(
-        self, *, content: str | None, reasoning_content: str | None
+        self, *, content: str | None, reasoning_content: str | None,
+        reasoning_details: list[JsonObject] | None,
     ) -> ReplyContent:
         """构造群内可见回复，并保持长期上下文只记录正式回复。"""
         memory_reasoning_content = self._build_memory_reasoning_content(
             reasoning_content
         )
+        memory_reasoning_details = reasoning_details if self.config.retain_reasoning else None
         if content is None:
             return ReplyContent(
                 visible_content=None,
                 memory_content=None,
                 memory_reasoning_content=memory_reasoning_content,
+                memory_reasoning_details=memory_reasoning_details,
             )
         reasoning_text = self._normalize_content(reasoning_content)
         if not self.config.show_reasoning or reasoning_text is None:
@@ -894,6 +1146,7 @@ class GroupChatToolLoop:
                 visible_content=content,
                 memory_content=content,
                 memory_reasoning_content=memory_reasoning_content,
+                memory_reasoning_details=memory_reasoning_details,
             )
         visible_content = (
             "【模型原生思维链】\n"
@@ -907,12 +1160,13 @@ class GroupChatToolLoop:
             visible_content=visible_content,
             memory_content=content,
             memory_reasoning_content=memory_reasoning_content,
+            memory_reasoning_details=memory_reasoning_details,
         )
 
     def _build_memory_reasoning_content(
         self, reasoning_content: str | None
     ) -> str | None:
-        """按配置决定是否把模型原生思维链作为结构化字段回传给后续请求。"""
+        """按配置决定是否把模型 reasoning 保存到下一次用户请求。"""
         if not self.config.retain_reasoning:
             return None
         return self._normalize_content(reasoning_content)

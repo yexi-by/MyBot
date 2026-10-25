@@ -1,12 +1,19 @@
 """WebUI 配置 API 路由；ConfigManager 在创建路由时显式注入。"""
 
+from collections.abc import Iterable
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Response, status
 
-from app.config import RESTART_ONLY_SECTIONS, ConfigLoadError, ConfigManager
+from app.config import (
+    RESTART_ONLY_SECTIONS,
+    ConfigIssue,
+    ConfigLoadError,
+    ConfigManager,
+    MyBotConfig,
+)
 
-from . import config_io, files
+from . import config_io, files, llm_models
 from .config_io import ConfigConflictError
 from .power import PowerAction, PowerController
 from .schemas import (
@@ -22,18 +29,38 @@ from .schemas import (
     FileSaveRequest,
     FileSaveResponse,
     PowerResponse,
+    ProviderModelsResponse,
 )
 
 
-def _issue_payloads(error: ConfigLoadError) -> list[ConfigIssuePayload]:
+_CONFIG_SECTIONS = frozenset(MyBotConfig.model_fields)
+
+
+def _issue_path(issue: ConfigIssue) -> list[str | int]:
+    """返回错误对应的配置字段路径。
+
+    文件引用与模型引用错误只有点分 location（如
+    plugins.ai_group_chat.groups.0.system_prompt_file），这里按配置节还原成路径，
+    让前端能把错误标到具体字段上；其他 location（文件 API、TOML 解析）保持空路径。
+    """
+    if issue.path:
+        return list(issue.path)
+    parts = issue.location.split(".")
+    if parts[0] not in _CONFIG_SECTIONS:
+        return []
+    return [int(part) if part.isdigit() else part for part in parts]
+
+
+def _issue_payloads(issues: Iterable[ConfigIssue]) -> list[ConfigIssuePayload]:
     """把脱敏配置错误转换为 API 载荷。"""
     return [
         ConfigIssuePayload(
             location=issue.location,
+            path=_issue_path(issue),
             error_type=issue.error_type,
             message=issue.message,
         )
-        for issue in error.issues
+        for issue in issues
     ]
 
 
@@ -79,14 +106,7 @@ def create_webui_router(
             config=result.config,
             sha256=result.sha256,
             valid=result.valid,
-            issues=[
-                ConfigIssuePayload(
-                    location=issue.location,
-                    error_type=issue.error_type,
-                    message=issue.message,
-                )
-                for issue in result.issues
-            ],
+            issues=_issue_payloads(result.issues),
             meta=ConfigMeta(
                 plugin_revision=manager.plugins.revision,
                 watcher_active=watcher_active,
@@ -104,7 +124,7 @@ def create_webui_router(
                 config_file=manager.config_file, payload=body.config
             )
         except ConfigLoadError as exc:
-            return ConfigValidateResponse(valid=False, issues=_issue_payloads(exc))
+            return ConfigValidateResponse(valid=False, issues=_issue_payloads(exc.issues))
         return ConfigValidateResponse(valid=True, issues=[])
 
     @router.put("/config")
@@ -124,7 +144,7 @@ def create_webui_router(
         except ConfigLoadError as exc:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail={"issues": [issue.model_dump() for issue in _issue_payloads(exc)]},
+                detail={"issues": [issue.model_dump() for issue in _issue_payloads(exc.issues)]},
             ) from exc
         except OSError as exc:
             raise HTTPException(
@@ -160,7 +180,7 @@ def create_webui_router(
                     if _is_invalid_path_error(exc)
                     else status.HTTP_404_NOT_FOUND
                 ),
-                detail={"issues": [issue.model_dump() for issue in _issue_payloads(exc)]},
+                detail={"issues": [issue.model_dump() for issue in _issue_payloads(exc.issues)]},
             ) from exc
         return FileGetResponse(path=relative_path, content=content, sha256=digest)
 
@@ -181,7 +201,7 @@ def create_webui_router(
         except ConfigLoadError as exc:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail={"issues": [issue.model_dump() for issue in _issue_payloads(exc)]},
+                detail={"issues": [issue.model_dump() for issue in _issue_payloads(exc.issues)]},
             ) from exc
         except OSError as exc:
             raise HTTPException(
@@ -189,6 +209,24 @@ def create_webui_router(
                 detail="文本文件不可写，请检查 config 目录挂载权限",
             ) from exc
         return FileSaveResponse(sha256=digest)
+
+    @router.get("/llm/providers/{provider_id}/models")
+    async def list_provider_models(provider_id: str) -> ProviderModelsResponse:
+        """代理拉取指定 provider 的可用模型列表；未定义 404，上游失败 502。"""
+        try:
+            models = await llm_models.list_provider_models(
+                config_file=manager.config_file, provider_id=provider_id
+            )
+        except llm_models.ProviderNotFoundError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"未定义的 LLM provider: {provider_id}",
+            ) from exc
+        except llm_models.ProviderModelsError as exc:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            ) from exc
+        return ProviderModelsResponse(provider=provider_id, models=models)
 
     def _request_power(action: PowerAction) -> PowerResponse:
         """受理电源操作：延迟优雅停机，是否重新拉起由外部守护策略决定。"""
@@ -225,6 +263,7 @@ def create_webui_router(
         list_files,
         read_file,
         save_file,
+        list_provider_models,
         restart_process,
         shutdown_process,
     )

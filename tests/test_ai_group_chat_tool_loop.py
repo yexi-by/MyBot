@@ -1,6 +1,7 @@
 """AI 群聊工具循环与视觉工具集成测试。"""
 
 import unittest
+from unittest.mock import patch
 from datetime import UTC, datetime
 from typing import Protocol, cast
 
@@ -19,8 +20,8 @@ from app.models import (
     Sender,
     Text,
 )
-from app.plugins.ai_group_chat.debug_dump import AIGroupChatDebugDumper
-from app.plugins.ai_group_chat.tool_loop import GroupChatToolLoop
+from app.plugins.ai_group_chat.tool_loop import GroupChatToolLoop, GroupChatTurnError
+from app.services.llm.errors import LLMRequestError
 from app.plugins.ai_group_chat.vision_tool import (
     VisionDescriptionTool,
     VisionTurnState,
@@ -38,6 +39,7 @@ from app.services.llm.tools import (
     LLMImageError,
     LLMToolExecutionResult,
 )
+from tests.config_helpers import build_ai_group_chat_config
 
 VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
 VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
@@ -54,6 +56,7 @@ class FakeLLMProtocol(Protocol):
         model_name: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
         """返回纯文本响应。"""
         ...
@@ -95,9 +98,10 @@ class RecordingLLM:
         model_name: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
         """记录视觉或压缩请求并返回固定文本。"""
-        _ = (max_attempts, retry_delay_seconds)
+        _ = (max_attempts, retry_delay_seconds, retry_max_delay_seconds)
         self.text_requests.append(messages[:])
         self.text_models.append((provider, model_name))
         return self.text_response
@@ -200,7 +204,7 @@ class EmptyGroupMessageReader:
                 occurred_at=datetime(2026, 8, 16, tzinfo=UTC),
                 direction="incoming",
                 segments=(Forward.new(forward_id),),
-                images=(),
+                media=(),
             )
         )
 
@@ -319,38 +323,43 @@ def build_config(
     provider: str = "main-vendor",
     show_reasoning: bool = False,
     retain_reasoning: bool = False,
+    tool_result_retention: str = "off",
     retain_vision_descriptions: bool = True,
-    max_reply_chars: int = 100,
+    retain_images: bool = False,
+    max_tool_rounds: int = 16,
+    forward_reply_threshold_chars: int = 100,
     context_compression_notice: str = "正在整理上下文",
 ) -> AIGroupChatConfig:
     """按主模型能力构造有效配置。"""
-    values: dict[str, object] = {
-        "model": {
-            "provider": provider,
-            "name": model_name,
-            "supports_images": supports_images,
-        },
-        "show_reasoning": show_reasoning,
-        "retain_reasoning": retain_reasoning,
-        "max_reply_chars": max_reply_chars,
-        "context_compression_notice": context_compression_notice,
-        "groups": [],
-    }
-    if not supports_images:
-        values.update(
-            {
-                "vision": {
-                    "model": {
-                        "provider": "vision-vendor",
-                        "name": "vision-model",
-                    },
-                    "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
-                    "user_prompt_file": VISION_USER_PROMPT_PATH,
-                    "retain_descriptions": retain_vision_descriptions,
+    return build_ai_group_chat_config(
+        supports_images=supports_images,
+        provider=provider,
+        model_name=model_name,
+        overrides={
+            "show_reasoning": show_reasoning,
+            "retain_reasoning": retain_reasoning,
+            "tool_result_retention": tool_result_retention,
+            "max_tool_rounds": max_tool_rounds,
+            "forward_reply_threshold_chars": forward_reply_threshold_chars,
+            "context_compression_notice": context_compression_notice,
+            "images": {"retain_images": retain_images},
+            **(
+                {
+                    "vision": {
+                        "model": {
+                            "provider": "vision-vendor",
+                            "name": "vision-model",
+                        },
+                        "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
+                        "user_prompt_file": VISION_USER_PROMPT_PATH,
+                        "retain_descriptions": retain_vision_descriptions,
+                    }
                 }
-            }
-        )
-    return AIGroupChatConfig.model_validate(values)
+                if not supports_images
+                else {}
+            ),
+        },
+    )
 
 
 def build_message() -> GroupMessage:
@@ -387,22 +396,26 @@ def materialize_config(config: AIGroupChatConfig) -> MaterializedAIGroupChatConf
         vision_user_prompt=(
             "结合当前问题描述图片。" if config.vision is not None else None
         ),
+        turn_instruction=None,
     )
 
 
 def build_loop(
-    *, config: AIGroupChatConfig, context: FakeContext
+    *,
+    config: AIGroupChatConfig,
+    context: FakeContext,
+    turn_instruction: str | None = None,
 ) -> GroupChatToolLoop:
     """构造使用真实视觉工具的工具循环。"""
     typed_context = cast(Context, context)
     return GroupChatToolLoop(
         config=config,
         context=typed_context,
-        debug_dumper=AIGroupChatDebugDumper(config=config),
         vision_tool=VisionDescriptionTool(
             config=materialize_config(config),
             context=typed_context,
         ),
+        turn_instruction=turn_instruction,
     )
 
 
@@ -411,6 +424,7 @@ async def run_turn(
     loop: GroupChatToolLoop,
     chat_handler: ContextHandler,
     question: str = "请根据图片回答",
+    recent_chat_messages: list[ChatMessage] | None = None,
     turn_messages: list[ChatMessage] | None = None,
     input_vision_messages: list[ChatMessage] | None = None,
     input_vision_history_messages: list[ChatMessage] | None = None,
@@ -420,6 +434,7 @@ async def run_turn(
     await loop.run(
         msg=build_message(),
         chat_handler=chat_handler,
+        recent_chat_messages=recent_chat_messages or [],
         turn_messages=(
             turn_messages
             if turn_messages is not None
@@ -436,6 +451,364 @@ async def run_turn(
 
 class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
     """验证主模型路由、视觉隔离、思维字段和上下文保存。"""
+
+    async def test_protocol_leaks_retry_before_sending_or_persisting(self) -> None:
+        """截图中的调用文本和换行思考标签不会发群、保存或带回纠错请求。"""
+        rejected_marker = "不应公开的异常模型正文"
+        leaked_contents = (
+            "<call:default_api:qq__get_group_history_messages>"
+            f"{{limit:15,query_mode:recent_count,secret:{rejected_marker}}}"
+            "</call:default_api:qq__get_group_history_messages>",
+            f"<thought\n>{rejected_marker}</thought>这也是未校验的回答",
+            f"call:default_api:qq__get_group_history_messages{{secret:{rejected_marker}}}",
+            f"```xml\n<think>{rejected_marker}</think>\n```",
+            f"`<thought>`{rejected_marker}`</thought>`",
+            f"🫧thought\n{rejected_marker}这也是未校验的回答",
+            f"正常片段💭analysis:\n{rejected_marker}",
+            f"💭\nThe user asks a question. {rejected_marker}\n正式回复",
+            f"正常片段\n 🫧\ufe0f \r\n\r\n{rejected_marker}",
+            f"`💭`\n{rejected_marker}",
+        )
+        for leaked_content in leaked_contents:
+            with self.subTest(content=leaked_content):
+                llm = RecordingLLM(responses=[
+                    LLMResponse(content=leaked_content, reasoning_content=rejected_marker),
+                    LLMResponse(content="恢复后的公开回复"),
+                ])
+                context = FakeContext(llm=llm)
+                handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=1000000)
+                await run_turn(
+                    loop=build_loop(config=build_config(
+                        max_tool_rounds=1, show_reasoning=True, retain_reasoning=True,
+                        tool_result_retention="full",
+                    ), context=context),
+                    chat_handler=handler,
+                )
+
+                self.assertEqual(context.bot.sent_texts, ["恢复后的公开回复"])
+                self.assertEqual(context.bot.sent_forwards, [])
+                self.assertEqual(context.mcp_tool_manager.calls, [])
+                self.assertEqual(len(llm.formal_requests), 2)
+                self.assertEqual(
+                    [message.role for message in handler.messages_lst],
+                    ["system", "user", "assistant"],
+                )
+                self.assertEqual(handler.messages_lst[-1].text, "恢复后的公开回复")
+                for messages in [*llm.formal_requests, handler.messages_lst]:
+                    self.assertNotIn(rejected_marker, "\n".join(
+                        (message.text or "") + (message.reasoning_content or "")
+                        for message in messages
+                    ))
+                self.assertGreater(len(llm.formal_requests[1]), len(llm.formal_requests[0]))
+
+    async def test_invalid_mixed_response_is_rejected_before_tool_execution(self) -> None:
+        """异常正文与真实工具调用同包返回时整包拒绝，纠正后只执行一次。"""
+        rejected_marker = "不应公开的异常模型正文"
+        llm = RecordingLLM(responses=[
+            LLMResponse(
+                content=f"💭\nLet's check the repository. {rejected_marker}",
+                reasoning_content=rejected_marker,
+                tool_calls=[build_tool_call("blocked-call")],
+            ),
+            LLMResponse(tool_calls=[build_tool_call("accepted-call")]),
+            LLMResponse(content="查询成功"),
+        ])
+        context = FakeContext(llm=llm)
+        handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=1000000)
+        await run_turn(
+            loop=build_loop(config=build_config(
+                max_tool_rounds=2, show_reasoning=True, retain_reasoning=True,
+                tool_result_retention="full",
+            ), context=context),
+            chat_handler=handler,
+        )
+
+        self.assertEqual(context.mcp_tool_manager.calls, [(TOOL_NAME, {})])
+        self.assertEqual(context.bot.sent_texts, ["查询成功"])
+        self.assertEqual(context.bot.sent_forwards, [])
+        self.assertEqual(len(llm.formal_requests), 3)
+        for messages in [*llm.formal_requests, handler.messages_lst]:
+            self.assertNotIn("blocked-call", [
+                tool_call.id for message in messages for tool_call in message.tool_calls or []
+            ])
+            self.assertNotIn(rejected_marker, "\n".join(
+                (message.text or "") + (message.reasoning_content or "")
+                for message in messages
+            ))
+        self.assertEqual([
+            message.tool_call_id for message in handler.messages_lst if message.role == "tool"
+        ], ["accepted-call"])
+
+    async def test_protocol_retry_exhaustion_preserves_only_already_sent_content(self) -> None:
+        """连续异常在第三次拒绝后结束；先前已发出的正常正文与工具结果仍保留。"""
+        rejected_marker = "不应公开的异常模型正文"
+        for has_sent_content in (False, True):
+            with self.subTest(has_sent_content=has_sent_content):
+                responses = [LLMResponse(
+                    content="已发送的正常正文", tool_calls=[build_tool_call("completed-call")],
+                )] if has_sent_content else []
+                responses.extend(LLMResponse(
+                    content=f"💭\n{rejected_marker}",
+                    reasoning_content=rejected_marker,
+                    tool_calls=[build_tool_call("blocked-call")],
+                ) for _ in range(3))
+                llm = RecordingLLM(responses=responses)
+                context = FakeContext(llm=llm)
+                handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=1000000)
+
+                with self.assertRaises(GroupChatTurnError):
+                    await run_turn(
+                        loop=build_loop(config=build_config(
+                            max_tool_rounds=2, retain_reasoning=True,
+                            tool_result_retention="full",
+                        ), context=context),
+                        chat_handler=handler,
+                    )
+
+                self.assertEqual(len(llm.formal_requests), 3 + int(has_sent_content))
+                self.assertEqual(context.bot.sent_texts, ["已发送的正常正文"] if has_sent_content else [])
+                self.assertEqual(context.bot.sent_forwards, [])
+                self.assertEqual(context.mcp_tool_manager.calls, [(TOOL_NAME, {})] if has_sent_content else [])
+                self.assertEqual([
+                    message.tool_call_id for message in handler.messages_lst if message.role == "tool"
+                ], ["completed-call"] if has_sent_content else [])
+                for messages in [*llm.formal_requests, handler.messages_lst]:
+                    self.assertNotIn("blocked-call", [
+                        tool_call.id for message in messages for tool_call in message.tool_calls or []
+                    ])
+                    self.assertNotIn(rejected_marker, "\n".join(
+                        (message.text or "") + (message.reasoning_content or "")
+                        for message in messages
+                    ))
+                if has_sent_content:
+                    self.assertIn("已发送的正常正文", [message.text for message in handler.messages_lst])
+                else:
+                    self.assertEqual([message.role for message in handler.messages_lst], ["system", "user"])
+
+    async def test_history_quarantine_preserves_normal_turns_and_tool_pairs(self) -> None:
+        """污染只从请求视图隔离，预算和摘要也使用同一份干净历史。"""
+        for compress in (False, True):
+            with self.subTest(compress=compress):
+                llm = RecordingLLM(
+                    responses=[LLMResponse(content="继续正常聊天")],
+                    text_response="群友约好周六出发，查询结果为三本。",
+                )
+                context = FakeContext(llm=llm)
+                handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
+                normal = "约好周六出发。" * (2000 if compress else 1)
+                user = ChatMessage(role="user", text="💭\n用户在讨论这个现象。")
+                old_call = build_tool_call("old-completed-call").model_copy(update={
+                    "extra_content": {"vendor": {"signature": "old-state"}},
+                })
+                history = [
+                    user,
+                    ChatMessage(role="assistant", text=normal),
+                    ChatMessage(role="assistant", text="💭\nprivate-plan" + "x" * 30000),
+                    ChatMessage(
+                        role="assistant", text="🫧\nprivate-tool-plan",
+                        reasoning_content="private-reasoning", tool_calls=[old_call],
+                    ),
+                    ChatMessage(role="tool", tool_call_id=old_call.id, text="历史查询结果：三本"),
+                ]
+                original = [message.model_copy(deep=True) for message in history]
+                handler.add_msg(msg_list=history)
+                await run_turn(
+                    loop=build_loop(config=build_config(), context=context),
+                    chat_handler=handler,
+                )
+
+                self.assertEqual(history, original)
+                self.assertEqual(len(llm.text_requests), int(compress))
+                for request in [*llm.formal_requests, *llm.text_requests]:
+                    text = "\n".join((m.text or "") + (m.reasoning_content or "") for m in request)
+                    self.assertNotIn("private-", text)
+                request = llm.text_requests[0] if compress else llm.formal_requests[0]
+                text = "\n".join(m.text or "" for m in request)
+                self.assertIn(normal, text)
+                self.assertIn(user.text or "", text)
+                self.assertIn("历史查询结果：三本", text)
+                if not compress:
+                    replay = next(m for m in request if m.tool_calls)
+                    self.assertIsNone(replay.text)
+                    self.assertEqual(replay.tool_calls, [old_call])
+                    self.assertIn(old_call.id, [m.tool_call_id for m in request if m.role == "tool"])
+                    self.assertEqual(handler.messages_lst[1:1 + len(history)], original)
+                self.assertEqual(context.mcp_tool_manager.calls, [])
+                self.assertEqual(handler.messages_lst[-1].text, "继续正常聊天")
+
+    async def test_large_tool_results_finish_then_compress_only_retained_history(self) -> None:
+        """完整交付多轮大结果；full 保存后触发压缩，off 和 summary 不积累原文。"""
+        large_result = "工具资料" * 10000
+        for retention in ("off", "summary", "full"):
+            with self.subTest(retention=retention):
+                llm = RecordingLLM(
+                    responses=[
+                        LLMResponse(
+                            reasoning_content="本轮推理" * 3000,
+                            tool_calls=[build_tool_call("call-1")],
+                        ),
+                        LLMResponse(tool_calls=[build_tool_call("call-2")]),
+                        LLMResponse(content="工具查询成功"),
+                        LLMResponse(content="下一轮成功"),
+                        LLMResponse(content="再次成功"),
+                    ],
+                    text_response="工具资料已整理成摘要",
+                )
+                context = FakeContext(llm=llm)
+                loop = build_loop(
+                    config=build_config(
+                        supports_images=True, tool_result_retention=retention,
+                    ),
+                    context=context,
+                )
+                handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
+                with patch.object(
+                    context.mcp_tool_manager,
+                    "call_tool_with_artifacts",
+                    return_value=LLMToolExecutionResult(result={"ok": True, "text": large_result}),
+                ):
+                    await run_turn(loop=loop, chat_handler=handler)
+
+                request = llm.formal_requests[2]
+                self.assertGreater(loop.token_estimator.estimate_messages(messages=request), 9000)
+                results = [message for message in request if message.role == "tool"]
+                self.assertEqual([message.tool_call_id for message in results], ["call-1", "call-2"])
+                self.assertEqual(
+                    [call.id for message in request for call in message.tool_calls or []],
+                    ["call-1", "call-2"],
+                )
+                for result in results:
+                    self.assertIn(large_result, result.text or "")
+                    self.assertEqual(result in handler.messages_lst, retention == "full")
+                self.assertEqual(llm.text_requests, [])
+                self.assertEqual(context.bot.sent_texts, ["工具查询成功"])
+
+                await run_turn(loop=loop, chat_handler=handler, question="继续")
+                await run_turn(loop=loop, chat_handler=handler, question="再继续")
+                self.assertEqual(len(llm.text_requests), 1 if retention == "full" else 0)
+                self.assertEqual(len(llm.formal_requests), 5)
+                self.assertEqual(handler.messages_lst[-1].text, "再次成功")
+                if retention == "full":
+                    self.assertIn(large_result, llm.text_requests[0][1].text or "")
+                    self.assertIn("工具资料已整理成摘要", handler.messages_lst[1].text or "")
+                elif retention == "summary":
+                    statuses = [message.text or "" for message in handler.messages_lst if "运行记录" in (message.text or "")]
+                    self.assertEqual(len(statuses), 2)
+                    self.assertTrue(all("成功 1 次" in status and "失败" not in status for status in statuses))
+
+    async def test_large_reply_history_compresses_above_budget_and_recovers(self) -> None:
+        """压缩请求可超出长期预算，预算小于压缩提示词时后续对话仍能继续。"""
+        for max_tokens in (700, 9000):
+            with self.subTest(max_tokens=max_tokens):
+                llm = RecordingLLM(
+                    responses=[
+                        LLMResponse(content="历史回复" * 2000),
+                        LLMResponse(content="继续成功"),
+                        LLMResponse(content="再次成功"),
+                    ],
+                    text_response="已整理的历史摘要",
+                )
+                context = FakeContext(llm=llm)
+                loop = build_loop(config=build_config(), context=context)
+                handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=max_tokens)
+                await run_turn(loop=loop, chat_handler=handler, question="开始")
+                await run_turn(loop=loop, chat_handler=handler, question="继续")
+                await run_turn(loop=loop, chat_handler=handler, question="继续")
+                self.assertEqual(len(llm.text_requests), 1)
+                self.assertGreater(
+                    loop.token_estimator.estimate_messages(messages=llm.text_requests[0]),
+                    max_tokens,
+                )
+                self.assertEqual(len(llm.formal_requests), 3)
+                self.assertEqual(handler.messages_lst[-1].text, "再次成功")
+
+    async def test_large_current_input_does_not_trigger_empty_history_compression(self) -> None:
+        """首轮大输入直接交付，保存后在下一轮压缩；临时视觉消息不进入长期历史。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="收到"), LLMResponse(content="继续成功")])
+        context = FakeContext(llm=llm)
+        loop = build_loop(config=build_config(supports_images=True), context=context)
+        handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
+        question = "当前大段输入" * 3000
+        vision_message = ChatMessage(role="user", text="临时视觉描述" * 3000, image=[b"image"])
+        await run_turn(
+            loop=loop, chat_handler=handler, question=question,
+            input_vision_messages=[vision_message],
+        )
+        self.assertEqual(llm.text_requests, [])
+        self.assertEqual(llm.formal_requests[0][1].text, question)
+        self.assertIs(llm.formal_requests[0][2], vision_message)
+        self.assertNotIn(vision_message, handler.messages_lst)
+        await run_turn(loop=loop, chat_handler=handler, question="继续")
+        self.assertEqual(len(llm.text_requests), 1)
+        self.assertIn(question, llm.text_requests[0][1].text or "")
+        self.assertNotIn("临时视觉描述", llm.text_requests[0][1].text or "")
+        self.assertEqual(handler.messages_lst[-1].text, "继续成功")
+
+    async def test_compression_can_reduce_summary_without_reserving_current_input(self) -> None:
+        """超限摘要继续缩短，当前长输入与图片保持独立且不挤占摘要预算。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="压缩后回复")])
+        context = FakeContext(llm=llm)
+        loop = build_loop(config=build_config(supports_images=True, retain_images=True), context=context)
+        handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=700)
+        handler.add_msg(ChatMessage(role="assistant", text="历史" * 3000))
+        current_message = ChatMessage(role="user", text="本轮新问题" * 1000, image=[b"current"], image_detail="high")
+        vision_message = ChatMessage(role="user", text="临时图片", image=[b"vision"], image_detail="low")
+        with patch.object(
+            llm, "get_ai_text_response", side_effect=["长摘要" * 200, "简短摘要"],
+        ) as compress:
+            await run_turn(
+                loop=loop, chat_handler=handler,
+                turn_messages=[current_message], input_vision_messages=[vision_message],
+            )
+        self.assertEqual(compress.await_count, 2)
+        request = llm.formal_requests[0]
+        self.assertEqual([message.role for message in request], ["system", "user", "user", "user"])
+        self.assertIn("简短摘要", request[1].text or "")
+        self.assertIs(request[2], current_message)
+        self.assertIs(request[3], vision_message)
+        self.assertLessEqual(loop.token_estimator.estimate_messages(messages=request[:2]), 700)
+        self.assertNotIn(vision_message, handler.messages_lst)
+        self.assertEqual(handler.messages_lst[-1].text, "压缩后回复")
+
+    async def test_compression_notice_failure_still_allows_reply(self) -> None:
+        """提示发送失败只记录日志，压缩和正式回复继续。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="压缩后回复")])
+        context = FakeContext(llm=llm)
+        handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
+        handler.add_msg(ChatMessage(role="assistant", text="历史" * 3000))
+        with patch.object(
+            context.bot, "send_msg",
+            side_effect=[NapCatSendMessageError("通知发送失败"), Response(status="ok", retcode=0)],
+        ) as send:
+            await run_turn(loop=build_loop(config=build_config(), context=context), chat_handler=handler)
+        self.assertEqual(send.await_count, 2)
+        self.assertEqual(len(llm.text_requests), 1)
+        self.assertEqual(len(llm.formal_requests), 1)
+        self.assertEqual(handler.messages_lst[-1].text, "压缩后回复")
+
+    async def test_invalid_summary_preserves_history_and_allows_retry(self) -> None:
+        """空白或无法缩短的摘要明确失败，保留原历史供后续重试。"""
+        history = ChatMessage(role="assistant", text="历史回复" * 2000)
+        for summary, error in ((" \n\t ", "空历史摘要"), (history.text, "未能缩短")):
+            assert summary is not None
+            with self.subTest(error=error):
+                llm = RecordingLLM(
+                    responses=[LLMResponse(content="重试成功")],
+                    text_response=summary,
+                )
+                context = FakeContext(llm=llm)
+                loop = build_loop(config=build_config(), context=context)
+                handler = ContextHandler(system_prompt="角色提示词", max_context_tokens=9000)
+                handler.add_msg(history)
+                original_messages = handler.messages_lst
+                with self.assertRaisesRegex(LLMRequestError, error):
+                    await run_turn(loop=loop, chat_handler=handler)
+                self.assertEqual(llm.formal_requests, [])
+                self.assertEqual(handler.messages_lst, original_messages)
+
+                llm.text_response = "可用摘要"
+                await run_turn(loop=loop, chat_handler=handler)
+                self.assertEqual(handler.messages_lst[-1].text, "重试成功")
 
     async def test_reasoning_is_hidden_but_can_be_passed_back(self) -> None:
         """群内只显示 content，结构化 reasoning 可写回后续上下文。"""
@@ -542,19 +915,23 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_tool_round_passes_back_reasoning_field(self) -> None:
-        """工具续问会带回上一轮 assistant 的结构化 reasoning。"""
+        """工具续问带回 reasoning，但关闭长期保留后不跨用户轮次保存。"""
+        details: list[JsonObject] = [
+            {"type": "reasoning.text", "text": "工具前思考", "signature": "signed-state"},
+        ]
         llm = RecordingLLM(
             responses=[
                 LLMResponse(
                     content="我先查一下",
                     reasoning_content="工具前思考",
+                    reasoning_details=details,
                     tool_calls=[build_tool_call()],
                 ),
                 LLMResponse(content="工具后回复"),
             ]
         )
         context = FakeContext(llm=llm)
-        config = build_config(retain_reasoning=True)
+        config = build_config(retain_reasoning=False)
         chat_handler = ContextHandler(
             system_prompt="系统提示词", max_context_tokens=1000000
         )
@@ -568,7 +945,164 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             message for message in llm.formal_requests[1] if message.tool_calls
         )
         self.assertEqual(assistant_tool_message.reasoning_content, "工具前思考")
+        self.assertEqual(assistant_tool_message.reasoning_details, details)
         self.assertEqual(context.bot.sent_texts, ["我先查一下", "工具后回复"])
+        self.assertTrue(
+            all(
+                message.reasoning_content is None and message.reasoning_details is None
+                for message in chat_handler.messages_lst
+            )
+        )
+
+    async def test_turn_instruction_and_recent_chat_are_request_only(self) -> None:
+        """发言要求在工具结果之后仍是每轮最后一条；它和最近群聊都不进入长期上下文。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(content=None, tool_calls=[build_tool_call()]),
+                LLMResponse(content="查到了，挺离谱的"),
+            ]
+        )
+        context = FakeContext(llm=llm)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+        instruction = "像群友一样随口回一两句。"
+        recent_chat = ChatMessage(role="user", text="[12:01] 小明(20001)：食堂又涨价了")
+
+        await run_turn(
+            loop=build_loop(
+                config=build_config(),
+                context=context,
+                turn_instruction=instruction,
+            ),
+            chat_handler=chat_handler,
+            question="你怎么看",
+            recent_chat_messages=[recent_chat],
+        )
+
+        self.assertEqual(len(llm.formal_requests), 2)
+        for request in llm.formal_requests:
+            self.assertEqual(request[-1], ChatMessage(role="system", text=instruction))
+            self.assertEqual(
+                [message.text for message in request].count(instruction), 1
+            )
+            self.assertIn(recent_chat, request)
+        self.assertEqual(context.bot.sent_texts, ["查到了，挺离谱的"])
+        persisted_texts = [message.text for message in chat_handler.messages_lst]
+        self.assertIn("你怎么看", persisted_texts)
+        self.assertIn("查到了，挺离谱的", persisted_texts)
+        self.assertNotIn(recent_chat.text, persisted_texts)
+        self.assertNotIn(instruction, persisted_texts)
+
+    async def test_retained_tool_history_is_bounded_summary(self) -> None:
+        """开启工具保留时只保存调用状态，不保存原始结果或重复正文。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(
+                    content="我先查一下",
+                    reasoning_content="工具前思考",
+                    tool_calls=[build_tool_call()],
+                ),
+                LLMResponse(content="工具后回复"),
+            ]
+        )
+        context = FakeContext(llm=llm)
+        config = build_config(tool_result_retention="summary")
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+        )
+
+        history_text = "\n".join(
+            message.text or "" for message in chat_handler.messages_lst
+        )
+        history_roles = [message.role for message in chat_handler.messages_lst]
+        self.assertNotIn("tool", history_roles)
+        self.assertNotIn("工具结果", history_text)
+        self.assertIn(TOOL_NAME, history_text)
+        self.assertIn("成功 1 次", history_text)
+        self.assertEqual(
+            [message.text for message in chat_handler.messages_lst].count(
+                "我先查一下"
+            ),
+            1,
+        )
+
+    async def test_full_tool_retention_preserves_arguments_and_result(self) -> None:
+        """full 模式把可继续使用的工具调用和完整结果写入长期上下文。"""
+        tool_call = LLMToolCall(
+            id="call-full",
+            name=TOOL_NAME,
+            arguments={"query": "完整参数"},
+        )
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(content="我来检查", tool_calls=[tool_call]),
+                LLMResponse(content="检查完成"),
+            ]
+        )
+        context = FakeContext(llm=llm)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        await run_turn(
+            loop=build_loop(
+                config=build_config(tool_result_retention="full"),
+                context=context,
+            ),
+            chat_handler=chat_handler,
+        )
+
+        retained_tool_call = next(
+            message
+            for message in chat_handler.messages_lst
+            if message.tool_calls
+        )
+        self.assertEqual(retained_tool_call.tool_calls, [tool_call])
+        retained_result = next(
+            message
+            for message in chat_handler.messages_lst
+            if message.role == "tool"
+        )
+        self.assertIn("工具结果", retained_result.text or "")
+        self.assertEqual(retained_result.tool_call_id, "call-full")
+
+    async def test_sent_content_survives_tool_round_exhaustion(self) -> None:
+        """正文发送后即使工具轮数耗尽，后续请求仍能看到该回复。"""
+        llm = RecordingLLM(
+            responses=[
+                LLMResponse(
+                    content="已经发到群里的正文",
+                    tool_calls=[build_tool_call()],
+                )
+            ]
+        )
+        context = FakeContext(llm=llm)
+        config = build_config(max_tool_rounds=1)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "超过最大轮数"):
+            await run_turn(
+                loop=build_loop(config=config, context=context),
+                chat_handler=chat_handler,
+            )
+
+        self.assertEqual(context.bot.sent_texts, ["已经发到群里的正文"])
+        self.assertEqual(
+            [message.role for message in chat_handler.messages_lst],
+            ["system", "user", "assistant"],
+        )
+        self.assertEqual(
+            chat_handler.messages_lst[-1].text,
+            "已经发到群里的正文",
+        )
 
     async def test_deepseek_named_model_gets_no_temporary_prompt(self) -> None:
         """模型名称不再触发 DSV4 临时 user 消息。"""
@@ -923,24 +1457,45 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             "<Reply>\n我在喵~ 已改成合法标记。",
         )
 
+    async def test_video_is_kept_in_current_request_only(self) -> None:
+        """图片保留开关不会把视频带入下一轮；文字来源继续保留。"""
+        for retain_images in (False, True):
+            with self.subTest(retain_images=retain_images):
+                llm = RecordingLLM(responses=[LLMResponse(content="视频答复"), LLMResponse(content="后续答复")])
+                context = FakeContext(llm=llm)
+                config = build_config(supports_images=True, retain_images=retain_images)
+                handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+                loop = build_loop(config=config, context=context)
+                await run_turn(loop=loop, chat_handler=handler, turn_messages=[
+                    ChatMessage(role="user", text="当前消息第 1 个视频", video=[b"original-video"]),
+                ])
+                self.assertTrue(any(item.video for item in llm.formal_requests[0]))
+                self.assertFalse(any(item.video for item in handler.messages_lst))
+                await run_turn(loop=loop, chat_handler=handler, question="继续")
+                self.assertFalse(any(item.video for item in llm.formal_requests[1]))
+                self.assertIn("当前消息第 1 个视频", [item.text for item in handler.messages_lst])
+
     async def test_plain_content_sends_once_and_finishes(self) -> None:
-        """无工具正文只发送一次并结束本轮。"""
-        llm = RecordingLLM(responses=[LLMResponse(content="第一句")])
-        context = FakeContext(llm=llm)
-        config = build_config()
-        chat_handler = ContextHandler(
-            system_prompt="系统提示词", max_context_tokens=1000000
-        )
-
-        await run_turn(
-            loop=build_loop(config=config, context=context),
-            chat_handler=chat_handler,
-            question="继续说",
-        )
-
-        self.assertEqual(context.bot.sent_texts, ["第一句"])
-        self.assertEqual(len(llm.formal_requests), 1)
-        self.assertEqual(chat_handler.messages_lst[-1].text, "第一句")
+        """正常正文、HTML 和单个协议标签的引用示例均可发送，无需纠错。"""
+        for content in (
+            "第一句。I think so。HTML 示例：<div>普通内容</div>；标签名示例：`<thought>`。",
+            "这个标记的字面写法是 `🫧thought`，不是正常聊天里的单词。",
+            "I thought we should meet at six. Let's check the timetable.",
+            "💭 我再想想，明天八点见。",
+            "💭",
+            "这个符号 `💭` 表示思考。\n计算过程可以正常解释：9 点减去 60 分钟就是 8 点。",
+        ):
+            with self.subTest(content=content):
+                llm = RecordingLLM(responses=[LLMResponse(content=content)])
+                context = FakeContext(llm=llm)
+                chat_handler = ContextHandler(system_prompt="系统提示词", max_context_tokens=1000000)
+                await run_turn(
+                    loop=build_loop(config=build_config(), context=context),
+                    chat_handler=chat_handler, question="继续说",
+                )
+                self.assertEqual(context.bot.sent_texts, [content])
+                self.assertEqual(len(llm.formal_requests), 1)
+                self.assertEqual(chat_handler.messages_lst[-1].text, content)
 
     async def test_send_failure_persists_status_without_assistant_content(
         self,
@@ -1025,6 +1580,38 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             all(message.image is None for message in chat_handler.messages_lst)
         )
 
+    async def test_direct_mode_can_retain_original_images_across_turns(self) -> None:
+        """用户显式开启 retain_images 后，后续请求继续携带原始图片字节。"""
+        llm = RecordingLLM(responses=[LLMResponse(content="下一轮回复")])
+        context = FakeContext(llm=llm)
+        config = build_config(supports_images=True, retain_images=True)
+        chat_handler = ContextHandler(
+            system_prompt="系统提示词", max_context_tokens=1000000
+        )
+        chat_handler.build_chatmessage(
+            message=ChatMessage(
+                role="user",
+                text="上一轮图片",
+                image=[b"old-original-image"],
+                image_detail="high",
+            )
+        )
+
+        await run_turn(
+            loop=build_loop(config=config, context=context),
+            chat_handler=chat_handler,
+            question="继续看上一张图",
+        )
+
+        self.assertEqual(
+            llm.formal_requests[0][1].image,
+            [b"old-original-image"],
+        )
+        self.assertEqual(
+            chat_handler.messages_lst[1].image,
+            [b"old-original-image"],
+        )
+
     async def test_context_compression_and_formal_reply_use_main_model(self) -> None:
         """上下文压缩与压缩后的正式请求都固定使用主模型。"""
         llm = RecordingLLM(
@@ -1042,8 +1629,8 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         )
         chat_handler.build_chatmessage(
             message_lst=[
-                ChatMessage(role="user", text="历史消息一" * 100),
-                ChatMessage(role="assistant", text="历史回复一" * 100),
+                ChatMessage(role="user", text="历史消息一" * 1000),
+                ChatMessage(role="assistant", text="历史回复一" * 1000),
             ]
         )
 
@@ -1060,11 +1647,12 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("当前新消息", compression_text)
         self.assertEqual(
             [message.role for message in llm.formal_requests[0]],
-            ["system", "user"],
+            ["system", "user", "user"],
         )
         rebuilt_text = llm.formal_requests[0][1].text or ""
         self.assertIn("历史上下文摘要", rebuilt_text)
-        self.assertIn("当前新消息", rebuilt_text)
+        self.assertNotIn("当前新消息", rebuilt_text)
+        self.assertEqual(llm.formal_requests[0][2].text, "当前新消息")
         self.assertEqual(
             context.bot.sent_texts,
             ["我先整理一下记忆", "压缩后回复"],
@@ -1076,7 +1664,7 @@ class GroupChatToolLoopTest(unittest.IsolatedAsyncioTestCase):
             responses=[LLMResponse(content="这是一段很长的正式回复")]
         )
         context = FakeContext(llm=llm)
-        config = build_config(max_reply_chars=5)
+        config = build_config(forward_reply_threshold_chars=5)
         chat_handler = ContextHandler(
             system_prompt="系统提示词", max_context_tokens=1000000
         )

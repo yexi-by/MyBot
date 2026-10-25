@@ -1,11 +1,16 @@
 """MCP 工具加载与 LLM 工具暴露。"""
 
+import asyncio
 import os
 from contextlib import AsyncExitStack
+from datetime import timedelta
 from typing import cast, override
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import McpError
 from mcp.types import CallToolResult, TextContent, Tool
 
 from app.config.schemas import MCPConfig, MCPServerConfig
@@ -51,27 +56,32 @@ class MCPToolManager(LLMToolExecutor):
         """启动已配置的 MCP server 并加载工具清单。"""
         if self._started:
             return
-        self._started = True
         if not self.config.enabled:
+            self._started = True
             return
         self._exit_stack = AsyncExitStack()
-        _ = await self._exit_stack.__aenter__()
-        for server_name, server_config in self.config.servers.items():
-            if server_config.disabled:
-                continue
-            await self._connect_server(
-                server_name=server_name, server_config=server_config
-            )
+        try:
+            for server_name, server_config in self.config.servers.items():
+                if server_config.disabled:
+                    continue
+                await self._connect_server(
+                    server_name=server_name, server_config=server_config
+                )
+        except BaseException:
+            await self.close()
+            raise
+        self._started = True
 
     async def close(self) -> None:
-        """关闭所有 MCP 会话和子进程。"""
-        if self._exit_stack is not None:
-            await self._exit_stack.aclose()
+        """关闭所有 MCP 会话、HTTP 连接和子进程。"""
+        exit_stack = self._exit_stack
         self._exit_stack = None
         self._sessions.clear()
         self._tool_map.clear()
         self._tools.clear()
         self._started = False
+        if exit_stack is not None:
+            await exit_stack.aclose()
 
     @override
     def list_tools(self) -> list[LLMToolDefinition]:
@@ -82,36 +92,87 @@ class MCPToolManager(LLMToolExecutor):
     async def call_tool(self, name: str, arguments: JsonObject) -> JsonValue:
         """调用 MCP 工具。"""
         if not self._started:
-            await self.start()
+            raise RuntimeError("MCP 工具管理器尚未完成启动")
         mapping = self._tool_map.get(name)
         if mapping is None:
             raise KeyError(f"未知 MCP 工具: {name}")
         server_name, raw_tool_name = mapping
         session = self._sessions[server_name]
-        result = await session.call_tool(raw_tool_name, cast(dict[str, object], arguments))
+        try:
+            async with asyncio.timeout(self.config.call_timeout_seconds):
+                result = await session.call_tool(
+                    raw_tool_name,
+                    cast(dict[str, object], arguments),
+                    read_timeout_seconds=timedelta(seconds=self.config.call_timeout_seconds),
+                )
+        except (TimeoutError, McpError) as exc:
+            if isinstance(exc, McpError) and exc.error.code != 408:
+                raise
+            return {
+                "ok": False,
+                "is_error": True,
+                "error_type": "TimeoutError",
+                "error": f"MCP 工具 {name} 超过 {self.config.call_timeout_seconds:g} 秒未完成",
+                "message": "工具等待超时。请缩小请求范围，或根据已有信息完成回答。",
+            }
         return self._serialize_tool_result(result)
 
     async def _connect_server(
         self, *, server_name: str, server_config: MCPServerConfig
     ) -> None:
-        """连接单个 MCP stdio server 并注册其工具。"""
+        """按配置连接 MCP server 并注册其工具。"""
         if self._exit_stack is None:
             raise RuntimeError("MCP exit stack 尚未初始化")
-        server_params = StdioServerParameters(
-            command=server_config.command,
-            args=list(server_config.args),
-            env=build_mcp_server_environment(server_config.env),
-            cwd=server_config.cwd,
-        )
-        read_stream, write_stream = await self._exit_stack.enter_async_context(
-            stdio_client(server_params)
-        )
+        if server_config.transport == "streamable_http":
+            if server_config.url is None:
+                raise ValueError("Streamable HTTP MCP 服务缺少 url")
+            http_client = await self._exit_stack.enter_async_context(
+                httpx.AsyncClient(
+                    follow_redirects=True,
+                    headers={
+                        name: value.get_secret_value()
+                        for name, value in (server_config.headers or {}).items()
+                    },
+                    timeout=httpx.Timeout(
+                        self.config.initialization_timeout_seconds,
+                        read=max(
+                            self.config.initialization_timeout_seconds,
+                            self.config.call_timeout_seconds,
+                        ),
+                    ),
+                )
+            )
+            read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+                streamable_http_client(server_config.url, http_client=http_client)
+            )
+        else:
+            if server_config.command is None:
+                raise ValueError("stdio MCP 服务缺少 command")
+            server_params = StdioServerParameters(
+                command=server_config.command,
+                args=list(server_config.args or ()),
+                env=build_mcp_server_environment(server_config.env),
+                cwd=server_config.cwd,
+            )
+            read_stream, write_stream = await self._exit_stack.enter_async_context(
+                stdio_client(server_params)
+            )
         session = await self._exit_stack.enter_async_context(
-            ClientSession(read_stream, write_stream)
+            ClientSession(
+                read_stream,
+                write_stream,
+                read_timeout_seconds=timedelta(seconds=self.config.initialization_timeout_seconds),
+            )
         )
-        _ = await session.initialize()
+        try:
+            async with asyncio.timeout(self.config.initialization_timeout_seconds):
+                _ = await session.initialize()
+                tools_result = await session.list_tools()
+        except (TimeoutError, McpError) as exc:
+            if isinstance(exc, McpError) and exc.error.code != 408:
+                raise
+            raise TimeoutError(f"MCP 服务 {server_name} 初始化超时") from None
         self._sessions[server_name] = session
-        tools_result = await session.list_tools()
         for tool in tools_result.tools:
             self._register_mcp_tool(server_name=server_name, tool=tool)
 
@@ -135,7 +196,7 @@ class MCPToolManager(LLMToolExecutor):
     def _serialize_tool_result(self, result: CallToolResult) -> JsonValue:
         """将 MCP 调用结果收窄成 JSON 可序列化结构。"""
         if result.structuredContent is not None:
-            return to_json_value(result.structuredContent)
+            return {"is_error": result.isError, "data": to_json_value(result.structuredContent)}
         content: list[JsonValue] = []
         for item in result.content:
             if isinstance(item, TextContent):

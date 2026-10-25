@@ -34,9 +34,12 @@ class BaseMixin:
         asyncio.Event, cast(object, None)
     )
     boot_id: NapCatId = ""
-    timeout: int = 0
-    send_max_attempts: int = 5
-    send_retry_delay_seconds: float = 0
+    timeout: float
+    send_max_attempts: int
+    send_retry_delay_seconds: float
+    send_retry_max_delay_seconds: float
+    response_summary_max_chars: int
+    persistence_retry_delays_seconds: tuple[float, ...]
 
     def _generate_echo(self) -> str:
         """生成唯一 echo 标识。"""
@@ -63,27 +66,6 @@ class BaseMixin:
         future = self.echo_dict.get(echo)
         if future and not future.done():
             future.set_result(response)
-
-    async def create_future(self, echo: str) -> Response:
-        """创建响应 Future 并等待 NapCat 回包。"""
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[Response] = loop.create_future()
-        self.echo_dict[echo] = future
-        try:
-            _ = await asyncio.wait_for(future, timeout=self.timeout)
-            return future.result()
-        except asyncio.TimeoutError as exc:
-            log_event(
-                level="ERROR",
-                event="napcat.action.timeout",
-                category="napcat_api",
-                message="等待 NapCat 响应超时",
-                echo=echo,
-                timeout=self.timeout,
-            )
-            raise TimeoutError(f"等待 NapCat 响应超时: {echo}") from exc
-        finally:
-            self.echo_dict.pop(echo, None)
 
     def _is_stream_transfer_done(self, response: Response) -> bool:
         """判断 Stream Action 是否已经抵达最终响应包。"""
@@ -155,8 +137,26 @@ class BaseMixin:
         self._ensure_persistence_healthy()
         echo = self._generate_echo()
         payload = ActionPayload(action=action, params=params, echo=echo)
-        await self.websocket.send_text(payload.model_dump_json(exclude_none=True))
-        return await self.create_future(echo=echo)
+        future: asyncio.Future[Response] = asyncio.get_running_loop().create_future()
+        self.echo_dict[echo] = future
+        try:
+            await self.websocket.send_text(payload.model_dump_json(exclude_none=True))
+            return await asyncio.wait_for(future, timeout=self.timeout)
+        except TimeoutError as exc:
+            log_event(
+                level="ERROR",
+                event="napcat.action.timeout",
+                category="napcat_api",
+                message="等待 NapCat 响应超时",
+                action=action,
+                echo=echo,
+                timeout=self.timeout,
+            )
+            raise TimeoutError(f"等待 NapCat 响应超时: {echo}") from exc
+        finally:
+            self.echo_dict.pop(echo, None)
+            if not future.done():
+                _ = future.cancel()
 
     async def _call_stream_action(
         self, action: str, params: JsonObject | None = None

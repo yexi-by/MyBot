@@ -24,12 +24,16 @@ class ForwardImageAutoFetcher:
         *,
         tool_call: LLMToolCall,
         result: JsonValue,
-        explicit_forward_image_call: bool,
+        explicit_forward_image_message_ids: set[str],
     ) -> bool:
         """判断是否需要在读取合并转发后自动补取图片内容。"""
         if tool_call.name != FORWARD_MESSAGE_TOOL_NAME:
             return False
-        if explicit_forward_image_call:
+        message_id = tool_call.arguments.get("message_id")
+        if (
+            isinstance(message_id, str)
+            and message_id in explicit_forward_image_message_ids
+        ):
             return False
         if not self.config.images.forward_tool_enabled:
             return False
@@ -38,9 +42,7 @@ class ForwardImageAutoFetcher:
         if result.get("ok") is not True:
             return False
         image_count = result.get("image_count")
-        if isinstance(image_count, int):
-            return image_count > 0
-        return self._forward_result_has_images(result=result)
+        return isinstance(image_count, int) and image_count > 0
 
     async def fetch(
         self,
@@ -113,30 +115,6 @@ class ForwardImageAutoFetcher:
         merged_result: JsonObject = dict(forward_result)
         merged_result["auto_image_fetch"] = image_result
         return merged_result
-
-    def _forward_result_has_images(self, *, result: JsonObject) -> bool:
-        """兼容旧工具结果，递归判断合并转发结果里是否包含图片段。"""
-        messages = result.get("messages")
-        if not isinstance(messages, list):
-            return False
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
-            raw_image_count = message.get("image_count")
-            if isinstance(raw_image_count, int) and raw_image_count > 0:
-                return True
-            segment_types = message.get("segment_types")
-            if isinstance(segment_types, list) and "image" in segment_types:
-                return True
-            nested_forwards = message.get("nested_forwards")
-            if not isinstance(nested_forwards, list):
-                continue
-            for nested_forward in nested_forwards:
-                if isinstance(nested_forward, dict) and self._forward_result_has_images(
-                    result=nested_forward
-                ):
-                    return True
-        return False
 
     def _build_error_result(
         self,

@@ -1,16 +1,12 @@
 """Root 用户被禁言时自动解除禁言。"""
 
 from dataclasses import dataclass
-from typing import ClassVar, Final, override
+from typing import ClassVar, override
 
 from app.config import AutoUnbanConfig
 from app.models import GroupBanEvent, NapCatId
 from app.plugins.base import BasePlugin
 from app.utils.log import log_event, log_exception
-
-CONSUMERS_COUNT: Final[int] = 1
-PRIORITY: Final[int] = 10
-
 
 @dataclass(frozen=True, slots=True)
 class _AutoUnbanRuntime:
@@ -25,9 +21,6 @@ class AutoUnbanPlugin(BasePlugin[GroupBanEvent]):
 
     name: ClassVar[str] = "自动解禁插件"
     plugin_id: ClassVar[str] = "auto_unban"
-    consumers_count: ClassVar[int] = CONSUMERS_COUNT
-    priority: ClassVar[int] = PRIORITY
-
     @override
     def setup(self) -> None:
         """初始化延迟构造的配置运行对象。"""

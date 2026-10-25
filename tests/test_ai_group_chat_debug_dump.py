@@ -6,10 +6,10 @@ from shutil import rmtree
 from pathlib import Path
 
 from app.config import AIGroupChatConfig, AIGroupConfig
-from app.plugins.ai_group_chat.constants import DEBUG_DUMP_DIR
 from app.plugins.ai_group_chat.debug_dump import AIGroupChatDebugDumper
 from app.services import ChatMessage
 from app.services.llm.schemas import LLMToolCall
+from tests.config_helpers import build_ai_group_chat_config
 
 VISION_SYSTEM_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/system.md"
 VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
@@ -17,21 +17,19 @@ VISION_USER_PROMPT_PATH = "tests/fixtures/ai_group_chat/vision/user.md"
 
 def build_config(*, enabled: bool) -> AIGroupChatConfig:
     """构造测试用 AI 群聊配置。"""
-    return AIGroupChatConfig.model_validate(
-        {
-            "model": {
-            "provider": "CLIProxyAPI",
-            "name": "gpt-5.5",
-            "supports_images": False,
-        },
+    return build_ai_group_chat_config(
+        provider="CLIProxyAPI",
+        model_name="gpt-5.5",
+        overrides={
             "vision": {
-            "model": {"provider": "CLIProxyAPI", "name": "gpt-5.5-vision"},
-            "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
-            "user_prompt_file": VISION_USER_PROMPT_PATH,
-        },
+                "model": {"provider": "CLIProxyAPI", "name": "gpt-5.5-vision"},
+                "system_prompt_file": VISION_SYSTEM_PROMPT_PATH,
+                "user_prompt_file": VISION_USER_PROMPT_PATH,
+            },
             "debug_dump_messages": enabled,
+            "debug_dump_directory": "logs/ai_group_chat_debug",
             "groups": [],
-        }
+        },
     )
 
 
@@ -48,20 +46,15 @@ def build_group_config() -> AIGroupConfig:
 class AIGroupChatDebugDumperTest(unittest.IsolatedAsyncioTestCase):
     """验证 AI 群聊 Markdown 调试文件内容。"""
 
-    def test_default_directory_uses_writable_log_mount(self) -> None:
-        """Docker 只读挂载插件配置时，调试文件仍写入日志目录。"""
-        dumper = AIGroupChatDebugDumper(config=build_config(enabled=False))
-
-        self.assertEqual(DEBUG_DUMP_DIR, Path("logs/ai_group_chat_debug"))
-        self.assertEqual(dumper.root_dir, DEBUG_DUMP_DIR)
-
     async def test_enabled_dumper_only_appends_long_term_context_delta(
         self,
     ) -> None:
         """开启开关后，调试文件只追加长期上下文新增 messages。"""
         with tempfile.TemporaryDirectory() as temp_dir:
-            dumper = AIGroupChatDebugDumper(config=build_config(enabled=True))
-            dumper.root_dir = Path(temp_dir)
+            config = build_ai_group_chat_config(
+                overrides={"debug_dump_messages": True, "debug_dump_directory": temp_dir}
+            )
+            dumper = AIGroupChatDebugDumper(config=config)
             group_config = build_group_config()
             path = dumper.initialize_group(
                 group_config=group_config,
@@ -70,6 +63,7 @@ class AIGroupChatDebugDumperTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(path)
             if path is None:
                 raise AssertionError("调试文件路径不应为空")
+            self.assertTrue(path.is_relative_to(Path(temp_dir)))
 
             await dumper.append_context_snapshot(
                 group_id="40000",

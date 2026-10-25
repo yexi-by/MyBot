@@ -1,9 +1,17 @@
 """PostgreSQL migration 和插件 session 基础集成测试。"""
 
+from collections.abc import Awaitable, Callable
 import os
+import asyncio
+
+from alembic import command
+from alembic.config import Config
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -19,9 +27,70 @@ from app.database import (
     plugin_schema_name,
     validate_plugin_id,
 )
+from app.database.migrations import __main__ as migration_cli
 from app.plugins.base import PluginMeta
 
 TEST_DATABASE_ENV = "MYBOT_TEST_DATABASE_URL"
+
+
+class MigrationCliTest(unittest.IsolatedAsyncioTestCase):
+    """验证独立 migration 入口在加载插件前建立日志配置。"""
+
+    async def test_logging_is_configured_before_plugin_discovery(self) -> None:
+        """migration 不能依赖日志模块的隐式兜底配置。"""
+        events: list[str] = []
+        logging = SimpleNamespace(
+            directory="logs",
+            console_level="INFO",
+            file_level="DEBUG",
+            retention="30 days",
+            rotation="50 MB",
+            compression="gz",
+        )
+        database = SimpleNamespace(
+            build_url=Mock(return_value="postgresql+asyncpg://example")
+        )
+        manager = SimpleNamespace(
+            boot_config=SimpleNamespace(logging=logging, database=database)
+        )
+        migrator = SimpleNamespace(
+            upgrade_all=AsyncMock(),
+            assert_current=AsyncMock(),
+        )
+
+        def configure(**_kwargs: object) -> None:
+            events.append("logging")
+
+        def discover() -> tuple[PluginMigrationSpec, ...]:
+            events.append("plugins")
+            return ()
+
+        with (
+            patch("app.config.ConfigManager.create", return_value=manager),
+            patch(
+                "app.database.migrations.__main__.configure_logging",
+                side_effect=configure,
+            ),
+            patch(
+                "app.plugins.discover_plugin_migrations",
+                side_effect=discover,
+            ),
+            patch(
+                "app.database.migrations.__main__.DatabaseMigrator",
+                return_value=migrator,
+            ),
+        ):
+            run_command = cast(
+                Callable[
+                    [str, PluginMigrationRegistry | None],
+                    Awaitable[None],
+                ],
+                getattr(migration_cli, "_run"),
+            )
+            await run_command("check", None)
+
+        self.assertEqual(events, ["logging", "plugins"])
+        migrator.assert_current.assert_awaited_once_with()
 
 
 class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
@@ -34,7 +103,13 @@ class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
             self.skipTest(f"未配置 {TEST_DATABASE_ENV}，跳过 PostgreSQL 集成测试")
         self.database_url = database_url
         self.migrator = DatabaseMigrator(database_url=database_url)
-        self.runtime = PostgreSQLRuntime.create(database_url=database_url)
+        self.runtime = PostgreSQLRuntime.create(
+            database_url=database_url,
+            pool_size=20,
+            max_overflow=20,
+            pool_timeout_seconds=2,
+            statement_timeout_seconds=5,
+        )
 
     async def asyncTearDown(self) -> None:
         """关闭测试连接池。"""
@@ -54,7 +129,7 @@ class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
                 text("SELECT to_regclass('core.group_messages')")
             )
             images_table = await connection.scalar(
-                text("SELECT to_regclass('core.group_message_images')")
+                text("SELECT to_regclass('core.group_message_media')")
             )
             indexes = set(
                 (
@@ -70,9 +145,37 @@ class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
         if isinstance(version, str):
             self.assertEqual(int(version) // 10000, 18)
         self.assertEqual(messages_table, "core.group_messages")
-        self.assertEqual(images_table, "core.group_message_images")
+        self.assertEqual(images_table, "core.group_message_media")
         self.assertIn("ix_group_messages_active_recent", indexes)
         self.assertIn("ix_group_messages_active_sender_recent", indexes)
+
+    async def test_video_upgrade_preserves_existing_image_archive(self) -> None:
+        """真实升级保留既有图片行、主键和文件存储键。"""
+        async with self.runtime.engine.begin() as connection:
+            _ = await connection.execute(text('DROP SCHEMA IF EXISTS "core" CASCADE'))
+        config = Config("alembic.ini")
+        config.set_main_option("sqlalchemy.url", self.database_url.replace("%", "%%"))
+        await asyncio.to_thread(command.upgrade, config, "202608160001")
+        async with self.runtime.engine.begin() as connection:
+            _ = await connection.execute(text("""
+                WITH message AS (
+                    INSERT INTO core.group_messages
+                    (bot_id, group_id, message_id, sender_id, occurred_at, direction, sender_name, segments)
+                    VALUES ('migration-test', 'group', 'msg', 'sender', now(), 'incoming', 'test', '[]') RETURNING id
+                )
+                INSERT INTO core.group_message_images
+                (message_row_id, segment_index, status, storage_key, mime_type, size_bytes, attempt_count)
+                SELECT id, 0, 'stored', 'ab/cd/image.png', 'image/png', 123, 1 FROM message
+            """))
+            old_id = await connection.scalar(text("SELECT id FROM core.group_message_images"))
+        await self.migrator.upgrade_all()
+        await self.migrator.assert_current()
+        async with self.runtime.engine.begin() as connection:
+            row = (await connection.execute(text(
+                "SELECT id, media_type, status, storage_key, mime_type, size_bytes FROM core.group_message_media"
+            ))).one()
+            self.assertEqual(tuple(row), (old_id, "image", "stored", "ab/cd/image.png", "image/png", 123))
+            _ = await connection.execute(text("DELETE FROM core.group_messages WHERE bot_id='migration-test'"))
 
     async def test_wrong_revision_is_rejected_without_automatic_upgrade(self) -> None:
         """启动检查对错误 revision 报错，并且不自动改表。"""
@@ -136,6 +239,9 @@ class DatabaseMigrationsTest(unittest.IsolatedAsyncioTestCase):
         """每条连接都启用持久提交和配置的语句超时。"""
         runtime = PostgreSQLRuntime.create(
             database_url=self.database_url,
+            pool_size=20,
+            max_overflow=20,
+            pool_timeout_seconds=2,
             statement_timeout_seconds=1.25,
         )
         try:

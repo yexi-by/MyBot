@@ -3,8 +3,9 @@
 from .llm import (
     ChatMessage,
     CompositeToolExecutor,
+    ConversationContextKey,
+    ConversationContextStore,
     ContextHandler,
-    LLMContextConfig,
     LLMHandler,
     LLMResponse,
     LLMToolCall,
@@ -27,8 +28,9 @@ from .napcat import (
 __all__ = [
     "ChatMessage",
     "CompositeToolExecutor",
+    "ConversationContextKey",
+    "ConversationContextStore",
     "ContextHandler",
-    "LLMContextConfig",
     "LLMHandler",
     "LLMResponse",
     "LLMToolCall",

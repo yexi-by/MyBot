@@ -73,41 +73,42 @@ class GroupMessageRow(DatabaseBase):
     segments: Mapped[list[JsonObject]] = mapped_column(JSONB, nullable=False)
     recalled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recalled_by_id: Mapped[str | None] = mapped_column(Text)
-    images: Mapped[list["GroupMessageImageRow"]] = relationship(
+    media: Mapped[list["GroupMessageMediaRow"]] = relationship(
         back_populates="message",
         cascade="all, delete-orphan",
         lazy="selectin",
-        order_by="GroupMessageImageRow.segment_index",
+        order_by="GroupMessageMediaRow.segment_index",
     )
 
 
-class GroupMessageImageRow(DatabaseBase):
-    """群消息顶层图片段的存储任务和结果。"""
+class GroupMessageMediaRow(DatabaseBase):
+    """群消息顶层媒体段的存储任务和结果。"""
 
-    __tablename__ = "group_message_images"
+    __tablename__ = "group_message_media"
     __table_args__ = (
         UniqueConstraint(
             "message_row_id",
             "segment_index",
-            name="uq_group_message_images_segment",
+            name="uq_group_message_media_segment",
         ),
         CheckConstraint(
             "status IN ('pending', 'leased', 'stored', 'retry', 'failed')",
-            name="ck_group_message_images_status",
+            name="ck_group_message_media_status",
         ),
-        CheckConstraint("attempt_count >= 0", name="ck_group_message_images_attempts"),
+        CheckConstraint("media_type IN ('image', 'video')", name="ck_group_message_media_type"),
+        CheckConstraint("attempt_count >= 0", name="ck_group_message_media_attempts"),
         CheckConstraint(
             "size_bytes IS NULL OR size_bytes >= 0",
-            name="ck_group_message_images_size",
+            name="ck_group_message_media_size",
         ),
         Index(
-            "ix_group_message_images_ready",
+            "ix_group_message_media_ready",
             "next_attempt_at",
             "id",
             postgresql_where=text("status IN ('pending', 'retry')"),
         ),
         Index(
-            "ix_group_message_images_expired_lease",
+            "ix_group_message_media_expired_lease",
             "leased_until",
             "id",
             postgresql_where=text("status = 'leased'"),
@@ -121,6 +122,7 @@ class GroupMessageImageRow(DatabaseBase):
         ForeignKey(f"{CORE_SCHEMA}.group_messages.id", ondelete="CASCADE"),
         nullable=False,
     )
+    media_type: Mapped[str] = mapped_column(Text, nullable=False)
     segment_index: Mapped[int] = mapped_column(Integer, nullable=False)
     source_file: Mapped[str | None] = mapped_column(Text)
     source_url: Mapped[str | None] = mapped_column(Text)
@@ -134,4 +136,4 @@ class GroupMessageImageRow(DatabaseBase):
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lease_token: Mapped[str | None] = mapped_column(Text)
     leased_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    message: Mapped[GroupMessageRow] = relationship(back_populates="images")
+    message: Mapped[GroupMessageRow] = relationship(back_populates="media")

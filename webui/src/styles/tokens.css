@@ -1,0 +1,68 @@
+/*
+ * 「蓝图」配色与字体：纸白 + 蓝图蓝 + 樱粉荧光笔，棱角分明。
+ * 亮 / 暗主题只改这里的变量，组件里不写死颜色。
+ */
+:root {
+  --paper: #f5f7fb;
+  --panel: #ffffff;
+  --ink: #16203a;
+  --ink-2: #4a5574;
+  --ink-3: #8592ae;
+  --rule: #e1e7f1;
+  --rule-strong: #cdd6e5;
+  --blue: #2b66d9;
+  --blue-soft: #e4edfd;
+  --blue-pastel: #b7cff6;
+  --pink: #e5739c;
+  --pink-soft: #fbdce8;
+  --pink-pastel: #f4b6cc;
+  --ok: #1c9468;
+  --warn: #b97a0f;
+  --bad: #d03c37;
+  --bad-soft: #fde6e5;
+  --on-accent: #ffffff;
+  --thumb: #ffffff;
+  --grid: rgba(43, 102, 217, 0.055);
+  --grid-major: rgba(43, 102, 217, 0.1);
+  --scrim: rgba(12, 18, 32, 0.38);
+  --shadow-pop: 0 18px 48px -12px rgba(22, 32, 58, 0.28);
+  --shadow-thumb: 0 1px 2px rgba(22, 32, 58, 0.3);
+
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
+  --font-display: "Smiley Sans Oblique", "Microsoft YaHei UI", sans-serif;
+
+  --r: 3px;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-spring: cubic-bezier(0.3, 1.35, 0.5, 1);
+  color-scheme: light;
+}
+
+:root.dark {
+  --paper: #0c1220;
+  --panel: #121a2c;
+  --ink: #dde5f5;
+  --ink-2: #a6b2cd;
+  --ink-3: #6b7893;
+  --rule: #1f2940;
+  --rule-strong: #2c3854;
+  --blue: #7aa5f6;
+  --blue-soft: #18264a;
+  --blue-pastel: #2f4a82;
+  --pink: #f095b9;
+  --pink-soft: #43213a;
+  --pink-pastel: #7a3a5a;
+  --ok: #4fc89b;
+  --warn: #e2aa4a;
+  --bad: #f1736e;
+  --bad-soft: #3c1c20;
+  --on-accent: #0c1220;
+  --thumb: #e8eefb;
+  --grid: rgba(122, 165, 246, 0.045);
+  --grid-major: rgba(122, 165, 246, 0.085);
+  --scrim: rgba(3, 6, 12, 0.6);
+  --shadow-pop: 0 24px 60px -16px rgba(0, 0, 0, 0.6);
+  --shadow-thumb: 0 1px 2px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}

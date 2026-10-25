@@ -7,6 +7,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from app.config import CONFIG_FILE, ConfigManager
+from app.utils.log import configure_logging
 
 from .power import PowerController
 from .routes import create_webui_router
@@ -33,8 +34,18 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=6056)
     namespace = parser.parse_args()
-    power = PowerController()
-    app = create_dev_app(config_file=Path(str(namespace.config)), power=power)
+    config_file = Path(str(namespace.config))
+    config = ConfigManager.create(config_file=config_file).boot_config
+    configure_logging(
+        log_dir=config.logging.directory,
+        console_level=config.logging.console_level,
+        file_level=config.logging.file_level,
+        retention=config.logging.retention,
+        rotation=config.logging.rotation,
+        compression=config.logging.compression,
+    )
+    power = PowerController(delay_seconds=config.server.power_action_delay_seconds)
+    app = create_dev_app(config_file=config_file, power=power)
     server = uvicorn.Server(
         uvicorn.Config(
             app,

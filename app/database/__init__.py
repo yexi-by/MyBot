@@ -27,10 +27,10 @@ from .repository import PostgreSQLMessageRepository
 from .runtime import PostgreSQLRuntime
 from .schemas import (
     GroupDataScope,
-    ImageArchiveStatus,
+    MediaArchiveStatus,
     MessageCursor,
     MessageDirection,
-    StoredGroupImage,
+    StoredGroupMedia,
     StoredGroupMessage,
 )
 
@@ -44,7 +44,7 @@ __all__ = [
     "DatabaseMigrator",
     "GroupDataScope",
     "GroupMessageReader",
-    "ImageArchiveStatus",
+    "MediaArchiveStatus",
     "IncomingMessageWriter",
     "MessageCursor",
     "MessageDirection",
@@ -57,7 +57,7 @@ __all__ = [
     "PostgreSQLRuntime",
     "RecallArchiver",
     "SentMessageRecorder",
-    "StoredGroupImage",
+    "StoredGroupMedia",
     "StoredGroupMessage",
     "plugin_schema_name",
     "run_plugin_migration_environment",

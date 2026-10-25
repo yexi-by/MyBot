@@ -1,141 +1,207 @@
-/** MCP 服务管理页：总开关 + stdio server 增删改。 */
+import { Plus, Trash2, TriangleAlert } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
 
-import { useState } from "react";
-import { useFormContext } from "react-hook-form";
-import { Plus, Trash2 } from "lucide-react";
-import { toast } from "sonner";
-
-import { SectionCard } from "@/components/SectionCard";
-import { SettingsGrid } from "@/components/SettingsGrid";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { confirm } from "@/components/Dialog";
+import { FilterEmpty, IssueBanner, PageHeader } from "@/components/PageHeader";
+import { Section, SectionRows } from "@/components/Section";
+import { config, useConfig } from "@/lib/config";
+import { useFieldFilter } from "@/lib/filter";
+import { cls } from "@/lib/pages";
+import { getIn, isRecord, setIn, tomlKey } from "@/lib/path";
+import { revealField } from "@/lib/router";
+import { shallowArrayEqual } from "@/lib/store";
+import { usePageToc } from "@/lib/toc";
+import type { JsonObject } from "@/lib/types";
 import {
-  KeyValueField,
-  StringListField,
-  SwitchField,
-  TextField,
-} from "@/lib/fields";
-import type { MCPServerConfig, MyBotConfigData } from "@/lib/types";
+  defaultMcpServer,
+  MCP_DISABLED,
+  MCP_HTTP_FIELDS,
+  MCP_SECTION,
+  MCP_STDIO_FIELDS,
+  MCP_TRANSPORT,
+  type McpTransport,
+} from "@/schema/services";
+import { fieldPath, type FieldDef, type SectionDef } from "@/schema/types";
+
+import { tocFor } from "./common";
+
+const SERVER_SECTIONS: Record<McpTransport, SectionDef> = {
+  stdio: {
+    id: "mcp-server",
+    title: "MCP 服务",
+    base: ["mcp", "servers"],
+    restart: true,
+    desc: "本地进程：MyBot 启动命令并通过标准输入输出通信。",
+    fields: [],
+  },
+  streamable_http: {
+    id: "mcp-server",
+    title: "MCP 服务",
+    base: ["mcp", "servers"],
+    restart: true,
+    desc: "HTTP 服务：连接远端的 Streamable HTTP 端点。",
+    fields: [],
+  },
+};
+
+/** 切换连接方式时记住另一种方式已填的内容，切回来可以恢复。 */
+const transportMemory = new Map<string, Partial<Record<McpTransport, JsonObject>>>();
+
+function switchTransport(draft: JsonObject, name: string, next: unknown): JsonObject {
+  const base = ["mcp", "servers", name];
+  const current = getIn(draft, base);
+  if (!isRecord(current)) return draft;
+  const from: McpTransport = current.transport === "streamable_http" ? "streamable_http" : "stdio";
+  const to: McpTransport = next === "streamable_http" ? "streamable_http" : "stdio";
+  if (from === to) return draft;
+  const memory = transportMemory.get(name) ?? {};
+  memory[from] = current as JsonObject;
+  transportMemory.set(name, memory);
+  const disabled = current.disabled === true;
+  const restored = memory[to];
+  return setIn(draft, base, restored ? { ...restored, transport: to, disabled } : defaultMcpServer(to, disabled));
+}
+
+function ServerCard({ name }: { name: string }) {
+  const base = useMemo(() => ["mcp", "servers", name], [name]);
+  const transport = useConfig((state): McpTransport =>
+    getIn(state.draft, [...base, "transport"]) === "streamable_http" ? "streamable_http" : "stdio",
+  );
+  const disabled = useConfig((state) => getIn(state.draft, [...base, "disabled"]) === true);
+  const fields = useMemo<FieldDef[]>(
+    () => [
+      { ...MCP_TRANSPORT, apply: (draft, value) => switchTransport(draft, name, value) },
+      MCP_DISABLED,
+      ...(transport === "stdio" ? MCP_STDIO_FIELDS : MCP_HTTP_FIELDS),
+    ],
+    [name, transport],
+  );
+  const remove = () =>
+    confirm({
+      title: `删除 MCP 服务 ${name}？`,
+      body: <p>这个服务的连接配置（含环境变量与请求头）会随自动保存一起移除，无法恢复。</p>,
+      confirmLabel: "删除服务",
+      onConfirm: () => {
+        transportMemory.delete(name);
+        config.set(base, null);
+      },
+    });
+  return (
+    <Section
+      section={SERVER_SECTIONS[transport]}
+      base={base}
+      fields={fields}
+      title={disabled ? `${name}（已禁用）` : name}
+      titleMono
+      table={`[mcp.servers.${tomlKey(name)}]`}
+      domId={`mcp-${name}`}
+      aside={
+        <button type="button" className="icon-btn icon-btn--danger icon-btn--small" aria-label={`删除 MCP 服务 ${name}`} title="删除这个服务" onClick={remove}>
+          <Trash2 className="ic" aria-hidden />
+        </button>
+      }
+    />
+  );
+}
+
+function AddServer({ existing }: { existing: string[] }) {
+  const [name, setName] = useState("");
+  const [error, setError] = useState("");
+  const submit = () => {
+    if (name.trim() === "") return setError("请输入服务名");
+    if (name !== name.trim()) return setError("服务名不能有首尾空格");
+    if (existing.includes(name)) return setError(`服务 ${name} 已存在`);
+    config.set(["mcp", "servers", name], defaultMcpServer("stdio"));
+    setName("");
+    setError("");
+    revealField(fieldPath(["mcp", "servers", name], MCP_STDIO_FIELDS[0]!));
+  };
+  return (
+    <section className="sec sec--add" id="sec-mcp-add" data-section="mcp-add" data-search="新增 mcp 服务 添加" aria-labelledby="mcp-add-title">
+      <header className="sec-head">
+        <h2 className="sec-title" id="mcp-add-title">
+          新增 MCP 服务
+        </h2>
+        <code className="sec-path">[mcp.servers.&lt;name&gt;]</code>
+        <p className="sec-desc">服务名会出现在工具名里（mcp__服务名__工具名），默认按本地进程添加，之后可以切换为 HTTP 服务。</p>
+      </header>
+      <div className="sec-body">
+        <div className="add-row">
+          <div className="ctl">
+            <input
+              className={cls("inp is-mono", error && "is-error")}
+              value={name}
+              placeholder="服务名，如 firecrawl"
+              aria-label="新 MCP 服务名"
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(event) => {
+                setName(event.target.value);
+                if (error) setError("");
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+            />
+          </div>
+          <button type="button" className="btn btn--primary" onClick={submit}>
+            <Plus className="ic" aria-hidden />
+            添加
+          </button>
+        </div>
+        {error ? (
+          <p className="fld-err" role="alert">
+            <TriangleAlert className="ic" aria-hidden />
+            {error}
+          </p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
 
 export default function McpPage() {
-  const { watch, setValue } = useFormContext<MyBotConfigData>();
-  const [newServerName, setNewServerName] = useState("");
-  const servers = watch("mcp.servers") ?? {};
-  const serverNames = Object.keys(servers);
-
-  const addServer = () => {
-    const name = newServerName.trim();
-    if (name === "") {
-      toast.error("服务名不能为空");
-      return;
-    }
-    if (name in servers) {
-      toast.error(`服务 ${name} 已存在`);
-      return;
-    }
-    const next: Record<string, MCPServerConfig> = {
-      ...servers,
-      [name]: { command: "", args: [], disabled: false },
-    };
-    setValue("mcp.servers", next, { shouldDirty: true });
-    setNewServerName("");
-  };
-
-  const removeServer = (name: string) => {
-    const next = { ...servers };
-    delete next[name];
-    setValue("mcp.servers", next, { shouldDirty: true });
-  };
-
+  const names = useConfig((state) => {
+    const record = getIn(state.draft, ["mcp", "servers"]);
+    return isRecord(record) ? Object.keys(record) : [];
+  }, shallowArrayEqual);
+  const [filter, setFilter] = useState("");
+  const root = useRef<HTMLDivElement>(null);
+  const empty = useFieldFilter(root, filter);
+  usePageToc([
+    ...tocFor([MCP_SECTION]),
+    ...names.map((name) => ({ id: `mcp-${name}`, title: name, prefixes: [["mcp", "servers", name]] })),
+    { id: "mcp-add", title: "新增 MCP 服务", prefixes: [] },
+  ]);
   return (
-    <div className="space-y-4">
-      <Alert>
-        <AlertTitle>MCP 改动需要重启进程后生效</AlertTitle>
-        <AlertDescription>
-          MCP stdio 服务只在启动时拉起，自动保存后需重启进程才会应用。
-        </AlertDescription>
-      </Alert>
-
-      <SettingsGrid>
-      <SectionCard title="MCP 总开关" description="关闭后所有 MCP server 都不会启动。">
-        <SwitchField
-          path="mcp.enabled"
-          label="启用 MCP"
-          description="以 mcp__{server}__{tool} 形式暴露给 AI 工具调用"
-        />
-      </SectionCard>
-
-      {serverNames.map((name) => (
-        <SectionCard
-          key={name}
-          title={name}
-          actions={
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label={`删除 MCP 服务 ${name}`}
-              onClick={() => removeServer(name)}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          }
-        >
-          <TextField
-            path={`mcp.servers.${name}.command`}
-            label="启动命令"
-            placeholder="如 npx / uvx"
-          />
-          <TextField
-            path={`mcp.servers.${name}.cwd`}
-            label="工作目录"
-            placeholder="留空使用进程当前目录"
-          />
-          <div className="xl:col-span-2">
-            <StringListField
-              path={`mcp.servers.${name}.args`}
-              label="命令参数"
-              placeholder="如 -y"
-              addLabel="添加参数"
-            />
+    <div className="page-inner" ref={root}>
+      <PageHeader
+        page="mcp"
+        kicker="系统"
+        table="[mcp]"
+        title="MCP 服务"
+        desc="管理 stdio 本地进程和 Streamable HTTP 服务；服务名、环境变量名与请求头名都按原样写回。"
+        notice="MCP 改动写入后，要重启进程才生效"
+        filter={filter}
+        onFilter={setFilter}
+      />
+      <IssueBanner page="mcp" />
+      <div className="sections">
+        <SectionRows rows={[[MCP_SECTION]]} />
+        {names.length === 0 ? (
+          <div className="empty">
+            <p className="empty-title">还没有 MCP 服务</p>
+            <p className="empty-desc">在下面输入服务名即可添加；工具会以 mcp__服务名__工具名 的形式提供给 AI 调用。</p>
           </div>
-          <div className="xl:col-span-2">
-            <KeyValueField
-              path={`mcp.servers.${name}.env`}
-              label="环境变量"
-              description="按需注入 API Key 等敏感变量"
-            />
-          </div>
-          <SwitchField
-            path={`mcp.servers.${name}.disabled`}
-            label="禁用此服务"
-            description="保留配置但不启动"
-          />
-        </SectionCard>
-      ))}
-
-      <SectionCard title="新增 MCP 服务">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center xl:col-span-2">
-          <Input
-            aria-label="新 MCP 服务名"
-            placeholder="服务名，如 firecrawl"
-            value={newServerName}
-            onChange={(event) => setNewServerName(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                addServer();
-              }
-            }}
-          />
-          <Button type="button" className="sm:w-auto" onClick={addServer}>
-            <Plus className="mr-1 h-4 w-4" />
-            添加
-          </Button>
-        </div>
-      </SectionCard>
-      </SettingsGrid>
+        ) : (
+          names.map((name) => <ServerCard key={name} name={name} />)
+        )}
+        <AddServer existing={names} />
+      </div>
+      {empty ? <FilterEmpty query={filter} /> : null}
     </div>
   );
 }

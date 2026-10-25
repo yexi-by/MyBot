@@ -19,9 +19,10 @@ MyBot 是面向 QQ 群聊的机器人服务。它通过 FastAPI 接收 NapCat �
 uv sync
 mkdir config
 cp config.example.toml config/mybot.toml
+cp -r config.example/. config/
 ```
 
-编辑 `config/mybot.toml`，并把其中引用的 prompt、知识库文件放到 `config/` 下。随后启动 PostgreSQL、执行 migration 并运行服务：
+编辑 `config/mybot.toml`；其中引用的提示词已随 `config.example/` 复制到 `config/`，默认人格见「默认提示词与人格」。随后启动 PostgreSQL、执行 migration 并运行服务：
 
 ```bash
 uv run python -m app.database.migrations upgrade
@@ -49,7 +50,13 @@ npm ci
 npm run dev
 ```
 
-开发页面位于 `http://127.0.0.1:5173/`，Vite 会把 `/api` 转发到 6056。配置字段停止编辑 800ms 后自动校验和保存，文本文件停止编辑 1 秒后自动保存；非法值、空的必填 prompt 和内容哈希冲突都不会覆盖磁盘文件。文本编辑器只允许读写 `config/` 内的 `.md` 和 `.txt` 文件。
+开发页面位于 `http://127.0.0.1:5173/`，Vite 会把 `/api` 转发到 6056。开发后端不依赖 PostgreSQL，可以用 `--config` 指向一份临时配置联调。
+
+控制台按 `mybot.toml` 的结构分页：系统设置、模型服务、MCP 服务、每个插件各一页，以及编辑 `config/` 文本的「配置文本」页。每页都有独立地址（如 `/plugins/ai_group_chat`、`/files?path=mybot.toml`），可以直接收藏或刷新。
+
+配置字段停止编辑 800ms 后自动校验并写回，文本文件停止编辑 1 秒后自动保存；写回只改动变化的键，保留 TOML 注释与格式。非法值、空的必填 prompt 和内容哈希冲突都不会覆盖磁盘文件，错误标在对应字段上。顶栏状态显示待写入、写入中、待重启或插件热生效的进度，右侧「写回记录」逐条列出本次会话写入的改动。文件页允许读写 `config/` 内任意扩展名的 UTF-8 文本，包括 `mybot.toml`；TOML 语法损坏时控制台会直接打开原文供修复。
+
+`Ctrl+S` 立即保存当前配置或文本文件，`Ctrl+K` 打开命令面板搜索字段、页面和文件，`/` 聚焦本页字段筛选。删除 Provider、MCP 服务、群或停用插件前会二次确认。磁盘文件被外部修改时，可以选择覆盖外部修改、丢弃并刷新或继续编辑；文本文件还可以先复制本地内容。模型名输入框会从所选 Provider 拉取模型列表供筛选，拉取失败时仍可手输。切换页面会保留已打开的文本编辑会话并继续自动保存；重启和关机会先写完待保存内容，关闭浏览器页面时如有未保存内容也会提示。
 
 ## Docker
 
@@ -59,6 +66,7 @@ Compose 使用 `postgres:18.4-bookworm`，PostgreSQL 不向宿主机公开端口
 umask 077
 mkdir -p config secrets images logs
 cp config.example.toml config/mybot.toml
+cp -r config.example/. config/
 # 编辑 config/mybot.toml，并向 secrets/postgres_password 写入数据库密码。
 docker compose up -d
 ```
@@ -70,13 +78,25 @@ docker compose up -d
 - `./logs:/app/logs`
 - `mybot-postgres-data:/var/lib/postgresql`
 
-`migrate` 会等待 PostgreSQL 健康后执行 migration，成功后 MyBot 才启动。应用启动时只检查 migration 版本，不会自动修改 schema。数据库和图片没有自动过期或备份机制。
+`migrate` 会等待 PostgreSQL 健康后执行 migration，成功后 MyBot 才启动。应用启动时只检查 migration 版本，不会自动修改 schema。数据库和媒体文件没有自动过期或备份机制。
+
+图片和视频共用 `storage.images` 配置及持久化目录，按 SHA-256 去重保存原文件；数据库只记录任务、文件类型、大小和存储键。引用消息时，仓库会将已归档的本地路径补回对应消息段，优先读取归档文件。归档独立于 AI 视频输入开关，关闭输入后收到的视频仍会保存，供日后引用。
+
+媒体归档先读取消息段已有的本地文件，再尝试已有 URL，失败后向 NapCat 刷新来源：图片用 `get_image`，视频用 `get_file`。`storage.images.download_timeout_seconds` 分别限制首次下载、刷新信息和刷新后下载；完整读取预算为该值的三倍，任务租约在此基础上加上配置的 `lease_seconds`，为存储和状态写回保留时间。重试间隔由 `retry_delays_seconds` 决定，用尽次数后任务标记为失败。
+
+NapCat 返回的本地缓存路径属于 NapCat 所在的文件系统。分容器部署需要把对应缓存目录以相同容器路径只读挂载到 MyBot，才能使用本地缓存兜底；没有共享缓存时会继续尝试刷新后的 URL。
 
 默认 Compose 允许 MyBot 通过 WebUI 在线保存 `config/`，`migrate` 服务仍保持只读挂载。WebUI 面向可信内网使用，不应直接暴露到公网。
 
 ## 配置
 
 唯一配置文件是 `config/mybot.toml`，完整字段见 [config.example.toml](config.example.toml)。所有配置模型都禁止未知字段。
+
+运行参数必须在配置中明确填写。项目不会在运行时用常量补齐缺失的超时、重试、并发、数量或大小限制；字段缺失会在启动或 WebUI 校验时返回完整字段路径。可关闭的限制使用文档中声明的 `0` 或空列表语义，不依赖省略字段。
+
+插件消费者数量和优先级使用 `[plugin_execution.plugins.<plugin_id>]` 动态映射。启动时会比较已加载插件与配置键；缺少执行配置或配置了不存在的插件都会直接报出对应 ID。
+
+`plugin_execution.blocked_user_ids` 配置不响应的用户 QQ 列表，也可在 WebUI「系统设置 → 插件执行 → 屏蔽用户 QQ」中编辑，重启后生效。这些用户的群聊和私聊消息会在进入插件链前被跳过，AI、绘图等插件均不会响应；群消息持久化和撤回、禁言等通知事件照常处理。
 
 ### 热加载范围
 
@@ -85,7 +105,7 @@ docker compose up -d
 - `[plugins.*]`、这些配置引用的 prompt、知识库和通用要求文件会热加载。
 - 插件配置节存在即启用；删除该节即停用。当前事件继续使用取得时的旧配置，下一条相关事件使用新配置。
 - TOML 不完整、字段无效或引用文件不可读时，整次重载失败，现有配置继续生效。
-- `[app]`、`[server]`、`[napcat]`、`[storage]`、`[network]`、`[logging]`、`[llm]`、`[mcp]` 和 `[database]` 只在启动时生效。运行中修改这些节会记录需要重启，但同一次保存中的有效插件变化仍会应用。
+- `[app]`、`[server]`、`[napcat]`、`[storage]`、`[network]`、`[logging]`、`[llm]`、`[mcp]`、`[database]` 和 `[plugin_execution]` 只在启动时生效。运行中修改这些节会记录需要重启，但同一次保存中的有效插件变化仍会应用。
 - 新增 LLM provider 必须重启。热加载期间，插件只能引用进程启动时已经注册的 provider。
 
 配置引用文件必须使用相对于 `config/` 的路径。绝对路径、越出目录的 `..` 和指向目录外的符号链接都会被拒绝。system、vision 和通用要求文件不能为空；知识库可以省略或留空。
@@ -98,11 +118,14 @@ Provider ID 直接使用表名：
 [llm.providers.deepseek]
 api_key = "sk-CHANGE_ME"
 base_url = "https://api.deepseek.com"
+inherit_network_proxy = true
+timeout_seconds = 0
 max_attempts = 5
 retry_delay_seconds = 0
+retry_max_delay_seconds = 10
 ```
 
-无鉴权的 OpenAI 兼容服务可以省略 `api_key`。未配置 key 时不会发送 `Authorization` 请求头。
+无鉴权的 OpenAI 兼容服务可以省略 `api_key`。未配置 key 时不会发送 `Authorization` 请求头。`timeout_seconds = 0` 表示使用 `[network].timeout_seconds`；`retry_max_delay_seconds = 0` 表示指数退避不设最大等待时间。Provider 可单独配置 `proxy`，也可通过 `inherit_network_proxy` 决定是否继承全局代理。
 
 插件使用 `{ provider, name }` 引用模型，例如：
 
@@ -112,25 +135,41 @@ model = { provider = "deepseek", name = "deepseek-chat" }
 
 ### MCP
 
-MCP server 使用 stdio 启动，工具名会转换为 `mcp__{server}__{tool}`：
+MCP server 支持 stdio 和 Streamable HTTP，工具名会转换为 `mcp__{server}__{tool}`：
 
 ```toml
 [mcp]
 enabled = true
+initialization_timeout_seconds = 30
+call_timeout_seconds = 60
 
 [mcp.servers.example]
+transport = "stdio"
 command = "npx"
 args = ["-y", "your-mcp-server"]
 env = { EXAMPLE_API_KEY = "CHANGE_ME" }
 disabled = false
+
+[mcp.servers.firecrawl]
+transport = "streamable_http"
+url = "https://mcp.firecrawl.dev/v2/mcp"
+headers = { Authorization = "Bearer fc-CHANGE_ME" }
+disabled = false
 ```
 
-MCP 命令、环境变量和密钥属于部署配置，不应提交到仓库。
-镜像内已包含 `/app/node_modules/.bin/firecrawl-mcp`、`/app/node_modules/.bin/mcp-searxng` 和 `/usr/local/bin/github-mcp-server`，部署配置可以直接使用这些 stdio 命令，不需要运行时下载安装。
+MCP 命令、环境变量和认证头属于部署配置，不应提交真实密钥。stdio 服务配置 `command`、`args` 以及可选的 `env`、`cwd`；Streamable HTTP 服务配置 `url` 和可选的 `headers`，不能混用两种传输的字段。省略 `transport` 时使用 stdio。
+`initialization_timeout_seconds` 限制每个服务握手与工具清单加载的总等待时间；初始化失败会释放已启动的 MCP 资源。`call_timeout_seconds` 限制单次工具调用，超时会把结构化错误返回给 AI，后续调用仍可继续。两个字段均须明确填写正数。
+Firecrawl 直接连接[官方托管 MCP API](https://docs.firecrawl.dev/mcp-server)，通过 `Authorization: Bearer <API Key>` 认证。镜像不再安装或启动本地 Firecrawl MCP，也不需要自建 Firecrawl 服务或 `FIRECRAWL_API_URL`。已有部署需删除 Firecrawl 节的 `command`、`args`、`env`、`cwd`，改为上述 HTTP 配置，并移除 Compose 中 MyBot 对 Firecrawl 专用网络的引用。
+镜像内仍包含 `/app/node_modules/.bin/mcp-searxng` 和 `/usr/local/bin/github-mcp-server`，这两个服务继续使用 stdio 命令，不需要运行时下载安装。
 
-### AI 群聊与视觉描述
+### AI 群聊与图片交付
 
-AI 群聊始终由主模型生成正式回复。主模型支持图片时，图片直接交给主模型，并且不得配置 `[plugins.ai_group_chat.vision]`。主模型不支持图片时必须配置 vision；视觉模型只接收当前问题、图片和视觉提示词，不接收角色、历史或工具。
+AI 群聊始终由主模型生成正式回复。`model.supports_images` 声明主模型能力，`images.delivery_mode` 决定图片实际走向：
+
+- `direct`：原始图片字节直接进入主模型的 Chat Completions 请求，不调用其他模型，也不缩放或重新编码。
+- `vision`：独立视觉模型只接收当前问题、图片和视觉提示词，生成事实描述后交给主模型；它不接收角色、历史或工具。
+
+`direct` 要求主模型支持图片。`vision` 要求配置 `[plugins.ai_group_chat.vision]`。原生多模态模式仍可保留 vision，仅在 `oversize_behavior = "describe"` 时把超过主模型已声明限制的图片交给视觉模型；选择 `error` 或 `skip` 时不会发生模型转发。
 
 ```toml
 [plugins.ai_group_chat]
@@ -138,6 +177,7 @@ model = { provider = "deepseek", name = "deepseek-chat", supports_images = false
 extra_requirements_file = "ai_group_chat/prompts/extra_requirements.md"
 show_reasoning = false
 retain_reasoning = false
+tool_result_retention = "off"
 
 [plugins.ai_group_chat.vision]
 model = { provider = "vision", name = "vision-model" }
@@ -145,20 +185,97 @@ system_prompt_file = "ai_group_chat/prompts/vision/system.md"
 user_prompt_file = "ai_group_chat/prompts/vision/user.md"
 max_attempts = 5
 retry_delay_seconds = 0.25
+retry_max_delay_seconds = 10
 retain_descriptions = true
+
+[plugins.ai_group_chat.images]
+delivery_mode = "vision"
+max_per_turn = 0
+max_image_bytes = 0
+max_total_bytes_per_request = 0
+max_width = 0
+max_height = 0
+allowed_mime_types = []
+oversize_behavior = "skip"
+image_detail = "auto" # 可设为 omit，完全不发送 detail 字段
+retain_images = false
+forward_max_per_call = 0
+forward_max_per_turn = 0
 
 [[plugins.ai_group_chat.groups]]
 id = "123456789"
-system_prompt_file = "ai_group_chat/prompts/roles/default.md"
+system_prompt_file = "ai_group_chat/prompts/roles/maodie.md"
 knowledge_base_file = "ai_group_chat/knowledge/default.md"
 max_context_tokens = 64000
 ```
 
-图片读取依次尝试已有路径、现有 URL 和 NapCat `get_image` 刷新。视觉描述可以保留在当前进程的对话上下文，图片字节不会进入上下文；进程重启后上下文仍会丢失。同群请求串行执行，不同群可以并行。prompt、知识库或通用要求内容变化后，只清空受影响群的内存上下文。
+图片读取依次尝试已有路径、现有 URL 和 NapCat `get_image` 刷新。图片数量、单图原始字节、单次请求图片总原始字节、宽高、MIME 类型、下载并发、超时及转发图片额度都由配置决定；数量、字节和宽高字段为 `0` 时不限，MIME 列表为空时不限制格式。超过正数限制时按 `oversize_behavior` 执行：`error` 立即结束本轮并报错，`skip` 跳过单图并把原因告诉主模型，`describe` 调用明确配置的视觉模型。若全部限制为 `0`，MyBot 不预先拦截图片。模型服务最终失败时向群成员说明本轮已结束；反馈和日志仅保留模型错误分类及 HTTP 状态，省略可能含密钥的供应商响应正文。
+
+`retain_images = false` 时 direct 图片只服务当前轮；设为 `true` 后原始字节会保留到当前进程的长期上下文，并受上下文压缩及总字节设置约束。进程重启后内存上下文仍会丢失，NapCat 断线重连不会清空当前进程内的上下文。同群请求分别读取长期上下文快照并发执行，待模型回复完成后按完成顺序提交；运行中的请求不会把未完成内容暴露给其他请求。
+
+模型响应在协议入口和群消息发送前接受完整性检查：截断或异常结束、缺失或无效的结构化工具调用，以及正文中的 `<call:…>`、`<think>`、`<thought>`、`🫧thought`、`💭thinking` 和 `<|channel|>` 等明确内部标记都会使整份响应被拒绝。单独一行的 `💭` 或 `🫧` 后面跟着正文，也按异常思考标题处理。检查依据输出格式，不按模型名称分支，也不把普通英文或 thought、think 等单词当作异常。句中表情、单个表情消息和单个行内标记引用可正常展示，独占一行的思考标题不会因加了反引号而放行。混合正文不猜测切分点、不只删除标记。
+
+被拒绝的正文、思考和调用不会发群、执行或写入长期上下文，也不会作为错误原文回传模型；重试只追加本次请求使用的简短纠错说明。Provider 按现有 `max_attempts` 和退避配置重试，耗尽后明确结束本轮；发送前的兜底检查每轮最多额外纠错两次，不占正常工具轮数，也不会再次重试 Provider 已经耗尽的请求。视觉描述和历史摘要使用相同的协议入口检查。独立思考文字及 `reasoning_details` 不混入正文，同轮工具续问会保留完整思考明细和调用的 `extra_content` 协议状态（如签名）；`show_reasoning` 只控制展示，`retain_reasoning` 控制思考文字和明细是否跨用户轮次保存。
+
+已确认异常的历史助手正文会从本轮模型请求、token 预算和压缩摘要输入中隔离，已执行的工具调用与结果保持配对。最近群聊、引用消息和历史查询同样隔离机器人自己的异常旧回复，历史工具以 `content_quarantined = true` 标注；群成员消息、正常机器人回复和数据库原始记录保持原样。隔离不会清空整个群的历史，也不会新增业务配置项。完全无标记、与正常解释难以区分的内容不做关键词强拦截。
+
+`tool_result_retention` 支持 `off`、`summary` 和 `full`：分别不保存、只保存工具名称及成功/失败次数、保存工具调用参数和完整结果。`retain_reasoning` 只控制 reasoning 是否跨用户轮次保存。`debug_dump_messages` 和 `debug_dump_directory` 明确控制长期上下文调试文件。消息格式化、历史分页、群文件列表和 token 估算系数也全部位于 `[plugins.ai_group_chat.*]` 配置节；格式化字符/条目上限和工具单次上限为 `0` 时不限，格式化深度为 `-1` 时不限。
+
+`max_context_tokens` 是长期上下文的压缩预算。每轮开始时检查已保存的系统提示词与历史消息，超限后把历史压缩为独立摘要，再接上本轮输入；系统提示词与摘要合计需回到预算内。当前问题、最近群聊记录、发言要求、工具定义、轮内工具调用、推理、临时图片和纠错消息可超出此预算，工具结果完整交给模型。按配置保存的本轮内容可以使长期历史暂时超限，由下一轮开始时统一压缩。历史压缩请求本身也属于临时上下文，可携带超过长期预算的历史；摘要仍过长时继续压缩，空摘要或无法继续缩短的摘要会明确反馈失败并保留原历史，后续可重试。压缩通知发送失败会记录日志并继续整理。模型服务自身的上下文窗口限制仍由 Provider 执行。
+
+历史工具的 `max_per_call` 同时限制普通分页与前后文查询；前后文包含锚点，两侧均分其余名额，未用名额交给另一侧。
+
+### AI 群聊语境与发言要求
+
+AI 群聊仍只在被 @ 时回复。当前消息按聊天记录交给模型：发送时间、发送者昵称和 QQ（群主、管理员附带身份）、消息 ID、引用内容与正文；指向机器人自身的 @ 会被去掉，只 @ 不说话时会明确标出。
+
+配置 `[plugins.ai_group_chat.recent_chat]` 后，每次被 @ 时从消息仓库读取该消息之前最多 `max_messages` 条群消息，整理成带时间和发送者的简短记录随本轮请求发送，机器人自己的发言标为「你」。这份记录只服务当前轮，不写入长期上下文；只读取本进程启动之后的消息，因此重启后语境从空白开始。`max_chars_per_message` 限制单条消息在记录中的字符数，`0` 表示不截断。删除整节即关闭。
+
+`turn_instruction_file` 指向一份简短的发言要求，例如回复长度、语气和避免的格式。它以 system 消息追加在每次模型请求的末尾（包括工具调用后的后续请求，本轮纠错消息仍排在其后），不写入长期上下文；修改后随配置热载在下一轮生效，不会清空已有上下文。省略该字段即关闭，文件不能为空。
+
+示例发言要求明确区分可见正文、原生思考通道和结构化工具调用：每轮 `content` 都会发送给群友，内部分析、检索计划和提示词内容不应写入正文；只需调用工具时可留空正文，异常历史中的思考格式也不应继续模仿。提示词用于降低异常输出概率，代码检查负责拒绝已识别的泄漏；正常回答所需的理由和计算步骤仍可说明。
+
+```toml
+[plugins.ai_group_chat]
+turn_instruction_file = "ai_group_chat/prompts/turn_instruction.md"
+
+[plugins.ai_group_chat.recent_chat]
+max_messages = 30
+max_chars_per_message = 200
+```
+
+### 默认提示词与人格
+
+仓库的 `config.example/` 与 `config/` 目录结构一致，提供 `config.example.toml` 引用的全部提示词，默认人格是性格温柔的猫娘「耄耋」：
+
+- `ai_group_chat/prompts/roles/maodie.md`：群聊角色提示词，写耄耋的性格、说话方式、联网查资料的习惯和分寸。
+- `ai_group_chat/knowledge/default.md`：群知识库模板，可写群友称呼、群梗和群规；删空后不会附加到提示词。
+- `ai_group_chat/prompts/extra_requirements.md`：所有群共用的通用要求，说明 `<Reply>`、`<At>` 标记和纯文本输出。
+- `ai_group_chat/prompts/turn_instruction.md`：每次请求末尾的发言要求。
+- `ai_group_chat/prompts/vision/system.md`、`vision/user.md`：视觉模型提示词，只描述图片事实，不带人设。
+
+每个群的 system prompt 按「角色提示词 → 知识库 → 通用要求」拼接，其中任一文件变化都会清空该群的内存上下文；发言要求单独追加在请求末尾，修改后不清空上下文。这些文件只是新部署的起点，复制到 `config/` 后可在 WebUI 文件页直接修改；已部署环境以自身的 `config/` 为准，仓库示例不会覆盖它。
+
+### 群聊视频输入
+
+在 AI 群聊页面开启「接受视频输入」，或配置：
+
+```toml
+[plugins.ai_group_chat.videos]
+enabled = true
+max_per_turn = 2
+fetch_concurrency = 2
+download_timeout_seconds = 60
+max_video_bytes = 20971520
+```
+
+开启后，当前消息、引用消息及已内嵌转发中的视频会按来源顺序交给主模型，优先处理当前消息。主模型及服务端需支持 Chat Completions 的 `video_url` 扩展，例如 CLIProxyAPI 的 Gemini 路由；完整原文件以 `data:video/...;base64,...` 传入。该能力独立于图片的 `delivery_mode`，不调用图片描述模型。关闭时只保留视频消息元信息，不读取视频作为模型输入。
+
+`max_per_turn` 和 `max_video_bytes` 为 `0` 时不限。超限、下载失败或超时会返回明确的部分错误，其余视频与文字继续处理。归档文件受系统「媒体存储」的 `storage.images.max_bytes` 限制；模型输入受这里的 `max_video_bytes` 限制。原文件持久归档；模型请求里的视频字节只保留到本轮结束，后续轮次可以通过引用原消息重新读取。示例配置默认关闭视频输入，以便按主模型能力选择开启。
 
 ### Neavo 群聊图像插件
 
-群成员使用 `#生图 提示词` 触发文生图，使用 `#反推` 加图片或回复含图消息进行图片反推。反推接受 JPEG、PNG 或 WebP，单图最大值由 `max_image_bytes` 控制。
+群成员使用配置的 `generate_command` 触发文生图，使用 `describe_command` 加图片或回复含图消息进行图片反推。输入和输出图片分别由 `max_input_image_bytes`、`max_output_image_bytes` 控制，`0` 表示不限；反推格式列表由 `allowed_input_mime_types` 控制，空列表表示不设 MIME 白名单。
 
 ```toml
 [plugins.neavo_image_generate]
@@ -168,7 +285,13 @@ api_token = "CHANGE_ME"
 poll_interval_seconds = 3
 generation_timeout_seconds = 600
 request_timeout_seconds = 30
-max_image_bytes = 20971520
+max_prompt_chars = 4096
+max_input_image_bytes = 10485760
+max_output_image_bytes = 20971520
+allowed_input_mime_types = ["image/jpeg", "image/png", "image/webp"]
+max_consecutive_poll_errors = 3
+generate_command = "#生图"
+describe_command = "#反推"
 ```
 
 省略整个插件节即可停用；Neavo 服务不要求鉴权时可以省略 `api_token`。实际 Token 不得提交或写入日志。
@@ -177,18 +300,19 @@ max_image_bytes = 20971520
 
 - `app/api/`：NapCat Action 封装。
 - `app/models/`：NapCat 协议模型和 JSON 边界类型。
-- `app/services/napcat/`：可复用的 NapCat 本地工具和图片读取服务。
+- `app/services/napcat/`：可复用的 NapCat 本地工具和媒体读取服务。
 - `app/services/llm/`：模型路由、OpenAI 协议、MCP 和工具注册。
 - `app/plugins/`：插件业务编排。
-- `app/database/`：PostgreSQL、migration、群消息 repository 和图片任务；不保存图片字节。
+- `app/database/`：PostgreSQL、migration、群消息 repository 和媒体任务；不保存媒体字节。
 - `app/config/`：唯一配置模型、加载器、配置版本和目录监听。
 - `app/webui/`：配置控制台 API、保留 TOML 注释的写回和 SPA 静态文件挂载。
+- `webui/`：配置控制台前端（React + TypeScript + Vite）；表单由 `webui/src/schema/` 的字段定义生成。
 
 插件必须声明稳定的 ASCII `plugin_id`。每个插件只获得绑定自身 ID 的类型化配置视图，不能通过公共接口读取启动配置或其他插件配置。插件私有关系数据使用 `plugin_<plugin_id>` schema、自有 migration 和类型化 repository；插件不直接持有 `AsyncSession`，也不通过通用 JSONB KV 保存状态。插件之间不导入、调用或订阅彼此，需要共用的能力放入公共模块。
 
 ## 失败策略
 
-配置缺失、协议不一致、PostgreSQL 不可用或 migration 版本不匹配会直接失败。群消息持久化第二次失败后不再分发该事件，并以 1011 关闭当前 NapCat 会话。工具参数、回复标记或图片读取等可恢复错误会返回结构化信息，让模型或插件继续处理。
+配置缺失、协议不一致、PostgreSQL 不可用或 migration 版本不匹配会直接失败。群消息持久化按 `database.persistence_retry_delays_seconds` 明确给出的等待序列重试；全部尝试失败后不再分发该事件，并以 1011 关闭当前 NapCat 会话。工具参数、回复标记或图片读取等可恢复错误会返回结构化信息，让模型或插件继续处理。
 
 ## 开发检查
 

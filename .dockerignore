@@ -63,6 +63,7 @@ webui/dist/
 
 # 无需进入镜像上下文的本地说明和脚本
 docs/
+config.example/
 run.bat
 docker-compose.yml
 

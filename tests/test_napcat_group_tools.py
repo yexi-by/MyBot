@@ -1,6 +1,7 @@
 """NapCat 群聊本地工具测试。"""
 
 import unittest
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import cast
 
@@ -8,6 +9,7 @@ import httpx
 
 from app.database import (
     GroupDataScope,
+    GroupMessageReader,
     MessageCursor,
     StoredGroupMessage,
 )
@@ -30,9 +32,70 @@ from app.models import (
 from app.services.napcat.group_tools import (
     GetForwardMessageImagesArgs,
     GetGroupHistoryMessagesArgs,
-    NapCatGroupToolExecutor,
+    NapCatGroupToolExecutor as RealNapCatGroupToolExecutor,
     NapCatGroupToolBot,
 )
+from app.services.napcat.message_formatter import NapCatMessageTextFormatter
+
+
+def NapCatGroupToolExecutor(
+    *,
+    bot: NapCatGroupToolBot,
+    group_messages: object,
+    event: GroupMessage,
+    allow_mention_all: bool = False,
+    forward_image_tool_enabled: bool = True,
+    forward_image_max_images_per_call: int = 0,
+    forward_image_max_images_per_turn: int = 0,
+    image_fetch_concurrency: int = 16,
+    image_download_timeout_seconds: float = 20,
+    image_max_bytes: int | None = None,
+    forward_reply_threshold_chars: int = 1000,
+    http_client: httpx.AsyncClient | None = None,
+    message_formatter: NapCatMessageTextFormatter | None = None,
+    history_default_limit: int = 20,
+    history_max_per_call: int = 0,
+    history_default_before_count: int = 10,
+    history_default_after_count: int = 10,
+    file_default_count: int = 50,
+    file_max_per_call: int = 0,
+    remaining_image_delivery_slots: Callable[[], int | None] | None = None,
+) -> RealNapCatGroupToolExecutor:
+    """用显式测试参数构造群聊工具执行器。"""
+    formatter = message_formatter or NapCatMessageTextFormatter(
+        field_text_limit=0,
+        json_text_limit=0,
+        markdown_text_limit=0,
+        forward_max_items=0,
+        forward_max_depth=-1,
+        nested_text_search_max_depth=-1,
+    )
+    return RealNapCatGroupToolExecutor(
+        bot=bot,
+        group_messages=cast(GroupMessageReader, group_messages),
+        event=event,
+        allow_mention_all=allow_mention_all,
+        forward_image_tool_enabled=forward_image_tool_enabled,
+        forward_image_max_images_per_call=forward_image_max_images_per_call,
+        forward_image_max_images_per_turn=forward_image_max_images_per_turn,
+        image_fetch_concurrency=image_fetch_concurrency,
+        image_download_timeout_seconds=image_download_timeout_seconds,
+        image_max_bytes=image_max_bytes,
+        forward_reply_threshold_chars=forward_reply_threshold_chars,
+        http_client=http_client,
+        message_formatter=formatter,
+        history_default_limit=history_default_limit,
+        history_max_per_call=history_max_per_call,
+        history_default_before_count=history_default_before_count,
+        history_default_after_count=history_default_after_count,
+        file_default_count=file_default_count,
+        file_max_per_call=file_max_per_call,
+        remaining_image_delivery_slots=(
+            remaining_image_delivery_slots
+            if remaining_image_delivery_slots is not None
+            else lambda: None
+        ),
+    )
 
 
 def build_group_message(
@@ -90,7 +153,7 @@ def to_stored_message(message: GroupMessage, *, row_id: int) -> StoredGroupMessa
             "outgoing" if message.post_type == "message_sent" else "incoming"
         ),
         segments=tuple(message.message),
-        images=(),
+        media=(),
     )
 
 
@@ -114,6 +177,8 @@ class FakeBot:
         self.sent_forward_messages: list[tuple[NapCatId, list[MessageSegment]]] = []
         self.image_responses = image_responses or {}
         self.image_calls: list[tuple[str | None, str | None]] = []
+        self.root_file_counts: list[int] = []
+        self.folder_file_counts: list[int] = []
 
     async def send_msg(
         self,
@@ -141,7 +206,8 @@ class FakeBot:
         self, group_id: NapCatId, file_count: int = 50
     ) -> Response:
         """返回空群文件列表。"""
-        _ = (group_id, file_count)
+        _ = group_id
+        self.root_file_counts.append(file_count)
         return Response(status="ok", retcode=0, data=[])
 
     async def get_group_files_by_folder(
@@ -152,7 +218,8 @@ class FakeBot:
         file_count: int = 50,
     ) -> Response:
         """返回空文件夹列表。"""
-        _ = (group_id, folder_id, folder, file_count)
+        _ = (group_id, folder_id, folder)
+        self.folder_file_counts.append(file_count)
         return Response(status="ok", retcode=0, data=[])
 
     async def get_group_file_url(self, group_id: NapCatId, file_id: str) -> Response:
@@ -401,6 +468,37 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         text_segment = cast(Text, text_segment)
         self.assertEqual(text_segment.data.text, " 测试通过")
 
+    async def test_group_file_counts_come_from_config_without_fixed_cap(self) -> None:
+        """群文件默认数量和单次上限只由当前 AIChat 配置决定。"""
+        bot = FakeBot()
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            group_messages=FakeDatabase(),
+            event=build_group_message(),
+            file_default_count=250,
+            file_max_per_call=0,
+        )
+
+        _ = await executor.call_tool("qq__list_group_root_files", {})
+        _ = await executor.call_tool(
+            "qq__list_group_root_files",
+            {"file_count": 500},
+        )
+
+        self.assertEqual(bot.root_file_counts, [250, 500])
+
+        capped = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            group_messages=FakeDatabase(),
+            event=build_group_message(),
+            file_max_per_call=300,
+        )
+        _ = await capped.call_tool(
+            "qq__list_group_files_by_folder",
+            {"folder_id": "folder", "file_count": 500},
+        )
+        self.assertEqual(bot.folder_file_counts, [300])
+
     async def test_short_content_uses_normal_group_message(self) -> None:
         """未达到字数阈值的回复仍按普通群消息发送。"""
         bot = FakeBot()
@@ -408,7 +506,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             bot=cast(NapCatGroupToolBot, bot),
             group_messages=FakeDatabase(),
             event=build_group_message(),
-            max_reply_chars=5,
+            forward_reply_threshold_chars=5,
         )
 
         _ = await executor.send_content("短文")
@@ -423,7 +521,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             bot=cast(NapCatGroupToolBot, bot),
             group_messages=FakeDatabase(),
             event=build_group_message(),
-            max_reply_chars=5,
+            forward_reply_threshold_chars=5,
         )
 
         _ = await executor.send_content("<Reply>\n<At>20000</At>\n这是一段很长的回复")
@@ -443,6 +541,21 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([segment.type for segment in content], ["reply", "at", "text"])
         text_segment = cast(Text, content[-1])
         self.assertEqual(text_segment.data.text, " 这是一段很长的回复")
+
+    async def test_zero_forward_threshold_sends_every_reply_as_forward(self) -> None:
+        """阈值为 0 时所有合法回复都使用合并转发。"""
+        bot = FakeBot()
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            group_messages=FakeDatabase(),
+            event=build_group_message(),
+            forward_reply_threshold_chars=0,
+        )
+
+        _ = await executor.send_content("短文")
+
+        self.assertEqual(bot.sent_count, 0)
+        self.assertEqual(len(bot.sent_forward_messages), 1)
 
     async def test_mention_all_disabled_raises_model_visible_error(self) -> None:
         """关闭 @全体 时 content 标记解析会返回模型可读错误。"""
@@ -605,8 +718,26 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(args.context_message_id, "msg-2")
-        self.assertEqual(args.before_count, 10)
-        self.assertEqual(args.after_count, 10)
+        self.assertIsNone(args.before_count)
+        self.assertIsNone(args.after_count)
+
+    def test_history_rejects_arguments_unused_by_query_mode(self) -> None:
+        """工具参数不能携带当前查询模式不会读取的字段。"""
+        cases = (
+            ({"query_mode": "recent_count", "duration_minutes": 5}, "duration_minutes"),
+            (
+                {
+                    "query_mode": "around_message",
+                    "context_message_id": "msg-2",
+                    "limit": 20,
+                },
+                "limit",
+            ),
+        )
+        for payload, field_name in cases:
+            with self.subTest(field=field_name):
+                with self.assertRaisesRegex(ValueError, field_name):
+                    _ = GetGroupHistoryMessagesArgs.model_validate(payload)
 
     def test_forward_image_args_require_indices_by_mode(self) -> None:
         """不同合并转发图片选择模式需要明确的定位参数。"""
@@ -709,6 +840,36 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             ["at", "text", "image", "file", "share"],
         )
 
+    async def test_history_tool_quarantines_leaked_bot_text_without_changing_records(self) -> None:
+        """历史工具只屏蔽自己的异常正文，保留正常发言、成员原文及消息定位信息。"""
+        history = [
+            build_group_message(
+                message_id="29991", user_id="10000",
+                message=[Text.new("💭"), Text.new("\nprivate-plan")],
+            ),
+            build_group_message(message_id="29992", user_id="10000", text="正常回复"),
+            build_group_message(message_id="29993", text="💭\n成员讨论原文"),
+        ]
+        database = HistoryDatabase(history)
+        original = list(database.messages)
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, FakeBot()),
+            group_messages=database, event=build_group_message(),
+        )
+        result = cast(JsonObject, await executor.call_tool(
+            "qq__get_group_history_messages", {"query_mode": "recent_count", "limit": 3},
+        ))
+        messages = cast(list[JsonObject], result["messages"])
+        by_id = {message["message_id"]: message for message in messages}
+        self.assertTrue(result["ok"])
+        self.assertTrue(by_id["29991"]["content_quarantined"])
+        self.assertNotIn("private-plan", str(by_id["29991"]["text"]))
+        self.assertIn("正常回复", str(by_id["29992"]["text"]))
+        self.assertIn("成员讨论原文", str(by_id["29993"]["text"]))
+        self.assertNotIn("content_quarantined", by_id["29992"])
+        self.assertNotIn("content_quarantined", by_id["29993"])
+        self.assertEqual(database.messages, original)
+
     async def test_history_messages_push_user_filter_into_recent_query(self) -> None:
         """指定 QQ 号查询会把成员条件交给群消息仓库。"""
         database = HistoryDatabase(
@@ -763,7 +924,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_message["user_id"], "20000")
         self.assertIn("目标 2", require_string(first_message["text"]))
         self.assertEqual(database.search_calls[0]["method"], "list_recent")
-        self.assertEqual(database.search_calls[0]["limit"], 1)
+        self.assertEqual(database.search_calls[0]["limit"], 2)
         self.assertEqual(database.search_calls[0]["sender_id"], "20000")
         query = require_json_object(result_object["query"])
         self.assertEqual(query["user_id"], "20000")
@@ -855,6 +1016,28 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query["context_message_id"], "msg-3")
         self.assertEqual(query["before_count"], 1)
         self.assertEqual(query["after_count"], 2)
+
+    async def test_around_message_obeys_total_limit_including_anchor(self) -> None:
+        """锚点前后文受单次总量限制，0 继续表示不限。"""
+        database = HistoryDatabase([
+            build_group_message(message_id=f"m{i}", time=100 + i)
+            for i in range(11)
+        ])
+        for limit in (1, 3, 8, 0):
+            with self.subTest(limit=limit):
+                executor = NapCatGroupToolExecutor(
+                    bot=cast(NapCatGroupToolBot, FakeBot()), group_messages=database,
+                    event=build_group_message(), history_max_per_call=limit,
+                )
+                result = require_json_object(await executor.call_tool(
+                    "qq__get_group_history_messages", {
+                        "query_mode": "around_message", "context_message_id": "m5",
+                        "before_count": 5, "after_count": 5,
+                    },
+                ))
+                messages = require_json_list(result["messages"])
+                self.assertEqual(len(messages), limit or 11)
+                self.assertTrue(any(require_json_object(m).get("is_anchor") is True for m in messages))
 
     async def test_history_around_message_can_filter_context_by_user_id(self) -> None:
         """上下文查询同时指定 QQ 号时，只返回上下文窗口内该成员消息。"""
@@ -1249,7 +1432,7 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
             bot=cast(NapCatGroupToolBot, bot),
             group_messages=build_forward_database(),
             event=build_group_message(),
-            forward_image_max_all_images=3,
+            forward_image_max_images_per_turn=3,
         )
 
         result = await executor.call_tool_with_artifacts(
@@ -1263,6 +1446,82 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result_object["truncated"], True)
         self.assertEqual(len(result.image_artifacts), 3)
         self.assertEqual(result.truncated_image_count, 2)
+
+    async def test_forward_image_batch_reserves_global_slots_before_download(
+        self,
+    ) -> None:
+        """同批后续工具调用在下载前扣除成功图片的待交付额度。"""
+        bot = FakeBot(
+            forward_responses={
+                "root-forward": Response(
+                    status="ok",
+                    retcode=0,
+                    data={
+                        "messages": [
+                            {
+                                "message": [
+                                    {
+                                        "type": "image",
+                                        "data": {"file": "a.jpg", "file_id": "img-a"},
+                                    }
+                                ]
+                            },
+                            {
+                                "message": [
+                                    {
+                                        "type": "image",
+                                        "data": {"file": "b.jpg", "file_id": "img-b"},
+                                    }
+                                ]
+                            },
+                        ]
+                    },
+                )
+            },
+            image_responses={
+                "a.jpg": Response(
+                    status="ok",
+                    retcode=0,
+                    data={"file": "a.jpg", "base64": IMAGE_A_BASE64},
+                ),
+                "b.jpg": Response(
+                    status="ok",
+                    retcode=0,
+                    data={"file": "b.jpg", "base64": IMAGE_B_BASE64},
+                ),
+            },
+        )
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            group_messages=build_forward_database(),
+            event=build_group_message(),
+            remaining_image_delivery_slots=lambda: 1,
+        )
+        executor.begin_image_delivery_batch()
+
+        first = await executor.call_tool_with_artifacts(
+            "qq__get_forward_message_images",
+            {
+                "message_id": FORWARD_OWNER_MESSAGE_ID,
+                "mode": "single",
+                "message_index": 1,
+                "image_index": 1,
+            },
+        )
+        second = await executor.call_tool_with_artifacts(
+            "qq__get_forward_message_images",
+            {
+                "message_id": FORWARD_OWNER_MESSAGE_ID,
+                "mode": "single",
+                "message_index": 2,
+                "image_index": 1,
+            },
+        )
+
+        self.assertEqual(len(first.image_artifacts), 1)
+        self.assertEqual(second.image_artifacts, [])
+        self.assertEqual(second.truncated_image_count, 1)
+        self.assertEqual(bot.image_calls, [(None, "a.jpg")])
 
     async def test_forward_image_tool_returns_partial_errors(self) -> None:
         """部分图片读取失败时，成功图片仍作为附件返回。"""
@@ -1324,6 +1583,76 @@ class NapCatGroupToolExecutorTest(unittest.IsolatedAsyncioTestCase):
         errors = require_json_list(result_object["errors"])
         first_error = require_json_object(errors[0])
         self.assertEqual(first_error["error_type"], "NapCatActionFailed")
+
+    async def test_forward_image_failure_does_not_consume_turn_limit(self) -> None:
+        """失败读取不占用整轮成功图片额度。"""
+        bot = FakeBot(
+            forward_responses={
+                "root-forward": Response(
+                    status="ok",
+                    retcode=0,
+                    data={
+                        "messages": [
+                            {
+                                "message": [
+                                    {
+                                        "type": "image",
+                                        "data": {"file": "a.jpg", "file_id": "img-a"},
+                                    }
+                                ]
+                            },
+                            {
+                                "message": [
+                                    {
+                                        "type": "image",
+                                        "data": {
+                                            "file": "missing.jpg",
+                                            "file_id": "missing",
+                                        },
+                                    }
+                                ]
+                            },
+                        ]
+                    },
+                )
+            },
+            image_responses={
+                "a.jpg": Response(
+                    status="ok",
+                    retcode=0,
+                    data={"file": "a.jpg", "base64": IMAGE_A_BASE64},
+                )
+            },
+        )
+        executor = NapCatGroupToolExecutor(
+            bot=cast(NapCatGroupToolBot, bot),
+            group_messages=build_forward_database(),
+            event=build_group_message(),
+            forward_image_max_images_per_turn=1,
+        )
+
+        failed = await executor.call_tool_with_artifacts(
+            "qq__get_forward_message_images",
+            {
+                "message_id": FORWARD_OWNER_MESSAGE_ID,
+                "mode": "single",
+                "message_index": 2,
+                "image_index": 1,
+            },
+        )
+        succeeded = await executor.call_tool_with_artifacts(
+            "qq__get_forward_message_images",
+            {
+                "message_id": FORWARD_OWNER_MESSAGE_ID,
+                "mode": "single",
+                "message_index": 1,
+                "image_index": 1,
+            },
+        )
+
+        self.assertEqual(len(failed.image_errors), 1)
+        self.assertEqual(len(succeeded.image_artifacts), 1)
+        self.assertEqual(succeeded.truncated_image_count, 0)
 
     async def test_forward_tool_recursively_fetches_nested_forward_id(self) -> None:
         """只有 ID 的嵌套合并转发会继续调用 NapCat 读取。"""

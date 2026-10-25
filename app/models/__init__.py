@@ -53,7 +53,7 @@ from .events import (
     Sender,
     StreamTransferResult,
 )
-from .image_archive import ImageArchiveTask, StoredImage
+from .media_archive import MediaArchiveTask, MediaType, StoredMedia
 from .segments import (
     At,
     Contact,
@@ -115,7 +115,8 @@ __all__ = [
     "GroupUploadNoticeEvent",
     "HeartBeat",
     "Image",
-    "ImageArchiveTask",
+    "MediaArchiveTask",
+    "MediaType",
     "InputStatusEvent",
     "Json",
     "JsonObject",
@@ -152,7 +153,7 @@ __all__ = [
     "Sender",
     "Share",
     "StreamTransferResult",
-    "StoredImage",
+    "StoredMedia",
     "StrictModel",
     "Text",
     "UnknownSegment",

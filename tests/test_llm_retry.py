@@ -1,14 +1,24 @@
 """LLM 单次请求重试覆盖测试。"""
 
+import json
 import unittest
-from typing import override
+import traceback
+from typing import cast, override
 from unittest.mock import AsyncMock, call, patch
 
-from app.config import LLMProviderConfig
+import httpx
+from openai import AsyncOpenAI, AuthenticationError
+from pydantic import SecretStr
+
+from app.config import LLMProviderConfig, NetworkConfig
+from app.models import JsonObject
 from app.services.llm.base import LLMProvider
 from app.services.llm.handler import LLMHandler
 from app.services.llm.schemas import ChatMessage, LLMProviderWrapper
 from app.services.llm.wrapper import ResilientLLMProvider
+from app.services.llm.errors import LLMRequestError
+from app.services.llm.providers.openai import OpenAIService
+from app.services.llm.schemas import LLMToolDefinition
 
 
 class FlakyTextProvider(LLMProvider):
@@ -36,18 +46,278 @@ class FlakyTextProvider(LLMProvider):
 class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
     """验证当前请求可以替换供应商默认重试参数。"""
 
+    async def test_invalid_protocol_response_retries_with_clean_feedback(self) -> None:
+        """通过真实协议适配器拒绝异常响应，纠错后恢复且不回放异常内容。"""
+        rejected_marker = "private-rejected-payload"
+        valid_call: dict[str, object] = {
+            "id": "call-recovered", "type": "function",
+            "function": {"name": "inspect", "arguments": '{"limit": 15}'},
+        }
+        malformed_call: dict[str, object] = {
+            **valid_call,
+            "function": {"name": "inspect", "arguments": f'{{"secret":"{rejected_marker}"'},
+        }
+        invalid_cases: list[tuple[str, str, dict[str, object], str, str | None]] = [
+            ("text_call", "text", {"content": f"<call:default_api:inspect>{rejected_marker}</call:default_api:inspect>"}, "stop", None),
+            ("no_tools_thought", "no_tools", {"content": f"<thought\n>{rejected_marker}</thought>公开回复"}, "stop", None),
+            ("thought_header", "text", {"content": f"🫧thought\n{rejected_marker}公开回复"}, "stop", None),
+            ("bare_thought_header", "tools", {"content": f"💭\nLet's check the repository. {rejected_marker}", "tool_calls": [valid_call]}, "tool_calls", None),
+            ("embedded_thought", "tools", {"content": f"公开片段🫧thought\n{rejected_marker}", "tool_calls": [valid_call]}, "tool_calls", None),
+            ("quoted_thought_header", "no_tools", {"content": f"`💭thinking`\n{rejected_marker}"}, "stop", None),
+            ("channel_marker", "text", {"content": f"<|channel|>analysis\n{rejected_marker}"}, "stop", None),
+            ("invalid_reasoning_details", "tools", {"reasoning_details": {"secret": rejected_marker}, "tool_calls": [valid_call]}, "tool_calls", None),
+            ("invalid_tool_state", "tools", {"tool_calls": [{**valid_call, "extra_content": rejected_marker}]}, "tool_calls", None),
+            ("malformed_arguments", "tools", {"tool_calls": [malformed_call]}, "tool_calls", None),
+            ("non_object_arguments", "tools", {"tool_calls": [{**valid_call, "function": {"name": "inspect", "arguments": "[]"}}]}, "tool_calls", None),
+            ("truncated_content", "text", {"content": rejected_marker}, "length", None),
+            ("native_truncation", "no_tools", {"content": rejected_marker}, "stop", "MAX_TOKENS"),
+            ("malformed_function_call", "tools", {"content": rejected_marker}, "stop", "MALFORMED_FUNCTION_CALL"),
+            ("filtered_content", "text", {"content": rejected_marker}, "content_filter", None),
+            ("missing_calls", "tools", {"content": rejected_marker}, "tool_calls", None),
+            ("missing_call_id", "tools", {"tool_calls": [{key: value for key, value in valid_call.items() if key != "id"}]}, "tool_calls", None),
+            ("duplicate_call_ids", "tools", {"tool_calls": [valid_call, valid_call]}, "tool_calls", None),
+        ]
+        for name, mode, invalid_message, finish_reason, native_finish_reason in invalid_cases:
+            with self.subTest(case=name):
+                request_messages: list[list[dict[str, object]]] = []
+
+                async def respond(request: httpx.Request) -> httpx.Response:
+                    body = cast(dict[str, object], json.loads(request.content))
+                    request_messages.append(cast(list[dict[str, object]], body["messages"]))
+                    first_attempt = len(request_messages) == 1
+                    message: dict[str, object] = (
+                        invalid_message if first_attempt else
+                        {"tool_calls": [valid_call]} if mode == "tools" else
+                        {"content": "恢复成功"}
+                    )
+                    choice: dict[str, object] = {
+                        "index": 0,
+                        "finish_reason": finish_reason if first_attempt else ("tool_calls" if name == "malformed_arguments" else "stop"),
+                        "message": {"role": "assistant", **message},
+                    }
+                    if first_attempt and native_finish_reason is not None:
+                        choice["native_finish_reason"] = native_finish_reason
+                    return httpx.Response(200, json={
+                        "id": "test", "object": "chat.completion", "created": 0,
+                        "model": "test", "choices": [choice],
+                    })
+
+                async with AsyncOpenAI(
+                    api_key="test", base_url="https://model.invalid/v1", max_retries=0,
+                    http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+                ) as client:
+                    provider = ResilientLLMProvider(OpenAIService(client), LLMProviderConfig(
+                        inherit_network_proxy=False, timeout_seconds=1, max_attempts=2,
+                        retry_delay_seconds=0, retry_max_delay_seconds=0,
+                    ))
+                    messages = [ChatMessage(role="user", text="查看最近消息")]
+                    original_messages = [message.model_copy(deep=True) for message in messages]
+                    if mode == "text":
+                        self.assertEqual(await provider.get_ai_response(messages, "test"), "恢复成功")
+                    else:
+                        tools = [LLMToolDefinition(name="inspect", description="查看消息", parameters={})] if mode == "tools" else []
+                        response = await provider.get_ai_response_with_tools(messages, "test", tools)
+                        if mode == "tools":
+                            self.assertEqual(len(response.tool_calls), 1)
+                            self.assertEqual(response.tool_calls[0].arguments, {"limit": 15})
+                        else:
+                            self.assertEqual(response.content, "恢复成功")
+                    self.assertEqual(messages, original_messages)
+
+                self.assertEqual(len(request_messages), 2)
+                self.assertEqual(request_messages[1][:len(request_messages[0])], request_messages[0])
+                self.assertGreater(len(request_messages[1]), len(request_messages[0]))
+                self.assertNotIn(rejected_marker, json.dumps(request_messages))
+
+    async def test_structured_reasoning_and_tool_state_survive_protocol_round_trip(self) -> None:
+        """隐藏思考时仍能回传结构化状态，签名和加密内容不会拼进可见正文。"""
+        requests: list[dict[str, object]] = []
+        details: list[JsonObject] = [
+            {"type": "reasoning.text", "text": "内部规划", "signature": "signed-detail"},
+            {"type": "reasoning.encrypted", "data": "encrypted-state"},
+        ]
+        extra: JsonObject = {"google": {"thought_signature": "signed-tool-state"}}
+
+        async def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(cast(dict[str, object], json.loads(request.content)))
+            first = len(requests) == 1
+            message: dict[str, object] = {
+                "role": "assistant", "content": None,
+                "reasoning_details": details,
+                "tool_calls": [{
+                    "id": "lookup-1", "type": "function", "extra_content": extra,
+                    "function": {"name": "lookup", "arguments": '{"item":"book"}'},
+                }],
+            } if first else {"role": "assistant", "content": "查询结果已确认"}
+            return httpx.Response(200, json={
+                "id": "test", "object": "chat.completion", "created": 0,
+                "model": "test", "choices": [{
+                    "index": 0, "finish_reason": "tool_calls" if first else "stop",
+                    "message": message,
+                }],
+            })
+
+        async with AsyncOpenAI(
+            api_key="test", base_url="https://model.invalid/v1", max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        ) as client:
+            service = OpenAIService(client)
+            tools = [LLMToolDefinition(name="lookup", description="查询", parameters={})]
+            messages = [ChatMessage(role="user", text="查询库存")]
+            first = await service.get_ai_response_with_tools(messages, "test", tools)
+            self.assertIsNone(first.content)
+            self.assertEqual(first.reasoning_content, "内部规划")
+            messages.extend([
+                ChatMessage(
+                    role="assistant", tool_calls=first.tool_calls,
+                    reasoning_content=first.reasoning_content,
+                    reasoning_details=first.reasoning_details,
+                ),
+                ChatMessage(role="tool", tool_call_id="lookup-1", text='{"count":3}'),
+            ])
+            final = await service.get_ai_response_with_tools(messages, "test", tools)
+
+        replay = cast(list[dict[str, object]], requests[1]["messages"])[1]
+        self.assertEqual(replay["reasoning_details"], details)
+        call_data = cast(list[dict[str, object]], replay["tool_calls"])[0]
+        self.assertEqual(call_data["extra_content"], extra)
+        self.assertIsNone(replay["content"])
+        self.assertEqual(final.content, "查询结果已确认")
+
+    async def test_protocol_retry_exhaustion_keeps_error_and_requests_clean(self) -> None:
+        """持续泄漏不会越过重试预算，异常与纠错请求均不携带模型私有正文。"""
+        rejected_marker = "private-rejected-payload"
+        for mode in ("text", "tools"):
+            with self.subTest(mode=mode):
+                request_messages: list[list[dict[str, object]]] = []
+
+                async def respond(request: httpx.Request) -> httpx.Response:
+                    body = cast(dict[str, object], json.loads(request.content))
+                    request_messages.append(cast(list[dict[str, object]], body["messages"]))
+                    return httpx.Response(200, json={
+                        "id": "test", "object": "chat.completion", "created": 0,
+                        "model": "test", "choices": [{
+                            "index": 0, "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": f"<think>{rejected_marker}</think>"},
+                        }],
+                    })
+
+                async with AsyncOpenAI(
+                    api_key="test", base_url="https://model.invalid/v1", max_retries=0,
+                    http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+                ) as client:
+                    provider = ResilientLLMProvider(OpenAIService(client), LLMProviderConfig(
+                        inherit_network_proxy=False, timeout_seconds=1, max_attempts=3,
+                        retry_delay_seconds=0, retry_max_delay_seconds=0,
+                    ))
+                    handler = LLMHandler(services={"main": LLMProviderWrapper(
+                        provider_id="main", provider=provider,
+                    )}, clients=[])
+                    messages = [ChatMessage(role="user", text="正常问题")]
+                    original_messages = [message.model_copy(deep=True) for message in messages]
+                    with self.assertRaises(LLMRequestError) as caught:
+                        if mode == "text":
+                            await handler.get_ai_text_response(messages, "main", "test")
+                        else:
+                            await handler.get_ai_response_with_tools(messages, "main", "test", [
+                                LLMToolDefinition(name="inspect", description="查看消息", parameters={}),
+                            ])
+                    self.assertNotIn(rejected_marker, "".join(traceback.format_exception(caught.exception)))
+                    self.assertEqual(messages, original_messages)
+
+                self.assertEqual(len(request_messages), 3)
+                self.assertNotIn(rejected_marker, json.dumps(request_messages))
+                self.assertEqual(len(request_messages[2]), len(request_messages[1]))
+
+    async def test_empty_choices_retries_for_text_and_tool_requests(self) -> None:
+        """文本、无工具和带工具入口收到空候选后都能重试恢复。"""
+        for mode in ("text", "no_tools", "tools", "exhausted"):
+            with self.subTest(mode=mode):
+                requests = 0
+
+                async def respond(request: httpx.Request) -> httpx.Response:
+                    nonlocal requests
+                    requests += 1
+                    choices: list[dict[str, object]] = []
+                    if requests > 1 and mode != "exhausted":
+                        choices.append({"index": 0, "finish_reason": "stop",
+                                        "message": {"role": "assistant", "content": "恢复成功"}})
+                    return httpx.Response(200, json={
+                        "id": "test", "object": "chat.completion", "created": 0,
+                        "model": "test", "choices": choices,
+                    })
+
+                async with AsyncOpenAI(
+                    api_key="test", base_url="https://model.invalid/v1", max_retries=0,
+                    http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+                ) as client:
+                    provider = ResilientLLMProvider(OpenAIService(client), LLMProviderConfig(
+                        inherit_network_proxy=False, timeout_seconds=1, max_attempts=2,
+                        retry_delay_seconds=0, retry_max_delay_seconds=0,
+                    ))
+                    messages = [ChatMessage(role="user", text="测试")]
+                    if mode == "text":
+                        self.assertEqual(await provider.get_ai_response(messages, "test"), "恢复成功")
+                    elif mode == "exhausted":
+                        handler = LLMHandler(services={"main": LLMProviderWrapper(
+                            provider_id="main", provider=provider,
+                        )}, clients=[])
+                        with self.assertRaisesRegex(LLMRequestError, "未返回可用结果"):
+                            await handler.get_ai_response_with_tools(messages, "main", "test", [])
+                    else:
+                        tools = [LLMToolDefinition(name="test", description="测试", parameters={})] if mode == "tools" else []
+                        response = await provider.get_ai_response_with_tools(messages, "test", tools)
+                        self.assertEqual(response.content, "恢复成功")
+                self.assertEqual(requests, 2)
+
+    async def test_provider_error_omits_credentials_from_feedback_and_exception_chain(self) -> None:
+        inner = FlakyTextProvider(failures_before_success=0)
+        provider = ResilientLLMProvider(inner, LLMProviderConfig(
+            api_key=SecretStr("test-key"), inherit_network_proxy=True, timeout_seconds=0,
+            max_attempts=1, retry_delay_seconds=0, retry_max_delay_seconds=0,
+        ))
+        handler = LLMHandler(services={"main": LLMProviderWrapper(provider_id="main", provider=provider)}, clients=[])
+        error = AuthenticationError(
+            "invalid test-key at https://user:secret@model.invalid",
+            response=httpx.Response(401, request=httpx.Request("GET", "https://model.invalid")),
+            body={"error": "test-key"},
+        )
+        with patch.object(inner, "get_image", side_effect=error):
+            try:
+                await handler.get_image(ChatMessage(role="user", text="test"), model="image", provider="main")
+            except LLMRequestError as exc:
+                formatted = "".join(traceback.format_exception(exc))
+                self.assertIn("HTTP 401", str(exc))
+                self.assertNotIn("test-key", formatted)
+                self.assertNotIn("user:secret", formatted)
+            else:
+                self.fail("模型鉴权失败应返回脱敏异常")
+
     async def test_register_instance_allows_provider_without_api_key(self) -> None:
         """无鉴权 OpenAI 兼容服务使用空 key，客户端不会发送认证头。"""
         provider_config = LLMProviderConfig.model_validate(
-            {"base_url": "http://model.internal/v1"}
+            {
+                "base_url": "http://model.internal/v1",
+                "inherit_network_proxy": True,
+                "timeout_seconds": 0,
+                "max_attempts": 5,
+                "retry_delay_seconds": 0,
+                "retry_max_delay_seconds": 0,
+            }
         )
 
         with patch("app.services.llm.handler.AsyncOpenAI") as client_type:
-            handler = LLMHandler.register_instance({"local": provider_config})
+            handler = LLMHandler.register_instance(
+                {"local": provider_config},
+                NetworkConfig(proxy=None, timeout_seconds=15),
+            )
 
         client_type.assert_called_once_with(
             api_key="",
             base_url="http://model.internal/v1",
+            timeout=15,
+            max_retries=0,
+            http_client=None,
         )
         self.assertIn("local", handler.services)
 
@@ -61,8 +331,11 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
             provider_config=LLMProviderConfig.model_validate(
                 {
                     "api_key": "test-key",
+                    "inherit_network_proxy": True,
+                    "timeout_seconds": 0,
                     "max_attempts": 1,
                     "retry_delay_seconds": 9,
+                    "retry_max_delay_seconds": 10,
                 }
             ),
         )
@@ -72,7 +345,8 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
                     provider_id="vision-vendor",
                     provider=provider,
                 )
-            }
+            },
+            clients=[],
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
@@ -82,6 +356,7 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
                 model_name="vision-model",
                 max_attempts=3,
                 retry_delay_seconds=1,
+                retry_max_delay_seconds=0,
             )
 
         self.assertEqual(result, "视觉描述成功")
@@ -96,8 +371,11 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
             provider_config=LLMProviderConfig.model_validate(
                 {
                     "api_key": "test-key",
+                    "inherit_network_proxy": True,
+                    "timeout_seconds": 0,
                     "max_attempts": 3,
                     "retry_delay_seconds": 0,
+                    "retry_max_delay_seconds": 0,
                 }
             ),
         )
@@ -107,7 +385,8 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
                     provider_id="fast-vendor",
                     provider=provider,
                 )
-            }
+            },
+            clients=[],
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:

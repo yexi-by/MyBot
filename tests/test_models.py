@@ -11,7 +11,6 @@ from app.models import (
     Json,
     LightApp,
     NotifyEvent,
-    Sender,
     Share,
     StrictModel,
     Text,
@@ -32,18 +31,6 @@ class StrictModelBoundaryTest(unittest.TestCase):
 
         with self.assertRaises(ValidationError):
             DemoStrictModel.model_validate({"name": "夜袭", "unexpected": "拒绝"})
-
-    def test_napcat_sender_ignores_unknown_field(self) -> None:
-        """NapCat 入站模型忽略未消费的上游扩展字段。"""
-        sender = Sender.model_validate(
-            {
-                "user_id": "10000",
-                "nickname": "夜袭",
-                "unexpected": "上游扩展字段",
-            }
-        )
-        self.assertEqual(sender.user_id, "10000")
-        self.assertNotIn("unexpected", sender.model_dump())
 
     def test_group_message_parser_accepts_extra_napcat_fields(self) -> None:
         """事件解析器不会因为 NapCat 额外字段丢弃群消息。"""
@@ -78,6 +65,8 @@ class StrictModelBoundaryTest(unittest.TestCase):
         assert isinstance(event, GroupMessage)
         self.assertEqual(event.group_id, "939506743")
         self.assertIsInstance(event.message[1], Text)
+        self.assertEqual(event.sender.user_id, "2172959822")
+        self.assertNotIn("shut_up_timestamp", event.sender.model_dump())
 
     def test_image_sub_type_accepts_integer(self) -> None:
         """图片消息段的 sub_type 支持 NapCat 上报整数并统一收敛为字符串。"""

@@ -51,12 +51,13 @@ class GroupForwardToolset:
         bot: NapCatGroupToolBot,
         group_messages: GroupMessageReader,
         event: GroupMessage,
+        message_formatter: NapCatMessageTextFormatter,
     ) -> None:
         """绑定当前群事件和 NapCat Bot。"""
         self.bot: NapCatGroupToolBot = bot
         self.group_messages: GroupMessageReader = group_messages
         self.event: GroupMessage = event
-        self.message_formatter: NapCatMessageTextFormatter = NapCatMessageTextFormatter()
+        self.message_formatter = message_formatter
         self.segment_adapter: TypeAdapter[MessageSegment] = TypeAdapter(MessageSegment)
         self.segments_adapter: TypeAdapter[list[MessageSegment]] = TypeAdapter(
             list[MessageSegment]

@@ -11,9 +11,28 @@ import httpx
 
 from app.models import Response
 from app.services.napcat.image_reader import (
-    NapCatImageReader,
+    NapCatImageBot,
+    NapCatImageReader as RealNapCatImageReader,
     NapCatImageResource,
 )
+
+
+def NapCatImageReader(
+    *,
+    bot: object,
+    http_client: httpx.AsyncClient | None,
+    fetch_concurrency: int,
+    download_timeout_seconds: float,
+    max_image_bytes: int | None = None,
+) -> RealNapCatImageReader:
+    """用显式的不限大小策略构造测试读取器。"""
+    return RealNapCatImageReader(
+        bot=cast(NapCatImageBot, bot),
+        http_client=http_client,
+        fetch_concurrency=fetch_concurrency,
+        download_timeout_seconds=download_timeout_seconds,
+        max_image_bytes=max_image_bytes,
+    )
 
 
 class FakeImageBot:
@@ -253,6 +272,19 @@ class NapCatImageReaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(results[1].ok)
         self.assertEqual(results[1].error_type, "NapCatActionFailed")
 
+    async def test_read_many_requires_explicit_concurrency(self) -> None:
+        """仅配置为单图读取的实例不能静默采用批量并发数。"""
+        reader = RealNapCatImageReader(
+            bot=cast(NapCatImageBot, FakeImageBot()),
+            http_client=None,
+            fetch_concurrency=None,
+            download_timeout_seconds=3.0,
+            max_image_bytes=None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "fetch_concurrency"):
+            _ = await reader.read_many(resources=[])
+
     async def test_concurrency_limit_applies_to_shared_reader(self) -> None:
         """批量 URL 下载不会超过配置的并发数。"""
         client = ConcurrencyHTTPClient()
@@ -308,6 +340,55 @@ class NapCatImageReaderTest(unittest.IsolatedAsyncioTestCase):
             [("https://example.com/slow.png", 0.25)],
         )
         self.assertIn("读取超时", result.error or "")
+
+    async def test_hanging_refresh_returns_partial_error(self) -> None:
+        """NapCat 刷新挂起时按单阶段预算返回错误，其他图片正常完成。"""
+        class HangingBot:
+            async def get_image(
+                self, file_id: str | None = None, file: str | None = None,
+            ) -> Response:
+                if file == "slow.png":
+                    await asyncio.Event().wait()
+                return Response(status="ok", retcode=0, data={"base64": "YQ=="})
+
+        reader = NapCatImageReader(
+            bot=HangingBot(), http_client=None, fetch_concurrency=2,
+            download_timeout_seconds=0.05,
+        )
+        results = await reader.read_many(resources=[
+            NapCatImageResource(label="超时图片", file="slow.png"),
+            NapCatImageResource(label="正常图片", file="good.png"),
+        ])
+        self.assertEqual(results[0].error_type, "TimeoutError")
+        self.assertIn("NapCat 刷新图片信息失败: TimeoutError", results[0].error or "")
+        self.assertEqual(results[1].image_bytes, b"a")
+
+    async def test_refreshed_download_reports_latest_error_and_connection_cause(self) -> None:
+        """最终错误类型跟随刷新后的失败，同时保留首次连接失败的底层原因。"""
+        bot = FakeImageBot()
+        bot.responses["image.png"] = Response(status="ok", retcode=0, data={
+            "url": "https://example.com/refreshed.png",
+        })
+
+        async def download(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/refreshed.png":
+                raise httpx.ReadTimeout("")
+            try:
+                raise OSError("connection reset by peer")
+            except OSError as exc:
+                raise httpx.ConnectError("") from exc
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(download)) as client:
+            reader = NapCatImageReader(
+                bot=bot, http_client=client, fetch_concurrency=1,
+                download_timeout_seconds=0.1,
+            )
+            result = await reader.read(resource=NapCatImageResource(
+                label="图片", file="image.png", url="https://example.com/original.png",
+            ))
+        self.assertEqual(result.error_type, "ReadTimeout")
+        self.assertIn("ConnectError <- OSError: connection reset by peer", result.error or "")
+        self.assertIn("下载 NapCat 刷新 URL 失败: ReadTimeout", result.error or "")
 
 
 if __name__ == "__main__":

@@ -2,21 +2,29 @@
 
 import base64
 import json
+import re
 from typing import Final, cast, override
 
 from openai import AsyncOpenAI
 from openai.types.chat import (
+    ChatCompletion,
     ChatCompletionMessage,
+    ChatCompletionMessageFunctionToolCall,
     ChatCompletionMessageParam,
     ChatCompletionToolChoiceOptionParam,
     ChatCompletionToolParam,
 )
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_message_function_tool_call import Function
 from openai.types.images_response import ImagesResponse
+from pydantic import TypeAdapter, ValidationError
 
 from app.models import JsonObject
 from app.utils.file_type import detect_mime_type
 
 from ..base import LLMProvider
+from ..errors import LLMResponseError
+from ..response_validation import validate_response
 from ..schemas import (
     ChatMessage,
     LLMResponse,
@@ -30,6 +38,9 @@ REASONING_FIELD_NAMES: Final[tuple[str, ...]] = (
     "reasoning",
     "reasoning_summary",
     "reasoning_text",
+    "reasoning_details",
+    "thinking",
+    "thought",
 )
 REASONING_TEXT_KEYS: Final[tuple[str, ...]] = (
     "reasoning_content",
@@ -37,13 +48,114 @@ REASONING_TEXT_KEYS: Final[tuple[str, ...]] = (
     "text",
     "summary",
     "output_text",
+    "thinking",
+    "thought",
 )
+FINISH_REASON_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
+REASONING_DETAILS_ADAPTER: TypeAdapter[list[JsonObject]] = TypeAdapter(list[JsonObject])
+EXTRA_CONTENT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
+
+
 class OpenAIService(LLMProvider):
     """通过 OpenAI Chat Completions 和 Images 协议访问模型服务。"""
 
     def __init__(self, client: AsyncOpenAI) -> None:
         """保存 OpenAI 异步客户端。"""
         self.client: AsyncOpenAI = client
+
+    def _decode_response(
+        self, response: ChatCompletion, *, tools_allowed: bool
+    ) -> LLMResponse:
+        """在协议入口收窄上游数据，分类异常不携带正文或原始工具参数。"""
+        raw_choices: object = getattr(response, "choices", None)
+        if not isinstance(raw_choices, list) or not raw_choices:
+            raise LLMResponseError("missing_choices", "模型响应缺少候选结果")
+        choice = cast(list[object], raw_choices)[0]
+        if not isinstance(choice, Choice):
+            raise LLMResponseError("invalid_choice", "模型响应候选结构无效")
+        message: object = getattr(choice, "message", None)
+        if not isinstance(message, ChatCompletionMessage):
+            raise LLMResponseError("invalid_message", "模型响应消息结构无效")
+        content: object = getattr(message, "content", None)
+        if content is not None and not isinstance(content, str):
+            raise LLMResponseError("invalid_content", "模型响应正文类型无效")
+        raw_reasoning_details: object = getattr(message, "reasoning_details", None)
+        try:
+            reasoning_details = (
+                REASONING_DETAILS_ADAPTER.validate_python(raw_reasoning_details, strict=True)
+                if raw_reasoning_details is not None else None
+            )
+        except ValidationError:
+            raise LLMResponseError(
+                "invalid_reasoning_details", "模型响应思考明细结构无效"
+            ) from None
+        if getattr(message, "function_call", None) is not None:
+            raise LLMResponseError(
+                "unsupported_tool_call", "模型响应使用了未支持的旧工具调用格式"
+            )
+        finish_reason = self._normalize_finish_reason(
+            getattr(choice, "finish_reason", None)
+        )
+        native_finish_reason = self._normalize_finish_reason(
+            getattr(choice, "native_finish_reason", None)
+        )
+        raw_calls: object = getattr(message, "tool_calls", None)
+        if raw_calls is not None and not isinstance(raw_calls, list):
+            raise LLMResponseError("invalid_tool_calls", "模型响应工具调用列表无效")
+        tool_calls: list[LLMToolCall] = []
+        for raw_call in cast(list[object], raw_calls or []):
+            if (
+                not isinstance(raw_call, ChatCompletionMessageFunctionToolCall)
+                or getattr(raw_call, "type", None) != "function"
+            ):
+                raise LLMResponseError(
+                    "unsupported_tool_call", "模型响应工具调用类型无效"
+                )
+            function: object = getattr(raw_call, "function", None)
+            if not isinstance(function, Function):
+                raise LLMResponseError("invalid_tool_call", "模型响应工具函数结构无效")
+            call_id: object = getattr(raw_call, "id", None)
+            name: object = getattr(function, "name", None)
+            if not isinstance(call_id, str) or not call_id.strip():
+                raise LLMResponseError("invalid_tool_call_id", "模型响应工具调用缺少有效 ID")
+            if not isinstance(name, str) or not name.strip():
+                raise LLMResponseError("invalid_tool_name", "模型响应工具调用缺少有效名称")
+            arguments = self._parse_tool_arguments(
+                getattr(function, "arguments", None)
+            )
+            try:
+                raw_extra_content: object = getattr(raw_call, "extra_content", None)
+                extra_content = (
+                    EXTRA_CONTENT_ADAPTER.validate_python(raw_extra_content, strict=True)
+                    if raw_extra_content is not None else None
+                )
+                tool_call = LLMToolCall(
+                    id=call_id, name=name, arguments=arguments,
+                    extra_content=extra_content,
+                )
+            except ValidationError:
+                raise LLMResponseError(
+                    "invalid_tool_arguments", "模型响应工具参数或扩展状态结构无效"
+                ) from None
+            tool_calls.append(tool_call)
+        decoded = LLMResponse(
+            content=content,
+            reasoning_content=self._extract_reasoning_content(message),
+            reasoning_details=reasoning_details,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            native_finish_reason=native_finish_reason,
+        )
+        validate_response(decoded, tools_allowed=tools_allowed)
+        return decoded
+
+    def _normalize_finish_reason(self, value: object) -> str | None:
+        """只保留短 ASCII 状态标记，防止上游错误正文混入状态或日志。"""
+        if value is None:
+            return None
+        if not isinstance(value, str) or FINISH_REASON_PATTERN.fullmatch(value) is None:
+            raise LLMResponseError("invalid_finish_reason", "模型响应结束状态格式无效")
+        return value.lower()
 
     def _format_chat_messages(
         self, messages: list[ChatMessage]
@@ -65,22 +177,34 @@ class OpenAIService(LLMProvider):
                 continue
 
             content_items: list[dict[str, object]] = []
-            if msg.text:
-                content_items.append({"type": "text", "text": msg.text})
-            if msg.image:
-                for image_bytes in msg.image:
+            if msg.image or msg.video:
+                if msg.text:
+                    content_items.append({"type": "text", "text": msg.text})
+                for image_bytes in msg.image or []:
                     mime_type = detect_mime_type(image_bytes)
                     image_data = base64.b64encode(image_bytes).decode("utf-8")
                     base64_image = f"data:{mime_type};base64,{image_data}"
+                    image_url: dict[str, object] = {"url": base64_image}
+                    if msg.image_detail is not None:
+                        image_url["detail"] = msg.image_detail
                     content_items.append(
                         {
                             "type": "image_url",
-                            "image_url": {"url": base64_image, "detail": "auto"},
+                            "image_url": image_url,
                         }
                     )
+                for video_bytes in msg.video or []:
+                    mime_type = detect_mime_type(video_bytes)
+                    if not mime_type.startswith("video/"):
+                        raise ValueError("视频附件必须是可识别的视频格式")
+                    video_data = base64.b64encode(video_bytes).decode("ascii")
+                    content_items.append({
+                        "type": "video_url",
+                        "video_url": {"url": f"data:{mime_type};base64,{video_data}"},
+                    })
             raw_message: dict[str, object] = {
                 "role": msg.role,
-                "content": content_items if content_items else msg.text,
+                "content": content_items if msg.image or msg.video else msg.text,
             }
             if msg.tool_calls:
                 raw_message["tool_calls"] = [
@@ -93,11 +217,15 @@ class OpenAIService(LLMProvider):
                                 tool_call.arguments, ensure_ascii=False
                             ),
                         },
+                        **({"extra_content": tool_call.extra_content}
+                           if tool_call.extra_content is not None else {}),
                     }
                     for tool_call in msg.tool_calls
                 ]
             if msg.role == "assistant" and msg.reasoning_content is not None:
                 raw_message["reasoning_content"] = msg.reasoning_content
+            if msg.role == "assistant" and msg.reasoning_details is not None:
+                raw_message["reasoning_details"] = msg.reasoning_details
             chat_messages.append(
                 cast(ChatCompletionMessageParam, cast(object, raw_message))
             )
@@ -212,7 +340,7 @@ class OpenAIService(LLMProvider):
             model=model,
             messages=chat_messages,
         )
-        content = response.choices[0].message.content
+        content = self._decode_response(response, tools_allowed=False).content
         if content is None:
             raise ValueError("OpenAI 协议服务返回了空文本")
         return content
@@ -232,11 +360,7 @@ class OpenAIService(LLMProvider):
                 model=model,
                 messages=self._format_chat_messages(messages),
             )
-            message = response.choices[0].message
-            return LLMResponse(
-                content=message.content,
-                reasoning_content=self._extract_reasoning_content(message),
-            )
+            return self._decode_response(response, tools_allowed=False)
         response = await self.client.chat.completions.create(
             model=model,
             messages=self._format_chat_messages(messages),
@@ -244,33 +368,20 @@ class OpenAIService(LLMProvider):
             tool_choice=cast(ChatCompletionToolChoiceOptionParam, tool_choice),
             parallel_tool_calls=parallel_tool_calls,
         )
-        message = response.choices[0].message
-        tool_calls: list[LLMToolCall] = []
-        for raw_tool_call in message.tool_calls or []:
-            if raw_tool_call.type != "function":
-                raise ValueError("当前仅支持 function 类型工具调用")
-            arguments = self._parse_tool_arguments(raw_tool_call.function.arguments)
-            tool_calls.append(
-                LLMToolCall(
-                    id=raw_tool_call.id,
-                    name=raw_tool_call.function.name,
-                    arguments=arguments,
-                )
-            )
-        return LLMResponse(
-            content=message.content,
-            reasoning_content=self._extract_reasoning_content(message),
-            tool_calls=tool_calls,
-        )
+        return self._decode_response(response, tools_allowed=tool_choice != "none")
 
-    def _parse_tool_arguments(self, raw_arguments: str) -> JsonObject:
+    def _parse_tool_arguments(self, raw_arguments: object) -> JsonObject:
         """解析模型返回的工具参数 JSON。"""
+        if not isinstance(raw_arguments, str):
+            raise LLMResponseError("invalid_tool_arguments", "模型响应工具参数必须是 JSON 字符串")
         try:
             parsed = cast(object, json.loads(raw_arguments))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"工具参数不是合法 JSON: {raw_arguments}") from exc
+        except (ValueError, RecursionError):
+            raise LLMResponseError(
+                "invalid_tool_arguments", "模型响应工具参数不是合法 JSON"
+            ) from None
         if not isinstance(parsed, dict):
-            raise ValueError("工具参数必须是 JSON 对象")
+            raise LLMResponseError("invalid_tool_arguments", "模型响应工具参数必须是 JSON 对象")
         return cast(JsonObject, parsed)
 
     @override

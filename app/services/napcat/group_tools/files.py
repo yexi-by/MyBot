@@ -14,10 +14,19 @@ from .protocols import NapCatGroupToolBot
 class GroupFileToolset:
     """把当前群文件查询能力暴露为 LLM 信息工具。"""
 
-    def __init__(self, *, bot: NapCatGroupToolBot, event: GroupMessage) -> None:
+    def __init__(
+        self,
+        *,
+        bot: NapCatGroupToolBot,
+        event: GroupMessage,
+        default_count: int,
+        max_per_call: int,
+    ) -> None:
         """绑定当前群事件。"""
         self.bot: NapCatGroupToolBot = bot
         self.event: GroupMessage = event
+        self.default_count = default_count
+        self.max_per_call = max_per_call
 
     def register_tools(self, registry: LLMToolRegistry) -> None:
         """向工具注册表登记群文件工具。"""
@@ -61,7 +70,7 @@ class GroupFileToolset:
         args = ListGroupRootFilesArgs.model_validate(arguments)
         response = await self.bot.get_group_root_files(
             group_id=self.event.group_id,
-            file_count=args.file_count,
+            file_count=self._effective_count(requested=args.file_count),
         )
         return {
             "ok": True,
@@ -77,7 +86,7 @@ class GroupFileToolset:
             group_id=self.event.group_id,
             folder_id=args.folder_id,
             folder=args.folder,
-            file_count=args.file_count,
+            file_count=self._effective_count(requested=args.file_count),
         )
         return {
             "ok": True,
@@ -102,3 +111,8 @@ class GroupFileToolset:
             "file_id": args.file_id,
             "response": to_json_value(response),
         }
+
+    def _effective_count(self, *, requested: int | None) -> int:
+        """应用显式配置的默认数量和可选单次上限。"""
+        count = self.default_count if requested is None else requested
+        return min(count, self.max_per_call) if self.max_per_call > 0 else count

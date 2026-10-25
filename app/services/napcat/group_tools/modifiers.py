@@ -37,13 +37,13 @@ class GroupMessageDirectiveParser:
         bot: NapCatGroupToolBot,
         event: GroupMessage,
         allow_mention_all: bool,
-        max_reply_chars: int = 1000,
+        forward_reply_threshold_chars: int,
     ) -> None:
         """绑定当前群事件与 @全体权限开关。"""
         self.bot: NapCatGroupToolBot = bot
         self.event: GroupMessage = event
         self.allow_mention_all: bool = allow_mention_all
-        self.max_reply_chars: int = max_reply_chars
+        self.forward_reply_threshold_chars: int = forward_reply_threshold_chars
 
     def parse(self, *, content: str) -> GroupMessageDirectives:
         """解析模型 content，返回清理后的正文和待执行的消息修饰动作。"""
@@ -119,7 +119,7 @@ class GroupMessageDirectiveParser:
             for segment in message_segments
             if isinstance(segment, Text)
         )
-        return text_chars >= self.max_reply_chars
+        return text_chars >= self.forward_reply_threshold_chars
 
     def _build_forward_sender_id(self) -> NapCatId:
         """确定合并转发节点里展示的机器人 QQ。"""

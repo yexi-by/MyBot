@@ -1,19 +1,42 @@
 """LLM 提供商重试包装器。"""
 
-from typing import override
+from typing import Literal, override
 
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 from app.config.schemas import LLMProviderConfig
+from app.utils.log import log_event
 from app.utils.retry_utils import create_retry_manager
 
 from .base import LLMProvider
+from .errors import LLMResponseError
+from .response_validation import build_response_repair_message
 from .schemas import (
     ChatMessage,
     LLMResponse,
     LLMToolChoice,
     LLMToolDefinition,
 )
+
+
+def _repair_request_messages(
+    messages: list[ChatMessage],
+    error: LLMResponseError,
+    *,
+    attempt_number: int,
+    response_kind: Literal["text", "tools"],
+) -> list[ChatMessage]:
+    """纠正提示仅存在于本次请求副本，不回放异常输出，也不累积提示。"""
+    log_event(
+        level="WARNING",
+        event="llm.response.rejected",
+        category="llm",
+        message="模型响应格式异常，已阻止交付",
+        error_code=error.code,
+        attempt=attempt_number,
+        response_kind=response_kind,
+    )
+    return [*messages, build_response_repair_message(error)]
 
 
 class ResilientLLMProvider(LLMProvider):
@@ -33,6 +56,7 @@ class ResilientLLMProvider(LLMProvider):
         model: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
         """调用底层文本接口，并按供应商默认值或当前请求覆盖值重试。"""
         retrier = create_retry_manager(
@@ -46,6 +70,11 @@ class ResilientLLMProvider(LLMProvider):
                 if retry_delay_seconds is None
                 else retry_delay_seconds
             ),
+            retry_max_delay_seconds=(
+                self.provider_config.retry_max_delay_seconds
+                if retry_max_delay_seconds is None
+                else retry_max_delay_seconds
+            ),
             error_types=(
                 RateLimitError,
                 APIConnectionError,
@@ -53,11 +82,21 @@ class ResilientLLMProvider(LLMProvider):
                 ValueError,
             ),
         )
+        request_messages = list(messages)
         async for attempt in retrier:
             with attempt:
-                response = await self.inner_provider.get_ai_response(
-                    messages=messages, model=model
-                )
+                try:
+                    response = await self.inner_provider.get_ai_response(
+                        messages=request_messages, model=model
+                    )
+                except LLMResponseError as error:
+                    request_messages = _repair_request_messages(
+                        messages,
+                        error,
+                        attempt_number=attempt.retry_state.attempt_number,
+                        response_kind="text",
+                    )
+                    raise
                 if not response:
                     raise ValueError("LLM 提供商返回了空响应")
                 return response
@@ -76,6 +115,7 @@ class ResilientLLMProvider(LLMProvider):
         retrier = create_retry_manager(
             max_attempts=self.provider_config.max_attempts,
             retry_delay_seconds=self.provider_config.retry_delay_seconds,
+            retry_max_delay_seconds=self.provider_config.retry_max_delay_seconds,
             error_types=(
                 RateLimitError,
                 APIConnectionError,
@@ -83,15 +123,25 @@ class ResilientLLMProvider(LLMProvider):
                 ValueError,
             ),
         )
+        request_messages = list(messages)
         async for attempt in retrier:
             with attempt:
-                response = await self.inner_provider.get_ai_response_with_tools(
-                    messages=messages,
-                    model=model,
-                    tools=tools,
-                    tool_choice=tool_choice,
-                    parallel_tool_calls=parallel_tool_calls,
-                )
+                try:
+                    response = await self.inner_provider.get_ai_response_with_tools(
+                        messages=request_messages,
+                        model=model,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                        parallel_tool_calls=parallel_tool_calls,
+                    )
+                except LLMResponseError as error:
+                    request_messages = _repair_request_messages(
+                        messages,
+                        error,
+                        attempt_number=attempt.retry_state.attempt_number,
+                        response_kind="tools",
+                    )
+                    raise
                 if response.content is None and not response.tool_calls:
                     raise ValueError("LLM 提供商返回了空工具响应")
                 return response
@@ -107,6 +157,7 @@ class ResilientLLMProvider(LLMProvider):
         retrier = create_retry_manager(
             max_attempts=self.provider_config.max_attempts,
             retry_delay_seconds=self.provider_config.retry_delay_seconds,
+            retry_max_delay_seconds=self.provider_config.retry_max_delay_seconds,
             error_types=(
                 RateLimitError,
                 APIConnectionError,

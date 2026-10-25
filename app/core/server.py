@@ -23,7 +23,7 @@ from app.database import (
 )
 from app.models import GroupMessage, GroupRecallNoticeEvent, Meta, Response
 from app.services import LLMHandler, MCPToolManager
-from app.services.napcat import ImageArchiveWorkerFactory
+from app.services.napcat import MediaArchiveWorkerFactory
 from app.utils.log import log_event, log_exception, log_run_end, log_run_start
 from app.webui import PowerController, create_webui_router, mount_webui_static
 
@@ -31,12 +31,8 @@ from .di import DirectHttpx, ProxyHttpx
 from .dispatcher import EventDispatcher
 from .event_parser import EventTypeChecker
 
-_PERSISTENCE_RETRY_DELAY_SECONDS = 0.25
-_IMAGE_WORKER_STOP_TIMEOUT_SECONDS = 5.0
-
-
 class EventPersistenceError(RuntimeError):
-    """事件在两次 PostgreSQL 写入后仍无法持久化。"""
+    """事件按配置尝试后仍无法持久化。"""
 
 
 class NapCatServer:
@@ -104,6 +100,7 @@ class NapCatServer:
         mcp_tool_manager: MCPToolManager | None = None
         direct_httpx: DirectHttpx | None = None
         proxy_httpx: ProxyHttpx | None = None
+        llm_handler: LLMHandler | None = None
         config_watcher: ConfigWatcher | None = None
         config_watcher_task: asyncio.Task[None] | None = None
         active_error: BaseException | None = None
@@ -118,8 +115,8 @@ class NapCatServer:
             await migrator.assert_current()
             await mcp_tool_manager.start()
             _ = await self.container.get(PostgreSQLMessageRepository)
-            _ = await self.container.get(ImageArchiveWorkerFactory)
-            _ = await self.container.get(LLMHandler | None)
+            _ = await self.container.get(MediaArchiveWorkerFactory)
+            llm_handler = await self.container.get(LLMHandler | None)
             config_watcher_task = asyncio.create_task(config_watcher.run())
             log_event(
                 level="SUCCESS",
@@ -162,7 +159,12 @@ class NapCatServer:
                 config_watcher.stop()
             if config_watcher_task is not None:
                 async def wait_config_watcher() -> None:
-                    await asyncio.wait_for(config_watcher_task, timeout=3)
+                    await asyncio.wait_for(
+                        config_watcher_task,
+                        timeout=(
+                            self.config.server.config_watcher_stop_timeout_seconds
+                        ),
+                    )
 
                 await close_resource(
                     resource_name="config_watcher",
@@ -172,6 +174,11 @@ class NapCatServer:
                 await close_resource(
                     resource_name="mcp_tool_manager",
                     operation=mcp_tool_manager.close,
+                )
+            if llm_handler is not None:
+                await close_resource(
+                    resource_name="llm_handler",
+                    operation=llm_handler.aclose,
                 )
             if direct_httpx is not None:
                 await close_resource(
@@ -224,25 +231,30 @@ class NapCatServer:
         event_model: str,
         message_id: str,
     ) -> ResultT:
-        """PostgreSQL 写入失败后等待 250ms，并且只重试一次。"""
+        """按数据库配置重试 PostgreSQL 写入。"""
         first_error: Exception | None = None
-        for attempt_number in (1, 2):
+        retry_delays = self.config.database.persistence_retry_delays_seconds
+        for attempt_index in range(len(retry_delays) + 1):
             try:
                 return await operation()
             except Exception as exc:
-                if attempt_number == 1:
+                if first_error is None:
                     first_error = exc
+                if attempt_index < len(retry_delays):
+                    retry_delay = retry_delays[attempt_index]
                     log_event(
                         level="WARNING",
                         event=f"{event_name}.retry",
                         category="database",
-                        message="PostgreSQL 写入失败，250ms 后重试一次",
+                        message="PostgreSQL 写入失败，等待后重试",
                         event_model=event_model,
                         message_id=message_id,
                         error_type=type(exc).__name__,
                         error=str(exc),
+                        retry_delay_seconds=retry_delay,
+                        retry_number=attempt_index + 1,
                     )
-                    await asyncio.sleep(_PERSISTENCE_RETRY_DELAY_SECONDS)
+                    await asyncio.sleep(retry_delay)
                     continue
                 log_exception(
                     event=f"{event_name}.failed",
@@ -251,11 +263,7 @@ class NapCatServer:
                     exc=exc,
                     event_model=event_model,
                     message_id=message_id,
-                    first_error_type=(
-                        type(first_error).__name__
-                        if first_error is not None
-                        else None
-                    ),
+                    first_error_type=type(first_error).__name__,
                 )
                 log_event(
                     level="CRITICAL",
@@ -320,30 +328,30 @@ class NapCatServer:
                 recalled_by_id=str(event.operator_id),
             )
 
-    async def _stop_image_worker(
+    async def _stop_media_worker(
         self,
         *,
         stop_event: asyncio.Event | None,
         worker_task: asyncio.Task[None] | None,
         client_id: str,
     ) -> None:
-        """停止当前机器人图片 worker；超时任务由数据库租约恢复。"""
+        """停止当前机器人媒体 worker；超时任务由数据库租约恢复。"""
         if stop_event is None or worker_task is None:
             return
         stop_event.set()
         try:
             await asyncio.wait_for(
                 asyncio.shield(worker_task),
-                timeout=_IMAGE_WORKER_STOP_TIMEOUT_SECONDS,
+                timeout=self.config.storage.images.worker_stop_timeout_seconds,
             )
         except TimeoutError:
             worker_task.cancel()
             _ = await asyncio.gather(worker_task, return_exceptions=True)
             log_event(
                 level="WARNING",
-                event="napcat.image_archive.stop_timeout",
+                event="napcat.media_archive.stop_timeout",
                 category="napcat_tools",
-                message="图片归档 worker 停止超时，未完成任务将由租约恢复",
+                message="媒体归档 worker 停止超时，未完成任务将由租约恢复",
                 client_id=client_id,
             )
 
@@ -358,7 +366,7 @@ class NapCatServer:
             client_id: str,
             checker: FromDishka[EventTypeChecker],
             repository: FromDishka[PostgreSQLMessageRepository],
-            image_worker_factory: FromDishka[ImageArchiveWorkerFactory],
+            media_worker_factory: FromDishka[MediaArchiveWorkerFactory],
         ) -> None:
             """处理单个 NapCat WebSocket 客户端连接。"""
             async with self.container(
@@ -370,8 +378,8 @@ class NapCatServer:
                     return
                 dispatcher = await request_container.get(EventDispatcher)
                 bot = await request_container.get(BOTClient)
-                image_worker_stop: asyncio.Event | None = None
-                image_worker_task: asyncio.Task[None] | None = None
+                media_worker_stop: asyncio.Event | None = None
+                media_worker_task: asyncio.Task[None] | None = None
                 try:
                     while True:
                         data_str = await websocket.receive_text()
@@ -420,14 +428,14 @@ class NapCatServer:
                             )
                             break
                         bot.get_self_qq_id(msg=event)
-                        if image_worker_task is None:
-                            image_worker_stop = asyncio.Event()
-                            image_worker = image_worker_factory.create(
+                        if media_worker_task is None:
+                            media_worker_stop = asyncio.Event()
+                            media_worker = media_worker_factory.create(
                                 bot_id=str(event.self_id),
                                 bot=bot,
                             )
-                            image_worker_task = asyncio.create_task(
-                                image_worker.run(stop_event=image_worker_stop)
+                            media_worker_task = asyncio.create_task(
+                                media_worker.run(stop_event=media_worker_stop)
                             )
                         if isinstance(event, (GroupMessage, GroupRecallNoticeEvent)):
                             await self._persist_event(
@@ -493,9 +501,9 @@ class NapCatServer:
                         message="正在清理客户端资源",
                         client_id=client_id,
                     )
-                    await self._stop_image_worker(
-                        stop_event=image_worker_stop,
-                        worker_task=image_worker_task,
+                    await self._stop_media_worker(
+                        stop_event=media_worker_stop,
+                        worker_task=media_worker_task,
                         client_id=client_id,
                     )
                     shutdown_tasks = [

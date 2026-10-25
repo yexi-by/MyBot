@@ -13,12 +13,12 @@ from .schemas import (
     AIGroupChatConfig,
     AIGroupConfig,
     AutoUnbanConfig,
-    EmptyPluginConfig,
     GroupNoticeConfig,
     ImageGenerateConfig,
     ModelRef,
     MyBotConfig,
     NeavoImageGenerateConfig,
+    RecallBotImageConfig,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +34,7 @@ RESTART_ONLY_SECTIONS = (
     "llm",
     "mcp",
     "database",
+    "plugin_execution",
 )
 
 
@@ -44,6 +45,7 @@ class ConfigIssue:
     location: str
     error_type: str
     message: str
+    path: tuple[str | int, ...] = ()
 
 
 class ConfigLoadError(RuntimeError):
@@ -74,6 +76,7 @@ class MaterializedAIGroupChatConfig:
     groups: tuple[MaterializedAIGroupConfig, ...]
     vision_system_prompt: str | None
     vision_user_prompt: str | None
+    turn_instruction: str | None
 
 
 type PluginConfigValue = (
@@ -82,7 +85,7 @@ type PluginConfigValue = (
     | AutoUnbanConfig
     | ImageGenerateConfig
     | NeavoImageGenerateConfig
-    | EmptyPluginConfig
+    | RecallBotImageConfig
 )
 
 
@@ -96,7 +99,7 @@ class PluginConfigSnapshot:
     auto_unban: AutoUnbanConfig | None
     image_generate: ImageGenerateConfig | None
     neavo_image_generate: NeavoImageGenerateConfig | None
-    recall_bot_image: EmptyPluginConfig | None
+    recall_bot_image: RecallBotImageConfig | None
     referenced_files: frozenset[Path]
 
     def get(self, plugin_id: str) -> PluginConfigValue | None:
@@ -145,12 +148,14 @@ def safe_validation_issues(exc: ValidationError) -> tuple[ConfigIssue, ...]:
         include_context=False,
         include_input=False,
     ):
-        location = ".".join(str(part) for part in item.get("loc", ())) or "config"
+        raw_path = tuple(item.get("loc", ()))
+        location = ".".join(str(part) for part in raw_path) or "config"
         issues.append(
             ConfigIssue(
                 location=location,
                 error_type=str(item.get("type", "validation_error")),
                 message=str(item.get("msg", "配置字段无效")),
+                path=raw_path,
             )
         )
     return tuple(issues)
@@ -271,6 +276,15 @@ def _materialize_plugins(
             require_content=True,
         )
         referenced_files.add(extra_path)
+        turn_instruction: str | None = None
+        if ai_config.turn_instruction_file is not None:
+            instruction_path, turn_instruction = _read_config_text(
+                config_root=config_root,
+                file_value=ai_config.turn_instruction_file,
+                label="plugins.ai_group_chat.turn_instruction_file",
+                require_content=True,
+            )
+            referenced_files.add(instruction_path)
         vision_system_prompt: str | None = None
         vision_user_prompt: str | None = None
         if ai_config.vision is not None:
@@ -325,6 +339,7 @@ def _materialize_plugins(
             groups=tuple(materialized_groups),
             vision_system_prompt=vision_system_prompt,
             vision_user_prompt=vision_user_prompt,
+            turn_instruction=turn_instruction,
         )
 
     image_generate = config.plugins.image_generate
@@ -376,6 +391,8 @@ def _candidate_plugin_files(*, config_file: Path) -> frozenset[Path]:
     if ai_config is None:
         return frozenset()
     file_values: list[str] = [ai_config.extra_requirements_file]
+    if ai_config.turn_instruction_file is not None:
+        file_values.append(ai_config.turn_instruction_file)
     if ai_config.vision is not None:
         file_values.extend(
             (

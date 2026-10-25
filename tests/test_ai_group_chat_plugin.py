@@ -1,13 +1,17 @@
 """AI 群聊插件端到端假 Bot / 假 LLM 烟测。"""
 
 import asyncio
+import re
+import tempfile
 import unittest
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 import httpx
 
 from app.config import (
-    AIGroupChatConfig,
     AIGroupConfig,
     ConfigManager,
     MaterializedAIGroupChatConfig,
@@ -27,16 +31,23 @@ from app.models import (
     Text,
 )
 from app.plugins.ai_group_chat.ai_group_chat import AIGroupChatPlugin
+from app.plugins.ai_group_chat.tool_loop import TurnContextState
 from app.plugins.base import Context
-from app.services import ChatMessage
-from app.services.llm.schemas import LLMResponse, LLMToolChoice, LLMToolDefinition
+from app.services import (
+    ChatMessage,
+    ConversationContextKey,
+    ConversationContextStore,
+)
+from app.services.llm.schemas import LLMResponse, LLMToolCall, LLMToolChoice, LLMToolDefinition
+from app.services.llm.errors import LLMRequestError
+from tests.config_helpers import build_ai_group_chat_config
 
 
 class SmokeBot:
     """提供图片刷新和群消息发送能力的假 Bot。"""
 
-    def __init__(self) -> None:
-        self.boot_id = "10000"
+    def __init__(self, *, bot_id: str = "10000") -> None:
+        self.boot_id = bot_id
         self.image_calls: list[tuple[str | None, str | None]] = []
         self.sent_texts: list[str] = []
 
@@ -78,13 +89,28 @@ class SmokeBot:
 
 
 class SmokeDatabase:
-    """引用消息查询始终为空。"""
+    """引用消息查询始终为空，最近群聊返回测试预置的记录。"""
+
+    def __init__(self) -> None:
+        self.recent_messages: list[StoredGroupMessage] = []
 
     async def get_active(
         self, *, scope: GroupDataScope, message_id: str
     ) -> StoredGroupMessage | None:
         _ = (scope, message_id)
         return None
+
+    async def list_around(
+        self,
+        *,
+        scope: GroupDataScope,
+        message_id: str,
+        before_count: int,
+        after_count: int,
+        sender_id: str | None = None,
+    ) -> list[StoredGroupMessage]:
+        _ = (scope, message_id, before_count, after_count, sender_id)
+        return list(self.recent_messages)
 
 
 class EmptyToolManager:
@@ -107,8 +133,8 @@ class SmokeLLM:
         self.formal_messages: list[list[ChatMessage]] = []
         self.formal_entered = asyncio.Event()
         self.formal_release: asyncio.Event | None = None
-        self.active_formal_requests = 0
-        self.max_active_formal_requests = 0
+        self.active_formal_requests: int = 0
+        self.max_active_formal_requests: int = 0
 
     async def get_ai_text_response(
         self,
@@ -117,8 +143,9 @@ class SmokeLLM:
         model_name: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
-        _ = (max_attempts, retry_delay_seconds)
+        _ = (max_attempts, retry_delay_seconds, retry_max_delay_seconds)
         self.vision_models.append((provider, model_name))
         if [message.role for message in messages] != ["system", "user"]:
             raise AssertionError("视觉请求不应携带群聊历史")
@@ -153,12 +180,68 @@ class SmokeLLM:
             self.active_formal_requests -= 1
 
 
+class ControlledSmokeLLM(SmokeLLM):
+    """允许测试按消息 ID 独立控制并发请求的完成顺序。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered_by_message_id: dict[str, asyncio.Event] = {}
+        self.release_by_message_id: dict[str, asyncio.Event] = {}
+        self.messages_by_message_id: dict[str, list[ChatMessage]] = {}
+
+    async def get_ai_response_with_tools(
+        self,
+        messages: list[ChatMessage],
+        provider: str,
+        model_name: str,
+        tools: list[LLMToolDefinition],
+        tool_choice: LLMToolChoice = "auto",
+        parallel_tool_calls: bool = True,
+    ) -> LLMResponse:
+        _ = (tools, tool_choice, parallel_tool_calls)
+        message_id = self._message_id(messages=messages)
+        self.formal_models.append((provider, model_name))
+        self.formal_messages.append(messages[:])
+        self.messages_by_message_id[message_id] = messages[:]
+        self.active_formal_requests += 1
+        self.max_active_formal_requests = max(
+            self.max_active_formal_requests,
+            self.active_formal_requests,
+        )
+        self.entered_by_message_id.setdefault(message_id, asyncio.Event()).set()
+        try:
+            release = self.release_by_message_id.get(message_id)
+            if release is not None:
+                await release.wait()
+            return LLMResponse(content=f"回复 {message_id}")
+        finally:
+            self.active_formal_requests -= 1
+
+    def _message_id(self, *, messages: list[ChatMessage]) -> str:
+        """从当前消息聊天记录标题行中读取消息 ID。"""
+        for message in reversed(messages):
+            if message.role != "user" or message.text is None:
+                continue
+            match = re.search(r"@你（消息 ID (\d+)）", message.text)
+            if match is not None:
+                return match.group(1)
+        raise AssertionError("正式请求缺少当前消息 ID")
+
+
 class SmokeContext:
     """组合烟测依赖。"""
 
-    def __init__(self) -> None:
-        self.bot = SmokeBot()
+    def __init__(
+        self,
+        *,
+        bot_id: str = "10000",
+        conversation_contexts: ConversationContextStore | None = None,
+    ) -> None:
+        self.bot = SmokeBot(bot_id=bot_id)
         self.group_messages = SmokeDatabase()
+        self.conversation_contexts = (
+            conversation_contexts or ConversationContextStore()
+        )
         self.direct_httpx = cast(httpx.AsyncClient, object())
         self.llm = SmokeLLM()
         self.mcp_tool_manager = EmptyToolManager()
@@ -186,6 +269,12 @@ def build_snapshot(
     max_context_tokens: int = 1_000_000,
     model_name: str = "main-model",
     include_second_group: bool = False,
+    debug_dump_messages: bool = False,
+    supports_images: bool = False,
+    retain_images: bool = False,
+    tool_result_retention: str = "off",
+    recent_chat: dict[str, int] | None = None,
+    turn_instruction: str | None = None,
 ) -> PluginConfigSnapshot:
     """构造已经读取提示词文件的 AI 配置快照。"""
     group = AIGroupConfig(
@@ -202,22 +291,36 @@ def build_snapshot(
                 max_context_tokens=max_context_tokens,
             )
         )
-    source = AIGroupChatConfig.model_validate(
-        {
-            "model": {
-            "provider": "main-vendor",
-            "name": model_name,
-            "supports_images": False,
-        },
-            "vision": {
-            "model": {"provider": "vision-vendor", "name": "vision-model"},
-            "system_prompt_file": "vision/system.md",
-            "user_prompt_file": "vision/user.md",
-            "retain_descriptions": True,
-        },
+    source = build_ai_group_chat_config(
+        supports_images=supports_images,
+        provider="main-vendor",
+        model_name=model_name,
+        overrides={
+            **(
+                {
+                    "vision": {
+                        "model": {
+                            "provider": "vision-vendor",
+                            "name": "vision-model",
+                        },
+                        "system_prompt_file": "vision/system.md",
+                        "user_prompt_file": "vision/user.md",
+                        "retain_descriptions": True,
+                    }
+                }
+                if not supports_images
+                else {}
+            ),
+            "images": {"retain_images": retain_images},
             "show_reasoning": False,
+            "tool_result_retention": tool_result_retention,
+            "debug_dump_messages": debug_dump_messages,
+            "recent_chat": recent_chat,
+            "turn_instruction_file": (
+                "turn_instruction.md" if turn_instruction is not None else None
+            ),
             "groups": group_configs,
-        }
+        },
     )
     materialized = MaterializedAIGroupChatConfig(
         source=source,
@@ -228,8 +331,13 @@ def build_snapshot(
             )
             for group_config in group_configs
         ),
-        vision_system_prompt="只描述可见事实。",
-        vision_user_prompt="结合当前问题描述图片。",
+        vision_system_prompt=(
+            "只描述可见事实。" if source.vision is not None else None
+        ),
+        vision_user_prompt=(
+            "结合当前问题描述图片。" if source.vision is not None else None
+        ),
+        turn_instruction=turn_instruction,
     )
     return PluginConfigSnapshot(
         revision=revision,
@@ -246,12 +354,13 @@ def build_snapshot(
 def build_event(
     message_id: str = "30000",
     *,
+    bot_id: str = "10000",
     group_id: str = "40000",
 ) -> GroupMessage:
     """构造艾特机器人并附图的群消息。"""
     return GroupMessage(
         time=1_777_132_900,
-        self_id="10000",
+        self_id=bot_id,
         post_type="message",
         message_type="group",
         sub_type="normal",
@@ -259,14 +368,134 @@ def build_event(
         message_id=message_id,
         group_id=group_id,
         group_name="测试群",
-        message=[At.new("10000"), Text.new("请看图回答"), Image.new("smoke.png")],
-        raw_message="[CQ:at,qq=10000]请看图回答[图片]",
+        message=[At.new(bot_id), Text.new("请看图回答"), Image.new("smoke.png")],
+        raw_message=f"[CQ:at,qq={bot_id}]请看图回答[图片]",
         sender=Sender(user_id="20000", nickname="测试用户", role="member"),
+    )
+
+
+def build_stored_message(
+    *, message_id: str, text: str, occurred_at: int
+) -> StoredGroupMessage:
+    """构造测试群里其他群员的一条已归档文字消息。"""
+    return StoredGroupMessage(
+        row_id=1,
+        scope=GroupDataScope(bot_id="10000", group_id="40000"),
+        message_id=message_id,
+        group_name="测试群",
+        sender_id="20001",
+        sender_name="小明",
+        sender_role="member",
+        occurred_at=datetime.fromtimestamp(occurred_at, tz=UTC),
+        direction="incoming",
+        segments=(Text.new(text),),
+        media=(),
+    )
+
+
+def conversation_key(
+    *, bot_id: str = "10000", group_id: str = "40000"
+) -> ConversationContextKey:
+    """返回 AI 群聊测试使用的进程内对话键。"""
+    return ConversationContextKey(
+        owner=AIGroupChatPlugin.plugin_id,
+        bot_id=bot_id,
+        conversation_id=group_id,
     )
 
 
 class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
     """验证附图消息从读取到最终群回复的完整编排。"""
+
+    async def test_retained_tool_overflow_compresses_after_failure_and_commits(self) -> None:
+        """工具超预算后整轮提交，压缩失败保留原历史，重试成功后后续会话继续。"""
+        context = SmokeContext()
+        plugin = AIGroupChatPlugin(
+            context=cast(Context, context),
+            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot(
+                supports_images=True,
+                max_context_tokens=9000,
+                tool_result_retention="full",
+            ))),
+            consumers_count=1,
+            stop_timeout_seconds=1,
+        )
+        tool = LLMToolDefinition(
+            name="mcp__fake__inspect",
+            description="读取资料。",
+            parameters={"type": "object", "properties": {}},
+        )
+        large_result = "资料原文" * 5000
+        event = build_event().model_copy(update={
+            "message": [At.new("10000"), Text.new("读取资料")],
+            "raw_message": "读取资料",
+        })
+        try:
+            with (
+                patch.object(context.mcp_tool_manager, "list_tools", return_value=[tool]),
+                patch.object(
+                    context.mcp_tool_manager, "call_tool",
+                    return_value={"ok": True, "text": large_result},
+                ),
+                patch.object(
+                    context.llm, "get_ai_response_with_tools",
+                    side_effect=[
+                        LLMResponse(tool_calls=[LLMToolCall(id="call-1", name=tool.name, arguments={})]),
+                        LLMResponse(content="资料已读取"),
+                        LLMResponse(content="摘要后继续成功"),
+                        LLMResponse(content="后续对话成功"),
+                    ],
+                ) as formal,
+                patch.object(context.llm, "get_ai_text_response", return_value="资料摘要") as compress,
+            ):
+                self.assertTrue(await plugin.run(event))
+                persistent = context.conversation_contexts.get(key=conversation_key())
+                assert persistent is not None
+                original_messages = persistent.messages_lst
+                original_revision = persistent.revision
+                tool_result = next(message for message in original_messages if message.role == "tool")
+                self.assertIn(large_result, tool_result.text or "")
+                self.assertEqual(original_messages[-1].text, "资料已读取")
+                self.assertEqual(formal.await_count, 2)
+                compress.assert_not_awaited()
+
+                compress.side_effect = LLMRequestError("压缩服务暂时失败")
+                self.assertTrue(await plugin.run(event.model_copy(update={"message_id": "30001"})))
+                self.assertEqual(persistent.messages_lst, original_messages)
+                self.assertEqual(persistent.revision, original_revision)
+                self.assertEqual(formal.await_count, 2)
+
+                compress.side_effect = None
+                self.assertTrue(await plugin.run(event.model_copy(update={"message_id": "30002"})))
+                self.assertIn("资料摘要", persistent.messages_lst[1].text or "")
+                self.assertFalse(any(message.role == "tool" for message in persistent.messages_lst))
+                self.assertEqual(persistent.messages_lst[-1].text, "摘要后继续成功")
+                self.assertTrue(await plugin.run(event.model_copy(update={"message_id": "30003"})))
+                self.assertEqual(persistent.messages_lst[-1].text, "后续对话成功")
+                self.assertEqual(formal.await_count, 4)
+                self.assertEqual(compress.await_count, 2)
+        finally:
+            await plugin.stop_consumers()
+
+    async def test_final_provider_failure_replies_to_triggering_message(self) -> None:
+        context = SmokeContext()
+        plugin = AIGroupChatPlugin(
+            context=cast(Context, context),
+            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot(supports_images=True))),
+            consumers_count=1, stop_timeout_seconds=1,
+        )
+        event = build_event().model_copy(update={"message": [At.new("10000"), Text.new("hello")]})
+        try:
+            with patch.object(context.llm, "get_ai_response_with_tools", side_effect=LLMRequestError("模型请求超时")):
+                handled = await plugin.add_to_queue(event)
+            self.assertTrue(handled)
+            self.assertEqual(context.bot.sent_texts, ["本轮处理已结束：模型请求超时"])
+            with patch.object(context.llm, "get_ai_response_with_tools", side_effect=TypeError("代码缺陷")):
+                with self.assertRaisesRegex(TypeError, "代码缺陷"):
+                    await plugin.add_to_queue(event)
+            self.assertEqual(len(context.bot.sent_texts), 1)
+        finally:
+            await plugin.stop_consumers()
 
     async def test_non_image_main_model_uses_internal_vision_tool(self) -> None:
         """独立视觉模型描述图片，正式回复始终由主模型生成。"""
@@ -274,6 +503,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         plugin = AIGroupChatPlugin(
             context=cast(Context, smoke_context),
             plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         try:
             handled = await plugin.run(build_event())
@@ -297,32 +528,208 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("图片中写着“测试成功”", request_text)
         self.assertEqual(smoke_context.bot.sent_texts, ["图片里写着测试成功。"])
 
-    async def test_same_group_requests_are_serialized(self) -> None:
-        """同群第二个请求等待首个请求完成，不重复进入视觉和正式请求。"""
+    async def test_direct_multimodal_image_can_remain_in_persistent_context(
+        self,
+    ) -> None:
+        """direct + retain_images 把原始字节交给主模型并原样提交长期上下文。"""
         smoke_context = SmokeContext()
-        smoke_context.llm.formal_release = asyncio.Event()
         plugin = AIGroupChatPlugin(
             context=cast(Context, smoke_context),
-            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            plugin_config=ai_plugin_config(
+                FakeConfigManager(
+                    build_snapshot(supports_images=True, retain_images=True)
+                )
+            ),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
-        first = asyncio.create_task(plugin.run(build_event("30001")))
         try:
-            await asyncio.wait_for(smoke_context.llm.formal_entered.wait(), timeout=1)
-            second = asyncio.create_task(plugin.run(build_event("30002")))
-            await asyncio.sleep(0.05)
-            self.assertEqual(len(smoke_context.llm.formal_models), 1)
-            self.assertEqual(len(smoke_context.llm.vision_models), 1)
-
-            smoke_context.llm.formal_release.set()
-            self.assertEqual(await asyncio.gather(first, second), [True, True])
+            handled = await plugin.run(build_event())
         finally:
-            smoke_context.llm.formal_release.set()
-            if not first.done():
-                await first
             await plugin.stop_consumers()
 
-        self.assertEqual(smoke_context.llm.max_active_formal_requests, 1)
-        self.assertEqual(len(smoke_context.llm.formal_models), 2)
+        self.assertTrue(handled)
+        self.assertEqual(smoke_context.llm.vision_models, [])
+        direct_message = next(
+            message
+            for message in smoke_context.llm.formal_messages[0]
+            if message.image
+        )
+        self.assertEqual(direct_message.image, [b"smoke-image"])
+        committed = smoke_context.conversation_contexts.get(
+            key=conversation_key()
+        )
+        self.assertIsNotNone(committed)
+        assert committed is not None
+        self.assertTrue(
+            any(
+                message.image == [b"smoke-image"]
+                for message in committed.messages_lst
+            )
+        )
+
+    async def test_recent_chat_and_turn_instruction_stay_out_of_persistent_context(
+        self,
+    ) -> None:
+        """最近群聊和发言要求只随本轮请求发送，长期上下文只保存 @ 消息与回复。"""
+        smoke_context = SmokeContext()
+        smoke_context.conversation_contexts.started_at = datetime.fromtimestamp(
+            1_777_132_000, tz=UTC
+        )
+        smoke_context.group_messages.recent_messages = [
+            build_stored_message(
+                message_id="29990",
+                text="重启前的旧话题",
+                occurred_at=1_777_131_000,
+            ),
+            build_stored_message(
+                message_id="29991",
+                text="刚才在聊食堂涨价",
+                occurred_at=1_777_132_800,
+            ),
+        ]
+        instruction = "像群友一样随口回一两句。"
+        plugin = AIGroupChatPlugin(
+            context=cast(Context, smoke_context),
+            plugin_config=ai_plugin_config(
+                FakeConfigManager(
+                    build_snapshot(
+                        recent_chat={"max_messages": 20, "max_chars_per_message": 0},
+                        turn_instruction=instruction,
+                    )
+                )
+            ),
+            consumers_count=1,
+            stop_timeout_seconds=1,
+        )
+        try:
+            handled = await plugin.run(build_event())
+        finally:
+            await plugin.stop_consumers()
+
+        self.assertTrue(handled)
+        request = smoke_context.llm.formal_messages[0]
+        self.assertEqual(request[-1], ChatMessage(role="system", text=instruction))
+        request_text = "\n".join(message.text or "" for message in request)
+        self.assertIn("刚才在聊食堂涨价", request_text)
+        self.assertNotIn("重启前的旧话题", request_text)
+        committed = smoke_context.conversation_contexts.get(key=conversation_key())
+        self.assertIsNotNone(committed)
+        assert committed is not None
+        committed_text = "\n".join(
+            message.text or "" for message in committed.messages_lst
+        )
+        self.assertIn("请看图回答", committed_text)
+        self.assertIn("图片里写着测试成功。", committed_text)
+        self.assertNotIn("刚才在聊食堂涨价", committed_text)
+        self.assertNotIn(instruction, committed_text)
+
+    async def test_same_group_requests_use_isolated_context_and_commit_by_completion(
+        self,
+    ) -> None:
+        """同群请求并发执行，且只按回复完成顺序提交各自完整轮次。"""
+        smoke_context = SmokeContext()
+        controlled_llm = ControlledSmokeLLM()
+        controlled_llm.release_by_message_id = {
+            "30001": asyncio.Event(),
+            "30002": asyncio.Event(),
+        }
+        smoke_context.llm = controlled_llm
+        plugin = AIGroupChatPlugin(
+            context=cast(Context, smoke_context),
+            plugin_config=ai_plugin_config(
+                FakeConfigManager(build_snapshot(debug_dump_messages=True))
+            ),
+            consumers_count=1,
+            stop_timeout_seconds=1,
+        )
+        dump_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(dump_directory.cleanup)
+        runtime = plugin._current_runtime()  # pyright: ignore[reportPrivateUsage]
+        assert runtime is not None
+        runtime.debug_dumper.root_dir = Path(dump_directory.name)
+        first = asyncio.create_task(plugin.run(build_event("30001")))
+        second: asyncio.Task[bool] | None = None
+        try:
+            async with asyncio.timeout(1):
+                while "30001" not in controlled_llm.entered_by_message_id:
+                    await asyncio.sleep(0.01)
+                await controlled_llm.entered_by_message_id["30001"].wait()
+            second = asyncio.create_task(plugin.run(build_event("30002")))
+            async with asyncio.timeout(1):
+                while "30002" not in controlled_llm.entered_by_message_id:
+                    await asyncio.sleep(0.01)
+                await controlled_llm.entered_by_message_id["30002"].wait()
+            self.assertEqual(controlled_llm.active_formal_requests, 2)
+            self.assertEqual(controlled_llm.max_active_formal_requests, 2)
+            self.assertNotIn(
+                "30001",
+                "\n".join(
+                    message.text or ""
+                    for message in controlled_llm.messages_by_message_id["30002"]
+                ),
+            )
+
+            controlled_llm.release_by_message_id["30002"].set()
+            self.assertTrue(await second)
+            self.assertFalse(first.done())
+            context_after_second = smoke_context.conversation_contexts.get(
+                key=conversation_key()
+            )
+            assert context_after_second is not None
+            context_after_second_text = "\n".join(
+                message.text or "" for message in context_after_second.messages_lst
+            )
+            self.assertIn("30002", context_after_second_text)
+            self.assertNotIn("30001", context_after_second_text)
+            self.assertEqual(
+                [
+                    message.text
+                    for message in context_after_second.messages_lst
+                    if message.role == "assistant"
+                ],
+                ["回复 30002"],
+            )
+
+            controlled_llm.release_by_message_id["30001"].set()
+            self.assertTrue(await first)
+        finally:
+            for release in controlled_llm.release_by_message_id.values():
+                release.set()
+            if not first.done():
+                await first
+            if second is not None and not second.done():
+                await second
+            await plugin.stop_consumers()
+
+        committed_context = smoke_context.conversation_contexts.get(
+            key=conversation_key()
+        )
+        assert committed_context is not None
+        committed_texts = [message.text or "" for message in committed_context.messages_lst]
+        fast_user_index = next(
+            index for index, text in enumerate(committed_texts) if "30002" in text
+        )
+        fast_reply_index = committed_texts.index("回复 30002")
+        slow_user_index = next(
+            index for index, text in enumerate(committed_texts) if "30001" in text
+        )
+        slow_reply_index = committed_texts.index("回复 30001")
+        self.assertEqual(
+            [
+                message.text
+                for message in committed_context.messages_lst
+                if message.role == "assistant"
+            ],
+            ["回复 30002", "回复 30001"],
+        )
+        self.assertLess(fast_user_index, fast_reply_index)
+        self.assertLess(fast_reply_index, slow_user_index)
+        self.assertLess(slow_user_index, slow_reply_index)
+        dump_files = list(Path(dump_directory.name).glob("40000/*.md"))
+        self.assertEqual(len(dump_files), 1)
+        dump_content = dump_files[0].read_text(encoding="utf-8")
+        self.assertLess(dump_content.index("回复 30002"), dump_content.index("回复 30001"))
 
     async def test_different_groups_can_run_in_parallel(self) -> None:
         """不同群使用不同锁，正式请求可以同时进行。"""
@@ -333,6 +740,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
             plugin_config=ai_plugin_config(
                 FakeConfigManager(build_snapshot(include_second_group=True))
             ),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         first = asyncio.create_task(plugin.run(build_event("30005")))
         second = asyncio.create_task(
@@ -354,12 +763,104 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(smoke_context.llm.max_active_formal_requests, 2)
 
+    async def test_stale_compression_cannot_overwrite_a_faster_turn(self) -> None:
+        """慢请求基于旧历史生成的摘要只能追加本轮，不能覆盖先完成的请求。"""
+        smoke_context = SmokeContext()
+        plugin = AIGroupChatPlugin(
+            context=cast(Context, smoke_context),
+            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
+        )
+        key = conversation_key()
+        runtime = plugin._current_runtime()  # pyright: ignore[reportPrivateUsage]
+        assert runtime is not None
+        group = runtime.groups["40000"]
+        lock = smoke_context.conversation_contexts.lock_for(key=key)
+        async with lock:
+            persistent = plugin._get_group_context(  # pyright: ignore[reportPrivateUsage]
+                runtime=runtime,
+                group=group,
+                key=key,
+            )
+            persistent.build_chatmessage(
+                message=ChatMessage(role="assistant", text="压缩前历史")
+            )
+            base_revision = persistent.revision
+            fast_temporary = persistent.fork()
+            slow_temporary = persistent.fork()
+
+        fast_temporary.replace_history(
+            messages=[
+                ChatMessage(role="user", text="快速请求生成的摘要和正文"),
+                ChatMessage(role="assistant", text="快速回复"),
+            ]
+        )
+        slow_temporary.replace_history(
+            messages=[
+                ChatMessage(role="user", text="过期摘要，不应提交"),
+                ChatMessage(role="assistant", text="慢速回复"),
+            ]
+        )
+        fast_state = TurnContextState(
+            fallback_turn_messages=[ChatMessage(role="user", text="快速用户消息")],
+            persisted_prefix_count=2,
+            replace_existing_history=True,
+            commit_requested=True,
+            title="快速请求",
+        )
+        slow_state = TurnContextState(
+            fallback_turn_messages=[ChatMessage(role="user", text="慢速用户消息")],
+            persisted_prefix_count=2,
+            replace_existing_history=True,
+            commit_requested=True,
+            title="慢速请求",
+        )
+        try:
+            self.assertIsNotNone(
+                await plugin._commit_turn_context(  # pyright: ignore[reportPrivateUsage]
+                    msg=build_event("30011"),
+                    context_key=key,
+                    persistent_context=persistent,
+                    base_revision=base_revision,
+                    temporary_context=fast_temporary,
+                    state=fast_state,
+                )
+            )
+            self.assertIsNotNone(
+                await plugin._commit_turn_context(  # pyright: ignore[reportPrivateUsage]
+                    msg=build_event("30012"),
+                    context_key=key,
+                    persistent_context=persistent,
+                    base_revision=base_revision,
+                    temporary_context=slow_temporary,
+                    state=slow_state,
+                )
+            )
+        finally:
+            await plugin.stop_consumers()
+
+        committed = smoke_context.conversation_contexts.get(key=key)
+        assert committed is not None
+        self.assertEqual(
+            [message.text for message in committed.messages_lst],
+            [
+                "角色、知识库和通用群聊要求",
+                "快速请求生成的摘要和正文",
+                "快速回复",
+                "慢速用户消息",
+                "慢速回复",
+            ],
+        )
+
     async def test_prompt_change_resets_only_affected_group_context(self) -> None:
         """提示词变化替换上下文，普通 token 预算变化保留既有历史。"""
         manager = FakeConfigManager(build_snapshot())
         plugin = AIGroupChatPlugin(
             context=cast(Context, SmokeContext()),
             plugin_config=ai_plugin_config(manager),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         try:
             first_runtime = plugin._current_runtime()  # pyright: ignore[reportPrivateUsage]
@@ -368,6 +869,7 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
             first_context = plugin._get_group_context(  # pyright: ignore[reportPrivateUsage]
                 runtime=first_runtime,
                 group=first_runtime.groups["40000"],
+                key=conversation_key(),
             )
             first_context.add_msg(ChatMessage(role="user", text="保留的历史"))
 
@@ -380,6 +882,7 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
             budget_context = plugin._get_group_context(  # pyright: ignore[reportPrivateUsage]
                 runtime=budget_runtime,
                 group=budget_runtime.groups["40000"],
+                key=conversation_key(),
             )
             self.assertIs(budget_context, first_context)
             self.assertEqual(len(budget_context.messages_lst), 2)
@@ -395,6 +898,7 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
             prompt_context = plugin._get_group_context(  # pyright: ignore[reportPrivateUsage]
                 runtime=prompt_runtime,
                 group=prompt_runtime.groups["40000"],
+                key=conversation_key(),
             )
             self.assertIsNot(prompt_context, first_context)
             self.assertEqual(len(prompt_context.messages_lst), 1)
@@ -415,6 +919,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
         plugin = AIGroupChatPlugin(
             context=cast(Context, smoke_context),
             plugin_config=ai_plugin_config(manager),
+            consumers_count=1,
+            stop_timeout_seconds=1,
         )
         first = asyncio.create_task(plugin.run(build_event("30003")))
         try:
@@ -426,9 +932,8 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
             )
             smoke_context.llm.formal_release.set()
             self.assertTrue(await first)
-            self.assertNotIn(
-                "40000",
-                plugin._group_contexts,  # pyright: ignore[reportPrivateUsage]
+            self.assertIsNone(
+                smoke_context.conversation_contexts.get(key=conversation_key())
             )
             self.assertTrue(await plugin.run(build_event("30004")))
         finally:
@@ -443,6 +948,84 @@ class AIGroupChatPluginSmokeTest(unittest.IsolatedAsyncioTestCase):
                 ("main-vendor", "main-model"),
                 ("main-vendor", "new-main-model"),
             ],
+        )
+
+    async def test_new_websocket_session_reuses_process_context(self) -> None:
+        """新插件会话继续使用同一进程内已经提交的 assistant 历史。"""
+        shared_contexts = ConversationContextStore()
+        first_context = SmokeContext(conversation_contexts=shared_contexts)
+        first_plugin = AIGroupChatPlugin(
+            context=cast(Context, first_context),
+            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
+        )
+        try:
+            self.assertTrue(await first_plugin.run(build_event("30007")))
+        finally:
+            await first_plugin.stop_consumers()
+
+        second_context = SmokeContext(conversation_contexts=shared_contexts)
+        second_plugin = AIGroupChatPlugin(
+            context=cast(Context, second_context),
+            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
+        )
+        try:
+            self.assertTrue(await second_plugin.run(build_event("30008")))
+        finally:
+            await second_plugin.stop_consumers()
+
+        second_request = second_context.llm.formal_messages[0]
+        self.assertTrue(
+            any(
+                message.role == "assistant"
+                and message.text == "图片里写着测试成功。"
+                for message in second_request
+            )
+        )
+
+    async def test_process_context_is_scoped_by_bot(self) -> None:
+        """同群号在不同机器人下不会读取彼此的进程内上下文。"""
+        shared_contexts = ConversationContextStore()
+        first_context = SmokeContext(
+            bot_id="10000", conversation_contexts=shared_contexts
+        )
+        first_plugin = AIGroupChatPlugin(
+            context=cast(Context, first_context),
+            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
+        )
+        try:
+            self.assertTrue(
+                await first_plugin.run(build_event("30009", bot_id="10000"))
+            )
+        finally:
+            await first_plugin.stop_consumers()
+
+        second_context = SmokeContext(
+            bot_id="10001", conversation_contexts=shared_contexts
+        )
+        second_plugin = AIGroupChatPlugin(
+            context=cast(Context, second_context),
+            plugin_config=ai_plugin_config(FakeConfigManager(build_snapshot())),
+            consumers_count=1,
+            stop_timeout_seconds=1,
+        )
+        try:
+            self.assertTrue(
+                await second_plugin.run(build_event("30010", bot_id="10001"))
+            )
+        finally:
+            await second_plugin.stop_consumers()
+
+        self.assertFalse(
+            any(
+                message.role == "assistant"
+                for message in second_context.llm.formal_messages[0]
+            )
         )
 
 

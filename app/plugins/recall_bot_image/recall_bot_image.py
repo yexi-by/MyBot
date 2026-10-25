@@ -1,27 +1,18 @@
 """处理群聊中引用机器人图片的撤回指令。"""
 
-from typing import ClassVar, Final, override
+from typing import ClassVar, override
 
 from app.database import GroupDataScope, StoredGroupMessage
-from app.config import EmptyPluginConfig
+from app.config import RecallBotImageConfig
 from app.models import GroupMessage, Image, NapCatId, Reply, Response, Text
 from app.plugins.base import BasePlugin
 from app.utils.log import log_event, log_exception
-
-RECALL_COMMAND: Final[str] = "#撤回"
-CONSUMERS_COUNT: Final[int] = 5
-PRIORITY: Final[int] = 90
-MAX_FAILURE_DETAIL_LENGTH: Final[int] = 160
-
 
 class RecallBotImagePlugin(BasePlugin[GroupMessage]):
     """撤回当前机器人在本群发送的被引用图片消息。"""
 
     plugin_id: ClassVar[str] = "recall_bot_image"
     name: ClassVar[str] = "机器人图片撤回插件"
-    consumers_count: ClassVar[int] = CONSUMERS_COUNT
-    priority: ClassVar[int] = PRIORITY
-
     @override
     def setup(self) -> None:
         """图片撤回插件无需额外配置。"""
@@ -29,16 +20,20 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
     @override
     async def run(self, msg: GroupMessage) -> bool:
         """识别引用撤回指令，校验目标归属并尝试撤回图片。"""
-        if self.plugin_config.get(EmptyPluginConfig) is None:
+        config = self.plugin_config.get(RecallBotImageConfig)
+        if config is None:
             return False
-        if msg.post_type != "message" or self._extract_plain_text(msg=msg) != RECALL_COMMAND:
+        if (
+            msg.post_type != "message"
+            or self._extract_plain_text(msg=msg) != config.command
+        ):
             return False
 
         reply_id = self._extract_reply_id(msg=msg)
         if reply_id is None:
             await self._send_feedback(
                 msg=msg,
-                text=f"请回复机器人发送的图片，再发送 {RECALL_COMMAND}。",
+                text=f"请回复机器人发送的图片，再发送 {config.command}。",
             )
             return True
 
@@ -97,6 +92,7 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
         await self._recall_image(
             msg=msg,
             target_message_id=stored_message.message_id,
+            failure_detail_max_chars=config.failure_detail_max_chars,
         )
         return True
 
@@ -149,7 +145,11 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
         await self._send_feedback(msg=msg, text=feedback)
 
     async def _recall_image(
-        self, *, msg: GroupMessage, target_message_id: NapCatId
+        self,
+        *,
+        msg: GroupMessage,
+        target_message_id: NapCatId,
+        failure_detail_max_chars: int,
     ) -> None:
         """调用带回包的撤回接口，并根据明确结果反馈成功或失败。"""
         try:
@@ -168,7 +168,8 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
                 target_message_id=target_message_id,
             )
             detail = self._normalize_failure_detail(
-                str(exc) or type(exc).__name__
+                str(exc) or type(exc).__name__,
+                max_chars=failure_detail_max_chars,
             )
             await self._send_feedback(
                 msg=msg,
@@ -180,7 +181,10 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
             return
 
         if response.status != "ok" or response.retcode != 0:
-            detail = self._response_failure_detail(response=response)
+            detail = self._response_failure_detail(
+                response=response,
+                max_chars=failure_detail_max_chars,
+            )
             log_event(
                 level="WARNING",
                 event="recall_bot_image.rejected",
@@ -216,19 +220,21 @@ class RecallBotImagePlugin(BasePlugin[GroupMessage]):
         )
         await self._send_feedback(msg=msg, text="图片已撤回。")
 
-    def _response_failure_detail(self, *, response: Response) -> str:
+    def _response_failure_detail(
+        self, *, response: Response, max_chars: int
+    ) -> str:
         """从 NapCat 失败回包提取适合群内展示的简短原因。"""
         detail = response.wording.strip() or response.message.strip()
         if not detail:
             detail = f"NapCat 返回 retcode={response.retcode}"
-        return self._normalize_failure_detail(detail)
+        return self._normalize_failure_detail(detail, max_chars=max_chars)
 
-    def _normalize_failure_detail(self, detail: str) -> str:
+    def _normalize_failure_detail(self, detail: str, *, max_chars: int) -> str:
         """压缩错误空白并限制群内错误文本长度。"""
         normalized = " ".join(detail.split())
-        if len(normalized) <= MAX_FAILURE_DETAIL_LENGTH:
+        if max_chars == 0 or len(normalized) <= max_chars:
             return normalized
-        return f"{normalized[:MAX_FAILURE_DETAIL_LENGTH]}…"
+        return f"{normalized[:max_chars]}…"
 
     async def _send_feedback(self, *, msg: GroupMessage, text: str) -> None:
         """向触发者反馈结果；反馈发送失败只记录日志，不改变撤回结果。"""

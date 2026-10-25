@@ -1,5 +1,6 @@
 """NapCat 群聊合并转发图片信息工具。"""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -14,11 +15,13 @@ from app.models import (
     JsonValue,
     MessageSegment,
     NapCatId,
+    Node,
     to_json_value,
 )
 from app.services.llm.tools import (
     LLMImageArtifact,
     LLMImageError,
+    LLMImageItem,
     LLMToolExecutionResult,
     LLMToolRegistry,
 )
@@ -72,26 +75,36 @@ class GroupForwardImageToolset:
         group_messages: GroupMessageReader,
         event: GroupMessage,
         max_images_per_call: int,
-        max_all_images: int,
+        max_images_per_turn: int,
         fetch_concurrency: int,
         download_timeout_seconds: float,
         http_client: httpx.AsyncClient | None,
+        max_image_bytes: int | None,
+        remaining_delivery_slots: Callable[[], int | None],
     ) -> None:
         """绑定当前群事件和读取配置。"""
         self.bot: NapCatGroupToolBot = bot
         self.group_messages: GroupMessageReader = group_messages
         self.event: GroupMessage = event
         self.max_images_per_call: int = max_images_per_call
-        self.max_all_images: int = max_all_images
+        self.max_images_per_turn: int = max_images_per_turn
+        self._consumed_images: int = 0
+        self._pending_delivery_images: int = 0
+        self._remaining_delivery_slots = remaining_delivery_slots
         self.image_reader: NapCatImageReader = NapCatImageReader(
             bot=bot,
             http_client=http_client,
             fetch_concurrency=fetch_concurrency,
             download_timeout_seconds=download_timeout_seconds,
+            max_image_bytes=max_image_bytes,
         )
         self.segments_adapter: TypeAdapter[list[MessageSegment]] = TypeAdapter(
             list[MessageSegment]
         )
+
+    def begin_delivery_batch(self) -> None:
+        """开始一批模型工具调用，清除上一批已经结算的预留额度。"""
+        self._pending_delivery_images = 0
 
     def register_tools(self, registry: LLMToolRegistry) -> None:
         """向工具注册表登记合并转发图片读取工具。"""
@@ -130,7 +143,7 @@ class GroupForwardImageToolset:
             return LLMToolExecutionResult(
                 result=self._build_root_error_result(reference=reference)
             )
-        all_targets = self._collect_image_targets(
+        all_targets, discovery_errors = await self._collect_image_targets(
             forward_id=reference.forward_id,
             raw_messages=root_messages,
         )
@@ -146,6 +159,12 @@ class GroupForwardImageToolset:
             targets=selected_targets,
         )
         fetch_results = await self._fetch_targets(targets=limited_targets)
+        successful_count = sum(
+            result.error is None and result.image_bytes is not None
+            for result in fetch_results
+        )
+        self._consumed_images += successful_count
+        self._pending_delivery_images += successful_count
         self._log_fetch_results(
             group_message_id=reference.group_message_id,
             forward_id=reference.forward_id,
@@ -154,18 +173,28 @@ class GroupForwardImageToolset:
             truncated=truncated_count > 0,
         )
         images = [result.metadata for result in fetch_results if result.error is None]
-        errors: list[JsonObject] = []
+        errors: list[JsonObject] = [
+            {
+                "label": error.label,
+                "error_type": error.error_type,
+                "error": error.error,
+            }
+            for error in discovery_errors
+        ]
         for result in fetch_results:
             if result.error is not None:
                 errors.append(result.error)
-        image_items = [
-            (
-                self._build_artifact(result=result)
-                if result.error is None and result.image_bytes is not None
-                else self._build_artifact_error(result=result)
-            )
-            for result in fetch_results
-        ]
+        image_items: list[LLMImageItem] = [*discovery_errors]
+        image_items.extend(
+            [
+                (
+                    self._build_artifact(result=result)
+                    if result.error is None and result.image_bytes is not None
+                    else self._build_artifact_error(result=result)
+                )
+                for result in fetch_results
+            ]
+        )
         return LLMToolExecutionResult(
             result={
                 "ok": True,
@@ -204,68 +233,131 @@ class GroupForwardImageToolset:
             return None
         return [to_json_value(message) for message in raw_messages]
 
-    def _collect_image_targets(
+    async def _collect_image_targets(
         self, *, forward_id: NapCatId, raw_messages: list[JsonValue]
-    ) -> list[ForwardImageTarget]:
-        """从合并转发消息列表中收集图片定位信息。"""
+    ) -> tuple[list[ForwardImageTarget], list[LLMImageError]]:
+        """递归读取合并转发树并收集可唯一定位的图片。"""
         targets: list[ForwardImageTarget] = []
+        errors: list[LLMImageError] = []
+        active_forward_ids = {forward_id}
         for message_index, raw_message in enumerate(raw_messages, start=1):
             segments = self._parse_segments(raw_message=raw_message)
-            image_index = 0
-            for segment in segments:
-                if isinstance(segment, Image):
-                    image_index += 1
-                    targets.append(
-                        ForwardImageTarget(
-                            forward_id=forward_id,
-                            message_index=message_index,
-                            image_index=image_index,
-                            file=segment.data.file,
-                            file_id=segment.data.file_id,
-                            path=segment.data.path,
-                            url=segment.data.url,
-                            summary=segment.data.summary,
-                        )
-                    )
-                    continue
-                if isinstance(segment, Forward) and segment.data.content is not None:
-                    targets.extend(
-                        self._collect_embedded_forward_targets(
-                            parent_forward_id=forward_id,
-                            parent_message_index=message_index,
-                            segment=segment,
-                        )
-                    )
-        return targets
+            image_counter = [0]
+            await self._collect_segment_targets(
+                segments=segments,
+                root_forward_id=forward_id,
+                root_message_index=message_index,
+                image_counter=image_counter,
+                active_forward_ids=active_forward_ids,
+                targets=targets,
+                errors=errors,
+            )
+        return targets, errors
 
-    def _collect_embedded_forward_targets(
+    async def _collect_segment_targets(
         self,
         *,
-        parent_forward_id: NapCatId,
-        parent_message_index: int,
-        segment: Forward,
-    ) -> list[ForwardImageTarget]:
-        """收集已内嵌在消息段里的合并转发图片。"""
-        content = segment.data.content
-        if not isinstance(content, list):
+        segments: list[MessageSegment],
+        root_forward_id: NapCatId,
+        root_message_index: int,
+        image_counter: list[int],
+        active_forward_ids: set[NapCatId],
+        targets: list[ForwardImageTarget],
+        errors: list[LLMImageError],
+    ) -> None:
+        """按根消息内的发现顺序递归展开节点和嵌套转发。"""
+        for segment in segments:
+            if isinstance(segment, Image):
+                image_counter[0] += 1
+                targets.append(
+                    ForwardImageTarget(
+                        forward_id=root_forward_id,
+                        message_index=root_message_index,
+                        image_index=image_counter[0],
+                        file=segment.data.file,
+                        file_id=segment.data.file_id,
+                        path=segment.data.path,
+                        url=segment.data.url,
+                        summary=segment.data.summary,
+                    )
+                )
+                continue
+            if isinstance(segment, Node) and isinstance(segment.data.content, list):
+                await self._collect_segment_targets(
+                    segments=segment.data.content,
+                    root_forward_id=root_forward_id,
+                    root_message_index=root_message_index,
+                    image_counter=image_counter,
+                    active_forward_ids=active_forward_ids,
+                    targets=targets,
+                    errors=errors,
+                )
+                continue
+            if not isinstance(segment, Forward):
+                continue
+            nested_id = segment.data.id
+            if nested_id in active_forward_ids:
+                errors.append(
+                    LLMImageError(
+                        label=f"合并转发第 {root_message_index} 条消息的嵌套转发",
+                        error_type="ForwardCycleDetected",
+                        error="检测到循环引用，已停止继续展开。",
+                    )
+                )
+                continue
+            active_forward_ids.add(nested_id)
+            try:
+                nested_groups = self._parse_embedded_segment_groups(
+                    content=segment.data.content
+                )
+                if segment.data.content is None:
+                    nested_messages = await self._load_root_forward_messages(
+                        forward_id=nested_id
+                    )
+                    if nested_messages is None:
+                        errors.append(
+                            LLMImageError(
+                                label=(
+                                    f"合并转发第 {root_message_index} 条消息"
+                                    f"的嵌套转发 {nested_id}"
+                                ),
+                                error_type="ForwardReadFailed",
+                                error="嵌套合并转发读取失败。",
+                            )
+                        )
+                        continue
+                    nested_groups = [
+                        self._parse_segments(raw_message=item)
+                        for item in nested_messages
+                    ]
+                for nested_segments in nested_groups:
+                    await self._collect_segment_targets(
+                        segments=nested_segments,
+                        root_forward_id=root_forward_id,
+                        root_message_index=root_message_index,
+                        image_counter=image_counter,
+                        active_forward_ids=active_forward_ids,
+                        targets=targets,
+                        errors=errors,
+                    )
+            finally:
+                active_forward_ids.discard(nested_id)
+
+    def _parse_embedded_segment_groups(
+        self, *, content: JsonValue | None
+    ) -> list[list[MessageSegment]]:
+        """把内嵌转发内容解析为若干有序消息段组。"""
+        if content is None:
             return []
-        nested_targets = self._collect_image_targets(
-            forward_id=segment.data.id or parent_forward_id,
-            raw_messages=[to_json_value(item) for item in content],
-        )
-        return [
-            ForwardImageTarget(
-                forward_id=target.forward_id,
-                message_index=parent_message_index,
-                image_index=target.image_index,
-                file=target.file,
-                file_id=target.file_id,
-                path=target.path,
-                url=target.url,
-                summary=target.summary,
-            )
-            for target in nested_targets
-        ]
+        if isinstance(content, list):
+            try:
+                return [self.segments_adapter.validate_python(content)]
+            except ValidationError:
+                return [
+                    self._parse_segments(raw_message=to_json_value(item))
+                    for item in content
+                ]
+        return [self._parse_segments(raw_message=content)]
 
     def _parse_segments(self, *, raw_message: JsonValue) -> list[MessageSegment]:
         """从合并转发条目中解析消息段。"""
@@ -317,15 +409,24 @@ class GroupForwardImageToolset:
     def _limit_targets(
         self, *, args: GetForwardMessageImagesArgs, targets: list[ForwardImageTarget]
     ) -> tuple[list[ForwardImageTarget], int]:
-        """按模式和配置限制本次读取图片数量。"""
-        configured_limit = (
-            self.max_all_images if args.mode == "all" else self.max_images_per_call
-        )
-        if args.max_images is None:
-            limit = configured_limit
-        else:
-            limit = min(args.max_images, configured_limit)
-        return targets[:limit], max(0, len(targets) - limit)
+        """在下载前同时应用单次、整轮和剩余模型图片额度。"""
+        configured_limits: list[int] = []
+        if self.max_images_per_call > 0:
+            configured_limits.append(self.max_images_per_call)
+        if self.max_images_per_turn > 0:
+            configured_limits.append(
+                max(0, self.max_images_per_turn - self._consumed_images)
+            )
+        remaining_delivery = self._remaining_delivery_slots()
+        if remaining_delivery is not None:
+            configured_limits.append(
+                max(0, remaining_delivery - self._pending_delivery_images)
+            )
+        if args.max_images is not None:
+            configured_limits.append(args.max_images)
+        limit = min(configured_limits) if configured_limits else len(targets)
+        limited = targets[:limit]
+        return limited, max(0, len(targets) - len(limited))
 
     async def _fetch_targets(
         self, *, targets: list[ForwardImageTarget]

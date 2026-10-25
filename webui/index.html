@@ -3,8 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>MyBot 配置控制台</title>
+    <script>
+      // 首帧前按 localStorage.theme（light / dark / system）设置 dark class，避免暗色用户亮闪。
+      // 与 src/lib/theme.ts 保持同一套键名和取值。
+      (function () {
+        try {
+          var theme = localStorage.getItem("theme") || "system";
+          var dark =
+            theme === "dark" ||
+            (theme !== "light" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.documentElement.classList.add("dark");
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      /* 脚本与样式表加载前的底色，和 tokens.css 的 --paper 一致。 */
+      html { background: #f5f7fb; }
+      html.dark { background: #0c1220; }
+    </style>
   </head>
   <body>
     <div id="root"></div>

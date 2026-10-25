@@ -14,9 +14,31 @@ class ChatMessage(StrictModel):
     role: Literal["system", "user", "assistant", "tool"]
     text: str | None = None
     reasoning_content: str | None = None
+    reasoning_details: list[JsonObject] | None = None
     image: list[bytes] | None = None
+    image_detail: Literal["auto", "low", "high"] | None = None
+    video: list[bytes] | None = None
     tool_calls: list["LLMToolCall"] | None = None
     tool_call_id: str | None = None
+
+    def without_videos(self) -> "ChatMessage":
+        """视频仅服务当前轮，长期上下文保留来源文字。"""
+        if not self.video:
+            return self
+        return self.model_copy(update={
+            "video": None,
+            "text": self.text or "（视频已用于当轮多模态请求，长期上下文不保存视频字节）",
+        })
+
+    def without_images(self) -> "ChatMessage":
+        """复制图片消息的文字与工具信息，移除图片字节及其交付参数。"""
+        if not self.image:
+            return self
+        return self.model_copy(update={
+            "image": None,
+            "image_detail": None,
+            "text": self.text if self.text is not None else "（图片内容已用于当轮多模态请求，长期上下文不保存图片字节）",
+        })
 
     @model_validator(mode="after")
     def check_at_least_one(self) -> "ChatMessage":
@@ -29,8 +51,8 @@ class ChatMessage(StrictModel):
             if self.role != "assistant":
                 raise ValueError("只有 assistant 消息可以携带 tool_calls")
             return self
-        if self.text is None and self.image is None:
-            raise ValueError("必须提供 text、image 或 tool_calls")
+        if self.text is None and self.image is None and self.video is None:
+            raise ValueError("必须提供 text、image、video 或 tool_calls")
         return self
 
     @field_serializer("image")
@@ -42,6 +64,11 @@ class ChatMessage(StrictModel):
             return None
         return [f"此图片字节码长度为{len(image_bytes)}" for image_bytes in image]
 
+    @field_serializer("video")
+    def serialize_video(self, video: list[bytes] | None) -> list[str] | None:
+        """日志与调试序列化只记录视频长度。"""
+        return None if video is None else [f"此视频字节码长度为{len(item)}" for item in video]
+
 
 class LLMProviderProtocol(Protocol):
     """描述 LLM 服务实现需要提供的最小接口。"""
@@ -52,6 +79,7 @@ class LLMProviderProtocol(Protocol):
         model: str,
         max_attempts: int | None = None,
         retry_delay_seconds: float | None = None,
+        retry_max_delay_seconds: float | None = None,
     ) -> str:
         """获取文本响应，并允许当前请求覆盖供应商重试参数。"""
         ...
@@ -84,13 +112,6 @@ class LLMProviderWrapper:
     provider: LLMProviderProtocol
 
 
-class LLMContextConfig(StrictModel):
-    """定义 LLM 上下文管理配置。"""
-
-    system_prompt_path: str
-    max_context_tokens: int
-
-
 type LLMToolChoice = Literal["auto", "none", "required"] | JsonObject
 
 
@@ -109,6 +130,8 @@ class LLMToolCall(StrictModel):
     id: str
     name: str
     arguments: JsonObject = Field(default_factory=dict)
+    # 兼容协议随调用返回的签名等状态，工具参数和可见正文都不消费它。
+    extra_content: JsonObject | None = None
 
 
 class LLMResponse(StrictModel):
@@ -116,7 +139,10 @@ class LLMResponse(StrictModel):
 
     content: str | None = None
     reasoning_content: str | None = None
+    reasoning_details: list[JsonObject] | None = None
     tool_calls: list[LLMToolCall] = Field(default_factory=list)
+    finish_reason: str | None = None
+    native_finish_reason: str | None = None
 
 
 class LLMToolExecutor(Protocol):

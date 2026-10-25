@@ -35,18 +35,35 @@ from app.models import (
 from app.models import Json as JsonSegment
 from app.models import to_json_value
 
-FIELD_TEXT_LIMIT = 240
-JSON_TEXT_LIMIT = 600
-MARKDOWN_TEXT_LIMIT = 800
-FORWARD_MAX_ITEMS = 8
-FORWARD_MAX_DEPTH = 2
-
-
 class NapCatMessageTextFormatter:
     """把 NapCat 消息段转换为适合模型阅读的中文摘要。"""
 
-    def __init__(self) -> None:
-        """初始化消息段解析器。"""
+    def __init__(
+        self,
+        *,
+        field_text_limit: int,
+        json_text_limit: int,
+        markdown_text_limit: int,
+        forward_max_items: int,
+        forward_max_depth: int,
+        nested_text_search_max_depth: int,
+    ) -> None:
+        """初始化消息段解析器和用户选择的可选截断策略。"""
+        if min(
+            field_text_limit,
+            json_text_limit,
+            markdown_text_limit,
+            forward_max_items,
+        ) < 0:
+            raise ValueError("文本长度和转发条数限制不能小于 0")
+        if forward_max_depth < -1 or nested_text_search_max_depth < -1:
+            raise ValueError("深度限制不能小于 -1")
+        self.field_text_limit = field_text_limit
+        self.json_text_limit = json_text_limit
+        self.markdown_text_limit = markdown_text_limit
+        self.forward_max_items = forward_max_items
+        self.forward_max_depth = forward_max_depth
+        self.nested_text_search_max_depth = nested_text_search_max_depth
         self.segment_adapter: TypeAdapter[MessageSegment] = TypeAdapter(MessageSegment)
         self.segments_adapter: TypeAdapter[list[MessageSegment]] = TypeAdapter(
             list[MessageSegment]
@@ -60,6 +77,7 @@ class NapCatMessageTextFormatter:
         include_at: bool = True,
         include_reply: bool = True,
         include_image_details: bool = True,
+        _depth: int = 0,
     ) -> str:
         """把一组消息段转换为低噪音文本。"""
         text_parts: list[str] = []
@@ -77,7 +95,7 @@ class NapCatMessageTextFormatter:
                 continue
             formatted_segment = self._format_segment_text(
                 segment=segment,
-                depth=0,
+                depth=_depth,
                 include_at=include_at,
                 include_reply=include_reply,
             )
@@ -222,7 +240,7 @@ class NapCatMessageTextFormatter:
                 "应主动调用 qq__get_forward_message，并把该 Forward 所在群消息"
                 "元数据中的“消息 ID”作为 message_id。）"
             )
-        if depth >= FORWARD_MAX_DEPTH:
+        if self.forward_max_depth >= 0 and depth >= self.forward_max_depth:
             return f"{header}\n（合并转发展开达到深度上限，剩余内容已省略）"
         content = self._format_forward_content(
             value=segment.data.content,
@@ -232,23 +250,28 @@ class NapCatMessageTextFormatter:
 
     def _format_forward_content(self, *, value: JsonValue, depth: int) -> str:
         """把合并转发的内嵌内容转换为文本。"""
-        if depth > FORWARD_MAX_DEPTH:
+        if self.forward_max_depth >= 0 and depth > self.forward_max_depth:
             return "（合并转发展开达到深度上限，剩余内容已省略）"
         parsed_segments = self._try_parse_message_segments(value=value)
         if parsed_segments is not None:
             return self.format_segments(
                 segments=parsed_segments,
                 images_attached=False,
+                _depth=depth,
             )
         if isinstance(value, list):
             if not value:
                 return "（合并转发内容为空）"
             formatted_items: list[str] = []
-            visible_items = value[:FORWARD_MAX_ITEMS]
+            visible_items = (
+                value
+                if self.forward_max_items == 0
+                else value[: self.forward_max_items]
+            )
             for index, item in enumerate(visible_items, start=1):
                 item_text = self._format_forward_item(value=item, depth=depth)
                 formatted_items.append(f"{index}. {item_text}")
-            remaining_count = len(value) - FORWARD_MAX_ITEMS
+            remaining_count = len(value) - len(visible_items)
             if remaining_count > 0:
                 formatted_items.append(
                     f"（其余 {remaining_count} 条合并转发内容已省略）"
@@ -257,8 +280,8 @@ class NapCatMessageTextFormatter:
         if isinstance(value, dict):
             return self._format_forward_item(value=value, depth=depth)
         if isinstance(value, str):
-            return self._truncate_text(text=value, limit=FIELD_TEXT_LIMIT)
-        return self._format_json_value(value=value, limit=FIELD_TEXT_LIMIT)
+            return self._truncate_text(text=value, limit=self.field_text_limit)
+        return self._format_json_value(value=value, limit=self.field_text_limit)
 
     def _format_forward_item(self, *, value: JsonValue, depth: int) -> str:
         """格式化合并转发中的单条消息或节点。"""
@@ -267,6 +290,7 @@ class NapCatMessageTextFormatter:
             return self.format_segments(
                 segments=[parsed_segment],
                 images_attached=False,
+                _depth=depth,
             )
         if isinstance(value, dict):
             sender = self._format_forward_sender(payload=value)
@@ -283,8 +307,8 @@ class NapCatMessageTextFormatter:
         if isinstance(value, list):
             return self._format_forward_content(value=value, depth=depth + 1)
         if isinstance(value, str):
-            return self._truncate_text(text=value, limit=FIELD_TEXT_LIMIT)
-        return self._format_json_value(value=value, limit=FIELD_TEXT_LIMIT)
+            return self._truncate_text(text=value, limit=self.field_text_limit)
+        return self._format_json_value(value=value, limit=self.field_text_limit)
 
     def _format_node_segment(self, *, segment: Node, depth: int) -> str:
         """格式化合并转发节点消息段。"""
@@ -296,12 +320,13 @@ class NapCatMessageTextFormatter:
         if isinstance(segment.data.content, str):
             content = self._truncate_text(
                 text=segment.data.content,
-                limit=FIELD_TEXT_LIMIT,
+                limit=self.field_text_limit,
             )
         else:
             content = self.format_segments(
                 segments=segment.data.content,
                 images_attached=False,
+                _depth=depth + 1,
             )
         if sender is None:
             return f"（转发节点）\n{content}"
@@ -317,12 +342,12 @@ class NapCatMessageTextFormatter:
         if isinstance(normalized_payload, list):
             summary = self._format_json_value(
                 value=normalized_payload,
-                limit=JSON_TEXT_LIMIT,
+                limit=self.json_text_limit,
             )
             return f"（{label}）\n摘要: {summary}"
         text = self._truncate_text(
             text=str(normalized_payload),
-            limit=FIELD_TEXT_LIMIT,
+            limit=self.field_text_limit,
         )
         return f"（{label}）\n内容: {text}"
 
@@ -352,7 +377,7 @@ class NapCatMessageTextFormatter:
         if not fields:
             fields.append(
                 "摘要: "
-                + self._format_json_value(value=payload, limit=JSON_TEXT_LIMIT)
+                + self._format_json_value(value=payload, limit=self.json_text_limit)
             )
         return f"（{label}）\n" + "\n".join(fields)
 
@@ -400,7 +425,7 @@ class NapCatMessageTextFormatter:
             return "（Markdown 消息，内容为空）"
         return (
             "（Markdown 消息）\n"
-            + self._truncate_text(text=content, limit=MARKDOWN_TEXT_LIMIT)
+            + self._truncate_text(text=content, limit=self.markdown_text_limit)
         )
 
     def _format_light_app_segment(self, *, segment: LightApp) -> str:
@@ -440,7 +465,9 @@ class NapCatMessageTextFormatter:
         if segment.data.raw is not None:
             fields.append(
                 "原始摘要: "
-                + self._format_json_value(value=segment.data.raw, limit=FIELD_TEXT_LIMIT)
+                + self._format_json_value(
+                    value=segment.data.raw, limit=self.field_text_limit
+                )
             )
         return "（系统表情）\n" + "\n".join(fields)
 
@@ -513,14 +540,18 @@ class NapCatMessageTextFormatter:
 
     def _format_xml_segment(self, *, segment: Xml) -> str:
         """格式化 XML 消息段。"""
-        content = self._truncate_text(text=segment.data.data, limit=JSON_TEXT_LIMIT)
+        content = self._truncate_text(
+            text=segment.data.data, limit=self.json_text_limit
+        )
         return f"（XML 消息）\n内容: {content}"
 
     def _format_unknown_segment(self, *, segment: UnknownSegment) -> str:
         """格式化未显式支持的消息段，避免整段内容对 AI 不可见。"""
         if segment.data is None:
             return f"（暂不支持的消息段: {segment.type}）"
-        content = self._format_json_value(value=segment.data, limit=JSON_TEXT_LIMIT)
+        content = self._format_json_value(
+            value=segment.data, limit=self.json_text_limit
+        )
         return f"（暂不支持的消息段: {segment.type}，内容: {content}）"
 
     def _format_media_fields(
@@ -629,7 +660,10 @@ class NapCatMessageTextFormatter:
         self, *, value: JsonValue, keys: tuple[str, ...], depth: int = 0
     ) -> str | None:
         """在卡片 JSON 中按候选键递归寻找第一个可读文本。"""
-        if depth > 3:
+        if (
+            self.nested_text_search_max_depth >= 0
+            and depth > self.nested_text_search_max_depth
+        ):
             return None
         if isinstance(value, dict):
             for key in keys:
@@ -665,7 +699,7 @@ class NapCatMessageTextFormatter:
         if cleaned_value is None:
             return
         fields.append(
-            f"{label}: {self._truncate_text(text=cleaned_value, limit=FIELD_TEXT_LIMIT)}"
+            f"{label}: {self._truncate_text(text=cleaned_value, limit=self.field_text_limit)}"
         )
 
     def _set_optional_payload_text(
@@ -692,9 +726,9 @@ class NapCatMessageTextFormatter:
         return f"{size / 1024 / 1024:.1f} MB"
 
     def _truncate_text(self, *, text: str, limit: int) -> str:
-        """按固定上限截断长文本并标记截断状态。"""
+        """只在用户配置上限时截断文本并标记状态。"""
         cleaned_text = text.strip()
-        if len(cleaned_text) <= limit:
+        if limit == 0 or len(cleaned_text) <= limit:
             return cleaned_text
         return f"{cleaned_text[:limit]}...（已截断）"
 
