@@ -11,7 +11,6 @@ import {
   model,
   num,
   provider,
-  secret,
   select,
   seg,
   sw,
@@ -46,18 +45,6 @@ export const PLUGINS: PluginMeta[] = [
     name: "自动解禁",
     desc: "保护列表里的用户被禁言后自动解禁。",
     execution: { consumers_count: 1, priority: 10 },
-  },
-  {
-    id: "image_generate",
-    name: "生图",
-    desc: "用 OpenAI Images 兼容接口按群友的描述生成图片。",
-    execution: { consumers_count: 5, priority: 40 },
-  },
-  {
-    id: "neavo_image_generate",
-    name: "Neavo 生图",
-    desc: "调用 Neavo 图像服务生成图片或反推图片描述。",
-    execution: { consumers_count: 5, priority: 100 },
   },
   {
     id: "recall_bot_image",
@@ -488,63 +475,6 @@ const AUTO_UNBAN: SectionDef = {
   fields: [ids("protected_users", "保护用户 QQ", { span: 3, placeholder: "QQ 号", addLabel: "添加用户" })],
 };
 
-const IMAGE_GENERATE_MAIN: SectionDef = {
-  id: "image_generate",
-  title: "模型与命令",
-  base: ["plugins", "image_generate"],
-  desc: "生图模型、触发命令与生效群。",
-  fields: [
-    provider("model.provider"),
-    model("model.name", "model.provider"),
-    text("command", "生图命令", { mono: true, required: true }),
-    text("help_command", "帮助命令", { mono: true, required: true }),
-    ids("groups", "生效群号", { span: 2, placeholder: "QQ 群号", addLabel: "添加群号" }),
-  ],
-};
-
-const IMAGE_GENERATE_INPUT: SectionDef = {
-  id: "image_generate_input",
-  title: "参考图读取",
-  base: ["plugins", "image_generate"],
-  desc: "群友附带参考图时的下载限制。",
-  fields: [
-    int("fetch_concurrency", "取图并发数", { min: 1 }),
-    num("download_timeout_seconds", "下载超时", { unit: "秒", gt: 0 }),
-    int("max_input_image_bytes", "输入单图体积上限", { unit: "字节", min: 0, zero: "不限", bytes: true }),
-  ],
-};
-
-const NEAVO_SERVICE: SectionDef = {
-  id: "neavo_service",
-  title: "Neavo 服务",
-  base: ["plugins", "neavo_image_generate"],
-  desc: "服务地址、鉴权与轮询节奏。",
-  fields: [
-    text("base_url", "服务地址", { mono: true, span: 2, required: true, placeholder: "https://image-api.example.com" }),
-    secret("api_token", "API Token", { desc: "留空时不发送 Authorization" }),
-    num("poll_interval_seconds", "轮询间隔", { unit: "秒", gt: 0 }),
-    num("generation_timeout_seconds", "生成超时", { unit: "秒", gt: 0 }),
-    num("request_timeout_seconds", "请求超时", { unit: "秒", gt: 0 }),
-  ],
-};
-
-const NEAVO_COMMANDS: SectionDef = {
-  id: "neavo_commands",
-  title: "命令与限制",
-  base: ["plugins", "neavo_image_generate"],
-  desc: "触发命令、生效群与输入输出限制。",
-  fields: [
-    text("generate_command", "生图命令", { mono: true, required: true }),
-    text("describe_command", "反推命令", { mono: true, required: true }),
-    ids("groups", "生效群号", { placeholder: "QQ 群号", addLabel: "添加群号" }),
-    int("max_prompt_chars", "描述最大字符数", { unit: "字", min: 0, zero: "不限" }),
-    int("max_input_image_bytes", "反推输入体积上限", { unit: "字节", min: 0, zero: "不限", bytes: true }),
-    int("max_output_image_bytes", "生成结果体积上限", { unit: "字节", min: 0, zero: "不限", bytes: true }),
-    int("max_consecutive_poll_errors", "连续轮询错误上限", { unit: "次", min: 0, zero: "只受生成总超时限制" }),
-    tags("allowed_input_mime_types", "允许的反推输入 MIME", { span: 2, mono: true, unique: true, placeholder: "image/png", desc: "空列表表示不限制；图片内容仍需可识别", addLabel: "添加 MIME 类型" }),
-  ],
-};
-
 const RECALL: SectionDef = {
   id: "recall_bot_image",
   title: "撤回命令",
@@ -561,8 +491,6 @@ const RECALL: SectionDef = {
 export const PLUGIN_ROWS: Record<Exclude<PluginId, "ai_group_chat">, SectionDef[][]> = {
   group_notice: [[GROUP_NOTICE]],
   auto_unban: [[AUTO_UNBAN]],
-  image_generate: [[IMAGE_GENERATE_MAIN], [IMAGE_GENERATE_INPUT]],
-  neavo_image_generate: [[NEAVO_SERVICE], [NEAVO_COMMANDS]],
   recall_bot_image: [[RECALL]],
 };
 
@@ -578,31 +506,6 @@ export function defaultPluginConfig(id: PluginId, config: JsonObject): JsonObjec
       return { groups: [], send_avatar: true };
     case "auto_unban":
       return { protected_users: [] };
-    case "image_generate":
-      return {
-        groups: [],
-        model: { provider: firstProvider(config), name: "" },
-        fetch_concurrency: 16,
-        download_timeout_seconds: 20,
-        max_input_image_bytes: 0,
-        command: "/生图",
-        help_command: "/help生图",
-      };
-    case "neavo_image_generate":
-      return {
-        groups: [],
-        base_url: "",
-        poll_interval_seconds: 3,
-        generation_timeout_seconds: 600,
-        request_timeout_seconds: 30,
-        max_prompt_chars: 4096,
-        max_input_image_bytes: 10485760,
-        max_output_image_bytes: 20971520,
-        allowed_input_mime_types: ["image/jpeg", "image/png", "image/webp"],
-        max_consecutive_poll_errors: 3,
-        generate_command: "#生图",
-        describe_command: "#反推",
-      };
     case "recall_bot_image":
       return { command: "#撤回", failure_detail_max_chars: 160 };
   }

@@ -14,10 +14,8 @@ from .schemas import (
     AIGroupConfig,
     AutoUnbanConfig,
     GroupNoticeConfig,
-    ImageGenerateConfig,
     ModelRef,
     MyBotConfig,
-    NeavoImageGenerateConfig,
     RecallBotImageConfig,
 )
 
@@ -83,8 +81,6 @@ type PluginConfigValue = (
     MaterializedAIGroupChatConfig
     | GroupNoticeConfig
     | AutoUnbanConfig
-    | ImageGenerateConfig
-    | NeavoImageGenerateConfig
     | RecallBotImageConfig
 )
 
@@ -97,8 +93,6 @@ class PluginConfigSnapshot:
     ai_group_chat: MaterializedAIGroupChatConfig | None
     group_notice: GroupNoticeConfig | None
     auto_unban: AutoUnbanConfig | None
-    image_generate: ImageGenerateConfig | None
-    neavo_image_generate: NeavoImageGenerateConfig | None
     recall_bot_image: RecallBotImageConfig | None
     referenced_files: frozenset[Path]
 
@@ -111,10 +105,6 @@ class PluginConfigSnapshot:
                 return self.group_notice
             case "auto_unban":
                 return self.auto_unban
-            case "image_generate":
-                return self.image_generate
-            case "neavo_image_generate":
-                return self.neavo_image_generate
             case "recall_bot_image":
                 return self.recall_bot_image
             case _:
@@ -342,21 +332,11 @@ def _materialize_plugins(
             turn_instruction=turn_instruction,
         )
 
-    image_generate = config.plugins.image_generate
-    if image_generate is not None:
-        _validate_model_ref(
-            reference=image_generate.model,
-            provider_ids=provider_ids,
-            label="plugins.image_generate.model",
-        )
-
     return PluginConfigSnapshot(
         revision=revision,
         ai_group_chat=materialized_ai,
         group_notice=config.plugins.group_notice,
         auto_unban=config.plugins.auto_unban,
-        image_generate=image_generate,
-        neavo_image_generate=config.plugins.neavo_image_generate,
         recall_bot_image=config.plugins.recall_bot_image,
         referenced_files=frozenset(referenced_files),
     )
@@ -466,8 +446,6 @@ def _changed_plugins(
         "ai_group_chat",
         "group_notice",
         "auto_unban",
-        "image_generate",
-        "neavo_image_generate",
         "recall_bot_image",
     )
     return tuple(

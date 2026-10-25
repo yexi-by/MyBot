@@ -282,9 +282,12 @@ class LLMRequestRetryTest(unittest.IsolatedAsyncioTestCase):
             response=httpx.Response(401, request=httpx.Request("GET", "https://model.invalid")),
             body={"error": "test-key"},
         )
-        with patch.object(inner, "get_image", side_effect=error):
+        with patch.object(inner, "get_ai_response_with_tools", side_effect=error):
             try:
-                await handler.get_image(ChatMessage(role="user", text="test"), model="image", provider="main")
+                await handler.get_ai_response_with_tools(
+                    [ChatMessage(role="user", text="test")],
+                    model_name="chat", provider="main", tools=[],
+                )
             except LLMRequestError as exc:
                 formatted = "".join(traceback.format_exception(exc))
                 self.assertIn("HTTP 401", str(exc))

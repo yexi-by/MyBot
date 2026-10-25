@@ -131,21 +131,3 @@ class LLMHandler:
             )
         except (APIError, httpx.RequestError, TimeoutError, ValueError) as exc:
             raise LLMRequestError(provider_error_message(exc)) from None
-
-    async def get_image(
-        self,
-        message: ChatMessage,
-        model: str,
-        provider: str,
-    ) -> str:
-        """获取指定模型厂商的图片响应。"""
-        llm = self.services.get(provider)
-        if llm is None:
-            raise ValueError(f"未定义的 LLM provider: {provider}")
-        try:
-            return await llm.provider.get_image(
-                message=message,
-                model=model,
-            )
-        except (APIError, httpx.RequestError, TimeoutError, ValueError) as exc:
-            raise LLMRequestError(provider_error_message(exc)) from None

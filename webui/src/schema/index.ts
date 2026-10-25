@@ -273,15 +273,6 @@ function checkRetryPair(issues: IssueMap, config: JsonObject, base: Path, initia
   }
 }
 
-function checkDistinct(issues: IssueMap, config: JsonObject, base: Path, a: string, b: string, message: string) {
-  const first = getIn(config, [...base, a]);
-  const second = getIn(config, [...base, b]);
-  const key = pathKey([...base, b]);
-  if (typeof first === "string" && first.trim() !== "" && first.trim() === String(second ?? "").trim() && !issues.has(key)) {
-    issues.set(key, message);
-  }
-}
-
 /** 本地能判断的错误：数字范围、必填文本、列表重复、成对参数；其余交给后端 422。 */
 export function validateClient(config: JsonObject): IssueMap {
   const issues: IssueMap = new Map();
@@ -338,8 +329,6 @@ export function validateClient(config: JsonObject): IssueMap {
       });
     }
   }
-  checkDistinct(issues, config, ["plugins", "image_generate"], "command", "help_command", "不能与生图命令相同");
-  checkDistinct(issues, config, ["plugins", "neavo_image_generate"], "generate_command", "describe_command", "不能与生图命令相同");
   return issues;
 }
 

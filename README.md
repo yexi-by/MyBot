@@ -273,29 +273,6 @@ max_video_bytes = 20971520
 
 `max_per_turn` 和 `max_video_bytes` 为 `0` 时不限。超限、下载失败或超时会返回明确的部分错误，其余视频与文字继续处理。归档文件受系统「媒体存储」的 `storage.images.max_bytes` 限制；模型输入受这里的 `max_video_bytes` 限制。原文件持久归档；模型请求里的视频字节只保留到本轮结束，后续轮次可以通过引用原消息重新读取。示例配置默认关闭视频输入，以便按主模型能力选择开启。
 
-### Neavo 群聊图像插件
-
-群成员使用配置的 `generate_command` 触发文生图，使用 `describe_command` 加图片或回复含图消息进行图片反推。输入和输出图片分别由 `max_input_image_bytes`、`max_output_image_bytes` 控制，`0` 表示不限；反推格式列表由 `allowed_input_mime_types` 控制，空列表表示不设 MIME 白名单。
-
-```toml
-[plugins.neavo_image_generate]
-groups = ["123456789"]
-base_url = "https://image-api.example.com"
-api_token = "CHANGE_ME"
-poll_interval_seconds = 3
-generation_timeout_seconds = 600
-request_timeout_seconds = 30
-max_prompt_chars = 4096
-max_input_image_bytes = 10485760
-max_output_image_bytes = 20971520
-allowed_input_mime_types = ["image/jpeg", "image/png", "image/webp"]
-max_consecutive_poll_errors = 3
-generate_command = "#生图"
-describe_command = "#反推"
-```
-
-省略整个插件节即可停用；Neavo 服务不要求鉴权时可以省略 `api_token`。实际 Token 不得提交或写入日志。
-
 ## 运行边界
 
 - `app/api/`：NapCat Action 封装。

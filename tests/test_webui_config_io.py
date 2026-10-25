@@ -15,7 +15,7 @@ from app.webui.config_io import (
     read_config_payload,
     write_config_payload,
 )
-from tests.config_helpers import minimal_config_toml
+from tests.config_helpers import build_ai_group_chat_config, minimal_config_toml
 
 
 def commented_config() -> str:
@@ -451,15 +451,10 @@ class WebUIConfigIOTest(unittest.TestCase):
             new_llm["providers"] = new_providers
             new_config["llm"] = new_llm
             new_plugins = dict(payload.config["plugins"])
-            new_plugins["image_generate"] = {
-                "groups": ["40000"],
-                "model": {"provider": "second", "name": "image"},
-                "fetch_concurrency": 16,
-                "download_timeout_seconds": 20,
-                "max_input_image_bytes": 0,
-                "command": "/生图",
-                "help_command": "/help生图",
-            }
+            (Path(temp_dir) / "extra.md").write_text("通用要求", encoding="utf-8")
+            new_plugins["ai_group_chat"] = build_ai_group_chat_config(
+                supports_images=True, provider="second"
+            ).model_dump(mode="json", exclude_none=True)
             new_config["plugins"] = new_plugins
             result = write_config_payload(
                 config_file=config_file,

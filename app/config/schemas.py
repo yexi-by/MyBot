@@ -624,116 +624,6 @@ class AutoUnbanConfig(ConfigModel):
         return value
 
 
-class ImageGenerateConfig(ConfigModel):
-    """OpenAI Images 生图插件配置。"""
-
-    groups: tuple[NapCatId, ...]
-    model: ModelRef
-    fetch_concurrency: int = Field(ge=1)
-    download_timeout_seconds: float = Field(gt=0)
-    max_input_image_bytes: int = Field(ge=0)
-    command: str
-    help_command: str
-
-    @field_validator("groups")
-    @classmethod
-    def validate_groups(cls, value: tuple[NapCatId, ...]) -> tuple[NapCatId, ...]:
-        _validate_unique_ids(value, label="image_generate.groups")
-        return value
-
-    @field_validator("command", "help_command")
-    @classmethod
-    def validate_commands(cls, value: str) -> str:
-        """拒绝空白命令。"""
-        command = value.strip()
-        if command == "":
-            raise ValueError("生图命令不能为空")
-        return command
-
-    @model_validator(mode="after")
-    def validate_distinct_commands(self) -> "ImageGenerateConfig":
-        """执行命令和帮助命令不能相同。"""
-        if self.command == self.help_command:
-            raise ValueError("command 与 help_command 不能相同")
-        return self
-
-
-class NeavoImageGenerateConfig(ConfigModel):
-    """Neavo 群聊图像插件配置。"""
-
-    groups: tuple[NapCatId, ...]
-    base_url: str
-    api_token: SecretStr | None = None
-    poll_interval_seconds: float = Field(gt=0, allow_inf_nan=False)
-    generation_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
-    request_timeout_seconds: float = Field(gt=0, allow_inf_nan=False)
-    max_prompt_chars: int = Field(ge=0)
-    max_input_image_bytes: int = Field(ge=0)
-    max_output_image_bytes: int = Field(ge=0)
-    allowed_input_mime_types: tuple[str, ...]
-    max_consecutive_poll_errors: int = Field(ge=0)
-    generate_command: str
-    describe_command: str
-
-    @field_validator("allowed_input_mime_types")
-    @classmethod
-    def normalize_allowed_input_mime_types(
-        cls, value: tuple[str, ...]
-    ) -> tuple[str, ...]:
-        """规范化可选输入 MIME 白名单；空列表表示不限制。"""
-        normalized = tuple(item.strip().lower() for item in value)
-        if any(item == "" for item in normalized):
-            raise ValueError("allowed_input_mime_types 不能包含空值")
-        if len(normalized) != len(set(normalized)):
-            raise ValueError("allowed_input_mime_types 不能包含重复值")
-        return normalized
-
-    @field_validator("groups")
-    @classmethod
-    def validate_groups(cls, value: tuple[NapCatId, ...]) -> tuple[NapCatId, ...]:
-        _validate_unique_ids(value, label="neavo_image_generate.groups")
-        return value
-
-    @field_validator("generate_command", "describe_command")
-    @classmethod
-    def validate_commands(cls, value: str) -> str:
-        """拒绝空白命令。"""
-        command = value.strip()
-        if command == "":
-            raise ValueError("Neavo 命令不能为空")
-        return command
-
-    @field_validator("base_url")
-    @classmethod
-    def validate_base_url(cls, value: str) -> str:
-        """校验并规范化 Neavo 服务根地址。"""
-        base_url = value.strip().rstrip("/")
-        parsed = urlsplit(base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("base_url 必须是有效的 HTTP 或 HTTPS 地址")
-        if parsed.query or parsed.fragment:
-            raise ValueError("base_url 不允许包含查询参数或片段")
-        return base_url
-
-    @field_validator("api_token")
-    @classmethod
-    def validate_api_token(cls, value: SecretStr | None) -> SecretStr | None:
-        """空白 Token 表示 Neavo 服务不需要 Bearer 鉴权。"""
-        if value is None:
-            return None
-        token = value.get_secret_value().strip()
-        if token == "":
-            return None
-        return SecretStr(token)
-
-    @model_validator(mode="after")
-    def validate_distinct_commands(self) -> "NeavoImageGenerateConfig":
-        """两种 Neavo 操作必须使用不同命令。"""
-        if self.generate_command == self.describe_command:
-            raise ValueError("generate_command 与 describe_command 不能相同")
-        return self
-
-
 class RecallBotImageConfig(ConfigModel):
     """机器人图片撤回插件配置。"""
 
@@ -797,8 +687,6 @@ class PluginsConfig(ConfigModel):
     ai_group_chat: AIGroupChatConfig | None = None
     group_notice: GroupNoticeConfig | None = None
     auto_unban: AutoUnbanConfig | None = None
-    image_generate: ImageGenerateConfig | None = None
-    neavo_image_generate: NeavoImageGenerateConfig | None = None
     recall_bot_image: RecallBotImageConfig | None = None
 
 

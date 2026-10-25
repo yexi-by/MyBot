@@ -13,7 +13,7 @@ import uvicorn
 
 from app.webui import PowerController
 from app.webui.dev import create_dev_app
-from tests.config_helpers import minimal_config_toml
+from tests.config_helpers import build_ai_group_chat_config, minimal_config_toml
 
 
 def base_config() -> str:
@@ -154,15 +154,10 @@ class WebUIRoutesTest(unittest.IsolatedAsyncioTestCase):
                 get_response = await client.get("/api/config")
                 current = get_response.json()
                 payload: dict[str, Any] = current["config"]
-                payload["plugins"]["image_generate"] = {
-                    "groups": [],
-                    "model": {"provider": "missing", "name": "image-model"},
-                    "fetch_concurrency": 16,
-                    "download_timeout_seconds": 20,
-                    "max_input_image_bytes": 0,
-                    "command": "/生图",
-                    "help_command": "/help生图",
-                }
+                (root / "extra.md").write_text("通用要求", encoding="utf-8")
+                payload["plugins"]["ai_group_chat"] = build_ai_group_chat_config(
+                    supports_images=True, provider="missing"
+                ).model_dump(mode="json", exclude_none=True)
                 response = await client.put(
                     "/api/config",
                     json={"config": payload, "base_sha256": current["sha256"]},
@@ -174,8 +169,8 @@ class WebUIRoutesTest(unittest.IsolatedAsyncioTestCase):
             [(issue["location"], issue["path"]) for issue in issues],
             [
                 (
-                    "plugins.image_generate.model.provider",
-                    ["plugins", "image_generate", "model", "provider"],
+                    "plugins.ai_group_chat.model.provider",
+                    ["plugins", "ai_group_chat", "model", "provider"],
                 )
             ],
         )

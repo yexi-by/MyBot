@@ -19,7 +19,7 @@ from app.services.napcat.video_reader import NapCatVideoReader, NapCatVideoResou
 from tests.test_ai_group_chat_message_builder import (
     CONTEXT_STARTED_AT, EmptyDatabase, MissingImageBot, ReplyDatabase, build_config, build_message,
 )
-from tests.test_openai_image_generation import InspectableOpenAIService
+from tests.test_openai_chat_formatting import InspectableOpenAIService
 
 
 VIDEO_BYTES = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"

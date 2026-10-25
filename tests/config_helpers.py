@@ -8,9 +8,7 @@ from app.config import (
     AutoUnbanConfig,
     ConfigManager,
     GroupNoticeConfig,
-    ImageGenerateConfig,
     MaterializedAIGroupChatConfig,
-    NeavoImageGenerateConfig,
     PluginConfigSnapshot,
     PluginConfigView,
     RecallBotImageConfig,
@@ -112,17 +110,9 @@ def minimal_config_toml(
         consumers_count = 1
         priority = 10
 
-        [plugin_execution.plugins.image_generate]
-        consumers_count = 5
-        priority = 40
-
         [plugin_execution.plugins.recall_bot_image]
         consumers_count = 5
         priority = 90
-
-        [plugin_execution.plugins.neavo_image_generate]
-        consumers_count = 5
-        priority = 100
 
         {plugin_comment}[plugins.group_notice]
         groups = ["{group_id}"]
@@ -245,8 +235,6 @@ def build_plugin_snapshot(
     ai_group_chat: MaterializedAIGroupChatConfig | None = None,
     group_notice: GroupNoticeConfig | None = None,
     auto_unban: AutoUnbanConfig | None = None,
-    image_generate: ImageGenerateConfig | None = None,
-    neavo_image_generate: NeavoImageGenerateConfig | None = None,
     recall_bot_image: RecallBotImageConfig | None = None,
 ) -> PluginConfigSnapshot:
     """构造不引用磁盘文件的插件配置快照。"""
@@ -255,8 +243,6 @@ def build_plugin_snapshot(
         ai_group_chat=ai_group_chat,
         group_notice=group_notice,
         auto_unban=auto_unban,
-        image_generate=image_generate,
-        neavo_image_generate=neavo_image_generate,
         recall_bot_image=recall_bot_image,
         referenced_files=frozenset(),
     )

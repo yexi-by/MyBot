@@ -160,8 +160,6 @@ class SettingsConfigTest(unittest.TestCase):
         cases = (
             ("group_notice", "groups"),
             ("auto_unban", "protected_users"),
-            ("image_generate", "groups"),
-            ("neavo_image_generate", "groups"),
         )
         for section_name, field_name in cases:
             with self.subTest(section=section_name, field=field_name):

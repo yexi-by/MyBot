@@ -27,7 +27,6 @@ const PROVIDER_SECTION: SectionDef = {
 const REFERENCES: [PathSeg[], string][] = [
   [["plugins", "ai_group_chat", "model", "provider"], "AI 群聊 · 主模型"],
   [["plugins", "ai_group_chat", "vision", "model", "provider"], "AI 群聊 · 视觉模型"],
-  [["plugins", "image_generate", "model", "provider"], "生图 · 模型"],
 ];
 
 function providerRefs(config: JsonObject, id: string): string[] {
@@ -161,7 +160,7 @@ export default function ProvidersPage() {
         {ids.length === 0 ? (
           <div className="empty">
             <p className="empty-title">还没有配置模型服务</p>
-            <p className="empty-desc">在下面输入一个 Provider ID 即可添加；AI 群聊和生图插件都从这里选择服务。</p>
+            <p className="empty-desc">在下面输入一个 Provider ID 即可添加；AI 群聊从这里选择服务。</p>
           </div>
         ) : (
           ids.map((id) => <ProviderCard key={id} id={id} />)

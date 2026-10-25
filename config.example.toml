@@ -105,17 +105,9 @@ priority = 10
 consumers_count = 1
 priority = 10
 
-[plugin_execution.plugins.image_generate]
-consumers_count = 5
-priority = 40
-
 [plugin_execution.plugins.recall_bot_image]
 consumers_count = 5
 priority = 90
-
-[plugin_execution.plugins.neavo_image_generate]
-consumers_count = 5
-priority = 100
 
 [plugins.ai_group_chat]
 # 引用的提示词默认由仓库 config.example/ 提供（默认人格：耄耋），复制到 config/ 后即可使用。
@@ -212,31 +204,6 @@ send_avatar = true
 
 [plugins.auto_unban]
 protected_users = ["10000"]
-
-[plugins.image_generate]
-groups = ["123456789"]
-model = { provider = "deepseek", name = "image-model" }
-fetch_concurrency = 16
-download_timeout_seconds = 20
-max_input_image_bytes = 0
-command = "/生图"
-help_command = "/help生图"
-
-[plugins.neavo_image_generate]
-groups = ["123456789"]
-base_url = "https://image-api.example.com"
-api_token = "CHANGE_ME"
-# Neavo 服务不要求鉴权时可删除 api_token。
-poll_interval_seconds = 3
-generation_timeout_seconds = 600
-request_timeout_seconds = 30
-max_prompt_chars = 4096
-max_input_image_bytes = 10485760
-max_output_image_bytes = 20971520
-allowed_input_mime_types = ["image/jpeg", "image/png", "image/webp"]
-max_consecutive_poll_errors = 3
-generate_command = "#生图"
-describe_command = "#反推"
 
 [plugins.recall_bot_image]
 command = "#撤回"

@@ -35,12 +35,3 @@ class LLMProvider(ABC):
         """获取可能包含工具调用的结构化响应。"""
         _ = (messages, model, tools, tool_choice, parallel_tool_calls)
         raise NotImplementedError(f"{self.__class__.__name__} 不支持工具调用")
-
-    async def get_image(
-        self,
-        message: "ChatMessage",
-        model: str,
-    ) -> str:
-        """生成图片，不支持该能力的服务商会显式报错。"""
-        _ = (message, model)
-        raise NotImplementedError(f"{self.__class__.__name__} 不支持图像生成功能")

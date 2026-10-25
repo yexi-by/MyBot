@@ -146,32 +146,3 @@ class ResilientLLMProvider(LLMProvider):
                     raise ValueError("LLM 提供商返回了空工具响应")
                 return response
         raise RuntimeError("LLM 工具接口重试次数已耗尽")
-
-    @override
-    async def get_image(
-        self,
-        message: ChatMessage,
-        model: str,
-    ) -> str:
-        """调用底层图片接口，并在可恢复错误时重试。"""
-        retrier = create_retry_manager(
-            max_attempts=self.provider_config.max_attempts,
-            retry_delay_seconds=self.provider_config.retry_delay_seconds,
-            retry_max_delay_seconds=self.provider_config.retry_max_delay_seconds,
-            error_types=(
-                RateLimitError,
-                APIConnectionError,
-                APITimeoutError,
-                ValueError,
-            ),
-        )
-        async for attempt in retrier:
-            with attempt:
-                response = await self.inner_provider.get_image(
-                    message=message,
-                    model=model,
-                )
-                if not response:
-                    raise ValueError("LLM 提供商返回了空图片响应")
-                return response
-        raise RuntimeError("LLM 图片接口重试次数已耗尽")

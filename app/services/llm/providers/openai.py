@@ -16,7 +16,6 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_message_function_tool_call import Function
-from openai.types.images_response import ImagesResponse
 from pydantic import TypeAdapter, ValidationError
 
 from app.models import JsonObject
@@ -57,7 +56,7 @@ EXTRA_CONTENT_ADAPTER: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 
 class OpenAIService(LLMProvider):
-    """通过 OpenAI Chat Completions 和 Images 协议访问模型服务。"""
+    """通过 OpenAI Chat Completions 协议访问模型服务。"""
 
     def __init__(self, client: AsyncOpenAI) -> None:
         """保存 OpenAI 异步客户端。"""
@@ -249,28 +248,6 @@ class OpenAIService(LLMProvider):
             formatted_tools.append(cast(ChatCompletionToolParam, cast(object, raw_tool)))
         return formatted_tools
 
-    def _build_image_files(
-        self,
-        images: list[bytes],
-    ) -> list[tuple[str, bytes, str]]:
-        """将图片字节转换为 OpenAI 编辑接口所需的文件列表。"""
-        files: list[tuple[str, bytes, str]] = []
-        for index, image_bytes in enumerate(images, start=1):
-            mime_type = detect_mime_type(image_bytes)
-            extension = mime_type.split("/")[-1]
-            file_name = f"input_{index}.{extension}"
-            files.append((file_name, image_bytes, mime_type))
-        return files
-
-    def _extract_base64_image(self, response: ImagesResponse) -> str:
-        """从图片接口响应中提取首张 base64 图片。"""
-        if not response.data:
-            raise ValueError("图片接口返回了空结果")
-        for image_data in response.data:
-            if image_data.b64_json:
-                return image_data.b64_json
-        raise ValueError("未能从响应中获取图片数据")
-
     def _extract_reasoning_content(
         self, message: ChatCompletionMessage
     ) -> str | None:
@@ -383,27 +360,3 @@ class OpenAIService(LLMProvider):
         if not isinstance(parsed, dict):
             raise LLMResponseError("invalid_tool_arguments", "模型响应工具参数必须是 JSON 对象")
         return cast(JsonObject, parsed)
-
-    @override
-    async def get_image(
-        self,
-        message: ChatMessage,
-        model: str,
-    ) -> str:
-        """使用 OpenAI Images 协议生成或编辑图片。"""
-        if not message.text:
-            raise ValueError("提示词为空请重新输入")
-
-        if message.image:
-            image_files = self._build_image_files(message.image)
-            response = await self.client.images.edit(
-                image=image_files,
-                model=model,
-                prompt=message.text,
-            )
-        else:
-            response = await self.client.images.generate(
-                model=model,
-                prompt=message.text,
-            )
-        return self._extract_base64_image(response)

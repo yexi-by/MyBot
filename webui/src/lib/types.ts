@@ -69,8 +69,6 @@ export const PLUGIN_IDS = [
   "ai_group_chat",
   "group_notice",
   "auto_unban",
-  "image_generate",
-  "neavo_image_generate",
   "recall_bot_image",
 ] as const;
 

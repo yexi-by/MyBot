@@ -95,14 +95,6 @@ class LLMProviderProtocol(Protocol):
         """获取可能包含工具调用的结构化响应。"""
         ...
 
-    async def get_image(
-        self,
-        message: ChatMessage,
-        model: str,
-    ) -> str:
-        """获取图片响应。"""
-        ...
-
 
 @dataclass
 class LLMProviderWrapper:

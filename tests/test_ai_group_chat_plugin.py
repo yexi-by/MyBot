@@ -344,8 +344,6 @@ def build_snapshot(
         ai_group_chat=materialized,
         group_notice=None,
         auto_unban=None,
-        image_generate=None,
-        neavo_image_generate=None,
         recall_bot_image=None,
         referenced_files=frozenset(),
     )

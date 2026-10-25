@@ -352,20 +352,24 @@ class ConfigManagerTest(unittest.IsolatedAsyncioTestCase):
     def test_new_provider_requires_restart_before_plugin_can_reference_it(self) -> None:
         """同次新增 provider 不能被热加载插件提前使用。"""
         with tempfile.TemporaryDirectory() as temp_dir:
-            config_file = Path(temp_dir) / "mybot.toml"
+            root = Path(temp_dir)
+            config_file = root / "mybot.toml"
             config_file.write_text(base_config(), encoding="utf-8")
             manager = ConfigManager.create(config_file=config_file)
-            candidate = base_config() + textwrap.dedent(
+            write_ai_files(root)
+            candidate = ai_config().replace(
+                'provider = "main", name = "chat"',
+                'provider = "new", name = "chat"',
+            ) + textwrap.dedent(
                 """
 
                 [llm.providers.new]
                 api_key = "new-secret"
+                inherit_network_proxy = true
+                timeout_seconds = 0
                 max_attempts = 3
                 retry_delay_seconds = 0
-
-                [plugins.image_generate]
-                groups = ["40000"]
-                model = { provider = "new", name = "image" }
+                retry_max_delay_seconds = 10
                 """
             )
             config_file.write_text(candidate, encoding="utf-8")
@@ -374,7 +378,7 @@ class ConfigManagerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.applied)
         self.assertIsNotNone(result.error)
-        self.assertIsNone(manager.plugins.image_generate)
+        self.assertIsNone(manager.plugins.ai_group_chat)
 
     def test_validation_error_does_not_echo_secret_input(self) -> None:
         """配置错误摘要不会包含同文件中的 API key。"""
