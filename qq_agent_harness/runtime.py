@@ -14,13 +14,21 @@ from .configuration import ConfigStore
 from .contracts import (
     ConversationScope,
     JsonObject,
+    JsonValue,
     Message,
     NapCatConnection,
     ToolContext,
     ToolResult,
 )
 from .prompts import compose_prompt
-from .providers import MediaInput, ModelSession
+from .providers import (
+    CompactionError,
+    ContextLimitError,
+    MediaInput,
+    ModelRequestLimit,
+    ModelSession,
+    ProviderError,
+)
 from .registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -205,6 +213,27 @@ class AgentRuntime:
         )
         self.registry.initial(context)
         session: ModelSession | None = None
+
+        def context_event(event: JsonObject) -> None:
+            phase = event.get("phase")
+            self.turns[key]["state"] = "compacting" if phase == "compacting" else "running"
+            if session is not None:
+                # 请求发出时原地递增计数；共享元数据使等待响应期间的 UI 也能看到真实次数。
+                self.turns[key]["context"] = session.context_state
+            if isinstance(count := event.get("request_count"), int):
+                self.turns[key]["rounds"] = count
+            if phase == "compacting":
+                self.record(
+                    key, "compaction", "上下文达到预算，正在强制压缩旧资料", status="running"
+                )
+            elif phase == "compacted":
+                self.record(
+                    key,
+                    "compaction",
+                    f"上下文已压缩：{event.get('before_tokens')} → {event.get('after_tokens')} token；继续本轮",
+                    status="completed",
+                )
+
         try:
             async with asyncio.timeout(config.runtime.turn_timeout):
                 history_error = ""
@@ -224,38 +253,39 @@ class AgentRuntime:
                     history_error = (
                         "NapCat 历史暂不可用；仅依据本轮收到的消息，不能假设此前没有对话。"
                     )
-                unique = {m.message_id: m for m in history}
-                unique.update({m.message_id: m for m in batch})
-                entries = [m.model_dump(mode="json") for m in unique.values()]
-                while (
-                    len(entries) > len(batch)
-                    and len(json.dumps(entries, ensure_ascii=False))
-                    > config.runtime.context_char_limit
-                ):
-                    entries.pop(0)
                 conversation = json.dumps(
                     {
                         "来源会话": scope.model_dump(),
                         "历史限制": history_error,
-                        "对话资料": entries,
-                        "当前唤醒消息": [m.message_id for m in batch],
+                        "当前唤醒消息": [m.model_dump(mode="json") for m in batch],
                     },
                     ensure_ascii=False,
                 )
-                if len(conversation) > config.runtime.context_char_limit:
-                    self.record(key, "error", "本轮输入超过上下文上限，未截断消息结构或执行操作")
-                    return
                 persona = self.store.resolve_file(config.persona_file).read_text(encoding="utf-8")
-                knowledge = [
-                    self.store.resolve_file(path).read_text(encoding="utf-8")
-                    for path in config.knowledge_files
-                ]
-                # 知识库作为资料进入 user 内容，不能提升为系统级指令。
-                conversation = json.dumps(
-                    {"知识库资料": knowledge, "会话资料": json.loads(conversation)},
-                    ensure_ascii=False,
-                )
                 session = self.session_factory(provider, compose_prompt(persona), conversation)
+                session.request_limit = config.runtime.max_model_rounds
+                session.on_context_event = context_event
+                # 资料与当前输入分开：旧历史和知识可以压缩，当前消息及安全规则保持完整。
+                for path in config.knowledge_files:
+                    session.add_background(
+                        json.dumps(
+                            {
+                                "知识库文件": path,
+                                "知识库资料": self.store.resolve_file(path).read_text(
+                                    encoding="utf-8"
+                                ),
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                current_ids = {message.message_id for message in batch}
+                for message in {message.message_id: message for message in history}.values():
+                    if message.message_id not in current_ids:
+                        session.add_background(
+                            json.dumps(
+                                {"历史消息": message.model_dump(mode="json")}, ensure_ascii=False
+                            )
+                        )
                 session.media_limit = config.napcat.media_max_bytes
                 media_tool = self.registry.tools.get("qq__read_media")
                 if self.read_media and media_tool and self.registry.permitted(scope, media_tool)[0]:
@@ -317,17 +347,35 @@ class AgentRuntime:
                         )
                 executed: dict[str, tuple[str, JsonObject, ToolResult]] = {}
                 for round_number in range(config.runtime.max_model_rounds):
-                    self.turns[key]["rounds"] = round_number + 1
                     definitions = self.registry.definitions(context)
-                    if session.context_chars(definitions) > config.runtime.context_char_limit:
-                        self.record(
-                            key,
-                            "turn",
-                            "完整上下文已达到字符上限，已停止；未截断工具调用配对",
-                            status="limit",
-                        )
-                        return
+                    receipts: list[JsonValue] = []
+                    for receipt in context.sent_messages:
+                        safe_receipt = {
+                            "action": receipt.get("action"),
+                            "status": receipt.get("status"),
+                        }
+                        if isinstance(data := receipt.get("data"), dict):
+                            for name in ("message_id", "res_id", "file_id"):
+                                if isinstance(identifier := data.get(name), (str, int)):
+                                    safe_receipt[name] = str(identifier)
+                        receipts.append(safe_receipt)
+                    session.action_state = {
+                        "sent_receipts": receipts,
+                        "send_attempts": context.send_attempts,
+                        "max_sends_per_turn": self.registry.policy(scope).max_sends_per_turn,
+                        "executed_calls": [
+                            {"call_id": call_id, "tool": name, "status": result.status}
+                            for call_id, (name, _arguments, result) in executed.items()
+                        ],
+                        "unknown_operations": [
+                            {"tool": name, "target": target.model_dump(mode="json")}
+                            for name, _arguments, target in context.unknown_effects
+                        ],
+                    }
+                    self.turns[key]["rounds"] = round_number + 1
                     reply = await session.step(definitions)
+                    self.turns[key]["context"] = session.context_state
+                    self.turns[key]["rounds"] = session.request_count
                     if not reply.calls:
                         self.record(
                             key,
@@ -368,7 +416,16 @@ class AgentRuntime:
                             tool=call.name,
                             status=result.status,
                         )
-                self.record(key, "turn", "达到本轮模型往返上限，已停止", status="limit")
+                self.record(key, "turn", "达到本轮模型请求上限，已停止", status="limit")
+        except ModelRequestLimit:
+            self.record(key, "turn", "达到模型请求上限（含自动压缩），已停止", status="limit")
+        except ContextLimitError as exc:
+            self.record(key, "turn", str(exc), status="limit")
+        except CompactionError as exc:
+            self.record(key, "compaction", str(exc), status="error")
+        except ProviderError as exc:
+            # ProviderError 的消息由协议层生成固定脱敏文本，不携带上游响应正文。
+            self.record(key, "error", str(exc), status="error")
         except TimeoutError:
             self.record(key, "turn", "本轮超时，已停止；已提交动作状态以回执为准", status="timeout")
         except asyncio.CancelledError:

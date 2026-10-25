@@ -27,6 +27,14 @@ uv run --locked python -m qq_agent_harness --config config/harness.toml
 
 配置 provider 的模型、协议、base_url、密钥及实际输入模态；模型必须支持工具调用，只支持 Chat Completions 和 Responses 两种协议。默认不设置采样或输出长度参数。官方协议未支持的音视频输入会明确返回能力错误，不自动转写或抽帧。
 
+每个模型连接通过 `max_context_tokens` 声明模型的实际上下文窗口，默认 128000 token；这只是 Harness 的上下文预算，不会作为回复长度参数发送。`reasoning_effort` 可省略，省略时保留接口默认行为；明确选择后分别使用 Chat Completions 的 `reasoning_effort` 或 Responses 的 `reasoning.effort`。可选值是否可用取决于模型和接口，不会静默降级。[OpenAI 思考参数](https://developers.openai.com/api/docs/guides/reasoning)
+
+自动压缩是固定运行行为，没有关闭开关。每次模型请求前统计系统规则、人格、当前消息、历史与知识资料、工具定义、调用结果和媒体的完整预算；达到窗口约 80% 时，先压缩旧资料，以约 50% 为目标继续本轮。保留当前输入、最近完整工具调用组及由运行器确认的动作回执；摘要仍是低权限参考资料，不能改变权限或把群友发言变成必须执行的任务。
+
+上下文用量先按本地保守估算，再用接口返回的实际 usage 校准后续增量；缓存命中仍占上下文，媒体与不同模型的分词差异意味着这个数字不是精确 tokenizer 计数。运行页显示预算、计量来源与压缩次数；近期活动显示压缩前后变化，不展示摘要正文或思维链。摘要只留在本轮内存，不新增聊天存储。
+
+压缩请求和明确上下文超限后的有限恢复也计入 `runtime.max_model_rounds`。只有摘要完整、有效且实际缩小上下文后才替换原文；失败、取消或固定输入本身过大时明确结束本轮，不继续发送超预算请求，也不重放已经完成或结果未知的工具动作。
+
 NapCat 使用反向 WebSocket 连接 `ws://<harness-host>:6055/napcat/ws`，消息格式选择数组，配置匹配的 token 和机器人账号。空 token 不开放接入。接口清单锁定 NapCat v4.18.41；见 [动作覆盖清单](docs/napcat-actions.md)。
 
 ## 群配置和工具

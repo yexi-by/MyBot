@@ -22,7 +22,6 @@ turn_timeout = 600.0
 history_count = 60
 max_pending_conversations = 100
 max_pending_messages = 20
-context_char_limit = 120000
 tool_result_char_limit = 24000
 activity_limit = 200
 
@@ -31,6 +30,9 @@ protocol = "responses"
 base_url = "https://api.openai.com/v1"
 api_key = ""
 model = ""
+max_context_tokens = 128000
+# 思考等级未配置时不发送；按接口实际支持可选 none/minimal/low/medium/high/xhigh/max。
+# reasoning_effort = "high"
 timeout = 120.0
 modalities = ["text", "image"]
 store_supported = true

@@ -19,7 +19,7 @@ from qq_agent_harness.contracts import (
     ToolResult,
     schema,
 )
-from qq_agent_harness.providers import MediaInput, ModelReply, ModelSession, ToolCall
+from qq_agent_harness.providers import MediaInput, ModelReply, ModelSession
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime
 from qq_agent_harness.settings import (
@@ -257,7 +257,8 @@ async def test_protocol_tool_roundtrip_keeps_call_ids_and_reasoning(protocol):
         )
         assert any(item.get("type") == "function_call_output" for item in requests[1]["input"])
     else:
-        assert requests[1]["messages"][-1]["tool_call_id"] == "call-1"
+        tool_messages = [item for item in requests[1]["messages"] if item["role"] == "tool"]
+        assert len(tool_messages) == 1 and tool_messages[0]["tool_call_id"] == "call-1"
 
 
 def test_media_uses_native_parts_and_reports_unsupported():
@@ -417,24 +418,27 @@ async def test_inflight_message_replay_and_disconnect_are_visible(tmp_path):
 @pytest.mark.asyncio
 async def test_entire_context_budget_includes_persona_and_tool_schemas(tmp_path):
     store = make_store(tmp_path)
-    store.settings.runtime.context_char_limit = 4000
+    store.settings.providers["test"].max_context_tokens = 4096
     (tmp_path / "persona.md").write_text("非常长的资料" * 2000, encoding="utf-8")
 
-    class Session(ModelSession):
-        async def step(self, tools):
-            pytest.fail("完整上下文超限时不应发送模型请求")
+    def unexpected_request(_request):
+        pytest.fail("不可压缩的系统规则和人格超出预算时不应发送模型请求")
 
-    runtime = AgentRuntime(
-        store, ToolRegistry(lambda: store.settings), FakeHub(), session_factory=Session
-    )
-    await runtime.receive(
-        Message(
-            scope=ConversationScope(bot_id="bot", kind="private", peer_id="p"),
-            message_id="one",
-            sender_id="p",
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected_request)) as client:
+        runtime = AgentRuntime(
+            store,
+            ToolRegistry(lambda: store.settings),
+            FakeHub(),
+            session_factory=lambda *args: ModelSession(*args, client=client),
         )
-    )
-    await asyncio.gather(*list(runtime.workers.values()))
+        await runtime.receive(
+            Message(
+                scope=ConversationScope(bot_id="bot", kind="private", peer_id="p"),
+                message_id="one",
+                sender_id="p",
+            )
+        )
+        await asyncio.gather(*list(runtime.workers.values()))
     assert runtime.activity[-1]["status"] == "limit"
 
 
@@ -483,10 +487,17 @@ async def test_multiple_tool_results_precede_attached_media():
         session.result(response.calls[1], ToolResult.success({"value": "second"}), 1000)
         await session.step([])
     messages = bodies[1]["messages"]
-    assert [message["role"] for message in messages[2:]] == ["assistant", "tool", "tool", "user"]
-    assert messages[3]["tool_call_id"] == "first" and messages[4]["tool_call_id"] == "second"
-    assert "aGVsbG8=" not in messages[3]["content"]
-    assert messages[5]["content"][-1]["type"] == "image_url"
+    assistant_index = next(
+        index for index, message in enumerate(messages) if message.get("tool_calls")
+    )
+    results = messages[assistant_index + 1 : assistant_index + 3]
+    assert [message["role"] for message in results] == ["tool", "tool"]
+    assert [message["tool_call_id"] for message in results] == ["first", "second"]
+    assert "aGVsbG8=" not in results[0]["content"]
+    assert any(
+        isinstance(message.get("content"), list) and message["content"][-1]["type"] == "image_url"
+        for message in messages[assistant_index + 3 :]
+    )
 
 
 @pytest.mark.asyncio
@@ -522,30 +533,53 @@ async def test_send_workspace_bridge_respects_read_parameter_policy(tmp_path):
     async def read(path):
         pytest.fail(f"禁止读取 {path}")
 
-    class Session(ModelSession):
-        async def step(self, tools):
-            if len(self.items) == 2:
-                return ModelReply(
-                    calls=[
-                        ToolCall(
-                            "1",
-                            "qq__send_message",
-                            {"parts": [{"type": "image", "workspace_path": "private.png"}]},
-                        )
-                    ]
-                )
-            return ModelReply()
+    store.settings.providers["test"].protocol = "chat_completions"
+    requests = []
 
-    runtime = AgentRuntime(store, registry, hub, session_factory=Session)
-    runtime.read_workspace = read
-    await runtime.receive(
-        Message(
-            scope=ConversationScope(bot_id="bot", kind="private", peer_id="p"),
-            message_id="one",
-            sender_id="p",
+    def respond(request):
+        requests.append(json.loads(request.content))
+        calls = []
+        if len(requests) == 1:
+            calls = [
+                {
+                    "id": "one",
+                    "type": "function",
+                    "function": {
+                        "name": "qq__send_message",
+                        "arguments": json.dumps(
+                            {"parts": [{"type": "image", "workspace_path": "private.png"}]}
+                        ),
+                    },
+                }
+            ]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": calls,
+                        }
+                    }
+                ]
+            },
         )
-    )
-    await asyncio.gather(*list(runtime.workers.values()))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        runtime = AgentRuntime(
+            store, registry, hub, session_factory=lambda *args: ModelSession(*args, client=client)
+        )
+        runtime.read_workspace = read
+        await runtime.receive(
+            Message(
+                scope=ConversationScope(bot_id="bot", kind="private", peer_id="p"),
+                message_id="one",
+                sender_id="p",
+            )
+        )
+        await asyncio.gather(*list(runtime.workers.values()))
     assert hub.connection.calls == []
     assert any(
         item.get("kind") == "tool" and item.get("status") == "error" for item in runtime.activity
@@ -594,6 +628,168 @@ async def test_knowledge_injection_is_kept_out_of_system_role(tmp_path):
     await asyncio.gather(*list(runtime.workers.values()))
     assert "EXTERNAL_OVERRIDE" not in str(seen[0])
     assert "EXTERNAL_OVERRIDE" in str(seen[1])
+
+
+@pytest.mark.asyncio
+async def test_compaction_keeps_action_receipts_and_does_not_replay_unknown_send(tmp_path):
+    store = make_store(tmp_path)
+    provider = store.settings.providers["test"]
+    provider.protocol = "chat_completions"
+    provider.max_context_tokens = 8192
+    store.settings.runtime.max_model_rounds = 50
+    store.settings.runtime.tool_result_char_limit = 100_000
+    registry = ToolRegistry(lambda: store.settings)
+    sends = []
+    normal_requests = []
+    summary_requests = []
+
+    async def send(context, _arguments):
+        sends.append(context.scope.key)
+        context.sent_messages.append({"action": "send_msg", "status": "unknown", "data": None})
+        return ToolResult(status="unknown", message="平台未返回回执，不确定是否已发送")
+
+    async def large_info(_context, _arguments):
+        return ToolResult.success({"facts": "verified fact 42\n" * 1500})
+
+    registry.add(
+        ToolDefinition(
+            "qq__send_message",
+            "发送当前会话消息",
+            "messages.send",
+            schema(Empty),
+            send,
+            effects=True,
+            model=Empty,
+        )
+    )
+    registry.add(
+        ToolDefinition(
+            "qq__large_info",
+            "读取测试资料",
+            "messages.read",
+            schema(Empty),
+            large_info,
+            model=Empty,
+        )
+    )
+
+    def call(identifier, name, arguments):
+        return {
+            "id": identifier,
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }
+
+    def reply(request):
+        body = json.loads(request.content)
+        if not body.get("tools"):
+            summary_requests.append(body)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": "已读取测试资料；已尝试发言且结果未知，不能重发。",
+                            },
+                        }
+                    ]
+                },
+            )
+        normal_requests.append(body)
+        calls = []
+        if len(normal_requests) == 1:
+            calls = [
+                call("send-1", "qq__send_message", {}),
+                call("load-1", "harness__load_tools", {"names": ["qq__large_info"]}),
+            ]
+        elif len(normal_requests) == 2:
+            calls = [call("facts-1", "qq__large_info", {})]
+        elif len(normal_requests) == 3:
+            content = json.dumps(body, ensure_ascii=False)
+            assert "CURRENT_TRIGGER_SENTINEL" in content
+            assert "sent_receipts" in content and "unknown_operations" in content
+            assert "send-1" in content and "unknown" in content
+            calls = [
+                call("send-1", "qq__send_message", {}),
+                call("send-2", "qq__send_message", {}),
+            ]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls" if calls else "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": calls,
+                        },
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+        runtime = AgentRuntime(
+            store,
+            registry,
+            FakeHub(),
+            session_factory=lambda *args: ModelSession(*args, client=client),
+        )
+        await runtime.receive(
+            Message(
+                scope=ConversationScope(bot_id="bot", kind="private", peer_id="p"),
+                message_id="current",
+                sender_id="p",
+                segments=[{"type": "text", "data": {"text": "CURRENT_TRIGGER_SENTINEL"}}],
+            )
+        )
+        await asyncio.gather(*list(runtime.workers.values()))
+    assert summary_requests, "工具结果越过预算后必须自动压缩"
+    assert len(normal_requests) == 4
+    assert sends == ["bot:private:p"]
+    assert any(
+        item["kind"] == "compaction" and item["status"] == "completed" for item in runtime.activity
+    )
+    assert runtime.activity[-1]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_context_request_counter_is_visible_while_response_is_pending(tmp_path):
+    store = make_store(tmp_path)
+    store.settings.providers["test"].protocol = "chat_completions"
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def respond(_request):
+        entered.set()
+        await release.wait()
+        return httpx.Response(
+            200, json={"choices": [{"message": {"role": "assistant", "content": ""}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        runtime = AgentRuntime(
+            store,
+            ToolRegistry(lambda: store.settings),
+            FakeHub(),
+            session_factory=lambda *args: ModelSession(*args, client=client),
+        )
+        await runtime.receive(
+            Message(
+                scope=ConversationScope(bot_id="bot", kind="private", peer_id="p"),
+                message_id="counter",
+                sender_id="p",
+            )
+        )
+        await entered.wait()
+        metrics = runtime.turns["bot:private:p"]["context"]
+        assert isinstance(metrics, dict) and metrics["request_count"] == 1
+        release.set()
+        await asyncio.gather(*list(runtime.workers.values()))
 
 
 def test_runtime_config_cannot_be_attached_as_knowledge(tmp_path):

@@ -1388,6 +1388,95 @@ pre {
   flex-wrap: wrap;
   margin-bottom: 4px;
 }
+.turn-row {
+  align-items: flex-start;
+}
+.turn-row > .dot {
+  margin-top: 7px;
+  flex-shrink: 0;
+}
+.turn-row > button {
+  flex-shrink: 0;
+}
+.turn-row.compacting > .dot {
+  background: var(--warn);
+}
+.turn-row.compacting .activity-meta > .badge {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.activity-meta > code {
+  overflow-wrap: anywhere;
+}
+.turn-context {
+  padding: 12px;
+  margin-top: 12px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+}
+.context-summary,
+.context-details {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 11px;
+  color: var(--ink-2);
+}
+.context-summary strong {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.context-details {
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--ink-3);
+}
+.context-meter {
+  position: relative;
+  height: 7px;
+  margin-top: 11px;
+}
+.context-meter progress {
+  display: block;
+  width: 100%;
+  height: 7px;
+  appearance: none;
+  border: 0;
+  border-radius: var(--r);
+  overflow: hidden;
+  background: var(--rule);
+  color: var(--blue);
+}
+.context-meter progress::-webkit-progress-bar {
+  background: var(--rule);
+}
+.context-meter progress::-webkit-progress-value {
+  background: var(--blue);
+}
+.context-meter progress::-moz-progress-bar {
+  background: var(--blue);
+}
+.context-meter.near-limit progress::-webkit-progress-value {
+  background: var(--warn);
+}
+.context-meter.near-limit progress::-moz-progress-bar {
+  background: var(--warn);
+}
+.context-meter > span {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  left: 80%;
+  border-left: 1px solid var(--ink-2);
+}
+.activity-row .context-pending {
+  margin-top: 8px;
+  color: var(--ink-3);
+  font-size: 11px;
+}
 .right-rail {
   padding-top: 2px;
 }

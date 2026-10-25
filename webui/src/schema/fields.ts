@@ -25,6 +25,7 @@ export interface FieldDef {
   options?: Option[];
   span?: 2 | 3;
   nullable?: boolean;
+  placeholder?: string;
   providerId?: string;
   disabled?: (config: ObjectValue, base: Path) => string | false;
   choices?: (config: ObjectValue) => Option[];
@@ -108,8 +109,8 @@ export const runtimeSection: SectionDef = {
     }),
     number(
       "max_model_rounds",
-      "模型往返上限",
-      "一轮对话允许的最大模型调用次数。",
+      "模型请求上限",
+      "本轮普通模型调用、上下文压缩和超限恢复的实际 HTTP 请求共同计数。",
       1,
       { max: 100 },
     ),
@@ -141,9 +142,6 @@ export const runtimeSection: SectionDef = {
       1,
       { max: 100 },
     ),
-    number("context_char_limit", "上下文字符上限", "限制本轮输入规模。", 4000, {
-      unit: "字符",
-    }),
     number(
       "tool_result_char_limit",
       "工具结果字符上限",
@@ -175,6 +173,32 @@ export const providerSection: SectionDef = {
     text("model", "模型名称", "候选列表不可用时仍可手动输入。", {
       type: "model",
     }),
+    number(
+      "max_context_tokens",
+      "最大上下文容量",
+      "填写模型实际总上下文窗口。占用达到 80% 强制压缩，目标约 50%，保留最近完整工具轮次；不是回复长度限制。",
+      4096,
+      { step: 1, unit: "token" },
+    ),
+    text(
+      "reasoning_effort",
+      "思考等级",
+      "仅在接口明确支持时选择；默认不发送此参数，不支持时直接报错，不会静默降级。",
+      {
+        type: "select",
+        nullable: true,
+        placeholder: "跟随接口默认（不发送）",
+        options: [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+        ].map((value) => ({ value, label: value })),
+      },
+    ),
     number("timeout", "请求超时", "模型接口超时。", 0.1, { unit: "秒" }),
     text("proxy", "HTTP 代理", "留空表示不使用代理。", { nullable: true }),
     text(
@@ -421,6 +445,8 @@ export function defaultProvider(): ObjectValue {
     base_url: "https://api.openai.com/v1",
     api_key: "",
     model: "",
+    max_context_tokens: 128000,
+    reasoning_effort: null,
     timeout: 120,
     proxy: null,
     modalities: ["text", "image"],
@@ -485,6 +511,12 @@ export function validateClient(
         (field.max !== undefined && value > field.max))
     )
       errors.push({ path, message: field.label + "超出有效范围" });
+    else if (
+      field.type === "number" &&
+      field.step === 1 &&
+      !Number.isInteger(value)
+    )
+      errors.push({ path, message: field.label + "必须为整数" });
   }
   const active = String(config.active_provider || "");
   if (active && !object(config.providers)[active])

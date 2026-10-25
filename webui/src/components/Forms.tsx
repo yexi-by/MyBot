@@ -310,8 +310,20 @@ export function Field({
           label={definition.label}
           value={String(value ?? "")}
           disabled={!!disabled}
-          onChange={update}
-          options={[{ value: "", label: "请选择" }, ...options]}
+          onChange={(next) =>
+            update(definition.nullable && next === "" ? null : next)
+          }
+          placeholder={definition.placeholder}
+          options={[
+            {
+              value: "",
+              label:
+                definition.placeholder ??
+                options.find((option) => option.value === "")?.label ??
+                "请选择",
+            },
+            ...options.filter((option) => option.value !== ""),
+          ]}
         />
       );
       break;

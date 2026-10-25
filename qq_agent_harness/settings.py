@@ -52,6 +52,10 @@ class ProviderSettings(Model):
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = ""
+    max_context_tokens: int = Field(default=128_000, ge=4096)
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = (
+        None
+    )
     timeout: float = Field(default=120, gt=0)
     proxy: str | None = None
     modalities: list[Literal["text", "image", "audio", "video"]] = Field(
@@ -76,7 +80,6 @@ class RuntimeSettings(Model):
     history_count: int = Field(default=60, ge=0, le=300)
     max_pending_conversations: int = Field(default=100, ge=1, le=1000)
     max_pending_messages: int = Field(default=20, ge=1, le=100)
-    context_char_limit: int = Field(default=120_000, ge=4000)
     tool_result_char_limit: int = Field(default=24_000, ge=1000)
     activity_limit: int = Field(default=200, ge=10, le=2000)
 
