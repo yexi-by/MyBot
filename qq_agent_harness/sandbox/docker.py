@@ -170,6 +170,9 @@ def container_config(
             "ShmSize": 16_777_216,
             "Init": True,
             "RestartPolicy": {"Name": "no"},
-            "LogConfig": {"Type": "local", "Config": {"max-size": "2m", "max-file": "1"}},
+            "LogConfig": {
+                "Type": "local",
+                "Config": {"max-size": "2m", "max-file": "1", "compress": "false"},
+            },
         },
     }
