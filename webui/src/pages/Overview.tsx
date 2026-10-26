@@ -1,0 +1,345 @@
+import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
+import {
+  Activity as ActivityIcon,
+  Box,
+  CircleStop,
+  MessagesSquare,
+  Plug,
+  Radio,
+  Sparkles,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { Badge, Button, EmptyState, Meter, Segmented, StatusDot } from "../components/primitives";
+import { PageHeader, SearchInput } from "../components/shell";
+import { errorMessage, post } from "../lib/api";
+import { useConfig } from "../lib/config";
+import { conversationRoute, scopeLabel } from "../lib/conversations";
+import { formatBytes, formatClock, formatDuration, formatNumber, formatRelative, parseScopeKey } from "../lib/format";
+import { activityKind, mcpState, resultStatus, turnState, usageSources } from "../lib/labels";
+import { linkHandler } from "../lib/navigation";
+import {
+  runtimeResource,
+  sandboxResource,
+  toolsResource,
+  useGroupNames,
+  useResource,
+} from "../lib/resource";
+import { object } from "../lib/types";
+import type { Activity, Turn } from "../lib/types";
+import type { Tone } from "../lib/ui";
+import { confirm, toast } from "../lib/ui";
+
+function Tile({
+  icon: Icon,
+  label,
+  value,
+  detail,
+  tone,
+  to,
+}: {
+  icon: LucideIcon;
+  label: string;
+  value: ReactNode;
+  detail: ReactNode;
+  tone: Tone;
+  to: string;
+}) {
+  return (
+    <a className={"tile tile-" + tone} href={to} onClick={linkHandler(to)}>
+      <span className="tile-head">
+        <Icon size={16} aria-hidden="true" />
+        <span>{label}</span>
+        <StatusDot tone={tone} />
+      </span>
+      <span className="tile-value">{value}</span>
+      <span className="tile-detail">{detail}</span>
+    </a>
+  );
+}
+
+/** NapCat 反向 WebSocket 地址。生产环境由后端提供页面，与当前地址同源；Vite 开发时改用后端端口。 */
+export function napcatAddress(port?: unknown) {
+  const host =
+    import.meta.env.DEV && typeof port === "number"
+      ? window.location.hostname + ":" + port
+      : window.location.host;
+  return (window.location.protocol === "https:" ? "wss://" : "ws://") + host + "/napcat/ws";
+}
+
+function StatusTiles() {
+  const { draft } = useConfig();
+  const runtime = useResource(runtimeResource, 3000).data;
+  const sandboxEnabled = object(draft.sandbox).enabled === true;
+  const sandbox = useResource(sandboxResource, sandboxEnabled ? 15_000 : 0).data;
+  const napcat = object(draft.napcat);
+  const bots = runtime?.napcat.connected ?? [];
+  const providers = object(draft.providers);
+  const active = String(draft.active_provider || "");
+  const provider = object(providers[active]);
+  const groups = Object.values(object(draft.groups)).map(object);
+  const enabledGroups = groups.filter((group) => group.enabled === true).length;
+  const privateEnabled = object(draft.private).enabled === true;
+  const servers = Object.entries(object(draft.mcp));
+  const enabledServers = servers.filter(([, value]) => object(value).enabled === true);
+  const connected = enabledServers.filter(([name]) => runtime?.mcp[name]?.state === "connected").length;
+
+  const qq: [string, ReactNode, Tone] = bots.length
+    ? ["已连接", "机器人 " + bots.join("、"), "success"]
+    : !napcat.token
+      ? ["未设置连接密钥", "NapCat 无法接入，请先在设置中填写密钥", "danger"]
+      : ["等待连接", <span className="mono">{napcatAddress(object(draft.server).port)}</span>, "warning"];
+  const model: [string, ReactNode, Tone] = !active
+    ? ["未选择", "Agent 不会回复，请先选择模型连接", "danger"]
+    : !provider.model
+      ? [active, "没有填写模型名称，Agent 不会回复", "danger"]
+      : [String(provider.model), "模型连接 " + active, "success"];
+  const sessions: [string, ReactNode, Tone] = [
+    enabledGroups + " / " + groups.length + " 个群",
+    "私聊" + (privateEnabled ? "已启用" : "未启用"),
+    enabledGroups || privateEnabled ? "success" : "warning",
+  ];
+  const box: [string, ReactNode, Tone] = !sandboxEnabled
+    ? ["未启用", "代码执行和共享工作区不可用", "neutral"]
+    : !sandbox
+      ? ["读取中", "正在检查沙箱状态", "neutral"]
+      : !sandbox.available
+        ? ["不可用", sandbox.reason || "沙箱控制器没有响应", "danger"]
+        : [
+            sandbox.busy ? "执行中" : "可用",
+            "已用 " + formatBytes(sandbox.used_bytes) + " / " + formatBytes(sandbox.quota_bytes),
+            sandbox.busy ? "accent" : "success",
+          ];
+  const mcp: [string, ReactNode, Tone] = !servers.length
+    ? ["未配置", "可在工具页添加 MCP 服务", "neutral"]
+    : !enabledServers.length
+      ? ["未启用", servers.length + " 个服务均未启用", "neutral"]
+      : [
+          connected + " / " + enabledServers.length + " 已连接",
+          enabledServers
+            .map(([name]) => name + " " + mcpState(runtime?.mcp[name]?.state).text)
+            .join("，"),
+          connected === enabledServers.length ? "success" : "warning",
+        ];
+  return (
+    <div className="tiles">
+      <Tile icon={Radio} label="QQ 连接" value={qq[0]} detail={qq[1]} tone={qq[2]} to="/settings/napcat" />
+      <Tile
+        icon={Sparkles}
+        label="当前模型"
+        value={model[0]}
+        detail={model[1]}
+        tone={model[2]}
+        to={active ? "/models/" + encodeURIComponent(active) : "/models"}
+      />
+      <Tile
+        icon={MessagesSquare}
+        label="已启用会话"
+        value={sessions[0]}
+        detail={sessions[1]}
+        tone={sessions[2]}
+        to="/conversations"
+      />
+      <Tile icon={Box} label="共享沙箱" value={box[0]} detail={box[1]} tone={box[2]} to="/sandbox" />
+      <Tile icon={Plug} label="MCP 服务" value={mcp[0]} detail={mcp[1]} tone={mcp[2]} to="/tools/mcp" />
+    </div>
+  );
+}
+
+function TurnRow({ turn }: { turn: Turn }) {
+  const groups = useGroupNames();
+  const scope = parseScopeKey(turn.scope_key);
+  const state = turnState(turn.state);
+  const context = turn.context;
+  const max = context?.max_tokens ?? 0;
+  const used = context?.input_tokens ?? 0;
+  const ratio = max ? used / max : 0;
+  const route = scope ? conversationRoute(scope.kind, scope.peer) : "/conversations";
+  return (
+    <li className="turn">
+      <div className="turn-main">
+        <div className="turn-title">
+          <a href={route} onClick={linkHandler(route)}>
+            {scopeLabel(turn.scope_key, groups)}
+          </a>
+          <Badge tone={state.tone}>{state.text}</Badge>
+        </div>
+        <div className="turn-meta muted">
+          开始于 {formatRelative(turn.started_at)}
+          {turn.rounds !== undefined && " · 模型请求 " + turn.rounds + " 次"}
+          {context?.compactions ? " · 已压缩 " + context.compactions + " 次" : ""}
+        </div>
+      </div>
+      {context && max > 0 && (
+        <div className="turn-context">
+          <Meter
+            label="上下文用量"
+            value={used}
+            max={max}
+            marker={context.trigger_tokens}
+            tone={ratio >= 0.8 ? "warning" : "accent"}
+          />
+          <span className="tiny muted num">
+            上下文 {formatNumber(used)} / {formatNumber(max)} token
+            {context.usage_source ? " · " + (usageSources[context.usage_source] ?? context.usage_source) : ""}
+          </span>
+        </div>
+      )}
+      <Button
+        size="sm"
+        icon={CircleStop}
+        onClick={async () => {
+          const accepted = await confirm({
+            title: "停止这一轮对话？",
+            message: "已经发出的消息和执行过的操作不会撤回。",
+            confirmLabel: "停止",
+            danger: true,
+          });
+          if (!accepted) return;
+          try {
+            const result = await post<{ cancelled: boolean }>("/api/runtime/cancel", {
+              scope_key: turn.scope_key,
+            });
+            toast(result.cancelled ? "已停止" : "这一轮已经结束", result.cancelled ? "success" : "neutral");
+            void runtimeResource.refresh();
+          } catch (error) {
+            toast("停止失败：" + errorMessage(error), "danger");
+          }
+        }}
+      >
+        停止
+      </Button>
+    </li>
+  );
+}
+
+type Filter = "all" | "turn" | "tool" | "problem";
+const isProblem = (item: Activity) =>
+  item.kind === "error" ||
+  item.kind === "overload" ||
+  ["error", "unknown", "limit", "timeout"].includes(item.status ?? "");
+
+function ActivityFeed({ activity }: { activity: Activity[] }) {
+  const groups = useGroupNames();
+  const tools = useResource(toolsResource).data;
+  const [filter, setFilter] = useState<Filter>("all");
+  const [query, setQuery] = useState("");
+  const titles = useMemo(
+    () => new Map((tools?.tools ?? []).map((tool) => [tool.name, tool.title])),
+    [tools],
+  );
+  const ordered = useMemo(() => [...activity].reverse(), [activity]);
+  const counts = {
+    all: ordered.length,
+    turn: ordered.filter((item) => item.kind === "turn" || item.kind === "compaction").length,
+    tool: ordered.filter((item) => item.kind === "tool").length,
+    problem: ordered.filter(isProblem).length,
+  };
+  const text = query.trim().toLowerCase();
+  const visible = ordered.filter((item) => {
+    if (filter === "turn" && item.kind !== "turn" && item.kind !== "compaction") return false;
+    if (filter === "tool" && item.kind !== "tool") return false;
+    if (filter === "problem" && !isProblem(item)) return false;
+    if (!text) return true;
+    const tool = item.tool ? (titles.get(item.tool) ?? item.tool) + " " + item.tool : "";
+    return (item.message + " " + tool + " " + scopeLabel(item.scope_key, groups)).toLowerCase().includes(text);
+  });
+  return (
+    <section className="card">
+      <header className="card-header wrap">
+        <h2 className="grow">最近活动</h2>
+        <Segmented
+          size="sm"
+          label="活动类型"
+          value={filter}
+          onChange={setFilter}
+          options={[
+            { value: "all", label: "全部", count: counts.all },
+            { value: "turn", label: "对话", count: counts.turn },
+            { value: "tool", label: "工具", count: counts.tool },
+            { value: "problem", label: "异常", count: counts.problem },
+          ]}
+        />
+        <SearchInput value={query} onChange={setQuery} placeholder="搜索活动" label="搜索最近活动" />
+      </header>
+      {visible.length ? (
+        <ol className="activity">
+          {visible.map((item) => {
+            const kind = activityKind(item.kind);
+            const status = item.status ? resultStatus(item.status) : null;
+            const scope = parseScopeKey(item.scope_key);
+            const route = scope ? conversationRoute(scope.kind, scope.peer) : "";
+            return (
+              <li key={item.id} className="activity-row">
+                <time className="activity-time num muted" title={new Date(item.time * 1000).toLocaleString("zh-CN")}>
+                  {formatClock(item.time)}
+                </time>
+                <Badge tone={kind.tone}>{kind.text}</Badge>
+                <div className="activity-body">
+                  <div className="activity-line">
+                    {item.tool && (
+                      <span className="activity-tool" title={item.tool}>
+                        {titles.get(item.tool) ?? item.tool}
+                      </span>
+                    )}
+                    <span className="activity-message">{item.message}</span>
+                  </div>
+                  {route ? (
+                    <a className="activity-scope" href={route} onClick={linkHandler(route)}>
+                      {scopeLabel(item.scope_key, groups)}
+                    </a>
+                  ) : (
+                    item.scope_key && <span className="activity-scope">{item.scope_key}</span>
+                  )}
+                </div>
+                {status && <Badge tone={status.tone}>{status.text}</Badge>}
+              </li>
+            );
+          })}
+        </ol>
+      ) : (
+        <EmptyState icon={ActivityIcon} title={ordered.length ? "没有符合条件的活动" : "还没有活动"} compact>
+          {ordered.length ? "调整筛选条件或搜索词后再试。" : "Agent 被唤醒、调用工具或出错时会记录在这里，只保存在内存中。"}
+        </EmptyState>
+      )}
+    </section>
+  );
+}
+
+export function OverviewPage() {
+  const runtime = useResource(runtimeResource, 3000);
+  const data = runtime.data;
+  return (
+    <div className="page">
+      <PageHeader
+        title="概览"
+        save={false}
+        description={data ? "Harness 已运行 " + formatDuration(Date.now() / 1000 - data.started_at) : "运行状态与最近活动"}
+      />
+      <StatusTiles />
+      {runtime.error && !data && (
+        <p className="danger-text small" role="alert">
+          无法读取运行状态：{runtime.error}
+        </p>
+      )}
+      <section className="card">
+        <header className="card-header">
+          <h2 className="grow">正在运行</h2>
+          <span className="muted small">{data ? data.turns.length + " 个会话" : ""}</span>
+        </header>
+        {data?.turns.length ? (
+          <ul className="turns">
+            {data.turns.map((turn) => (
+              <TurnRow key={turn.scope_key} turn={turn} />
+            ))}
+          </ul>
+        ) : (
+          <EmptyState title="当前没有进行中的对话" compact>
+            被唤醒的会话会在这里显示进度和上下文用量。
+          </EmptyState>
+        )}
+      </section>
+      <ActivityFeed activity={data?.activity ?? []} />
+    </div>
+  );
+}

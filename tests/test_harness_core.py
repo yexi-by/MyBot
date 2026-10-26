@@ -19,6 +19,7 @@ from qq_agent_harness.contracts import (
     ToolResult,
     schema,
 )
+from qq_agent_harness.napcat import NapCatError
 from qq_agent_harness.providers import MediaInput, ModelReply, ModelSession
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime
@@ -361,7 +362,9 @@ def test_web_config_conflict_and_broken_toml_editor_recovery(tmp_path):
         store.path.write_text("broken = [", encoding="utf-8")
         broken = client.get("/api/config")
         assert broken.status_code == 422 and broken.json()["repair_path"] == "harness.toml"
-        raw = client.get("/api/files", params={"path": "harness.toml"}).json()
+        config_file = original["meta"]["config_file"]
+        assert config_file == broken.json()["repair_path"]
+        raw = client.get("/api/files", params={"path": config_file}).json()
         fixed = tomlkit.dumps(
             HarnessSettings.model_validate(original["config"]).model_dump(
                 mode="json", exclude_none=True
@@ -369,12 +372,92 @@ def test_web_config_conflict_and_broken_toml_editor_recovery(tmp_path):
         )
         assert (
             client.put(
-                "/api/files", json={"path": "harness.toml", "content": fixed, "sha": raw["sha"]}
+                "/api/files", json={"path": config_file, "content": fixed, "sha": raw["sha"]}
             ).status_code
             == 200
         )
         assert client.get("/api/config").status_code == 200
         assert client.get("/api/files", params={"path": "../outside"}).status_code == 400
+
+
+def test_text_file_creation_never_overwrites_existing_files(tmp_path):
+    store = make_store(tmp_path)
+    with TestClient(create_app(store.path, connect_mcp=False)) as client:
+        created = client.put(
+            "/api/files", json={"path": "notes.md", "content": "# 笔记", "sha": None}
+        )
+        assert created.status_code == 200 and created.json()["content"] == "# 笔记"
+        again = client.put("/api/files", json={"path": "notes.md", "content": "覆盖", "sha": None})
+        assert again.status_code == 409
+        assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "# 笔记"
+        outside = client.put("/api/files", json={"path": "../x.md", "content": "", "sha": None})
+        assert outside.status_code == 400
+        assert "notes.md" in client.get("/api/files/list").json()["files"]
+
+
+def test_tool_access_follows_each_conversation_policy(tmp_path):
+    store = make_store(tmp_path)
+    data = store.settings.model_dump(mode="json")
+    data["groups"]["a"]["policy"]["tools"] = {"qq__send_message": False}
+    data["groups"]["b"]["policy"]["tools"] = {"qq__get_history": True}
+    data["private"]["enabled"] = False
+    store.save(data, store.last_sha)
+    with TestClient(create_app(store.path, connect_mcp=False)) as client:
+        scopes = client.get("/api/tools/access").json()["scopes"]
+    assert "qq__get_history" in scopes["group:a"] and "qq__send_message" not in scopes["group:a"]
+    assert scopes["group:b"] == ["qq__get_history"]
+    assert scopes["private"] == []
+    # 内置发现工具始终可用，沙箱在本部署未启用，两者都不能出现在开放列表里。
+    assert not any(
+        name.startswith(("harness__", "sandbox__")) for names in scopes.values() for name in names
+    )
+
+
+def test_napcat_group_directory_handles_offline_and_upstream_failure(tmp_path):
+    class Directory:
+        closed = False
+
+        def __init__(self, result: JsonValue | Exception):
+            self.result = result
+            self.calls: list[str] = []
+
+        async def call(
+            self, action: str, params: JsonObject, *, timeout: float | None = None
+        ) -> JsonValue:
+            self.calls.append(action)
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+    store = make_store(tmp_path)
+    app = create_app(store.path, connect_mcp=False)
+    with TestClient(app) as client:
+        offline = client.get("/api/napcat/groups").json()
+        assert offline["available"] is False and offline["groups"] == []
+        directory = Directory(
+            [
+                {"group_id": "100", "group_name": "测试群", "member_count": 12},
+                {"group_name": "缺少群号的条目"},
+            ]
+        )
+        app.state.hub.connections["bot"] = directory
+        listed = client.get("/api/napcat/groups").json()
+        assert listed["available"] is True and listed["bot_id"] == "bot"
+        assert listed["groups"] == [
+            {
+                "group_id": "100",
+                "group_name": "测试群",
+                "member_count": 12,
+                "max_member_count": None,
+            }
+        ]
+        client.get("/api/napcat/groups")
+        assert directory.calls == ["get_group_list"]
+        app.state.hub.connections["bot"] = Directory(NapCatError("账号状态异常", 1))
+        failed = client.get("/api/napcat/groups", params={"refresh": True})
+        assert failed.status_code == 200 and failed.json()["available"] is False
+        # 假连接没有真实 WebSocket，退出前移除，避免关闭流程去关闭它。
+        app.state.hub.connections.clear()
 
 
 @pytest.mark.asyncio
@@ -871,7 +954,8 @@ def test_sandbox_pending_is_based_on_runner_applied_settings(tmp_path):
         )
         assert app.state.runner.get_settings().runner_token == original.runner_token
         assert client.get("/api/sandbox/status").json()["restart_required"] is True
-        assert client.get("/api/config").json()["meta"]["sandbox_restart_required"] is True
+        meta = client.get("/api/config").json()["meta"]
+        assert meta["sandbox_restart_required"] is True and "sandbox" in meta["restart_sections"]
 
     restarted = create_app(store.path, connect_mcp=False)
     restarted.state.runner.status = applied

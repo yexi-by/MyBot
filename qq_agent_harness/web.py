@@ -17,13 +17,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import Field, ValidationError
 
 from .configuration import ConfigError, ConfigStore, ConflictError
-from .contracts import JSON_OBJECT, ConversationScope, JsonObject, Model
+from .contracts import JSON_OBJECT, ConversationScope, JsonObject, JsonValue, Model
 from .mcp_tools import MCPManager
-from .napcat import MediaReader, NapCatHub, action_coverage
+from .napcat import MediaReader, NapCatError, NapCatHub, action_coverage
 from .napcat import build_tools as napcat_tools
+from .napcat.tools import CATEGORY_LABELS as NAPCAT_CATEGORIES
 from .registry import ToolRegistry
 from .runtime import AgentRuntime
 from .sandbox.client import RunnerClient
+from .sandbox.tools import CATEGORY_LABELS as SANDBOX_CATEGORIES
 from .sandbox.tools import build_tools as sandbox_tools
 
 
@@ -35,7 +37,8 @@ class SaveConfig(Model):
 class SaveFile(Model):
     path: str
     content: str
-    sha: str
+    # None 表示只新建文件；同名文件已存在时返回冲突而不是覆盖。
+    sha: str | None
 
 
 class CancelTurn(Model):
@@ -51,8 +54,11 @@ class Cleanup(Model):
 def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     store = ConfigStore(config_path, allow_invalid=True)
     boot_id = uuid.uuid4().hex
+    started_at = time.time()
     startup = store.settings.model_copy(deep=True)
     registry = ToolRegistry(lambda: store.settings)
+    registry.describe_categories(NAPCAT_CATEGORIES)
+    registry.describe_categories(SANDBOX_CATEGORIES)
     for tool in napcat_tools(startup.napcat):
         registry.add(tool)
     hub = NapCatHub(startup.napcat)
@@ -158,20 +164,32 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     async def remote_error(_request: Request, _error: httpx.HTTPError) -> JSONResponse:
         return JSONResponse({"detail": "远端服务暂不可用"}, status_code=502)
 
+    def restart_sections() -> list[str]:
+        """启动时固定下来的设置里，当前配置已改动、需要重启进程才生效的部分。"""
+        current = store.settings
+        sections = [
+            name
+            for name in ("server", "napcat", "mcp", "sandbox")
+            if getattr(startup, name) != getattr(current, name)
+        ]
+        # 并发信号量和活动队列长度在创建运行器时确定。
+        for name in ("concurrent_conversations", "activity_limit"):
+            if getattr(startup.runtime, name) != getattr(current.runtime, name):
+                sections.append(f"runtime.{name}")
+        if sandbox_pending and "sandbox" not in sections:
+            sections.append("sandbox")
+        return sections
+
     def snapshot() -> JsonObject:
         result = store.snapshot()
-        restart = (
-            any(
-                getattr(startup, name) != getattr(store.settings, name)
-                for name in ("server", "napcat", "mcp", "sandbox")
-            )
-            or startup.runtime.concurrent_conversations
-            != store.settings.runtime.concurrent_conversations
-        )
+        sections = restart_sections()
         result["meta"] = {
             "boot_id": boot_id,
             "revision": store.revision,
-            "restart_required": restart or sandbox_pending,
+            # 控制台的原文编辑与修复入口使用实际的配置文件名。
+            "config_file": store.path.name,
+            "restart_required": bool(sections),
+            "restart_sections": [name for name in sections],
             "sandbox_restart_required": sandbox_pending,
         }
         return result
@@ -212,12 +230,85 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
             )
         )
 
+    @app.get("/api/tools/access")
+    async def tool_access() -> JsonObject:
+        bot_id = startup.napcat.expected_bot_id or "preview"
+        scopes: JsonObject = {
+            "private": [
+                name
+                for name in registry.available(
+                    ConversationScope(bot_id=bot_id, kind="private", peer_id="")
+                )
+            ]
+        }
+        for group_id in store.settings.groups:
+            scopes[f"group:{group_id}"] = [
+                name
+                for name in registry.available(
+                    ConversationScope(bot_id=bot_id, kind="group", peer_id=group_id)
+                )
+            ]
+        return {"scopes": scopes}
+
     @app.get("/api/runtime")
     async def status() -> JsonObject:
         result = runtime.snapshot()
-        result["napcat"] = hub.status()
-        result["mcp"] = {name: value for name, value in mcp.statuses.items()}
+        result["started_at"] = started_at
+        result["napcat"] = {**hub.status(), "expected_bot_id": startup.napcat.expected_bot_id}
+        servers: JsonObject = {}
+        for name, config in store.settings.mcp.items():
+            if name in mcp.statuses:
+                servers[name] = {**mcp.statuses[name], "tools": len(mcp.directories.get(name, {}))}
+            else:
+                # 启动后才新增或启用的服务，要到重启时才会连接。
+                servers[name] = {"state": "pending_restart" if config.enabled else "disabled"}
+        result["mcp"] = servers
         return result
+
+    group_cache: dict[str, tuple[float, list[JsonValue]]] = {}
+
+    @app.get("/api/napcat/groups")
+    async def napcat_groups(refresh: bool = False) -> JsonObject:
+        # 只读群目录，仅用于控制台显示群名称；不进入模型上下文，也不记录返回内容。
+        connected = [bot for bot, connection in hub.connections.items() if not connection.closed]
+        expected = startup.napcat.expected_bot_id
+        bot_id = expected if expected in connected else (connected[0] if connected else "")
+        if not bot_id:
+            return {
+                "available": False,
+                "bot_id": "",
+                "reason": "机器人尚未连接 NapCat",
+                "groups": [],
+            }
+        cached = group_cache.get(bot_id)
+        if cached and cached[0] > time.monotonic() and not refresh:
+            return {"available": True, "bot_id": bot_id, "reason": "", "groups": cached[1]}
+        try:
+            data = await hub.bot_connection(bot_id).call(
+                "get_group_list", {"no_cache": refresh}, timeout=10
+            )
+        except NapCatError, OSError:
+            return {
+                "available": False,
+                "bot_id": bot_id,
+                "reason": "读取群列表失败，请稍后重试",
+                "groups": [],
+            }
+        groups: list[JsonValue] = []
+        for item in data if isinstance(data, list) else []:
+            if not isinstance(item, dict) or not isinstance(group_id := item.get("group_id"), str):
+                continue
+            members, capacity = item.get("member_count"), item.get("max_member_count")
+            groups.append(
+                {
+                    "group_id": group_id,
+                    "group_name": str(item.get("group_name") or ""),
+                    "member_count": members if isinstance(members, int) else None,
+                    "max_member_count": capacity if isinstance(capacity, int) else None,
+                }
+            )
+        group_cache[bot_id] = (time.monotonic() + 60, groups)
+        return {"available": True, "bot_id": bot_id, "reason": "", "groups": groups}
 
     @app.get("/api/napcat/coverage")
     async def napcat_coverage() -> JsonObject:
@@ -230,17 +321,20 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     @app.get("/api/sandbox/status")
     async def sandbox_status() -> JsonObject:
         nonlocal sandbox_pending
+        settings = store.settings.sandbox
         try:
             result = await runner.status()
-            expected = store.settings.sandbox.model_dump(
-                mode="json", exclude={"runner_token", "runner_url"}
-            )
+            expected = settings.model_dump(mode="json", exclude={"runner_token", "runner_url"})
             applied = result.get("applied_settings")
-            sandbox_pending = store.settings.sandbox.enabled and (
+            sandbox_pending = settings.enabled and (
                 applied != expected
-                or startup.sandbox.runner_token != store.settings.sandbox.runner_token
-                or startup.sandbox.runner_url != store.settings.sandbox.runner_url
+                or startup.sandbox.runner_token != settings.runner_token
+                or startup.sandbox.runner_url != settings.runner_url
             )
+            # runner 各分支返回的字段不完全相同，这里补齐控制台依赖的字段。
+            result.setdefault("used_bytes", None)
+            result.setdefault("reason", "")
+            result["enabled"] = settings.enabled
             result["restart_required"] = sandbox_pending
             if sandbox_pending:
                 result["configuration_notice"] = (
@@ -248,12 +342,15 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
                 )
             return result
         except httpx.HTTPError, ValueError:
-            sandbox_pending = store.settings.sandbox.enabled
+            sandbox_pending = settings.enabled
             return {
+                "enabled": settings.enabled,
                 "available": False,
                 "reason": "沙箱控制器不可用或尚未完成配额/网络初始化",
-                "quota_bytes": store.settings.sandbox.quota_bytes,
+                "quota_bytes": settings.quota_bytes,
+                "used_bytes": None,
                 "busy": False,
+                "restart_required": sandbox_pending,
             }
 
     @app.get("/api/sandbox/files")
@@ -274,7 +371,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     async def models(provider_id: str, refresh: bool = False) -> JsonObject:
         config = store.settings.providers.get(provider_id)
         if config is None:
-            raise HTTPException(404, "请先保存 provider")
+            raise HTTPException(404, "请先保存模型连接")
         cached = model_cache.get(provider_id)
         if cached and cached[0] > time.monotonic() and not refresh:
             return {"models": [model for model in cached[1]]}

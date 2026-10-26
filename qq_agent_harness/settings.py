@@ -129,7 +129,7 @@ class HarnessSettings(Model):
     @model_validator(mode="after")
     def check_references(self) -> HarnessSettings:
         if self.active_provider and self.active_provider not in self.providers:
-            raise ValueError("active_provider 引用不存在的 provider")
+            raise ValueError("当前使用的模型连接不存在")
         for name in self.persona_paths:
             path = Path(name)
             if path.is_absolute() or ".." in path.parts or ":" in name or "\\" in name:

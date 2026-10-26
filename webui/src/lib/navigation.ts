@@ -1,115 +1,59 @@
 import { useSyncExternalStore } from "react";
+import type { MouseEvent } from "react";
+
 const subscribers = new Set<() => void>();
-let currentLocation = window.location.pathname + window.location.search;
-let navigationGuard: (() => Promise<boolean>) | null = null;
-export function setNavigationGuard(guard: (() => Promise<boolean>) | null) {
-  navigationGuard = guard;
+let current = window.location.pathname + window.location.search;
+let guard: (() => Promise<boolean>) | null = null;
+
+/** 离开当前页面前的检查，例如文本编辑器还有未保存内容。 */
+export function setNavigationGuard(next: (() => Promise<boolean>) | null) {
+  guard = next;
 }
-function locationKey() {
-  return currentLocation;
-}
-function notify() {
-  currentLocation = window.location.pathname + window.location.search;
+function sync() {
+  current = window.location.pathname + window.location.search;
   subscribers.forEach((callback) => callback());
 }
 window.addEventListener("popstate", () => {
   void (async () => {
-    if (navigationGuard && !(await navigationGuard())) {
-      history.pushState({}, "", currentLocation);
+    if (guard && !(await guard())) {
+      history.pushState({}, "", current);
       return;
     }
-    notify();
+    sync();
   })();
 });
-export function transition(action: () => void) {
-  if (
-    !window.matchMedia("(prefers-reduced-motion: reduce)").matches &&
-    document.startViewTransition
-  ) {
-    const change = document.startViewTransition(action);
-    void change.ready.catch(() => {});
-    void change.finished.catch(() => {});
-  } else action();
+
+export async function navigate(
+  path: string,
+  options: { replace?: boolean; keepScroll?: boolean } = {},
+): Promise<boolean> {
+  if (path === current) return true;
+  if (guard && !(await guard())) return false;
+  const samePage = path.split("?")[0] === current.split("?")[0];
+  if (options.replace) history.replaceState({}, "", path);
+  else history.pushState({}, "", path);
+  sync();
+  if (!options.keepScroll && !samePage) window.scrollTo({ top: 0 });
+  return true;
 }
-export async function navigate(path: string) {
-  if (path === locationKey()) return;
-  if (navigationGuard && !(await navigationGuard())) return;
-  transition(() => {
-    history.pushState({}, "", path);
-    notify();
-    window.scrollTo({ top: 0 });
-  });
-}
-export function useLocation() {
+
+export function useLocation(): string {
   return useSyncExternalStore((callback) => {
     subscribers.add(callback);
     return () => subscribers.delete(callback);
-  }, locationKey);
+  }, () => current);
 }
-export const pages = [
-  {
-    path: "/connections",
-    name: "连接与模型",
-    code: "01",
-    description: "NapCat 与模型协议",
-  },
-  {
-    path: "/groups",
-    name: "群配置",
-    code: "02",
-    description: "按群授予 Agent 能力",
-  },
-  {
-    path: "/private",
-    name: "统一私聊",
-    code: "03",
-    description: "所有私聊使用同一策略",
-  },
-  {
-    path: "/tools",
-    name: "工具目录",
-    code: "04",
-    description: "渐进披露与参数边界",
-  },
-  { path: "/mcp", name: "MCP 服务", code: "05", description: "连接外部工具" },
-  {
-    path: "/persona",
-    name: "人格与知识",
-    code: "06",
-    description: "默认耄耋与知识文件",
-  },
-  {
-    path: "/sandbox",
-    name: "共享沙箱",
-    code: "07",
-    description: "代码、依赖与产物",
-  },
-  {
-    path: "/runtime",
-    name: "当前运行",
-    code: "08",
-    description: "内存中的近期活动",
-  },
-];
-export function pageForPath(path: string) {
-  return pages.find((page) => path.startsWith(page.path)) || pages[0];
+
+export function prefersReducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
-export function fieldRoute(path: (string | number)[]) {
-  if (path[0] === "groups")
-    return "/groups?id=" + encodeURIComponent(String(path[1]));
-  if (path[0] === "providers")
-    return "/connections?provider=" + encodeURIComponent(String(path[1]));
-  if (path[0] === "mcp")
-    return "/mcp?id=" + encodeURIComponent(String(path[1]));
-  if (path[0] === "private") return "/private";
-  if (path[0] === "sandbox") return "/sandbox";
-  if (path[0] === "persona_file" || path[0] === "knowledge_files")
-    return "/persona";
-  if (path[0] === "runtime") return "/runtime";
-  return "/connections";
-}
-export function fieldId(path: (string | number)[]) {
-  return (
-    "field-" + path.map((part) => encodeURIComponent(String(part))).join("--")
-  );
+
+/** 链接的点击处理：普通左键走前端路由，带修饰键时保留浏览器默认行为（新标签页等）。 */
+export function linkHandler(path: string, after?: () => void) {
+  return (event: MouseEvent) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    after?.();
+    void navigate(path);
+  };
 }

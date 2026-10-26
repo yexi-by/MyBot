@@ -8,6 +8,7 @@ import {
 } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
+import { Check, ChevronDown, RefreshCw } from "lucide-react";
 
 interface Option {
   value: string;
@@ -26,8 +27,12 @@ interface ComboboxProps {
   loading?: boolean;
   error?: string;
   emptyText?: string;
+  /** 可编辑模式下输入内容没有匹配候选时的提示。 */
+  freeTextHint?: string;
   listLabel?: string;
   onRefresh?: () => void;
+  refreshLabel?: string;
+  invalid?: boolean;
 }
 interface Position {
   left: number;
@@ -61,9 +66,12 @@ export function Combobox({
   className = "",
   loading = false,
   error = "",
-  emptyText = "暂无可选项",
+  emptyText = "没有可选项",
+  freeTextHint = "没有匹配项，将使用输入的内容",
   listLabel,
   onRefresh,
+  refreshLabel = "刷新列表",
+  invalid = false,
 }: ComboboxProps) {
   const generatedId = useId(),
     controlId = id || generatedId,
@@ -94,11 +102,11 @@ export function Combobox({
     selected = options.find((option) => option.value === value),
     expanded = open && !disabled;
   const status = loading
-    ? "正在读取候选列表…"
+    ? "正在读取…"
     : error ||
       (!visible.length
         ? query && options.length
-          ? "没有匹配项，可直接使用输入的模型名"
+          ? freeTextHint
           : emptyText
         : "");
 
@@ -335,6 +343,7 @@ export function Combobox({
     "aria-activedescendant":
       expanded && activeIndex >= 0 ? listId + "-" + activeIndex : undefined,
     "aria-describedby": expanded && status ? statusId : undefined,
+    "aria-invalid": invalid || undefined,
     disabled,
     onKeyDown: keyDown,
   };
@@ -383,8 +392,8 @@ export function Combobox({
               <button
                 type="button"
                 className={"choice-icon" + (loading ? " is-loading" : "")}
-                aria-label="刷新模型列表"
-                title="刷新模型列表"
+                aria-label={refreshLabel}
+                title={refreshLabel}
                 disabled={disabled || loading}
                 onClick={() => {
                   show();
@@ -392,7 +401,7 @@ export function Combobox({
                   control.current?.focus({ preventScroll: true });
                 }}
               >
-                <span aria-hidden="true">↻</span>
+                <RefreshCw size={15} aria-hidden="true" />
               </button>
             )}
             <button
@@ -410,7 +419,8 @@ export function Combobox({
                 }
               }}
             >
-              <span
+              <ChevronDown
+                size={16}
                 className={"choice-chevron" + (expanded ? " open" : "")}
                 aria-hidden="true"
               />
@@ -434,7 +444,8 @@ export function Combobox({
           >
             {selected?.label ?? (value || placeholder)}
           </span>
-          <span
+          <ChevronDown
+            size={16}
             className={"choice-chevron" + (expanded ? " open" : "")}
             aria-hidden="true"
           />
@@ -488,7 +499,7 @@ export function Combobox({
                     {highlighted(option.label, editable ? query : "")}
                   </span>
                   <span className="choice-check" aria-hidden="true">
-                    {option.value === value ? "✓" : ""}
+                    {option.value === value && <Check size={15} />}
                   </span>
                 </div>
               ))}

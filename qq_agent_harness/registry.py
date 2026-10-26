@@ -2,7 +2,7 @@
 
 import asyncio
 import copy
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as SchemaError
@@ -67,6 +67,8 @@ class ToolRegistry:
     def __init__(self, settings: Callable[[], HarnessSettings]) -> None:
         self.settings = settings
         self.tools: dict[str, ToolDefinition] = {}
+        # 分类 ID 到控制台名称；插入顺序即展示顺序。
+        self.category_labels: dict[str, str] = {}
         self.add(
             ToolDefinition(
                 "harness__discover_tools",
@@ -75,6 +77,7 @@ class ToolRegistry:
                 schema(DiscoverInput),
                 self.discover,
                 model=DiscoverInput,
+                title="发现工具",
             )
         )
         self.add(
@@ -85,6 +88,7 @@ class ToolRegistry:
                 schema(LoadInput),
                 self.load,
                 model=LoadInput,
+                title="加载工具",
             )
         )
 
@@ -93,6 +97,16 @@ class ToolRegistry:
             raise ValueError(f"工具名称重复：{tool.name}")
         Draft202012Validator.check_schema(tool.parameters)
         self.tools[tool.name] = tool
+
+    def describe_categories(self, labels: Mapping[str, str]) -> None:
+        self.category_labels.update(labels)
+
+    def category_label(self, category: str) -> str:
+        if category in self.category_labels:
+            return self.category_labels[category]
+        if category.startswith("mcp."):
+            return "MCP · " + category.removeprefix("mcp.")
+        return category
 
     def remove_prefix(self, prefix: str) -> None:
         for name in list(self.tools):
@@ -344,12 +358,18 @@ class ToolRegistry:
             item = tool.public()
             item.update(allowed=allowed, reason=reason)
             tools.append(item)
+        present = {t.category for t in self.tools.values() if t.category != "harness"}
+        known = [name for name in self.category_labels if name in present]
+        ordered = known + sorted(present - set(known))
         return {
             "tools": tools,
-            "categories": [
-                name
-                for name in sorted(
-                    {t.category for t in self.tools.values() if t.category != "harness"}
-                )
-            ],
+            "categories": [{"id": name, "label": self.category_label(name)} for name in ordered],
         }
+
+    def available(self, scope: ConversationScope) -> list[str]:
+        """当前配置下该会话可调用的业务工具；内置的发现与加载不计入。"""
+        return [
+            name
+            for name, tool in self.tools.items()
+            if tool.category != "harness" and self.permitted(scope, tool)[0]
+        ]

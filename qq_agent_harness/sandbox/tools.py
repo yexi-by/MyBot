@@ -10,6 +10,8 @@ from ..contracts import JsonObject, Model, ToolContext, ToolDefinition, ToolResu
 from ..settings import SandboxSettings
 from .client import RunnerClient
 
+CATEGORY_LABELS = {"sandbox.execute": "执行代码", "sandbox.files": "共享工作区文件"}
+
 
 class ExecInput(Model):
     command: str = Field(
@@ -120,6 +122,7 @@ def build_tools(
             execute,
             effects=True,
             model=ExecInput,
+            title="执行代码",
         ),
         ToolDefinition(
             "sandbox__read_file",
@@ -128,6 +131,7 @@ def build_tools(
             schema(FileInput),
             read,
             model=FileInput,
+            title="读取工作区文件",
         ),
         ToolDefinition(
             "sandbox__write_file",
@@ -137,6 +141,7 @@ def build_tools(
             write,
             effects=True,
             model=WriteInput,
+            title="写入工作区文件",
         ),
         ToolDefinition(
             "sandbox__list_files",
@@ -145,5 +150,6 @@ def build_tools(
             schema(ListInput),
             files,
             model=ListInput,
+            title="列出工作区文件",
         ),
     ]

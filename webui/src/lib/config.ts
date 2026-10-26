@@ -1,30 +1,36 @@
 import { useSyncExternalStore } from "react";
-import { request, ApiError, errorMessage } from "./api";
-import { equal, setAt } from "./types";
+import { ApiError, errorMessage, get, isOffline, put } from "./api";
+import { equal, getAt, setAt } from "./types";
 import type {
   ConfigEnvelope,
   Issue,
   Json,
+  Meta,
   ObjectValue,
   Path,
-  Receipt,
+  SaveRecord,
 } from "./types";
-import { fieldInstances, validateClient } from "../schema/fields";
+import { fieldLabel, validateClient } from "../schema/fields";
 
+/**
+ * 配置草稿与自动保存。编辑停止约 0.9 秒后写回；外部修改时保留本地编辑，
+ * 由用户在“覆盖 / 丢弃 / 继续编辑”中选择，继续编辑期间暂停自动保存。
+ */
 export interface ConfigState {
   loaded: boolean;
   loading: boolean;
   draft: ObjectValue;
   base: ObjectValue;
   sha: string;
-  meta: ConfigEnvelope["meta"];
+  meta: Meta;
   saving: boolean;
   error: string;
   issues: Issue[];
   conflict: ConfigEnvelope | null;
-  receipts: Receipt[];
   changed: Path[];
+  history: SaveRecord[];
   repairPath: string;
+  offline: boolean;
 }
 let state: ConfigState = {
   loaded: false,
@@ -32,26 +38,31 @@ let state: ConfigState = {
   draft: {},
   base: {},
   sha: "",
-  meta: { boot_id: "", revision: 0, restart_required: false },
+  meta: {
+    boot_id: "",
+    revision: 0,
+    config_file: "",
+    restart_required: false,
+    restart_sections: [],
+    sandbox_restart_required: false,
+  },
   saving: false,
   error: "",
   issues: [],
   conflict: null,
-  receipts: [],
   changed: [],
+  history: [],
   repairPath: "",
+  offline: false,
 };
 const listeners = new Set<() => void>();
 let timer: ReturnType<typeof setTimeout> | undefined;
+
 function emit(update: Partial<ConfigState>) {
   state = { ...state, ...update };
   listeners.forEach((listener) => listener());
 }
-function diff(
-  a: Json | undefined,
-  b: Json | undefined,
-  path: Path = [],
-): Path[] {
+function diff(a: Json | undefined, b: Json | undefined, path: Path = []): Path[] {
   if (equal(a, b)) return [];
   if (
     a &&
@@ -68,10 +79,11 @@ function diff(
 }
 function schedule() {
   clearTimeout(timer);
-  if (!state.conflict && state.changed.length && !state.issues.length)
+  if (!state.conflict && state.changed.length && !state.issues.length && !state.offline)
     timer = setTimeout(() => void save(), 900);
 }
-export function useConfig() {
+
+export function useConfig(): ConfigState {
   return useSyncExternalStore(
     (callback) => {
       listeners.add(callback);
@@ -80,13 +92,14 @@ export function useConfig() {
     () => state,
   );
 }
-export function getConfig() {
+export function getConfig(): ConfigState {
   return state;
 }
+
 export async function loadConfig() {
-  emit({ loading: true, error: "" });
+  emit({ loading: true });
   try {
-    const data = await request<ConfigEnvelope>("/api/config");
+    const data = await get<ConfigEnvelope>("/api/config");
     emit({
       loaded: true,
       loading: false,
@@ -98,129 +111,142 @@ export async function loadConfig() {
       issues: [],
       conflict: null,
       repairPath: "",
+      error: "",
+      offline: false,
     });
   } catch (error) {
+    const repair = error instanceof ApiError && typeof error.payload.repair_path === "string";
     emit({
       loading: false,
-      error: errorMessage(error),
-      repairPath:
-        error instanceof ApiError &&
-        typeof error.payload.repair_path === "string"
-          ? error.payload.repair_path
-          : "",
+      error: repair ? invalidReason(error) : errorMessage(error),
+      offline: isOffline(error),
+      repairPath: repair ? String(error.payload.repair_path) : "",
     });
   }
 }
+
 export function change(path: Path, value: Json | undefined) {
   const draft = setAt(state.draft, path, value);
   emit({
     draft,
     changed: diff(state.base, draft),
     issues: validateClient(draft),
-    error: state.conflict ? "外部配置已变化；你的编辑仍保留" : "",
+    error: state.conflict ? state.error : "",
   });
   schedule();
 }
+
+/** 配置无效（422）时的具体原因，最多列出两条。 */
+function invalidReason(error: ApiError): string {
+  const issues = serverIssues(error.payload);
+  if (!issues.length) return error.message;
+  return issues
+    .slice(0, 2)
+    .map((issue) => (issue.path.length ? issue.path.join(".") + "：" : "") + issue.message)
+    .join("；");
+}
+
 function serverIssues(payload: Record<string, unknown>): Issue[] {
-  const raw = payload.issues ?? payload.detail;
+  const raw = payload.issues;
   if (!Array.isArray(raw)) return [];
   return raw
-    .filter((item) => item && typeof item === "object")
-    .map((item) => {
-      const entry = item as Record<string, unknown>;
-      const location = entry.path ?? entry.loc;
-      return {
-        path: Array.isArray(location)
-          ? (location.filter(
-              (part) => typeof part === "string" || typeof part === "number",
-            ) as Path)
-          : [],
-        message: String(entry.message ?? entry.msg ?? "配置不符合要求"),
-      };
-    });
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === "object")
+    .map((entry) => ({
+      path: Array.isArray(entry.path)
+        ? (entry.path.filter(
+            (part) => typeof part === "string" || typeof part === "number",
+          ) as Path)
+        : [],
+      message: String(entry.message ?? "配置不符合要求"),
+    }));
 }
+
 export async function save(): Promise<boolean> {
   clearTimeout(timer);
   if (!state.loaded || state.saving || state.conflict) return false;
   const issues = validateClient(state.draft);
   if (issues.length) {
-    emit({ issues, error: "请先修正标出的配置字段" });
+    emit({ issues });
     return false;
   }
   if (!state.changed.length) return true;
-  const submitted = structuredClone(state.draft),
-    fields = state.changed.map((path) => {
-      const descriptor = fieldInstances(submitted).find((item) =>
-        equal(item.path, path),
-      );
-      return descriptor?.field.label || path.join(".");
-    });
+  const submitted = structuredClone(state.draft);
+  const fields = [...new Set(state.changed.map((path) => fieldLabel(submitted, path)))];
   emit({ saving: true, error: "", issues: [] });
   try {
-    const data = await request<ConfigEnvelope>("/api/config", {
-      method: "PUT",
-      body: JSON.stringify({ config: submitted, sha: state.sha }),
+    const data = await put<ConfigEnvelope>("/api/config", {
+      config: submitted,
+      sha: state.sha,
     });
+    // 请求期间若又有新编辑，保留草稿并在下一次自动保存中提交。
     const draft = equal(submitted, state.draft) ? data.config : state.draft;
     emit({
       saving: false,
+      offline: false,
       base: structuredClone(data.config),
       draft,
       sha: data.sha,
       meta: data.meta,
       changed: diff(data.config, draft),
-      receipts: [
-        {
-          at: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
-          message: "配置已写入",
-          fields: [...new Set(fields)],
-        },
-        ...state.receipts,
-      ].slice(0, 30),
+      history: [{ at: Date.now(), title: "配置", fields }, ...state.history].slice(0, 20),
     });
     schedule();
     return true;
   } catch (error) {
     if (error instanceof ApiError && error.status === 409) {
       try {
-        const latest = await request<ConfigEnvelope>("/api/config");
-        emit({
-          saving: false,
-          conflict: latest,
-          sha: latest.sha,
-          error: "外部配置已变化；你的编辑仍保留",
-        });
-      } catch (refreshError) {
-        emit({
-          saving: false,
-          error: "读取冲突版本失败：" + errorMessage(refreshError),
-        });
+        const latest = await get<ConfigEnvelope>("/api/config");
+        emit({ saving: false, conflict: latest, error: "配置文件已被外部修改，你的编辑仍保留" });
+      } catch (refresh) {
+        emit({ saving: false, error: "读取最新配置失败：" + errorMessage(refresh) });
       }
-    } else
+    } else {
+      const issues = error instanceof ApiError ? serverIssues(error.payload) : [];
       emit({
         saving: false,
-        error: errorMessage(error),
-        issues: error instanceof ApiError ? serverIssues(error.payload) : [],
+        offline: isOffline(error),
+        error: isOffline(error)
+          ? "无法连接控制台服务，恢复后会自动保存"
+          : issues.length
+            ? "服务端拒绝了这次保存，请修正标出的字段"
+            : "保存失败：" + errorMessage(error),
+        issues,
       });
+    }
     return false;
   }
 }
-export async function overwriteConflict() {
-  if (!state.conflict) return;
-  // 使用最新 sha；始终保留本地表单内容。再次发生变化仍会返回 409。
-  const latest = await request<ConfigEnvelope>("/api/config");
+
+/**
+ * 以最新文件为基础重新应用本地改动的字段后保存：外部修改的其他字段保留，
+ * 同一字段以本地内容为准。再次遇到外部修改时仍会提示冲突。
+ */
+export async function overwriteConflict(): Promise<boolean> {
+  if (!state.conflict) return false;
+  const latest = await get<ConfigEnvelope>("/api/config");
+  let draft = structuredClone(latest.config);
+  for (const path of state.changed) draft = setAt(draft, path, getAt(state.draft, path));
   emit({
     sha: latest.sha,
     base: latest.config,
-    changed: diff(latest.config, state.draft),
+    meta: latest.meta,
+    draft,
+    changed: diff(latest.config, draft),
+    issues: validateClient(draft),
     conflict: null,
     error: "",
   });
   return save();
 }
+
+/** 两份配置之间有差异的字段路径。 */
+export function changedPaths(a: ObjectValue, b: ObjectValue): Path[] {
+  return diff(a, b);
+}
+
 export function discardConflict() {
-  if (!state.conflict) return;
   const latest = state.conflict;
+  if (!latest) return;
   emit({
     draft: latest.config,
     base: structuredClone(latest.config),
@@ -232,23 +258,26 @@ export function discardConflict() {
     error: "",
   });
 }
+
 export async function pollConfig() {
-  if (state.saving || state.conflict || state.loading) return;
+  if (state.saving || state.loading) return;
   if (!state.loaded) {
-    if (state.repairPath) await loadConfig();
+    await loadConfig();
     return;
   }
   try {
-    const latest = await request<ConfigEnvelope>("/api/config");
-    if (state.repairPath) emit({ repairPath: "", error: "" });
+    const latest = await get<ConfigEnvelope>("/api/config");
+    const recovered = state.offline || !!state.repairPath;
+    if (recovered) emit({ offline: false, repairPath: "", error: state.conflict ? state.error : "" });
+    if (state.conflict) {
+      // 冲突期间只跟进最新版本，保证“覆盖”基于真正的当前文件。
+      if (latest.sha !== state.conflict.sha) emit({ conflict: latest });
+      return;
+    }
     if (latest.sha !== state.sha) {
       if (state.changed.length) {
         clearTimeout(timer);
-        emit({
-          conflict: latest,
-          sha: latest.sha,
-          error: "检测到外部修改；本地编辑已保留",
-        });
+        emit({ conflict: latest, error: "配置文件已被外部修改，你的编辑仍保留" });
       } else
         emit({
           draft: latest.config,
@@ -257,23 +286,14 @@ export async function pollConfig() {
           meta: latest.meta,
         });
     } else emit({ meta: latest.meta });
+    if (recovered) schedule();
   } catch (error) {
-    if (
-      error instanceof ApiError &&
-      typeof error.payload.repair_path === "string"
-    )
-      emit({ error: error.message, repairPath: error.payload.repair_path });
+    if (error instanceof ApiError && typeof error.payload.repair_path === "string")
+      emit({ error: invalidReason(error), repairPath: error.payload.repair_path });
+    else if (isOffline(error)) emit({ offline: true });
   }
 }
-export function recordReceipt(message: string, fields: string[]) {
-  emit({
-    receipts: [
-      {
-        at: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
-        message,
-        fields,
-      },
-      ...state.receipts,
-    ].slice(0, 30),
-  });
+
+export function recordSave(title: string, fields: string[]) {
+  emit({ history: [{ at: Date.now(), title, fields }, ...state.history].slice(0, 20) });
 }

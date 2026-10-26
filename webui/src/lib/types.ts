@@ -7,40 +7,50 @@ export type Json =
   | { [key: string]: Json };
 export type ObjectValue = { [key: string]: Json };
 export type Path = (string | number)[];
+
 export interface Meta {
   boot_id: string;
   revision: number;
-  restart_required: boolean | string[];
-  sandbox_restart_required?: boolean;
+  config_file: string;
+  restart_required: boolean;
+  restart_sections: string[];
+  sandbox_restart_required: boolean;
 }
 export interface ConfigEnvelope {
   config: ObjectValue;
   sha: string;
   meta: Meta;
-  schema?: ObjectValue;
 }
 export interface Issue {
   path: Path;
   message: string;
 }
-export interface Receipt {
-  at: string;
-  message: string;
+export interface SaveRecord {
+  at: number;
+  title: string;
   fields: string[];
 }
+export type ToolScope = "both" | "group" | "private" | "account";
 export interface Tool {
   name: string;
+  title: string;
   description: string;
   category: string;
   parameters: ObjectValue;
   effects: boolean;
-  scope: string;
-  allowed?: boolean;
-  reason?: string;
+  scope: ToolScope;
+  requires?: string[];
+}
+export interface Category {
+  id: string;
+  label: string;
 }
 export interface ToolsEnvelope {
   tools: Tool[];
-  categories: string[];
+  categories: Category[];
+}
+export interface ToolAccess {
+  scopes: Record<string, string[]>;
 }
 export interface FileEnvelope {
   path: string;
@@ -48,14 +58,15 @@ export interface FileEnvelope {
   sha: string;
 }
 export interface SandboxStatus {
+  enabled: boolean;
   available: boolean;
-  reason?: string;
-  quota_bytes: number;
-  used_bytes: number;
   busy: boolean;
-  execution_id?: string | null;
+  quota_bytes: number;
+  used_bytes: number | null;
+  reason: string;
+  restart_required: boolean;
   configuration_notice?: string;
-  restart_required?: boolean;
+  execution_id?: string | null;
 }
 export interface SandboxFile {
   path: string;
@@ -63,15 +74,82 @@ export interface SandboxFile {
   size: number;
   is_dir: boolean;
 }
-export interface RuntimeEnvelope {
-  napcat: Json;
-  turns: ObjectValue[];
-  activity: ObjectValue[];
+export interface TurnContext {
+  input_tokens?: number;
+  max_tokens?: number;
+  trigger_tokens?: number;
+  compactions?: number;
+  request_count?: number;
+  usage_source?: string;
 }
+export interface Turn {
+  scope_key: string;
+  turn_id?: string;
+  state: string;
+  started_at: number;
+  rounds?: number;
+  context?: TurnContext;
+}
+export interface Activity {
+  id: string;
+  time: number;
+  scope_key: string;
+  kind: string;
+  message: string;
+  status?: string;
+  tool?: string;
+}
+export interface McpStatus {
+  state: string;
+  message?: string;
+  error_type?: string;
+  tools?: number;
+}
+export interface RuntimeEnvelope {
+  started_at: number;
+  turns: Turn[];
+  activity: Activity[];
+  napcat: {
+    connected: string[];
+    expected_bot_id: string;
+    baseline_version: string;
+  };
+  mcp: Record<string, McpStatus>;
+}
+export interface GroupInfo {
+  group_id: string;
+  group_name: string;
+  member_count: number | null;
+  max_member_count: number | null;
+}
+export interface GroupDirectory {
+  available: boolean;
+  bot_id: string;
+  reason: string;
+  groups: GroupInfo[];
+}
+export interface CoverageAction {
+  action: string;
+  status: string;
+  tool: string | null;
+  reason: string;
+  source?: string;
+}
+export interface Coverage {
+  version: string;
+  commit: string;
+  source_url: string;
+  aliases: string;
+  actions: CoverageAction[];
+}
+
 export function object(value: Json | undefined): ObjectValue {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value
     : {};
+}
+export function list(value: Json | undefined): Json[] {
+  return Array.isArray(value) ? value : [];
 }
 export function getAt(value: Json | undefined, path: Path): Json | undefined {
   let next = value;
@@ -85,6 +163,15 @@ export function getAt(value: Json | undefined, path: Path): Json | undefined {
   }
   return next;
 }
+// 用 defineProperty 写入，避免群号等用户输入的键名触发原型链上的 setter。
+function assign(target: ObjectValue, key: string, value: Json) {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
 export function setAt(
   value: ObjectValue,
   path: Path,
@@ -97,14 +184,7 @@ export function setAt(
     if (Array.isArray(node)) {
       node = object(node[Number(key)]);
     } else {
-      if (!Object.hasOwn(node, key) || node[key] === null) {
-        Object.defineProperty(node, key, {
-          value: {},
-          enumerable: true,
-          writable: true,
-          configurable: true,
-        });
-      }
+      if (!Object.hasOwn(node, key) || node[key] === null) assign(node, key, {});
       node = node[key] as ObjectValue;
     }
   }
@@ -113,27 +193,9 @@ export function setAt(
     if (next === undefined) node.splice(Number(key), 1);
     else node[Number(key)] = next;
   } else if (next === undefined) delete node[String(key)];
-  else
-    Object.defineProperty(node, String(key), {
-      value: next,
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    });
+  else assign(node, String(key), next);
   return copy;
 }
 export function equal(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
-}
-export function formatBytes(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  if (n < 1000) return n + " B";
-  const units = ["KB", "MB", "GB", "TB"];
-  let v = n / 1000,
-    i = 0;
-  while (v >= 1000 && i < 3) {
-    v /= 1000;
-    i++;
-  }
-  return v.toFixed(v >= 100 ? 0 : 1) + " " + units[i];
 }

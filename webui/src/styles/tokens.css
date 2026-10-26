@@ -1,70 +1,114 @@
 /*
- * 「蓝图」配色与字体：纸白 + 蓝图蓝 + 樱粉荧光笔，棱角分明。
- * 亮 / 暗主题只改这里的变量，组件里不写死颜色。
+ * 设计变量：中性灰底 + 单一蓝色强调。亮 / 暗主题只改这里，组件不写死颜色。
+ * 文字三级对比度均不低于 4.5:1（相对各自的面板底色）。
  */
 :root {
-  --paper: #f5f7fb;
-  --panel: #ffffff;
-  --ink: #16203a;
-  --ink-2: #4a5574;
-  --ink-3: #8592ae;
-  --rule: #e1e7f1;
-  --rule-strong: #cdd6e5;
-  --blue: #2b66d9;
-  --blue-soft: #e4edfd;
-  --blue-pastel: #b7cff6;
-  --pink: #e5739c;
-  --pink-soft: #fbdce8;
-  --pink-pastel: #f4b6cc;
-  --ok: #1c9468;
-  --warn: #b97a0f;
-  --bad: #d03c37;
-  --bad-soft: #fde6e5;
-  --on-accent: #ffffff;
-  --thumb: #ffffff;
-  --grid: rgba(43, 102, 217, 0.055);
-  --grid-major: rgba(43, 102, 217, 0.1);
-  --scrim: rgba(12, 18, 32, 0.38);
-  --shadow-pop: 0 18px 48px -12px rgba(22, 32, 58, 0.28);
-  --shadow-thumb: 0 1px 2px rgba(22, 32, 58, 0.3);
-
-  --font-ui:
-    "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI",
-    "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
-  --font-mono:
-    "IBM Plex Mono", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
-  --font-display: "Smiley Sans Oblique", "Microsoft YaHei UI", sans-serif;
-
-  --r: 3px;
-  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --ease-spring: cubic-bezier(0.3, 1.35, 0.5, 1);
   color-scheme: light;
+  --canvas: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #f1f3f5;
+  --surface-3: #e8ebef;
+  --sidebar: #fbfbfc;
+  --border: #e3e6ea;
+  --border-strong: #cfd4da;
+  --text: #16181d;
+  --text-2: #4b5260;
+  --text-3: #687080;
+  --on-accent: #ffffff;
+  --accent: #2f6fed;
+  --accent-hover: #2560d8;
+  --accent-soft: #eaf1fe;
+  --accent-text: #1f5bd6;
+  --success: #1a7f4b;
+  --success-soft: #e6f4ec;
+  --success-text: #146c3f;
+  --warning: #b26a00;
+  --warning-soft: #fdf1df;
+  --warning-text: #8a4f00;
+  --danger: #c93030;
+  --danger-hover: #b22828;
+  --danger-soft: #fcebea;
+  --danger-text: #b42525;
+  --focus: rgba(47, 111, 237, 0.32);
+  --scrim: rgba(15, 17, 21, 0.4);
+  --shadow-pop:
+    0 10px 28px rgba(16, 24, 40, 0.12), 0 2px 6px rgba(16, 24, 40, 0.06);
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04);
+  --switch-off: #c5cbd3;
+  --thumb: #ffffff;
+  --code-bg: #f4f5f7;
+  --mark: rgba(255, 196, 0, 0.32);
+  --cm-heading: #1f5bd6;
+  --cm-strong: #16181d;
+  --cm-emphasis: #8a4f00;
+  --cm-link: #1f5bd6;
+  --cm-code: #b42525;
+  --cm-meta: #687080;
+
+  --font-sans:
+    "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans SC", system-ui, sans-serif;
+  --font-mono:
+    "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "SF Mono", Consolas,
+    "Liberation Mono", "Microsoft YaHei UI", monospace;
+
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 24px;
+  --r-sm: 4px;
+  --r: 6px;
+  --r-lg: 8px;
+  --control-h: 34px;
+  --control-h-sm: 28px;
+  --sidebar-w: 232px;
+  --sidebar-rail: 60px;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur: 140ms;
 }
 
 :root.dark {
-  --paper: #0c1220;
-  --panel: #121a2c;
-  --ink: #dde5f5;
-  --ink-2: #a6b2cd;
-  --ink-3: #6b7893;
-  --rule: #1f2940;
-  --rule-strong: #2c3854;
-  --blue: #7aa5f6;
-  --blue-soft: #18264a;
-  --blue-pastel: #2f4a82;
-  --pink: #f095b9;
-  --pink-soft: #43213a;
-  --pink-pastel: #7a3a5a;
-  --ok: #4fc89b;
-  --warn: #e2aa4a;
-  --bad: #f1736e;
-  --bad-soft: #3c1c20;
-  --on-accent: #0c1220;
-  --thumb: #e8eefb;
-  --grid: rgba(122, 165, 246, 0.045);
-  --grid-major: rgba(122, 165, 246, 0.085);
-  --scrim: rgba(3, 6, 12, 0.6);
-  --shadow-pop: 0 24px 60px -16px rgba(0, 0, 0, 0.6);
-  --shadow-thumb: 0 1px 2px rgba(0, 0, 0, 0.45);
   color-scheme: dark;
+  --canvas: #0f1115;
+  --surface: #171a20;
+  --surface-2: #1d2128;
+  --surface-3: #262b33;
+  --sidebar: #13161b;
+  --border: #2a2f37;
+  --border-strong: #3a414c;
+  --text: #e7e9ee;
+  --text-2: #b3b9c4;
+  --text-3: #8f97a4;
+  --on-accent: #ffffff;
+  --accent: #3b6fe0;
+  --accent-hover: #4a7cec;
+  --accent-soft: rgba(91, 142, 247, 0.16);
+  --accent-text: #93b5fb;
+  --success: #3fb87a;
+  --success-soft: rgba(63, 184, 122, 0.15);
+  --success-text: #63d39a;
+  --warning: #e0a03a;
+  --warning-soft: rgba(224, 160, 58, 0.15);
+  --warning-text: #f0bb68;
+  --danger: #dc4b4b;
+  --danger-hover: #e65c5c;
+  --danger-soft: rgba(240, 106, 106, 0.15);
+  --danger-text: #ff8f8f;
+  --focus: rgba(91, 142, 247, 0.45);
+  --scrim: rgba(0, 0, 0, 0.58);
+  --shadow-pop: 0 14px 36px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-card: none;
+  --switch-off: #444b57;
+  --thumb: #f4f6fa;
+  --code-bg: #13161b;
+  --mark: rgba(240, 187, 104, 0.3);
+  --cm-heading: #93b5fb;
+  --cm-strong: #e7e9ee;
+  --cm-emphasis: #f0bb68;
+  --cm-link: #93b5fb;
+  --cm-code: #ff8f8f;
+  --cm-meta: #8f97a4;
 }

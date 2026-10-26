@@ -191,6 +191,8 @@ class MCPManager:
                 ):
                     raise ValueError("不支持 MCP schema 外部引用")
                 effects = item.name not in config.read_only_tools
+                # 远端标题只用于控制台展示，不参与授权判断。
+                title = item.title or (item.annotations.title if item.annotations else None)
                 definitions.append(
                     ToolDefinition(
                         f"mcp__{name}__{item.name}",
@@ -202,6 +204,7 @@ class MCPManager:
                             session, item.name, config.timeout, effects, disconnected, disconnect
                         ),
                         effects=effects,
+                        title=title or item.name,
                     )
                 )
                 if len(definitions) > 1000:

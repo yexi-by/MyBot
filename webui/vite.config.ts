@@ -15,9 +15,7 @@ export default defineConfig({
     },
   },
   build: {
-    // 得意黑按 unicode-range 拆成几十个小字体文件，浏览器只按需加载。
-    assetsInlineLimit: 0,
-    // CodeMirror（含 Markdown 内嵌语言）单独成包且只在配置文本页按需加载。
+    // CodeMirror（含 Markdown 内嵌语言）单独成包，只在打开文本编辑器时加载。
     chunkSizeWarningLimit: 600,
   },
 });

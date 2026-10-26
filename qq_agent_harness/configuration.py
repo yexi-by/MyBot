@@ -146,11 +146,7 @@ class ConfigStore:
 
     def snapshot(self) -> JsonObject:
         self.reload()
-        return {
-            "config": self.settings.model_dump(mode="json"),
-            "sha": self.last_sha,
-            "schema": HarnessSettings.model_json_schema(),
-        }
+        return {"config": self.settings.model_dump(mode="json"), "sha": self.last_sha}
 
     def save(self, data: object, expected_sha: str) -> JsonObject:
         with self.lock:
@@ -182,14 +178,21 @@ class ConfigStore:
             raise ValueError("文本文件超过 2 MB")
         return {"path": relative, "content": raw.decode("utf-8-sig"), "sha": checksum(raw)}
 
-    def save_file(self, relative: str, content: str, expected_sha: str) -> JsonObject:
+    def save_file(self, relative: str, content: str, expected_sha: str | None) -> JsonObject:
+        """expected_sha 为 None 表示只新建；同名文件已存在时按冲突处理，不会覆盖。"""
         with self.lock:
             path = self.resolve_file(relative)
             if not path.parent.is_dir():
                 raise ValueError("父目录不存在")
-            old = path.read_bytes() if path.exists() else b""
-            if checksum(old) != expected_sha:
-                raise ConflictError(checksum(old))
+            if path.is_dir():
+                raise ValueError("该路径是目录，不能作为文本文件保存")
+            if expected_sha is None:
+                if path.exists():
+                    raise ConflictError(checksum(path.read_bytes()))
+            else:
+                old = path.read_bytes() if path.exists() else b""
+                if checksum(old) != expected_sha:
+                    raise ConflictError(checksum(old))
             if len(content.encode("utf-8")) > 2_000_000:
                 raise ValueError("文本文件超过 2 MB")
             if relative == self.settings.persona_file and not content.strip():

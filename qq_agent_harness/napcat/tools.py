@@ -33,6 +33,29 @@ BASELINE_VERSION = "v4.18.41"
 BASELINE_COMMIT = "859eb530c5801577633c2c3ae871d23586edf281"
 BEIJING = timezone(timedelta(hours=8))
 
+# 控制台展示的能力分类名称，按展示顺序排列；权限配置和模型侧仍使用分类 ID。
+CATEGORY_LABELS = {
+    "messages.read": "读取消息",
+    "messages.send": "发送消息",
+    "messages.manage": "管理消息",
+    "media.read": "读取媒体",
+    "members.read": "成员资料",
+    "groups.read": "群资料",
+    "groups.manage": "群管理",
+    "notices.read": "读取群公告",
+    "notices.manage": "管理群公告",
+    "files.read": "读取群文件",
+    "files.manage": "管理群文件",
+    "albums.read": "浏览群相册",
+    "albums.manage": "管理群相册",
+    "contacts.read": "联系人资料",
+    "contacts.manage": "管理联系人",
+    "account.read": "机器人账号信息",
+    "account.manage": "机器人账号设置",
+    "utilities.read": "辅助查询",
+    "system.manage": "NapCat 系统操作",
+}
+
 
 @dataclass(frozen=True)
 class ActionSpec:
@@ -339,6 +362,7 @@ def action_tool(spec: ActionSpec) -> ToolDefinition:
         scope=spec.scope,
         cross_scope=spec.scope in ("both", "group", "private"),
         model=spec.model,
+        title=spec.summary,
     )
 
 
@@ -686,6 +710,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             scope="group" if group else "account",
             cross_scope=group,
             model=a.ImageSource,
+            title="更新当前群头像" if group else "更新机器人头像",
         )
 
     tools.extend((avatar_tool(True), avatar_tool(False)))
@@ -792,6 +817,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         tuple[
             str,
             str,
+            str,
             type[BaseModel],
             str,
             Callable[[ToolContext, JsonObject], Awaitable[ToolResult]],
@@ -800,6 +826,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
     ] = [
         (
             "qq__get_history",
+            "读取会话历史",
             "主动补充当前会话上下文、核对前文或按北京时间筛选近期消息。远端历史不是完整归档。",
             a.History,
             "messages.read",
@@ -808,6 +835,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         ),
         (
             "qq__get_message",
+            "读取单条消息",
             "当你需要核实当前会话的引用、消息原文或消息段时，主动读取这条消息；不会读取其他会话。",
             a.MessageId,
             "messages.read",
@@ -816,6 +844,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         ),
         (
             "qq__get_forward_messages",
+            "展开合并转发",
             "当对话提及合并转发但缺少内容时，主动展开当前会话消息中的转发节点。必须提供外层消息 ID。",
             a.Forward,
             "messages.read",
@@ -824,6 +853,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         ),
         (
             "qq__read_media",
+            "读取媒体内容",
             "当你需要理解当前消息或转发中的图片、语音、视频和文件时，主动读取其实际内容。单个资源失败返回部分错误。",
             a.ReadMedia,
             "media.read",
@@ -832,6 +862,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         ),
         (
             "qq__send_message",
+            "发送消息",
             "当你判断有必要在 QQ 发言或交付文件时，主动调用此唯一发送入口。明确安排正文、引用、艾特及媒体顺序；普通模型正文不会发送，结果未知时不得重发。",
             a.SendMessage,
             "messages.send",
@@ -839,7 +870,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             True,
         ),
     ]
-    for name, description, model, category, handler, effects in custom:
+    for name, title, description, model, category, handler, effects in custom:
         tools.append(
             ToolDefinition(
                 name,
@@ -850,6 +881,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
                 effects=effects,
                 cross_scope=True,
                 model=model,
+                title=title,
             )
         )
     tools.append(
@@ -863,6 +895,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             cross_scope=True,
             model=SaveMedia,
             requires=("sandbox__write_file",),
+            title="保存媒体到共享工作区",
         )
     )
     tools.append(
@@ -876,6 +909,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             scope="group",
             cross_scope=True,
             model=a.GroupRequest,
+            title="处理当前群入群申请",
         )
     )
     return tools

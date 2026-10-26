@@ -100,15 +100,19 @@ class ToolDefinition:
     cross_scope: bool = False
     model: type[BaseModel] | None = None
     requires: tuple[str, ...] = ()
+    # 面向控制台的简短名称；模型看到的仍是 description。
+    title: str = ""
 
     def public(self) -> JsonObject:
         return {
             "name": self.name,
+            "title": self.title or self.name,
             "description": self.description,
             "category": self.category,
             "parameters": self.parameters,
             "effects": self.effects,
             "scope": self.scope,
+            "requires": [name for name in self.requires],
         }
 
 

@@ -1,4 +1,5 @@
 import type { Json } from "./types";
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -8,109 +9,148 @@ export class ApiError extends Error {
     super(message);
   }
 }
-function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-function arrayOf(value: unknown, check: (entry: unknown) => boolean): boolean {
-  return Array.isArray(value) && value.every(check);
-}
-function validateEnvelope(url: string, value: unknown): void {
+
+type Data = Record<string, unknown>;
+const record = (value: unknown): value is Data =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const text = (value: unknown) => typeof value === "string";
+const arrayOf = (value: unknown, check: (entry: unknown) => boolean) =>
+  Array.isArray(value) && value.every(check);
+
+// 只校验页面直接依赖的字段，用于尽早发现前后端版本不一致。
+const shapes: [RegExp, (value: Data) => boolean][] = [
+  [
+    /^\/api\/config$/,
+    (v) =>
+      record(v.config) &&
+      text(v.sha) &&
+      record(v.meta) &&
+      text(v.meta.boot_id) &&
+      typeof v.meta.revision === "number" &&
+      text(v.meta.config_file) &&
+      Array.isArray(v.meta.restart_sections),
+  ],
+  [/^\/api\/files\/list$/, (v) => arrayOf(v.files, text)],
+  [/^\/api\/files$/, (v) => text(v.path) && text(v.content) && text(v.sha)],
+  [
+    /^\/api\/tools$/,
+    (v) =>
+      arrayOf(v.categories, (c) => record(c) && text(c.id) && text(c.label)) &&
+      arrayOf(
+        v.tools,
+        (t) =>
+          record(t) &&
+          text(t.name) &&
+          text(t.title) &&
+          text(t.description) &&
+          text(t.category) &&
+          record(t.parameters) &&
+          typeof t.effects === "boolean" &&
+          text(t.scope),
+      ),
+  ],
+  [
+    /^\/api\/tools\/access$/,
+    (v) =>
+      record(v.scopes) &&
+      Object.values(v.scopes).every((names) => arrayOf(names, text)),
+  ],
+  [
+    /^\/api\/runtime$/,
+    (v) =>
+      typeof v.started_at === "number" &&
+      record(v.napcat) &&
+      arrayOf(v.napcat.connected, text) &&
+      arrayOf(v.turns, record) &&
+      arrayOf(v.activity, record) &&
+      record(v.mcp),
+  ],
+  [
+    /^\/api\/napcat\/groups$/,
+    (v) =>
+      typeof v.available === "boolean" &&
+      arrayOf(v.groups, (g) => record(g) && text(g.group_id)),
+  ],
+  [
+    /^\/api\/sandbox\/status$/,
+    (v) =>
+      typeof v.available === "boolean" &&
+      typeof v.busy === "boolean" &&
+      typeof v.quota_bytes === "number" &&
+      (v.used_bytes === null || typeof v.used_bytes === "number"),
+  ],
+  [
+    /^\/api\/sandbox\/files$/,
+    (v) =>
+      text(v.path) &&
+      arrayOf(
+        v.files,
+        (f) =>
+          record(f) &&
+          text(f.path) &&
+          text(f.name) &&
+          typeof f.size === "number" &&
+          typeof f.is_dir === "boolean",
+      ),
+  ],
+  [
+    /^\/api\/napcat\/coverage$/,
+    (v) =>
+      text(v.version) &&
+      text(v.source_url) &&
+      arrayOf(
+        v.actions,
+        (a) => record(a) && text(a.action) && text(a.status) && text(a.reason),
+      ),
+  ],
+  [/^\/api\/providers\/[^/]+\/models$/, (v) => arrayOf(v.models, text)],
+];
+
+function check(url: string, payload: unknown) {
   const path = new URL(url, window.location.origin).pathname;
-  let valid = record(value);
-  if (valid && record(value)) {
-    if (path === "/api/config")
-      valid =
-        record(value.config) &&
-        typeof value.sha === "string" &&
-        record(value.meta) &&
-        typeof value.meta.boot_id === "string" &&
-        typeof value.meta.revision === "number";
-    else if (path === "/api/files/list")
-      valid = arrayOf(value.files, (entry) => typeof entry === "string");
-    else if (path === "/api/files")
-      valid =
-        typeof value.path === "string" &&
-        typeof value.content === "string" &&
-        typeof value.sha === "string";
-    else if (path === "/api/tools")
-      valid =
-        arrayOf(value.categories, (entry) => typeof entry === "string") &&
-        arrayOf(
-          value.tools,
-          (entry) =>
-            record(entry) &&
-            typeof entry.name === "string" &&
-            typeof entry.description === "string" &&
-            typeof entry.category === "string" &&
-            record(entry.parameters) &&
-            typeof entry.effects === "boolean" &&
-            typeof entry.scope === "string",
-        );
-    else if (path === "/api/runtime")
-      valid =
-        record(value.napcat) &&
-        arrayOf(value.turns, record) &&
-        arrayOf(value.activity, record);
-    else if (path === "/api/sandbox/status")
-      valid =
-        typeof value.available === "boolean" &&
-        typeof value.busy === "boolean" &&
-        typeof value.quota_bytes === "number" &&
-        typeof value.used_bytes === "number";
-    else if (path === "/api/sandbox/files")
-      valid =
-        typeof value.path === "string" &&
-        arrayOf(
-          value.files,
-          (entry) =>
-            record(entry) &&
-            typeof entry.path === "string" &&
-            typeof entry.name === "string" &&
-            typeof entry.size === "number" &&
-            typeof entry.is_dir === "boolean",
-        );
-    else if (path === "/api/napcat/coverage")
-      valid =
-        typeof value.version === "string" &&
-        typeof value.commit === "string" &&
-        typeof value.source_url === "string" &&
-        arrayOf(
-          value.actions,
-          (entry) =>
-            record(entry) &&
-            typeof entry.action === "string" &&
-            typeof entry.status === "string" &&
-            typeof entry.reason === "string",
-        );
-    else if (/^\/api\/providers\/[^/]+\/models$/.test(path))
-      valid = arrayOf(value.models, (entry) => typeof entry === "string");
-  }
-  if (!valid) throw new Error("服务响应格式不正确，请检查前后端版本是否一致");
+  const shape = shapes.find(([pattern]) => pattern.test(path));
+  if (shape && !(record(payload) && shape[1](payload)))
+    throw new ApiError(
+      -1,
+      {},
+      "服务返回的数据与当前页面不匹配。请刷新页面；仍出现时，请确认前后端是同一版本。",
+    );
 }
+
 export async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...init,
+      headers: { "Content-Type": "application/json", ...init?.headers },
+    });
+  } catch {
+    throw new ApiError(0, {}, "无法连接控制台服务，请确认服务正在运行");
+  }
   const payload: unknown = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const data =
-      payload && typeof payload === "object"
-        ? (payload as Record<string, unknown>)
-        : {};
+    const data = record(payload) ? payload : {};
     const detail =
       typeof data.detail === "string"
         ? data.detail
         : typeof data.message === "string"
           ? data.message
-          : "请求失败（" + response.status + "）";
+          : "请求失败（HTTP " + response.status + "）";
     throw new ApiError(response.status, data, detail);
   }
-  validateEnvelope(url, payload);
+  check(url, payload);
   return payload as T;
 }
+
+export const get = <T>(url: string) => request<T>(url);
 export const post = <T>(url: string, body: Json = {}) =>
   request<T>(url, { method: "POST", body: JSON.stringify(body) });
+export const put = <T>(url: string, body: Json) =>
+  request<T>(url, { method: "PUT", body: JSON.stringify(body) });
+
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+export function isOffline(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 0;
 }
