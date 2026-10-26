@@ -12,9 +12,8 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { Badge, Button, EmptyState, Meter, Segmented, StatusDot } from "../components/primitives";
 import { PageHeader, SearchInput } from "../components/shell";
-import { errorMessage, post } from "../lib/api";
 import { useConfig } from "../lib/config";
-import { conversationRoute, scopeLabel } from "../lib/conversations";
+import { scopeLabel } from "../lib/conversations";
 import { formatBytes, formatClock, formatDuration, formatNumber, formatRelative, parseScopeKey } from "../lib/format";
 import { activityKind, mcpState, resultStatus, turnState, usageSources } from "../lib/labels";
 import { linkHandler } from "../lib/navigation";
@@ -25,10 +24,10 @@ import {
   useGroupNames,
   useResource,
 } from "../lib/resource";
+import { sessionRoute, stopTurn } from "../lib/sessions";
 import { object } from "../lib/types";
 import type { Activity, RetainedSession, Turn } from "../lib/types";
 import type { Tone } from "../lib/ui";
-import { confirm, toast } from "../lib/ui";
 
 function Tile({
   icon: Icon,
@@ -148,13 +147,12 @@ function StatusTiles() {
 
 function TurnRow({ turn }: { turn: Turn }) {
   const groups = useGroupNames();
-  const scope = parseScopeKey(turn.scope_key);
   const state = turnState(turn.state);
   const context = turn.context;
   const max = context?.max_tokens ?? 0;
   const used = context?.input_tokens ?? 0;
   const ratio = max ? used / max : 0;
-  const route = scope ? conversationRoute(scope.kind, scope.peer) : "/conversations";
+  const route = sessionRoute(turn.scope_key);
   return (
     <li className="turn">
       <div className="turn-main">
@@ -185,28 +183,7 @@ function TurnRow({ turn }: { turn: Turn }) {
           </span>
         </div>
       )}
-      <Button
-        size="sm"
-        icon={CircleStop}
-        onClick={async () => {
-          const accepted = await confirm({
-            title: "停止这一轮对话？",
-            message: "已经发出的消息和执行过的操作不会撤回。",
-            confirmLabel: "停止",
-            danger: true,
-          });
-          if (!accepted) return;
-          try {
-            const result = await post<{ cancelled: boolean }>("/api/runtime/cancel", {
-              scope_key: turn.scope_key,
-            });
-            toast(result.cancelled ? "已停止" : "这一轮已经结束", result.cancelled ? "success" : "neutral");
-            void runtimeResource.refresh();
-          } catch (error) {
-            toast("停止失败：" + errorMessage(error), "danger");
-          }
-        }}
-      >
+      <Button size="sm" icon={CircleStop} onClick={() => void stopTurn(turn.scope_key)}>
         停止
       </Button>
     </li>
@@ -220,32 +197,42 @@ function RetainedSessions({ sessions }: { sessions: RetainedSession[] }) {
       <header className="card-header">
         <h2 className="grow">已保留会话</h2>
         <span className="muted small">{sessions.length} 个</span>
+        <a className="small" href="/sessions" onClick={linkHandler("/sessions")}>
+          查看上下文
+        </a>
       </header>
       <p className="card-body muted small">
         再次唤醒会继续使用原有上下文。停止当前轮次会保留会话；重启会清空，容量达到上限时回收最久未使用的空闲会话。
       </p>
       {sessions.length ? (
         <ul className="turns">
-          {[...sessions].reverse().map((session) => (
-            <li className="turn" key={session.session_id}>
-              <div className="turn-main">
-                <div className="turn-title">
-                  <span>{scopeLabel(session.scope_key, groups)}</span>
-                  <Badge tone={session.state === "running" ? "accent" : "neutral"}>
-                    {session.state === "running" ? "处理中" : "等待唤醒"}
-                  </Badge>
+          {[...sessions].reverse().map((session) => {
+            const state = turnState(session.state);
+            const route = sessionRoute(session.scope_key);
+            return (
+              <li className="turn" key={session.session_id}>
+                <div className="turn-main">
+                  <div className="turn-title">
+                    <a href={route} onClick={linkHandler(route)}>
+                      {scopeLabel(session.scope_key, groups)}
+                    </a>
+                    <Badge tone={state.tone}>{state.text}</Badge>
+                    {session.cleared && <Badge>已重置</Badge>}
+                  </div>
+                  <div className="turn-meta muted">
+                    {session.cleared ? "上下文已重置，下次唤醒时重新建立" : "已接入 " + session.turns + " 轮"}
+                    {session.updated_at > 0 ? " · 最近结束于 " + formatRelative(session.updated_at) : ""}
+                    {session.context.compactions ? " · 已压缩 " + session.context.compactions + " 次" : ""}
+                  </div>
                 </div>
-                <div className="turn-meta muted">
-                  已接入 {session.turns} 轮
-                  {session.updated_at > 0 ? " · 最近结束于 " + formatRelative(session.updated_at) : ""}
-                  {session.context.compactions ? " · 已压缩 " + session.context.compactions + " 次" : ""}
-                </div>
-              </div>
-              <span className="turn-context small muted num">
-                上下文 {formatNumber(session.context.input_tokens ?? 0)} / {formatNumber(session.context.max_tokens ?? 0)} token
-              </span>
-            </li>
-          ))}
+                {!session.cleared && (
+                  <span className="turn-context small muted num">
+                    上下文 {formatNumber(session.context.input_tokens ?? 0)} / {formatNumber(session.context.max_tokens ?? 0)} token
+                  </span>
+                )}
+              </li>
+            );
+          })}
         </ul>
       ) : (
         <EmptyState title="尚无保留的会话" compact>首次唤醒后建立，会话内容只保留在内存中。</EmptyState>
@@ -308,8 +295,7 @@ function ActivityFeed({ activity }: { activity: Activity[] }) {
           {visible.map((item) => {
             const kind = activityKind(item.kind);
             const status = item.status ? resultStatus(item.status) : null;
-            const scope = parseScopeKey(item.scope_key);
-            const route = scope ? conversationRoute(scope.kind, scope.peer) : "";
+            const route = parseScopeKey(item.scope_key) ? sessionRoute(item.scope_key) : "";
             return (
               <li key={item.id} className="activity-row">
                 <time className="activity-time num muted" title={new Date(item.time * 1000).toLocaleString("zh-CN")}>

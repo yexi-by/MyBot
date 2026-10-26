@@ -14,6 +14,7 @@ const activityKinds: Record<string, Label> = {
   tool: { text: "工具调用", tone: "neutral" },
   compaction: { text: "上下文压缩", tone: "neutral" },
   session: { text: "会话回收", tone: "warning" },
+  reset: { text: "会话重置", tone: "neutral" },
   config: { text: "配置", tone: "neutral" },
   error: { text: "错误", tone: "danger" },
   overload: { text: "排队已满", tone: "warning" },
@@ -31,11 +32,13 @@ const results: Record<string, Label> = {
   cancelled: { text: "已停止", tone: "neutral" },
   limit: { text: "达到上限", tone: "warning" },
   timeout: { text: "超时", tone: "warning" },
+  reset: { text: "已重置", tone: "neutral" },
 };
 export const resultStatus = (status: string | undefined) =>
   lookup(results, status);
 
 const turnStates: Record<string, Label> = {
+  idle: { text: "等待唤醒", tone: "neutral" },
   queued: { text: "排队中", tone: "neutral" },
   running: { text: "运行中", tone: "accent" },
   compacting: { text: "压缩上下文", tone: "warning" },

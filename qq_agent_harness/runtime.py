@@ -31,6 +31,7 @@ from .providers import (
     ProviderError,
 )
 from .registry import ToolRegistry
+from .session_view import project, scrub
 
 logger = logging.getLogger(__name__)
 
@@ -40,16 +41,20 @@ MAX_RETAINED_BYTES = 256 * 1024 * 1024
 MAX_MESSAGE_IDS = 2048
 
 
+class SessionBusy(RuntimeError):
+    """会话仍在处理或停止期间又被唤醒，不能重置上下文。"""
+
+
 @dataclass
 class ConversationSession:
-    model: ModelSession
+    # None 表示上下文已在控制台重置，下次唤醒时重新建立；防重记录仍随对象保留。
+    model: ModelSession | None
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     message_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     wake_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     loaded_tools: set[str] = field(default_factory=set)
     unknown_effects: list[tuple[str, JsonObject, ConversationScope]] = field(default_factory=list)
     knowledge: list[tuple[str, str]] = field(default_factory=list)
-    turns: int = 0
     updated_at: float = 0
     outcome: str = ""
     retained_bytes: int = 0
@@ -61,6 +66,21 @@ class ConversationSession:
                 values.move_to_end(identifier)
             while len(values) > MAX_MESSAGE_IDS:
                 values.popitem(last=False)
+
+    def measure(self) -> int:
+        return len(
+            json.dumps(
+                {
+                    "items": self.model.items if self.model else [],
+                    "knowledge": self.knowledge,
+                    "unknown": [
+                        [name, arguments, target.model_dump(mode="json")]
+                        for name, arguments, target in self.unknown_effects
+                    ],
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
 
 
 class Hub(Protocol):
@@ -204,7 +224,8 @@ class AgentRuntime:
             if idle is None:
                 return
             retained = self.sessions.pop(idle)
-            await retained.model.close()
+            if retained.model:
+                await retained.model.close()
             self.record(idle, "session", "内存容量达到上限，已回收最久未使用的空闲会话")
 
     async def _turn(self, batch: list[Message]) -> None:
@@ -339,17 +360,19 @@ class AgentRuntime:
                     ensure_ascii=False,
                 )
                 persona = self.store.resolve_file(config.persona_file).read_text(encoding="utf-8")
-                if retained is None:
+                if retained is None or retained.model is None:
                     session = self.session_factory(provider, compose_prompt(persona), conversation)
-                    retained = ConversationSession(session)
-                    self.sessions[key] = retained
+                    if retained is None:
+                        retained = ConversationSession(session)
+                        self.sessions[key] = retained
+                    else:
+                        retained.model = session
                     context.unknown_effects = retained.unknown_effects
                 else:
                     session = retained.model
                     await session.configure(provider, compose_prompt(persona))
                     session.begin_turn(conversation)
                 self.sessions.move_to_end(key)
-                retained.turns += 1
                 self.turns[key]["session_id"] = retained.session_id
                 session.request_limit = config.runtime.max_model_rounds
                 session.on_context_event = context_event
@@ -368,7 +391,8 @@ class AgentRuntime:
                                 "说明": "当前版本替代此前知识库资料；移除的文件不再作为当前知识依据。",
                             },
                             ensure_ascii=False,
-                        )
+                        ),
+                        "knowledge",
                     )
                     retained.knowledge = knowledge
                 current_ids = {message.message_id for message in batch}
@@ -381,7 +405,8 @@ class AgentRuntime:
                         session.add_background(
                             json.dumps(
                                 {"历史消息": message.model_dump(mode="json")}, ensure_ascii=False
-                            )
+                            ),
+                            "history",
                         )
                         retained.remember([message.message_id])
                 retained.remember([message.message_id for message in batch], wake=True)
@@ -426,23 +451,16 @@ class AgentRuntime:
                     errors = session.add_media(media)
                     media_errors = raw.get("errors")
                     if errors or media_errors:
-                        session.items.append(
-                            {
-                                "role": "user",
-                                "content": json.dumps(
-                                    {
-                                        "media_errors": [
-                                            *errors,
-                                            *(
-                                                media_errors
-                                                if isinstance(media_errors, list)
-                                                else []
-                                            ),
-                                        ]
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                            }
+                        session.add_notice(
+                            json.dumps(
+                                {
+                                    "media_errors": [
+                                        *errors,
+                                        *(media_errors if isinstance(media_errors, list) else []),
+                                    ]
+                                },
+                                ensure_ascii=False,
+                            )
                         )
                 for round_number in range(config.runtime.max_model_rounds):
                     definitions = self.registry.definitions(context)
@@ -524,19 +542,7 @@ class AgentRuntime:
                 retained.loaded_tools = set(context.loaded_tools)
                 retained.updated_at = time.time()
                 retained.outcome = outcome
-                retained.retained_bytes = len(
-                    json.dumps(
-                        {
-                            "items": session.items,
-                            "knowledge": retained.knowledge,
-                            "unknown": [
-                                [name, arguments, target.model_dump(mode="json")]
-                                for name, arguments, target in retained.unknown_effects
-                            ],
-                        },
-                        ensure_ascii=False,
-                    ).encode("utf-8")
-                )
+                retained.retained_bytes = retained.measure()
                 self.sessions.move_to_end(key)
 
     async def cancel(self, key: str) -> bool:
@@ -550,26 +556,106 @@ class AgentRuntime:
             await task
         return True
 
+    async def reset(self, key: str, *, stop: bool) -> str:
+        """清空会话的模型上下文；结果未知动作和已处理唤醒的防重记录保留。"""
+        retained = self.sessions.get(key)
+        if retained is None:
+            raise KeyError(key)
+        if key in self.workers:
+            if not stop:
+                raise SessionBusy("会话正在处理，请先停止本轮")
+            await self.cancel(key)
+            if self.sessions.get(key) is not retained:
+                raise KeyError(key)
+            if key in self.workers:
+                raise SessionBusy("停止期间会话又被唤醒，请稍后再试")
+        model, retained.model = retained.model, None
+        retained.session_id = uuid.uuid4().hex
+        retained.loaded_tools = set()
+        retained.knowledge = []
+        # 清空已读历史，下次唤醒像新会话一样补入近期 QQ 历史。
+        retained.message_ids.clear()
+        retained.outcome = "reset"
+        retained.updated_at = time.time()
+        retained.retained_bytes = retained.measure()
+        self.record(key, "reset", "会话上下文已在控制台重置；防重记录保留", status="completed")
+        if model is not None:
+            await model.close()
+        return retained.session_id
+
     async def close(self) -> None:
         self.closing = True
         await asyncio.gather(*(self.cancel(key) for key in list(self.workers)))
         sessions, self.sessions = self.sessions, OrderedDict()
-        await asyncio.gather(*(retained.model.close() for retained in sessions.values()))
+        await asyncio.gather(
+            *(retained.model.close() for retained in sessions.values() if retained.model)
+        )
+
+    def _state(self, key: str) -> str:
+        turn = self.turns.get(key)
+        if turn is not None:
+            return str(turn.get("state", "queued"))
+        return "queued" if key in self.workers else "idle"
+
+    def _summary(self, key: str, retained: ConversationSession) -> JsonObject:
+        model = retained.model
+        return {
+            "scope_key": key,
+            "session_id": retained.session_id,
+            "turns": model.turn if model else 0,
+            "updated_at": retained.updated_at,
+            "state": self._state(key),
+            "pending": len(self.pending.get(key, [])),
+            "last_outcome": retained.outcome,
+            "context": model.context_state if model else {},
+            "retained_bytes": retained.retained_bytes,
+            "cleared": model is None,
+            "model": model.settings.model if model else "",
+        }
+
+    def inspect(self, key: str, *, since: int | None, session_id: str) -> JsonObject | None:
+        """控制台查看用的只读快照；同步构建，读取期间上下文不会被其他协程修改。"""
+        retained = self.sessions.get(key)
+        if retained is None:
+            return None
+        model = retained.model
+        entries: JsonValue = None
+        # 客户端已持有同一会话的同一版本时只返回摘要字段，避免轮询时重复传输全部条目。
+        if model is None:
+            entries = []
+        elif session_id != retained.session_id or since != model.version:
+            entries = [entry for entry in project(model)]
+        detail: JsonObject = {
+            **self._summary(key, retained),
+            "version": model.version if model else 0,
+            "pending_messages": [
+                scrub(message.model_dump(mode="json", exclude={"scope"}))
+                for message in self.pending.get(key, [])
+            ],
+            "loaded_tools": [name for name in sorted(retained.loaded_tools)],
+            "unknown_operations": [
+                scrub(
+                    {
+                        "tool": name,
+                        "arguments": arguments,
+                        "target": target.model_dump(mode="json"),
+                    }
+                )
+                for name, arguments, target in retained.unknown_effects
+            ],
+            "entries": entries,
+        }
+        return detail
 
     def snapshot(self) -> JsonObject:
         return {
             "turns": list(self.turns.values()),
             "activity": list(self.activity),
-            "sessions": [
-                {
-                    "scope_key": key,
-                    "session_id": retained.session_id,
-                    "turns": retained.turns,
-                    "updated_at": retained.updated_at,
-                    "state": "running" if key in self.workers else "idle",
-                    "last_outcome": retained.outcome,
-                    "context": retained.model.context_state,
-                }
-                for key, retained in self.sessions.items()
-            ],
+            "sessions": [self._summary(key, retained) for key, retained in self.sessions.items()],
+            "capacity": {
+                "sessions": len(self.sessions),
+                "max_sessions": MAX_RETAINED_SESSIONS,
+                "bytes": sum(retained.retained_bytes for retained in self.sessions.values()),
+                "max_bytes": MAX_RETAINED_BYTES,
+            },
         }

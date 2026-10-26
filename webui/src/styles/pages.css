@@ -145,6 +145,258 @@ a.activity-scope:hover {
   color: var(--accent-text);
 }
 
+/* ---------- 会话上下文 ---------- */
+.session-capacity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+.session-capacity .meter {
+  flex: 1;
+  min-width: 160px;
+  max-width: 320px;
+}
+.session-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px;
+}
+.session-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.session-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+}
+.session-stats dt {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.session-stats dd {
+  margin: 2px 0 0;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+.session-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.session-block h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.session-unknown h3,
+.session-warning-text {
+  color: var(--warning-text);
+}
+.session-unknown-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+.session-tool {
+  font-weight: 500;
+}
+.session-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.session-message {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+.session-sender {
+  color: var(--text-2);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.session-message .entry-text {
+  flex-basis: 100%;
+}
+.session-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.session-timeline-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.session-timeline-head h3 {
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+.session-turn {
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+.session-turn-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.session-turn-head h3 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.session-entries > li {
+  border-top: 1px solid var(--border);
+}
+.session-entries > li:first-child {
+  border-top: none;
+}
+.session-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 16px 10px 13px;
+  border-left: 3px solid transparent;
+}
+.session-entry.entry-accent {
+  border-left-color: var(--accent);
+}
+.session-entry.entry-warning {
+  border-left-color: var(--warning);
+}
+.session-boundary {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+  background: var(--surface-2);
+}
+.entry-head,
+.entry-call-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+}
+.entry-label {
+  margin-right: 4px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.entry-time {
+  margin-left: auto;
+}
+.entry-body,
+.entry-outcome {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.entry-text {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.entry-quote {
+  padding: 6px 10px;
+  border-radius: var(--r);
+  background: var(--surface-2);
+}
+.entry-details > summary {
+  width: fit-content;
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.entry-details > summary:hover {
+  color: var(--accent-text);
+}
+.entry-details[open] > summary {
+  margin-bottom: 6px;
+}
+.entry-pre {
+  max-height: 360px;
+}
+.entry-file + .entry-file {
+  margin-top: 8px;
+}
+.entry-file > p {
+  margin-bottom: 4px;
+}
+.session-standalone {
+  padding: 10px 16px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+.session-standalone > summary {
+  cursor: pointer;
+}
+.session-standalone[open] > summary {
+  margin-bottom: 8px;
+}
+.session-digest {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-style: solid;
+  background: var(--surface-2);
+}
+.session-end {
+  height: 1px;
+}
+.session-fresh {
+  position: sticky;
+  bottom: 16px;
+  display: inline-flex;
+  align-self: center;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-h-sm);
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: var(--shadow-pop);
+  color: var(--on-accent);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.session-fresh:hover {
+  background: var(--accent-hover);
+}
+@media (max-width: 767px) {
+  /* 窄屏详情只保留会话本身，容量概况回到列表再看。 */
+  .page:has(.master-detail.has-detail) .session-capacity {
+    display: none;
+  }
+}
+
 /* ---------- 会话与权限 ---------- */
 .permissions {
   display: flex;
@@ -612,6 +864,16 @@ button.file-name:hover {
   }
   .turn {
     padding: 12px 16px;
+  }
+  .session-overview {
+    padding: 14px 16px;
+  }
+  .session-turn-head,
+  .session-standalone {
+    padding: 10px 12px;
+  }
+  .session-entry {
+    padding: 10px 12px 10px 9px;
   }
   .perm-category-row {
     padding-right: 10px;

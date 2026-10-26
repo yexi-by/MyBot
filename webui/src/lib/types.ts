@@ -91,14 +91,88 @@ export interface Turn {
   rounds?: number;
   context?: TurnContext;
 }
+export type SessionState = "idle" | "queued" | "running" | "compacting";
 export interface RetainedSession {
   scope_key: string;
   session_id: string;
+  /** 当前上下文已接入的轮次；重置后为 0。 */
   turns: number;
   updated_at: number;
-  state: "running" | "idle";
+  state: SessionState;
+  /** 排队等待下一轮的唤醒消息数。 */
+  pending: number;
   last_outcome: string;
   context: TurnContext;
+  retained_bytes: number;
+  /** 上下文已在控制台重置，等待下次唤醒重新建立。 */
+  cleared: boolean;
+  model: string;
+}
+export interface SessionCapacity {
+  sessions: number;
+  max_sessions: number;
+  bytes: number;
+  max_bytes: number;
+}
+export interface QQMessage {
+  message_id: string;
+  sender_id: string;
+  sender_name: string;
+  time: number;
+  segments: ObjectValue[];
+}
+export interface ToolOutcome {
+  status: string;
+  message?: string;
+  data?: Json;
+  error_type?: string | null;
+  truncated?: boolean;
+  preview?: string;
+}
+interface EntryBase {
+  turn: number | null;
+  at: number | null;
+}
+/** 会话上下文中的一条可见内容；推理与媒体原始数据不在其中。 */
+export type SessionEntry = EntryBase &
+  (
+    | { kind: "system" | "summary" | "transfer"; text: string }
+    | { kind: "knowledge"; files: { path: string; text: string }[] }
+    | { kind: "history"; message: QQMessage }
+    | { kind: "wake"; messages: QQMessage[]; notice: string }
+    | { kind: "media"; items: { type: string; mime: string; bytes: number }[] }
+    | { kind: "notice"; messages: string[] }
+    | { kind: "assistant"; text: string }
+    | {
+        kind: "call";
+        id: string;
+        name: string;
+        arguments: Json;
+        result: ToolOutcome | null;
+        result_at: number | null;
+      }
+    | { kind: "result"; call_id: string; result: ToolOutcome }
+    | {
+        kind: "boundary";
+        outcome: string;
+        sent_receipts?: ObjectValue[];
+        send_attempts?: number;
+        unknown_operations?: ObjectValue[];
+      }
+    | { kind: "other"; label: string; text: string }
+  );
+export interface UnknownOperation {
+  tool: string;
+  arguments: Json;
+  target: { bot_id: string; kind: string; peer_id: string };
+}
+export interface SessionDetail extends RetainedSession {
+  version: number;
+  pending_messages: QQMessage[];
+  loaded_tools: string[];
+  unknown_operations: UnknownOperation[];
+  /** 与上次读取的会话和版本相同时为 null，沿用已有条目。 */
+  entries: SessionEntry[] | null;
 }
 export interface Activity {
   id: string;
@@ -119,6 +193,7 @@ export interface RuntimeEnvelope {
   started_at: number;
   turns: Turn[];
   sessions: RetainedSession[];
+  capacity: SessionCapacity;
   activity: Activity[];
   napcat: {
     connected: string[];

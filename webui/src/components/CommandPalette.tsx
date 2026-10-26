@@ -8,6 +8,7 @@ import {
   Plug,
   RotateCw,
   Save,
+  ScrollText,
   Search,
   SlidersHorizontal,
   Sparkles,
@@ -17,10 +18,18 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { save, useConfig } from "../lib/config";
-import { groupTitle } from "../lib/conversations";
+import { groupTitle, scopeLabel } from "../lib/conversations";
+import { turnState } from "../lib/labels";
 import { navigate } from "../lib/navigation";
 import { restartHarness } from "../lib/power";
-import { filesResource, toolsResource, useGroupNames, useResource } from "../lib/resource";
+import {
+  filesResource,
+  runtimeResource,
+  toolsResource,
+  useGroupNames,
+  useResource,
+} from "../lib/resource";
+import { sessionRoute } from "../lib/sessions";
 import { setTheme } from "../lib/theme";
 import { object } from "../lib/types";
 import type { Path } from "../lib/types";
@@ -46,6 +55,7 @@ function useCommands(): Command[] {
   const groups = useGroupNames();
   const tools = useResource(toolsResource).data;
   const files = useResource(filesResource).data;
+  const sessions = useResource(runtimeResource).data?.sessions;
   return useMemo(() => {
     const config = state.draft;
     const list: Command[] = [];
@@ -82,6 +92,18 @@ function useCommands(): Command[] {
         keywords: "群 " + id,
         icon: Hash,
         run: go("/conversations/group/" + enc(id)),
+      });
+    for (const session of sessions ?? [])
+      list.push({
+        id: "session:" + session.scope_key,
+        group: "会话上下文",
+        title: scopeLabel(session.scope_key, groups),
+        detail: session.cleared
+          ? "已重置"
+          : "第 " + session.turns + " 轮 · " + turnState(session.state).text,
+        keywords: session.scope_key,
+        icon: ScrollText,
+        run: go(sessionRoute(session.scope_key)),
       });
     for (const [id, value] of Object.entries(object(config.providers)))
       list.push({
@@ -143,7 +165,7 @@ function useCommands(): Command[] {
       { id: "action:restart", group: "操作", title: "重启 Harness", keywords: "restart", icon: RotateCw, run: () => void restartHarness() },
     );
     return list;
-  }, [state.draft, groups, tools, files]);
+  }, [state.draft, groups, tools, files, sessions]);
 }
 
 const defaultGroups = new Set(["页面", "操作"]);

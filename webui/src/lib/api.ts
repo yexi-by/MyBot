@@ -62,8 +62,18 @@ const shapes: [RegExp, (value: Data) => boolean][] = [
       record(v.napcat) &&
       arrayOf(v.napcat.connected, text) &&
       arrayOf(v.turns, record) &&
+      arrayOf(v.sessions, record) &&
+      record(v.capacity) &&
       arrayOf(v.activity, record) &&
       record(v.mcp),
+  ],
+  [
+    /^\/api\/sessions\/detail$/,
+    (v) =>
+      text(v.scope_key) &&
+      text(v.session_id) &&
+      typeof v.version === "number" &&
+      (v.entries === null || arrayOf(v.entries, (entry) => record(entry) && text(entry.kind))),
   ],
   [
     /^\/api\/napcat\/groups$/,

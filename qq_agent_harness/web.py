@@ -23,7 +23,7 @@ from .napcat import MediaReader, NapCatError, NapCatHub, action_coverage
 from .napcat import build_tools as napcat_tools
 from .napcat.tools import CATEGORY_LABELS as NAPCAT_CATEGORIES
 from .registry import ToolRegistry
-from .runtime import AgentRuntime
+from .runtime import AgentRuntime, SessionBusy
 from .sandbox.client import RunnerClient
 from .sandbox.tools import CATEGORY_LABELS as SANDBOX_CATEGORIES
 from .sandbox.tools import build_tools as sandbox_tools
@@ -43,6 +43,12 @@ class SaveFile(Model):
 
 class CancelTurn(Model):
     scope_key: str
+
+
+class ResetSession(Model):
+    scope_key: str
+    # 会话正在处理时，先停止本轮再重置；否则返回冲突。
+    stop: bool = False
 
 
 class Cleanup(Model):
@@ -317,6 +323,23 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     @app.post("/api/runtime/cancel")
     async def cancel(request: CancelTurn) -> JsonObject:
         return {"cancelled": await runtime.cancel(request.scope_key)}
+
+    @app.get("/api/sessions/detail")
+    async def session_detail(key: str, since: int | None = None, session: str = "") -> JsonObject:
+        # 只读投影内存中的可见上下文；不记录请求内容，也不写入文件。
+        detail = runtime.inspect(key, since=since, session_id=session)
+        if detail is None:
+            raise HTTPException(404, "会话尚未建立或已被回收")
+        return detail
+
+    @app.post("/api/sessions/reset")
+    async def reset_session(request: ResetSession) -> JsonObject:
+        try:
+            return {"session_id": await runtime.reset(request.scope_key, stop=request.stop)}
+        except KeyError:
+            raise HTTPException(404, "会话尚未建立或已被回收") from None
+        except SessionBusy as error:
+            raise HTTPException(409, str(error)) from None
 
     @app.get("/api/sandbox/status")
     async def sandbox_status() -> JsonObject:

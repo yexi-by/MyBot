@@ -14,6 +14,7 @@ import { ModelsPage } from "./pages/Models";
 import { OverviewPage } from "./pages/Overview";
 import { PromptsPage } from "./pages/Prompts";
 import { SandboxPage } from "./pages/Sandbox";
+import { SessionsPage } from "./pages/Sessions";
 import { SettingsPage } from "./pages/Settings";
 import { ToolsPage } from "./pages/Tools";
 import { legacyRedirect, navItems, parseRoute } from "./routes";
@@ -190,6 +191,8 @@ function Page({ route }: { route: Route }) {
   switch (route.page) {
     case "overview":
       return <OverviewPage />;
+    case "sessions":
+      return <SessionsPage route={route} />;
     case "conversations":
       return <ConversationsPage route={route} />;
     case "models":

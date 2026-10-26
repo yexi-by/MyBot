@@ -3,6 +3,7 @@ import {
   FileText,
   LayoutDashboard,
   MessagesSquare,
+  ScrollText,
   Settings,
   Sparkles,
   Wrench,
@@ -30,6 +31,7 @@ export const settingsSections: { id: SettingsSection; label: string }[] = [
 
 export type Route =
   | { page: "overview" }
+  | { page: "sessions"; key: string }
   | {
       page: "conversations";
       kind: "group" | "private" | null;
@@ -57,6 +59,8 @@ export function parseRoute(location: string): Route {
   const query = url.searchParams;
   const [head, second, third] = parts;
   if (!head) return { page: "overview" };
+  // 会话键形如 `机器人:group:群号`，整体编码为一段路径。
+  if (head === "sessions" && parts.length <= 2) return { page: "sessions", key: decode(second) };
   if (head === "conversations") {
     const tab = query.get("tab") === "permissions" ? "permissions" : "general";
     if (second === "private" && parts.length === 2)
@@ -129,6 +133,7 @@ export interface NavItem {
 }
 export const navItems: NavItem[] = [
   { path: "/", label: "概览", icon: LayoutDashboard, page: "overview" },
+  { path: "/sessions", label: "上下文", icon: ScrollText, page: "sessions" },
   { path: "/conversations", label: "会话", icon: MessagesSquare, page: "conversations" },
   { path: "/models", label: "模型", icon: Sparkles, page: "models" },
   { path: "/prompts", label: "提示词", icon: FileText, page: "prompts" },

@@ -1,6 +1,7 @@
 """Chat Completions 和 Responses 的协议适配，无供应商品牌分支。"""
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
@@ -27,6 +28,8 @@ __all__ = [
     "ContextWindowExceeded",
     "ModelRequestLimit",
     "ProviderError",
+    "ItemKind",
+    "ItemNote",
     "MediaInput",
     "ModelReply",
     "ModelSession",
@@ -70,6 +73,31 @@ class MediaInput:
     kind: Literal["image", "audio", "video"]
     mime_type: str
     base64: str
+
+
+ItemKind = Literal[
+    "system",
+    "wake",
+    "knowledge",
+    "history",
+    "background",
+    "media",
+    "notice",
+    "output",
+    "tool_result",
+    "boundary",
+    "summary",
+    "transfer",
+]
+
+
+@dataclass(frozen=True)
+class ItemNote:
+    """控制台查看用的条目标注；只记类别、所属轮次和加入时间，不含正文。"""
+
+    kind: ItemKind
+    turn: int
+    at: float
 
 
 def parse_call(call_id: JsonValue, name: JsonValue, arguments: JsonValue) -> ToolCall:
@@ -119,6 +147,25 @@ class ModelSession:
         self._usage_anchor: tuple[int, int] | None = None
         self._compactions = 0
         self._current_input: JsonObject | None = self.items[1]
+        # 轮次从 1 开始；version 随条目增删递增，控制台据此判断是否需要重新取全部条目。
+        self.turn = 1
+        self.version = 0
+        self._notes: dict[int, ItemNote] = {}
+        self._note(self.items[0], "system")
+        self._note(self.items[1], "wake")
+
+    def note(self, item: JsonObject) -> ItemNote | None:
+        return self._notes.get(id(item))
+
+    def _note(self, item: JsonObject, kind: ItemKind) -> None:
+        # 与 _background 一样按对象身份对应；条目移出上下文时同步删除，避免地址复用后错配。
+        self._notes[id(item)] = ItemNote(kind, self.turn, time.time())
+        self.version += 1
+
+    def _forget_removed(self) -> None:
+        live = {id(item) for item in self.items}
+        self._notes = {key: note for key, note in self._notes.items() if key in live}
+        self.version += 1
 
     async def configure(self, settings: ProviderSettings, system: str) -> None:
         """更新连接与人格；切换协议时保留可见事实，不向新协议发送旧协议对象。"""
@@ -137,10 +184,15 @@ class ModelSession:
             self._groups = []
             self._current_input = None
             self._usage_anchor = None
+            self._notes = {}
+            self._note(self.items[0], "system")
+            self._note(history, "transfer")
         else:
             if self.items[0].get("content") != system:
                 self._usage_anchor = None
+            self._notes.pop(id(self.items[0]), None)
             self.items[0] = {"role": "system", "content": system}
+            self._note(self.items[0], "system")
         if self.owns_client and settings.proxy != self.settings.proxy:
             await self.client.aclose()
             self.client = httpx.AsyncClient(
@@ -155,8 +207,10 @@ class ModelSession:
         tracked = {id(item) for item in self._background}
         tracked.update(id(item) for group in self._groups for item in group.items)
         self._background.extend(item for item in self.items[1:] if id(item) not in tracked)
+        self.turn += 1
         self._current_input = {"role": "user", "content": conversation}
         self.items.append(self._current_input)
+        self._note(self._current_input, "wake")
         self.request_count = 0
         self.media_bytes = 0
         self.action_state = {}
@@ -188,9 +242,10 @@ class ModelSession:
         }
         self.items.append(boundary)
         self._background.append(boundary)
+        self._note(boundary, "boundary")
         self.on_context_event = None
 
-    def add_background(self, text: str) -> None:
+    def add_background(self, text: str, kind: ItemKind = "background") -> None:
         item: JsonObject = {"role": "user", "content": text}
         position = next(
             (index for index, value in enumerate(self.items) if value is self._current_input),
@@ -198,11 +253,19 @@ class ModelSession:
         )
         self.items.insert(position, item)
         self._background.append(item)
+        self._note(item, kind)
 
-    def _append(self, item: JsonObject, group: ResponseGroup | None = None) -> None:
+    def add_notice(self, text: str) -> None:
+        """运行器补充的本轮说明（如媒体读取失败）；与当前输入一样，本轮内不参与压缩。"""
+        item: JsonObject = {"role": "user", "content": text}
+        self.items.append(item)
+        self._note(item, "notice")
+
+    def _append(self, item: JsonObject, group: ResponseGroup | None, kind: ItemKind) -> None:
         self.items.append(item)
         if group is not None:
             group.items.append(item)
+        self._note(item, kind)
 
     async def close(self) -> None:
         if self.owns_client:
@@ -260,6 +323,7 @@ class ModelSession:
                     ],
                 },
                 self._media_group,
+                "media",
             )
         return errors
 
@@ -275,6 +339,7 @@ class ModelSession:
                     "content": json.dumps({"media_errors": media_errors}, ensure_ascii=False),
                 },
                 self._pending_group,
+                "notice",
             )
         self._media_group = None
         self._pending_group = None
@@ -385,6 +450,8 @@ class ModelSession:
             raise ProviderError("模型返回重复工具调用标识")
         group = ResponseGroup(output, set(call_ids), calls=reply.calls)
         self.items.extend(output)
+        for item in output:
+            self._note(item, "output")
         self._groups.append(group)
         actual_input, actual_output = usage_totals(data, self.settings.protocol)
         if actual_input is not None:
@@ -613,6 +680,8 @@ class ModelSession:
             raise CompactionError("摘要未能缩小上下文至安全预算，原上下文已保留")
         # 只有全部摘要成功并且严格缩小时才替换原始列表。
         self.items = candidate
+        self._note(summary_item, "summary")
+        self._forget_removed()
         self._background = [item for item in self._background if id(item) not in selected]
         self._background.append(summary_item)
         self._groups = [
@@ -655,10 +724,16 @@ class ModelSession:
                 ensure_ascii=False,
             )
         if self.settings.protocol == "chat_completions":
-            self._append({"role": "tool", "tool_call_id": call.id, "content": serialized}, group)
+            self._append(
+                {"role": "tool", "tool_call_id": call.id, "content": serialized},
+                group,
+                "tool_result",
+            )
         else:
             self._append(
-                {"type": "function_call_output", "call_id": call.id, "output": serialized}, group
+                {"type": "function_call_output", "call_id": call.id, "output": serialized},
+                group,
+                "tool_result",
             )
         group.received.add(call.id)
         self.pending_media.extend(media)
