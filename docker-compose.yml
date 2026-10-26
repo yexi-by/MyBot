@@ -1,6 +1,7 @@
 name: qq-agent-harness
 services:
   harness:
+    container_name: mybot
     image: ${HARNESS_IMAGE:?use an explicit application image tag}
     command: ["qq-agent-harness", "--config", "/app/config/harness.toml"]
     network_mode: host
@@ -13,6 +14,7 @@ services:
         max-size: 5m
         max-file: "3"
   runner:
+    container_name: mybot-runner
     user: "0:0"
     image: ${HARNESS_IMAGE:?use an explicit application image tag}
     command: ["qq-harness-runner"]
@@ -29,6 +31,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
   egress:
+    container_name: mybot-egress
     image: ${HARNESS_IMAGE:?use an explicit application image tag}
     command: ["python", "-m", "qq_agent_harness.sandbox.egress"]
     user: "1000:1000"
