@@ -316,7 +316,13 @@ async def test_new_messages_merge_into_next_round_and_cancel_stops_waiting(tmp_p
 
     class Session(ModelSession):
         async def step(self, tools):
-            conversations.append(str(self.items[1]["content"]))
+            conversations.append(
+                next(
+                    str(item["content"])
+                    for item in reversed(self.items)
+                    if "当前唤醒消息" in str(item.get("content", ""))
+                )
+            )
             started.set()
             await gate.wait()
             return ModelReply()

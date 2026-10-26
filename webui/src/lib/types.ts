@@ -84,11 +84,21 @@ export interface TurnContext {
 }
 export interface Turn {
   scope_key: string;
+  session_id?: string;
   turn_id?: string;
   state: string;
   started_at: number;
   rounds?: number;
   context?: TurnContext;
+}
+export interface RetainedSession {
+  scope_key: string;
+  session_id: string;
+  turns: number;
+  updated_at: number;
+  state: "running" | "idle";
+  last_outcome: string;
+  context: TurnContext;
 }
 export interface Activity {
   id: string;
@@ -108,6 +118,7 @@ export interface McpStatus {
 export interface RuntimeEnvelope {
   started_at: number;
   turns: Turn[];
+  sessions: RetainedSession[];
   activity: Activity[];
   napcat: {
     connected: string[];

@@ -36,7 +36,7 @@ async function bootId(): Promise<string | null> {
 export async function restartHarness(): Promise<void> {
   const accepted = await confirm({
     title: "重启 Harness",
-    message: "正在进行的对话会被中断，已经发出的消息和执行过的操作不会撤回。重启通常需要几秒钟。",
+    message: "正在进行的对话会被中断，所有保留的会话上下文会清空。已经发出的消息和执行过的操作不会撤回。重启通常需要几秒钟。",
     confirmLabel: "重启",
     danger: true,
   });

@@ -13,6 +13,7 @@ const activityKinds: Record<string, Label> = {
   turn: { text: "对话", tone: "neutral" },
   tool: { text: "工具调用", tone: "neutral" },
   compaction: { text: "上下文压缩", tone: "neutral" },
+  session: { text: "会话回收", tone: "warning" },
   config: { text: "配置", tone: "neutral" },
   error: { text: "错误", tone: "danger" },
   overload: { text: "排队已满", tone: "warning" },

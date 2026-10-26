@@ -335,6 +335,9 @@ class ToolRegistry:
         try:
             result = await tool.handler(context, args)
         except asyncio.CancelledError:
+            if tool.effects:
+                # 取消等待不能证明外部动作未生效；随会话保留，下一次唤醒也不得盲目重试。
+                context.unknown_effects.append((name, args, target))
             raise
         except ValueError as exc:
             result = ToolResult.failure(str(exc), "InvalidArguments")

@@ -8,6 +8,7 @@ import uuid
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from .configuration import ConfigStore
@@ -32,6 +33,34 @@ from .providers import (
 from .registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+# 空闲会话只按容量回收，不因等待下一条消息而超时销毁。
+MAX_RETAINED_SESSIONS = 100
+MAX_RETAINED_BYTES = 256 * 1024 * 1024
+MAX_MESSAGE_IDS = 2048
+
+
+@dataclass
+class ConversationSession:
+    model: ModelSession
+    session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    message_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
+    wake_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
+    loaded_tools: set[str] = field(default_factory=set)
+    unknown_effects: list[tuple[str, JsonObject, ConversationScope]] = field(default_factory=list)
+    knowledge: list[tuple[str, str]] = field(default_factory=list)
+    turns: int = 0
+    updated_at: float = 0
+    outcome: str = ""
+    retained_bytes: int = 0
+
+    def remember(self, identifiers: list[str], *, wake: bool = False) -> None:
+        for values in (self.message_ids, self.wake_ids) if wake else (self.message_ids,):
+            for identifier in identifiers:
+                values[identifier] = None
+                values.move_to_end(identifier)
+            while len(values) > MAX_MESSAGE_IDS:
+                values.popitem(last=False)
 
 
 class Hub(Protocol):
@@ -62,6 +91,8 @@ class AgentRuntime:
         self.semaphore = asyncio.Semaphore(store.settings.runtime.concurrent_conversations)
         self.stopping: set[str] = set()
         self.seen: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self.sessions: OrderedDict[str, ConversationSession] = OrderedDict()
+        self.closing = False
         self.read_workspace: Callable[[str], Awaitable[bytes]] | None = None
         self.write_workspace: Callable[[str, bytes], Awaitable[None]] | None = None
         self.read_media: (
@@ -115,7 +146,7 @@ class AgentRuntime:
         return False
 
     async def receive(self, message: Message) -> None:
-        if not await self.should_wake(message):
+        if self.closing or not await self.should_wake(message):
             return
         key = message.scope.key
         settings = self.store.settings.runtime
@@ -125,7 +156,8 @@ class AgentRuntime:
         ):
             self.seen.popitem(last=False)
         identity = (key, message.message_id)
-        if identity in self.seen:
+        retained = self.sessions.get(key)
+        if identity in self.seen or retained and message.message_id in retained.wake_ids:
             return
         if key not in self.workers and len(self.workers) >= settings.max_pending_conversations:
             self.record(key, "overload", "等待会话已满，本次唤醒未接入")
@@ -161,6 +193,19 @@ class AgentRuntime:
             self.turns.pop(key, None)
             self.workers.pop(key, None)
             self.stopping.discard(key)
+            await self._trim_sessions()
+
+    async def _trim_sessions(self) -> None:
+        while (
+            len(self.sessions) > MAX_RETAINED_SESSIONS
+            or sum(value.retained_bytes for value in self.sessions.values()) > MAX_RETAINED_BYTES
+        ):
+            idle = next((key for key in self.sessions if key not in self.workers), None)
+            if idle is None:
+                return
+            retained = self.sessions.pop(idle)
+            await retained.model.close()
+            self.record(idle, "session", "内存容量达到上限，已回收最久未使用的空闲会话")
 
     async def _turn(self, batch: list[Message]) -> None:
         current = batch[-1]
@@ -213,6 +258,38 @@ class AgentRuntime:
         )
         self.registry.initial(context)
         session: ModelSession | None = None
+        retained = self.sessions.get(key)
+        if retained:
+            context.loaded_tools.update(retained.loaded_tools.intersection(self.registry.tools))
+            context.unknown_effects = retained.unknown_effects
+        executed: dict[str, tuple[str, JsonObject, ToolResult]] = {}
+        outcome = "error"
+        interrupted_call: str | None = None
+
+        def update_actions() -> None:
+            if session is None:
+                return
+            receipts: list[JsonValue] = []
+            for receipt in context.sent_messages:
+                safe_receipt = {"action": receipt.get("action"), "status": receipt.get("status")}
+                if isinstance(data := receipt.get("data"), dict):
+                    for name in ("message_id", "res_id", "file_id"):
+                        if isinstance(identifier := data.get(name), (str, int)):
+                            safe_receipt[name] = str(identifier)
+                receipts.append(safe_receipt)
+            session.action_state = {
+                "sent_receipts": receipts,
+                "send_attempts": context.send_attempts,
+                "max_sends_per_turn": self.registry.policy(scope).max_sends_per_turn,
+                "executed_calls": [
+                    {"call_id": call_id, "tool": name, "status": result.status}
+                    for call_id, (name, _arguments, result) in executed.items()
+                ],
+                "unknown_operations": [
+                    {"tool": name, "target": target.model_dump(mode="json")}
+                    for name, _arguments, target in context.unknown_effects
+                ],
+            }
 
         def context_event(event: JsonObject) -> None:
             phase = event.get("phase")
@@ -262,30 +339,52 @@ class AgentRuntime:
                     ensure_ascii=False,
                 )
                 persona = self.store.resolve_file(config.persona_file).read_text(encoding="utf-8")
-                session = self.session_factory(provider, compose_prompt(persona), conversation)
+                if retained is None:
+                    session = self.session_factory(provider, compose_prompt(persona), conversation)
+                    retained = ConversationSession(session)
+                    self.sessions[key] = retained
+                    context.unknown_effects = retained.unknown_effects
+                else:
+                    session = retained.model
+                    await session.configure(provider, compose_prompt(persona))
+                    session.begin_turn(conversation)
+                self.sessions.move_to_end(key)
+                retained.turns += 1
+                self.turns[key]["session_id"] = retained.session_id
                 session.request_limit = config.runtime.max_model_rounds
                 session.on_context_event = context_event
                 # 资料与当前输入分开：旧历史和知识可以压缩，当前消息及安全规则保持完整。
-                for path in config.knowledge_files:
+                knowledge = [
+                    (path, self.store.resolve_file(path).read_text(encoding="utf-8"))
+                    for path in config.knowledge_files
+                ]
+                if knowledge != retained.knowledge:
                     session.add_background(
                         json.dumps(
                             {
-                                "知识库文件": path,
-                                "知识库资料": self.store.resolve_file(path).read_text(
-                                    encoding="utf-8"
-                                ),
+                                "当前知识库": [
+                                    {"文件": path, "资料": text} for path, text in knowledge
+                                ],
+                                "说明": "当前版本替代此前知识库资料；移除的文件不再作为当前知识依据。",
                             },
                             ensure_ascii=False,
                         )
                     )
+                    retained.knowledge = knowledge
                 current_ids = {message.message_id for message in batch}
+                waiting_ids = {message.message_id for message in self.pending.get(key, [])}
                 for message in {message.message_id: message for message in history}.values():
-                    if message.message_id not in current_ids:
+                    if (
+                        message.message_id
+                        not in current_ids | waiting_ids | retained.message_ids.keys()
+                    ):
                         session.add_background(
                             json.dumps(
                                 {"历史消息": message.model_dump(mode="json")}, ensure_ascii=False
                             )
                         )
+                        retained.remember([message.message_id])
+                retained.remember([message.message_id for message in batch], wake=True)
                 session.media_limit = config.napcat.media_max_bytes
                 media_tool = self.registry.tools.get("qq__read_media")
                 if self.read_media and media_tool and self.registry.permitted(scope, media_tool)[0]:
@@ -345,38 +444,15 @@ class AgentRuntime:
                                 ),
                             }
                         )
-                executed: dict[str, tuple[str, JsonObject, ToolResult]] = {}
                 for round_number in range(config.runtime.max_model_rounds):
                     definitions = self.registry.definitions(context)
-                    receipts: list[JsonValue] = []
-                    for receipt in context.sent_messages:
-                        safe_receipt = {
-                            "action": receipt.get("action"),
-                            "status": receipt.get("status"),
-                        }
-                        if isinstance(data := receipt.get("data"), dict):
-                            for name in ("message_id", "res_id", "file_id"):
-                                if isinstance(identifier := data.get(name), (str, int)):
-                                    safe_receipt[name] = str(identifier)
-                        receipts.append(safe_receipt)
-                    session.action_state = {
-                        "sent_receipts": receipts,
-                        "send_attempts": context.send_attempts,
-                        "max_sends_per_turn": self.registry.policy(scope).max_sends_per_turn,
-                        "executed_calls": [
-                            {"call_id": call_id, "tool": name, "status": result.status}
-                            for call_id, (name, _arguments, result) in executed.items()
-                        ],
-                        "unknown_operations": [
-                            {"tool": name, "target": target.model_dump(mode="json")}
-                            for name, _arguments, target in context.unknown_effects
-                        ],
-                    }
+                    update_actions()
                     self.turns[key]["rounds"] = round_number + 1
                     reply = await session.step(definitions)
                     self.turns[key]["context"] = session.context_state
                     self.turns[key]["rounds"] = session.request_count
                     if not reply.calls:
+                        outcome = "completed"
                         self.record(
                             key,
                             "turn",
@@ -397,8 +473,10 @@ class AgentRuntime:
                                 "工具参数不是有效 JSON 对象", "InvalidArguments"
                             )
                         else:
+                            interrupted_call = call.id
                             result = await self.registry.execute(context, call.name, call.arguments)
                         session.result(call, result, config.runtime.tool_result_char_limit)
+                        interrupted_call = None
                         executed[call.id] = (
                             call.name,
                             call.arguments,
@@ -416,10 +494,13 @@ class AgentRuntime:
                             tool=call.name,
                             status=result.status,
                         )
-                self.record(key, "turn", "达到本轮模型请求上限，已停止", status="limit")
+                outcome = "limit"
+                self.record(key, "turn", "达到本轮模型请求上限，已停止", status=outcome)
         except ModelRequestLimit:
+            outcome = "limit"
             self.record(key, "turn", "达到模型请求上限（含自动压缩），已停止", status="limit")
         except ContextLimitError as exc:
+            outcome = "limit"
             self.record(key, "turn", str(exc), status="limit")
         except CompactionError as exc:
             self.record(key, "compaction", str(exc), status="error")
@@ -427,16 +508,36 @@ class AgentRuntime:
             # ProviderError 的消息由协议层生成固定脱敏文本，不携带上游响应正文。
             self.record(key, "error", str(exc), status="error")
         except TimeoutError:
+            outcome = "timeout"
             self.record(key, "turn", "本轮超时，已停止；已提交动作状态以回执为准", status="timeout")
         except asyncio.CancelledError:
+            outcome = "cancelled"
             raise
         except Exception as exc:
             # 只记录异常类型，避免将模型正文、密钥、工具原始结果写入日志。
             self.record(key, "error", f"本轮发生 {type(exc).__name__}，已停止", status="error")
             logger.error("turn_failed scope=%s error_type=%s", key, type(exc).__name__)
         finally:
-            if session:
-                await session.close()
+            if session is not None and retained is not None:
+                update_actions()
+                session.end_turn(outcome, interrupted_call)
+                retained.loaded_tools = set(context.loaded_tools)
+                retained.updated_at = time.time()
+                retained.outcome = outcome
+                retained.retained_bytes = len(
+                    json.dumps(
+                        {
+                            "items": session.items,
+                            "knowledge": retained.knowledge,
+                            "unknown": [
+                                [name, arguments, target.model_dump(mode="json")]
+                                for name, arguments, target in retained.unknown_effects
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                )
+                self.sessions.move_to_end(key)
 
     async def cancel(self, key: str) -> bool:
         task = self.workers.get(key)
@@ -450,7 +551,25 @@ class AgentRuntime:
         return True
 
     async def close(self) -> None:
+        self.closing = True
         await asyncio.gather(*(self.cancel(key) for key in list(self.workers)))
+        sessions, self.sessions = self.sessions, OrderedDict()
+        await asyncio.gather(*(retained.model.close() for retained in sessions.values()))
 
     def snapshot(self) -> JsonObject:
-        return {"turns": list(self.turns.values()), "activity": list(self.activity)}
+        return {
+            "turns": list(self.turns.values()),
+            "activity": list(self.activity),
+            "sessions": [
+                {
+                    "scope_key": key,
+                    "session_id": retained.session_id,
+                    "turns": retained.turns,
+                    "updated_at": retained.updated_at,
+                    "state": "running" if key in self.workers else "idle",
+                    "last_outcome": retained.outcome,
+                    "context": retained.model.context_state,
+                }
+                for key, retained in self.sessions.items()
+            ],
+        }

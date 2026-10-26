@@ -26,7 +26,7 @@ import {
   useResource,
 } from "../lib/resource";
 import { object } from "../lib/types";
-import type { Activity, Turn } from "../lib/types";
+import type { Activity, RetainedSession, Turn } from "../lib/types";
 import type { Tone } from "../lib/ui";
 import { confirm, toast } from "../lib/ui";
 
@@ -213,6 +213,47 @@ function TurnRow({ turn }: { turn: Turn }) {
   );
 }
 
+function RetainedSessions({ sessions }: { sessions: RetainedSession[] }) {
+  const groups = useGroupNames();
+  return (
+    <section className="card">
+      <header className="card-header">
+        <h2 className="grow">已保留会话</h2>
+        <span className="muted small">{sessions.length} 个</span>
+      </header>
+      <p className="card-body muted small">
+        再次唤醒会继续使用原有上下文。停止当前轮次会保留会话；重启会清空，容量达到上限时回收最久未使用的空闲会话。
+      </p>
+      {sessions.length ? (
+        <ul className="turns">
+          {[...sessions].reverse().map((session) => (
+            <li className="turn" key={session.session_id}>
+              <div className="turn-main">
+                <div className="turn-title">
+                  <span>{scopeLabel(session.scope_key, groups)}</span>
+                  <Badge tone={session.state === "running" ? "accent" : "neutral"}>
+                    {session.state === "running" ? "处理中" : "等待唤醒"}
+                  </Badge>
+                </div>
+                <div className="turn-meta muted">
+                  已接入 {session.turns} 轮
+                  {session.updated_at > 0 ? " · 最近结束于 " + formatRelative(session.updated_at) : ""}
+                  {session.context.compactions ? " · 已压缩 " + session.context.compactions + " 次" : ""}
+                </div>
+              </div>
+              <span className="turn-context small muted num">
+                上下文 {formatNumber(session.context.input_tokens ?? 0)} / {formatNumber(session.context.max_tokens ?? 0)} token
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <EmptyState title="尚无保留的会话" compact>首次唤醒后建立，会话内容只保留在内存中。</EmptyState>
+      )}
+    </section>
+  );
+}
+
 type Filter = "all" | "turn" | "tool" | "problem";
 const isProblem = (item: Activity) =>
   item.kind === "error" ||
@@ -339,6 +380,7 @@ export function OverviewPage() {
           </EmptyState>
         )}
       </section>
+      <RetainedSessions sessions={data?.sessions ?? []} />
       <ActivityFeed activity={data?.activity ?? []} />
     </div>
   );

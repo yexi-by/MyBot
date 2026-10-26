@@ -44,6 +44,7 @@ class ResponseGroup:
     items: list[JsonObject]
     expected: set[str]
     received: set[str] = field(default_factory=set)
+    calls: list[ToolCall] = field(default_factory=list)
 
     @property
     def complete(self) -> bool:
@@ -94,7 +95,7 @@ class ModelSession:
         *,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        self.settings = settings
+        self.settings = settings.model_copy(deep=True)
         self.owns_client = client is None
         self.client = client or httpx.AsyncClient(
             timeout=settings.timeout, proxy=settings.proxy, trust_env=False
@@ -117,10 +118,85 @@ class ModelSession:
         self._media_group: ResponseGroup | None = None
         self._usage_anchor: tuple[int, int] | None = None
         self._compactions = 0
+        self._current_input: JsonObject | None = self.items[1]
+
+    async def configure(self, settings: ProviderSettings, system: str) -> None:
+        """更新连接与人格；切换协议时保留可见事实，不向新协议发送旧协议对象。"""
+        changed_route = (settings.protocol, settings.model) != (
+            self.settings.protocol,
+            self.settings.model,
+        )
+        if changed_route:
+            history: JsonObject = {
+                "role": "user",
+                "content": "此前会话资料（模型连接已切换，仅作为历史事实）：\n"
+                + json.dumps(visible_data([item for item in self.items[1:]]), ensure_ascii=False),
+            }
+            self.items = [{"role": "system", "content": system}, history]
+            self._background = [history]
+            self._groups = []
+            self._current_input = None
+            self._usage_anchor = None
+        else:
+            if self.items[0].get("content") != system:
+                self._usage_anchor = None
+            self.items[0] = {"role": "system", "content": system}
+        if self.owns_client and settings.proxy != self.settings.proxy:
+            await self.client.aclose()
+            self.client = httpx.AsyncClient(
+                timeout=settings.timeout, proxy=settings.proxy, trust_env=False
+            )
+        self.settings = settings.model_copy(deep=True)
+
+    def begin_turn(self, conversation: str) -> None:
+        """追加新的唤醒输入；上一轮输入转为可压缩历史，保留已闭合工具组。"""
+        if any(not group.complete for group in self._groups):
+            raise ProviderError("上一轮工具调用尚未闭合，不能接入新一轮")
+        tracked = {id(item) for item in self._background}
+        tracked.update(id(item) for group in self._groups for item in group.items)
+        self._background.extend(item for item in self.items[1:] if id(item) not in tracked)
+        self._current_input = {"role": "user", "content": conversation}
+        self.items.append(self._current_input)
+        self.request_count = 0
+        self.media_bytes = 0
+        self.action_state = {}
+        self.context_state = {**self.context_state, "request_count": 0}
+
+    def end_turn(self, outcome: str, interrupted_call: str | None = None) -> None:
+        """中断也必须闭合协议；未开始的调用不执行，进行中的调用不伪称失败。"""
+        for group in self._groups:
+            for call in group.calls:
+                if call.id not in group.received:
+                    uncertain = call.id == interrupted_call
+                    self.result(
+                        call,
+                        ToolResult(
+                            status="unknown" if uncertain else "cancelled",
+                            message=(
+                                "本轮在执行中断开，结果未知；核实实际状态前不得重试"
+                                if uncertain
+                                else "本轮已经结束，此调用尚未执行"
+                            ),
+                        ),
+                        1000,
+                    )
+        self.flush_media()
+        boundary: JsonObject = {
+            "role": "user",
+            "content": "运行器记录：本轮已结束，历史动作不得因再次唤醒而重放。\n"
+            + json.dumps({"outcome": outcome, **self.action_state}, ensure_ascii=False),
+        }
+        self.items.append(boundary)
+        self._background.append(boundary)
+        self.on_context_event = None
 
     def add_background(self, text: str) -> None:
         item: JsonObject = {"role": "user", "content": text}
-        self.items.insert(1 + len(self._background), item)
+        position = next(
+            (index for index, value in enumerate(self.items) if value is self._current_input),
+            len(self.items),
+        )
+        self.items.insert(position, item)
         self._background.append(item)
 
     def _append(self, item: JsonObject, group: ResponseGroup | None = None) -> None:
@@ -307,7 +383,7 @@ class ModelSession:
         call_ids = [call.id for call in reply.calls]
         if len(call_ids) != len(set(call_ids)):
             raise ProviderError("模型返回重复工具调用标识")
-        group = ResponseGroup(output, set(call_ids))
+        group = ResponseGroup(output, set(call_ids), calls=reply.calls)
         self.items.extend(output)
         self._groups.append(group)
         actual_input, actual_output = usage_totals(data, self.settings.protocol)
