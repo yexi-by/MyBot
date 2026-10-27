@@ -20,6 +20,7 @@ from .contracts import (
     NapCatConnection,
     ToolContext,
     ToolResult,
+    UnknownOperation,
 )
 from .prompts import compose_prompt
 from .providers import (
@@ -36,8 +37,6 @@ from .session_view import project, scrub
 logger = logging.getLogger(__name__)
 
 # 空闲会话只按容量回收，不因等待下一条消息而超时销毁。
-MAX_RETAINED_SESSIONS = 100
-MAX_RETAINED_BYTES = 256 * 1024 * 1024
 MAX_MESSAGE_IDS = 2048
 # 闲时压缩按固定间隔检查；同时进行的压缩数量有上限，不占用会话并发名额。
 IDLE_SCAN_SECONDS = 15
@@ -57,7 +56,7 @@ class ConversationSession:
     message_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     wake_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     loaded_tools: set[str] = field(default_factory=set)
-    unknown_effects: list[tuple[str, JsonObject, ConversationScope]] = field(default_factory=list)
+    unknown_effects: list[UnknownOperation] = field(default_factory=list)
     knowledge: list[tuple[str, str]] = field(default_factory=list)
     updated_at: float = 0
     outcome: str = ""
@@ -81,8 +80,13 @@ class ConversationSession:
                     "items": self.model.items if self.model else [],
                     "knowledge": self.knowledge,
                     "unknown": [
-                        [name, arguments, target.model_dump(mode="json")]
-                        for name, arguments, target in self.unknown_effects
+                        [
+                            operation.id,
+                            operation.tool,
+                            operation.arguments,
+                            operation.target.model_dump(mode="json"),
+                        ]
+                        for operation in self.unknown_effects
                     ],
                 },
                 ensure_ascii=False,
@@ -120,6 +124,8 @@ class AgentRuntime:
         self.seen: OrderedDict[tuple[str, str], float] = OrderedDict()
         self.sessions: OrderedDict[str, ConversationSession] = OrderedDict()
         self.compacting: set[str] = set()
+        self.idle_interrupts: set[str] = set()
+        self.rejected_messages = 0
         self.idle_task: asyncio.Task[None] | None = None
         self.closing = False
         self.read_workspace: Callable[[str], Awaitable[bytes]] | None = None
@@ -189,27 +195,45 @@ class AgentRuntime:
         if identity in self.seen or retained and message.message_id in retained.wake_ids:
             return
         if key not in self.workers and len(self.workers) >= settings.max_pending_conversations:
+            self.rejected_messages += 1
             self.record(key, "overload", "等待会话已满，本次唤醒未接入")
             return
         queue = self.pending.setdefault(key, [])
         if any(item.message_id == message.message_id for item in queue):
             return
         if len(queue) >= settings.max_pending_messages:
+            self.rejected_messages += 1
             self.record(key, "overload", "当前会话等待消息已满，本次唤醒未接入")
             return
         queue.append(message)
         self.seen[identity] = now
+        if key in self.compacting and key not in self.idle_interrupts:
+            self.idle_interrupts.add(key)
+            self.workers[key].cancel()
         if key not in self.workers:
             self.stopping.discard(key)
             self.turns[key] = {"scope_key": key, "state": "queued", "started_at": time.time()}
             self.workers[key] = asyncio.create_task(self._worker(key))
 
     async def _worker(self, key: str, *, idle: bool = False) -> None:
-        # 闲时压缩占用会话的处理位置：期间到达的唤醒只排队，压缩结束后再开始本轮。
+        # 闲时压缩占用处理位置；新唤醒只中断一次压缩，保留原文后接入排队消息。
         compacting = idle
         try:
             if idle:
-                await self._compact_idle(key)
+                try:
+                    await self._compact_idle(key)
+                except asyncio.CancelledError:
+                    if key not in self.idle_interrupts or key in self.stopping or self.closing:
+                        raise
+                    self.idle_interrupts.discard(key)
+                    if task := asyncio.current_task():
+                        task.uncancel()
+                    self.record(
+                        key,
+                        "compaction",
+                        "新消息到达，已中断闲时压缩并保留原上下文",
+                        status="cancelled",
+                    )
             compacting = False
             while self.pending.get(key):
                 async with self.semaphore:
@@ -225,18 +249,23 @@ class AgentRuntime:
                 )
         except Exception as exc:
             self.record(key, "error", f"会话连接或运行失败：{type(exc).__name__}", status="error")
+            logger.error(
+                "worker_failed scope=%s error_type=%s", key, type(exc).__name__, exc_info=True
+            )
         finally:
             self.pending.pop(key, None)
             self.turns.pop(key, None)
             self.workers.pop(key, None)
             self.stopping.discard(key)
             self.compacting.discard(key)
+            self.idle_interrupts.discard(key)
             await self._trim_sessions()
 
     async def _trim_sessions(self) -> None:
         while (
-            len(self.sessions) > MAX_RETAINED_SESSIONS
-            or sum(value.retained_bytes for value in self.sessions.values()) > MAX_RETAINED_BYTES
+            len(self.sessions) > self.store.settings.runtime.max_retained_sessions
+            or sum(value.retained_bytes for value in self.sessions.values())
+            > self.store.settings.runtime.max_retained_bytes
         ):
             idle = next((key for key in self.sessions if key not in self.workers), None)
             if idle is None:
@@ -363,7 +392,15 @@ class AgentRuntime:
             tool = self.registry.tools.get("sandbox__read_file")
             if not tool or not self.read_workspace:
                 raise ValueError("当前群未开放共享工作区读取能力")
-            denied = self.registry.authorize(scope, tool, {"path": path})
+            denied = self.registry.authorize(
+                scope,
+                tool,
+                {
+                    "path": path,
+                    "offset": 0,
+                    "limit": self.store.settings.sandbox.transfer_max_bytes,
+                },
+            )
             if denied:
                 raise ValueError(denied.message)
             return await self.read_workspace(path)
@@ -372,7 +409,9 @@ class AgentRuntime:
             tool = self.registry.tools.get("sandbox__write_file")
             if not tool or not self.write_workspace:
                 raise ValueError("当前群未开放共享工作区写入能力")
-            denied = self.registry.authorize(scope, tool, {"path": path, "overwrite": False})
+            denied = self.registry.authorize(
+                scope, tool, {"path": path, "overwrite": False, "append": False}
+            )
             if denied:
                 raise ValueError(denied.message)
             if any(
@@ -420,8 +459,12 @@ class AgentRuntime:
                     for call_id, (name, _arguments, result) in executed.items()
                 ],
                 "unknown_operations": [
-                    {"tool": name, "target": target.model_dump(mode="json")}
-                    for name, _arguments, target in context.unknown_effects
+                    {
+                        "id": operation.id,
+                        "tool": operation.tool,
+                        "target": operation.target.model_dump(mode="json"),
+                    }
+                    for operation in context.unknown_effects
                 ],
             }
 
@@ -443,6 +486,10 @@ class AgentRuntime:
                     "compaction",
                     f"上下文已压缩：{event.get('before_tokens')} → {event.get('after_tokens')} token；继续本轮",
                     status="completed",
+                )
+            elif phase == "compaction_skipped":
+                self.record(
+                    key, "compaction", "压缩未完成，当前输入仍在窗口内，继续本轮", status="warning"
                 )
 
         try:
@@ -583,12 +630,12 @@ class AgentRuntime:
                     self.turns[key]["context"] = session.context_state
                     self.turns[key]["rounds"] = session.request_count
                     if not reply.calls:
-                        outcome = "completed"
+                        outcome = "completed" if context.sent_messages else "silent"
                         self.record(
                             key,
                             "turn",
                             "本轮结束" if context.sent_messages else "本轮静默结束；普通输出未发送",
-                            status="completed",
+                            status=outcome,
                         )
                         return
                     # 每个调用完整回填一次，保持协议配对；不把正文补发至QQ。
@@ -606,7 +653,7 @@ class AgentRuntime:
                         else:
                             interrupted_call = call.id
                             result = await self.registry.execute(context, call.name, call.arguments)
-                        session.result(call, result, config.runtime.tool_result_char_limit)
+                        session.result(call, result)
                         interrupted_call = None
                         executed[call.id] = (
                             call.name,
@@ -629,7 +676,7 @@ class AgentRuntime:
                 self.record(key, "turn", "达到本轮模型请求上限，已停止", status=outcome)
         except ModelRequestLimit:
             outcome = "limit"
-            self.record(key, "turn", "达到模型请求上限（含自动压缩），已停止", status="limit")
+            self.record(key, "turn", "达到模型或压缩请求上限，已停止", status="limit")
         except ContextLimitError as exc:
             outcome = "limit"
             self.record(key, "turn", str(exc), status="limit")
@@ -647,7 +694,9 @@ class AgentRuntime:
         except Exception as exc:
             # 只记录异常类型，避免将模型正文、密钥、工具原始结果写入日志。
             self.record(key, "error", f"本轮发生 {type(exc).__name__}，已停止", status="error")
-            logger.error("turn_failed scope=%s error_type=%s", key, type(exc).__name__)
+            logger.error(
+                "turn_failed scope=%s error_type=%s", key, type(exc).__name__, exc_info=True
+            )
         finally:
             if session is not None and retained is not None:
                 update_actions()
@@ -710,6 +759,42 @@ class AgentRuntime:
             *(retained.model.close() for retained in sessions.values() if retained.model)
         )
 
+    def resolve_operation(self, key: str, operation_id: str, executed: bool) -> None:
+        retained = self.sessions.get(key)
+        if retained is None:
+            raise KeyError(key)
+        if key in self.workers:
+            raise SessionBusy("请先停止当前轮次，再核实未知动作")
+        operation = next(
+            (item for item in retained.unknown_effects if item.id == operation_id), None
+        )
+        if operation is None:
+            raise KeyError(operation_id)
+        retained.unknown_effects.remove(operation)
+        if retained.model is not None:
+            retained.model.add_notice(
+                json.dumps(
+                    {
+                        "控制台核实动作": {
+                            "id": operation.id,
+                            "tool": operation.tool,
+                            "arguments": operation.arguments,
+                            "target": operation.target.model_dump(mode="json"),
+                            "executed": executed,
+                        },
+                        "说明": "操作者已核实该动作，未知状态已解除；不会自动重放。",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        retained.retained_bytes = retained.measure()
+        self.record(
+            key,
+            "resolution",
+            "未知动作已核实为已执行" if executed else "未知动作已核实为未执行，可重新调用",
+            status="completed",
+        )
+
     def _state(self, key: str) -> str:
         turn = self.turns.get(key)
         if turn is not None:
@@ -755,12 +840,13 @@ class AgentRuntime:
             "unknown_operations": [
                 scrub(
                     {
-                        "tool": name,
-                        "arguments": arguments,
-                        "target": target.model_dump(mode="json"),
+                        "id": operation.id,
+                        "tool": operation.tool,
+                        "arguments": operation.arguments,
+                        "target": operation.target.model_dump(mode="json"),
                     }
                 )
-                for name, arguments, target in retained.unknown_effects
+                for operation in retained.unknown_effects
             ],
             "entries": entries,
         }
@@ -773,8 +859,9 @@ class AgentRuntime:
             "sessions": [self._summary(key, retained) for key, retained in self.sessions.items()],
             "capacity": {
                 "sessions": len(self.sessions),
-                "max_sessions": MAX_RETAINED_SESSIONS,
+                "max_sessions": self.store.settings.runtime.max_retained_sessions,
                 "bytes": sum(retained.retained_bytes for retained in self.sessions.values()),
-                "max_bytes": MAX_RETAINED_BYTES,
+                "max_bytes": self.store.settings.runtime.max_retained_bytes,
+                "rejected_messages": self.rejected_messages,
             },
         }

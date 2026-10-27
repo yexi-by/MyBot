@@ -141,9 +141,7 @@ async def test_compaction_target_controls_how_much_recent_context_stays(target, 
         )
         session.on_context_event = events.append
         reply = await session.step([])
-        session.result(
-            reply.calls[0], ToolResult.success({"value": "RECENT_" + "r" * 1700}), 10_000
-        )
+        session.result(reply.calls[0], ToolResult.success({"value": "RECENT_" + "r" * 1700}))
         session.add_background("历史" * 2500)
         await session.step([])
     compacted = [event for event in events if event["phase"] == "compacted"]
@@ -202,9 +200,7 @@ async def test_turn_compaction_keeps_recent_group_by_api_measured_size():
             await session.step([])
         session.add_background("OLD_3" + "史" * 1633)
         reply = await session.step([])
-        session.result(
-            reply.calls[0], ToolResult.success({"value": "RECENT_" + "r" * 3550}), 10_000
-        )
+        session.result(reply.calls[0], ToolResult.success({"value": "RECENT_" + "r" * 3550}))
         await session.step([])
     assert len(bodies) == 5
     context = context_text(bodies[-1])
@@ -345,7 +341,7 @@ async def test_idle_compaction_uses_its_own_model_and_keeps_only_persona_and_kno
         await runtime.close()
 
 
-async def test_wake_during_idle_compaction_waits_for_the_summary(tmp_path):
+async def test_wake_interrupts_idle_compaction_and_keeps_original_context(tmp_path):
     store = make_store(tmp_path)
     enable_idle(store, ModelChoice(provider="cheap", name="small"))
     release = asyncio.Event()
@@ -370,18 +366,15 @@ async def test_wake_during_idle_compaction_waits_for_the_summary(tmp_path):
             while "summary" not in order:
                 await asyncio.sleep(0)
         await runtime.receive(message("second", "a", "group", "member"))
-        for _ in range(20):
-            await asyncio.sleep(0)
-        assert order == ["turn", "summary"]
-        waiting = sessions(runtime)[0]
-        assert waiting["state"] == "compacting" and waiting["pending"] == 1
-        release.set()
-        await finish(runtime)
+        async with asyncio.timeout(2):
+            await finish(runtime)
+        assert not release.is_set()
+        assert sessions(runtime)[0]["state"] == "idle"
         await runtime.close()
     assert order == ["turn", "summary", "turn"]
     context = context_text(turns[-1])
-    assert "IDLE_SUMMARY" in context and "INPUT_second" in context
-    assert "INPUT_first" not in context
+    assert "IDLE_SUMMARY" not in context and "INPUT_second" in context
+    assert "INPUT_first" in context
 
 
 async def test_failed_idle_compaction_keeps_context_and_is_not_retried(tmp_path):

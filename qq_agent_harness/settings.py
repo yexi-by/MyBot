@@ -30,7 +30,7 @@ class Policy(Model):
     allow_at_all: bool = False
     cross_groups: list[str] = Field(default_factory=list)
     cross_private: bool = False
-    max_sends_per_turn: int = Field(default=5, ge=1, le=100)
+    max_sends_per_turn: int = Field(default=5, ge=1)
 
     @model_validator(mode="after")
     def builtins_are_not_overrides(self) -> Policy:
@@ -104,18 +104,21 @@ class NapCatSettings(Model):
     action_timeout: float = Field(default=30, gt=0)
     media_timeout: float = Field(default=30, gt=0)
     media_max_bytes: int = Field(default=50_000_000, gt=0)
-    media_concurrency: int = Field(default=4, ge=1, le=32)
+    media_concurrency: int = Field(default=4, ge=1)
+    event_queue_size: int = Field(default=128, ge=1)
 
 
 class RuntimeSettings(Model):
-    concurrent_conversations: int = Field(default=4, ge=1, le=32)
-    max_model_rounds: int = Field(default=20, ge=1, le=100)
+    concurrent_conversations: int = Field(default=4, ge=1)
+    max_model_rounds: int = Field(default=20, ge=1)
     turn_timeout: float = Field(default=600, gt=0)
-    history_count: int = Field(default=60, ge=0, le=300)
-    max_pending_conversations: int = Field(default=100, ge=1, le=1000)
-    max_pending_messages: int = Field(default=20, ge=1, le=100)
-    tool_result_char_limit: int = Field(default=24_000, ge=1000)
-    activity_limit: int = Field(default=200, ge=10, le=2000)
+    history_count: int = Field(default=60, ge=0)
+    max_pending_conversations: int = Field(default=100, ge=1)
+    max_pending_messages: int = Field(default=20, ge=1)
+    max_retained_sessions: int = Field(default=100, ge=1)
+    max_retained_bytes: int = Field(default=268_435_456, ge=1)
+    config_text_max_bytes: int = Field(default=2_000_000, ge=1)
+    activity_limit: int = Field(default=200, ge=1)
 
 
 class MCPSettings(Model):
@@ -128,6 +131,7 @@ class MCPSettings(Model):
     headers: dict[str, str] = Field(default_factory=dict)
     timeout: float = Field(default=60, gt=0)
     read_only_tools: list[str] = Field(default_factory=list)
+    effect_tools: list[str] = Field(default_factory=list)
 
 
 class SandboxSettings(Model):
@@ -138,8 +142,10 @@ class SandboxSettings(Model):
     cpus: float = Field(default=2, gt=0)
     memory_bytes: int = Field(default=4_294_967_296, ge=134_217_728)
     pids_limit: int = Field(default=256, ge=16)
-    command_timeout: float = Field(default=120, gt=0, le=600)
-    output_limit: int = Field(default=1_048_576, ge=1024, le=16_777_216)
+    command_timeout: float = Field(default=120, gt=0)
+    output_limit: int = Field(default=1_048_576, ge=1)
+    transfer_max_bytes: int = Field(default=50_000_000, ge=1)
+    max_pending_operations: int = Field(default=32, ge=1)
 
 
 class ServerSettings(Model):

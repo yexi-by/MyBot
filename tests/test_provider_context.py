@@ -147,9 +147,9 @@ async def test_compaction_keeps_recent_protocol_group_and_excludes_reasoning(pro
             client=client,
         )
         old = await session.step([])
-        session.result(old.calls[0], ToolResult.success({"data": "a" * 5000}), 10000)
+        session.result(old.calls[0], ToolResult.success({"data": "a" * 5000}))
         recent = await session.step([])
-        session.result(recent.calls[0], ToolResult.success({"value": "small"}), 1000)
+        session.result(recent.calls[0], ToolResult.success({"value": "small"}))
         session.add_background("历史" * 2000)
         await session.step([])
     field = "messages" if protocol == "chat_completions" else "input"
@@ -356,7 +356,7 @@ async def test_explicit_overflow_compacts_once_and_never_replays_tools(protocol)
             client=client,
         )
         reply = await session.step([])
-        session.result(reply.calls[0], ToolResult.success({"value": "x" * 2000}), 3000)
+        session.result(reply.calls[0], ToolResult.success({"value": "x" * 2000}))
         session.action_state = {"executed_calls": [{"call_id": "done", "status": "success"}]}
         with pytest.raises(ContextWindowExceeded, match="输入上下文") as error:
             await session.step([])

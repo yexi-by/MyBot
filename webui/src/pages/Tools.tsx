@@ -301,10 +301,13 @@ function McpDetail({ name }: { name: string }) {
       )}
       <ConfigSection def={mcpConnectionSection} base={base} />
       <ConfigSection def={mcpSecretsSection} base={base} />
+      {!!status?.excluded_tools?.length && <Banner tone="warning" title="部分工具未加载">
+        {status.excluded_tools.map((item) => <p key={item.name}>{item.name}：{item.reason}</p>)}
+      </Banner>}
       <ConfigSection
         def={mcpToolsSection}
         base={base}
-        suggestions={{ read_only_tools: discovered }}
+        suggestions={{ read_only_tools: discovered, effect_tools: discovered }}
         describe={{
           read_only_tools: (item) => discovered.find((tool) => tool.value === item)?.label,
         }}

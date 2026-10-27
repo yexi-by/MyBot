@@ -31,16 +31,13 @@ class Workspace:
             raise ValueError("路径不能逃逸共享工作区")
         return target
 
-    def files(self, relative: str = "") -> JsonObject:
+    def files(self, relative: str = "", offset: int = 0, limit: int = 100) -> JsonObject:
         folder = self.path(relative, allow_root=True)
         if not folder.is_dir():
             raise ValueError("目录不存在")
         entries: list[JsonObject] = []
-        for item in sorted(
-            folder.iterdir(), key=lambda p: (p.is_symlink() or not p.is_dir(), p.name)
-        ):
-            if len(entries) >= 1000:
-                break
+        items = sorted(folder.iterdir(), key=lambda p: (p.is_symlink() or not p.is_dir(), p.name))
+        for item in items[offset : offset + limit]:
             stat = item.lstat()
             entries.append(
                 {
@@ -52,8 +49,49 @@ class Workspace:
                 }
             )
         return JSON_OBJECT.validate_python(
-            {"path": folder.relative_to(self.root).as_posix(), "files": entries}
+            {
+                "path": folder.relative_to(self.root).as_posix(),
+                "files": entries,
+                "total": len(items),
+                "next_offset": offset + len(entries)
+                if offset + len(entries) < len(items)
+                else None,
+            }
         )
+
+    def read_text(self, relative: str, offset: int = 0, limit: int = 65_536) -> JsonObject:
+        path = self.path(relative)
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise ValueError("只能读取普通文件")
+        total = path.stat().st_size
+        if offset >= total:
+            return {
+                "path": relative,
+                "content": "",
+                "offset": offset,
+                "total_bytes": total,
+                "next_offset": None,
+            }
+        with path.open("rb") as stream:
+            stream.seek(offset)
+            content = stream.read(max(4, limit))
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as error:
+            if error.reason != "unexpected end of data" or offset + len(content) >= total:
+                raise ValueError(
+                    "文件不是 UTF-8 文本，或 offset 不是字符边界；可用代码工具处理二进制文件"
+                ) from None
+            content = content[: error.start]
+            text = content.decode("utf-8")
+        end = offset + len(content)
+        return {
+            "path": relative,
+            "content": text,
+            "offset": offset,
+            "total_bytes": total,
+            "next_offset": end if end < total else None,
+        }
 
     def read(self, relative: str, max_bytes: int = 50_000_000) -> bytes:
         path = self.path(relative)
@@ -65,14 +103,15 @@ class Workspace:
             raise ValueError("文件超过本次读取上限")
         return content
 
-    def write(self, relative: str, content: bytes, *, overwrite: bool = False) -> None:
+    def write(
+        self, relative: str, content: bytes, *, overwrite: bool = False, append: bool = False
+    ) -> None:
         path = self.path(relative)
         if path.exists() and not stat.S_ISREG(path.lstat().st_mode):
             raise ValueError("只能写入普通文件")
-        if not path.parent.is_dir():
-            raise ValueError("父目录不存在；可先通过代码工具创建")
+        self.make_parents(relative)
         flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-        flags |= os.O_TRUNC if overwrite else os.O_EXCL
+        flags |= os.O_APPEND if append else os.O_TRUNC if overwrite else os.O_EXCL
         fd = os.open(path, flags, 0o600)
         with os.fdopen(fd, "wb") as stream:
             if os.name != "nt":

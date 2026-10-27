@@ -125,20 +125,23 @@ async def test_disclosure_permissions_revocation_and_unknown_are_enforced(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_guessed_tool_and_target_type_cannot_bypass_disclosure(tmp_path):
+async def test_known_tool_direct_call_still_checks_target_and_authorization(tmp_path):
     store = make_store(tmp_path)
     store.settings.groups["a"].policy.cross_private = True
     registry = ToolRegistry(lambda: store.settings)
 
-    async def forbidden(_context, _arguments):
-        pytest.fail("未披露工具或目标类型错误时不得实际执行")
+    executed = []
+
+    async def permitted(context, _arguments):
+        executed.append(context.target.key)
+        return ToolResult.success()
 
     tool = ToolDefinition(
         "qq__group_info",
         "群资料",
         "messages.read",
         schema(Empty),
-        forbidden,
+        permitted,
         scope="group",
         cross_scope=True,
         model=Empty,
@@ -148,13 +151,16 @@ async def test_guessed_tool_and_target_type_cannot_bypass_disclosure(tmp_path):
         ConversationScope(bot_id="bot", kind="group", peer_id="a"), "turn", FakeConnection()
     )
     registry.initial(context)
-    assert (await registry.execute(context, tool.name, {})).error_type == "ToolNotLoaded"
+    assert (await registry.execute(context, tool.name, {})).status == "ok"
     assert (
         await registry.execute(context, "harness__load_tools", {"names": [tool.name]})
     ).status == "ok"
     assert (
         await registry.execute(context, tool.name, {"target_user_id": "person"})
     ).error_type == "PermissionDenied"
+    store.settings.groups["a"].policy.tools[tool.name] = False
+    assert (await registry.execute(context, tool.name, {})).error_type == "PermissionDenied"
+    assert executed == [context.scope.key]
 
 
 def test_configuration_roundtrip_conflict_and_repair(tmp_path):
@@ -252,7 +258,7 @@ async def test_protocol_tool_roundtrip_keeps_call_ids_and_reasoning(protocol):
         config = ModelEndpoint(protocol=protocol, model="test")
         session = ModelSession(config, "system", "user", client=client)
         reply = await session.step([])
-        session.result(reply.calls[0], ToolResult.success({"value": "ok"}), 1000)
+        session.result(reply.calls[0], ToolResult.success({"value": "ok"}))
         await session.step([])
     serialized = json.dumps(requests[1])
     assert "call-1" in serialized and '"value"' in serialized.replace("\\", "")
@@ -307,7 +313,7 @@ async def test_plain_assistant_text_is_never_sent_and_input_is_not_system(tmp_pa
     assert hub.connection.calls == []
     assert seen[0]["role"] == "system" and "FAKE_SYSTEM_PROMPT" not in str(seen[0]["content"])
     assert seen[1]["role"] == "user" and "FAKE_SYSTEM_PROMPT" in str(seen[1]["content"])
-    assert runtime.activity[-1]["status"] == "completed"
+    assert runtime.activity[-1]["status"] == "silent"
     assert not runtime.workers and not runtime.pending
 
 
@@ -576,9 +582,8 @@ async def test_multiple_tool_results_precede_attached_media():
             ToolResult.success(
                 {"media": [{"type": "image", "mime_type": "image/png", "base64": "aGVsbG8="}]}
             ),
-            1000,
         )
-        session.result(response.calls[1], ToolResult.success({"value": "second"}), 1000)
+        session.result(response.calls[1], ToolResult.success({"value": "second"}))
         await session.step([])
     messages = bodies[1]["messages"]
     assistant_index = next(
@@ -730,7 +735,6 @@ async def test_compaction_keeps_action_receipts_and_does_not_replay_unknown_send
     store.settings.providers["test"].protocol = "chat_completions"
     store.settings.private.model.max_context_tokens = 8192
     store.settings.runtime.max_model_rounds = 50
-    store.settings.runtime.tool_result_char_limit = 100_000
     registry = ToolRegistry(lambda: store.settings)
     sends = []
     normal_requests = []

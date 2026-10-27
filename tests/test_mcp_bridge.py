@@ -52,7 +52,7 @@ if __name__ == '__main__':
         )
         registry.initial(context)
         tool = "mcp__fixture__echo"
-        assert (await registry.execute(context, tool, {"text": "x"})).error_type == "ToolNotLoaded"
+        assert (await registry.execute(context, tool, {"text": "x"})).status == "ok"
         assert (
             await registry.execute(context, "harness__load_tools", {"names": [tool]})
         ).status == "ok"

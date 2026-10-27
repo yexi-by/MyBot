@@ -13,6 +13,7 @@ action_timeout = 30.0
 media_timeout = 30.0
 media_max_bytes = 50000000
 media_concurrency = 4
+event_queue_size = 128
 
 [runtime]
 concurrent_conversations = 4
@@ -21,8 +22,10 @@ turn_timeout = 600.0
 history_count = 60
 max_pending_conversations = 100
 max_pending_messages = 20
-tool_result_char_limit = 24000
 activity_limit = 200
+max_retained_sessions = 100
+max_retained_bytes = 268435456
+config_text_max_bytes = 2000000
 
 # 服务商只负责连接；模型在各会话的 model 和 idle_compaction.model 中选择。
 [providers.default]
@@ -89,3 +92,5 @@ memory_bytes = 4294967296
 pids_limit = 256
 command_timeout = 120.0
 output_limit = 1048576
+transfer_max_bytes = 50000000
+max_pending_operations = 32

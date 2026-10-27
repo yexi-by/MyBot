@@ -181,8 +181,8 @@ class ConfigStore:
     def read_file(self, relative: str) -> JsonObject:
         path = self.resolve_file(relative)
         raw = path.read_bytes()
-        if len(raw) > 2_000_000:
-            raise ValueError("文本文件超过 2 MB")
+        if len(raw) > self.settings.runtime.config_text_max_bytes:
+            raise ValueError("文本文件超过配置编辑预算；可在运行设置中调整 config_text_max_bytes")
         return {"path": relative, "content": raw.decode("utf-8-sig"), "sha": checksum(raw)}
 
     def save_file(self, relative: str, content: str, expected_sha: str | None) -> JsonObject:
@@ -200,8 +200,10 @@ class ConfigStore:
                 old = path.read_bytes() if path.exists() else b""
                 if checksum(old) != expected_sha:
                     raise ConflictError(checksum(old))
-            if len(content.encode("utf-8")) > 2_000_000:
-                raise ValueError("文本文件超过 2 MB")
+            if len(content.encode("utf-8")) > self.settings.runtime.config_text_max_bytes:
+                raise ValueError(
+                    "文本文件超过配置编辑预算；可在运行设置中调整 config_text_max_bytes"
+                )
             if relative == self.settings.persona_file and not content.strip():
                 raise ValueError("人格提示词不能为空")
             self._write(path, content)

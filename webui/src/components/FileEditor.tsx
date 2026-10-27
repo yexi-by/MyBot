@@ -1,7 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Check, CircleAlert, FileText, LoaderCircle, PencilLine, TriangleAlert } from "lucide-react";
-import { ApiError, errorMessage, get, put } from "../lib/api";
+import { ApiError, errorMessage, get, isOffline, put } from "../lib/api";
 import { pollConfig, recordSave } from "../lib/config";
 import { formatClock, formatNumber } from "../lib/format";
 import { setNavigationGuard } from "../lib/navigation";
@@ -58,8 +58,8 @@ export function FileEditor({
   const [conflictOpen, setConflictOpen] = useState(false);
   const [savedAt, setSavedAt] = useState(0);
   const [mode, setMode] = useState<Mode>(readMode);
-  // 保存失败的内容不自动重试，直到用户再次修改。
-  const failed = useRef<string | null>(null);
+  const failed = useRef<{ content: string; retryable: boolean } | null>(null);
+  const retryDelay = useRef(1000);
   const latest = useRef({ remote, content, conflict, saving });
   latest.current = { remote, content, conflict, saving };
   const dirty = remote !== null && content !== remote.content;
@@ -73,6 +73,7 @@ export function FileEditor({
     setConflict(null);
     setConflictOpen(false);
     failed.current = null;
+    retryDelay.current = 1000;
     get<FileEnvelope>(fileUrl(path)).then(
       (data) => {
         if (cancelled) return;
@@ -93,11 +94,20 @@ export function FileEditor({
 
   const showConflict = useCallback(async () => {
     try {
-      setConflict(await get<FileEnvelope>(fileUrl(path)));
+      const fresh = await get<FileEnvelope>(fileUrl(path));
+      if (fresh.content === latest.current.content) {
+        setRemote(fresh);
+        setConflict(null);
+        failed.current = null;
+        setSaveError("");
+        return true;
+      }
+      setConflict(fresh);
       setConflictOpen(true);
     } catch (error) {
       setSaveError("读取最新内容失败：" + errorMessage(error));
     }
+    return false;
   }, [path]);
 
   const write = useCallback(
@@ -109,14 +119,17 @@ export function FileEditor({
         setRemote(data);
         setConflict(null);
         failed.current = null;
+        retryDelay.current = 1000;
         setSavedAt(Date.now());
         recordSave(path, []);
         if (kind === "toml") void pollConfig();
         return true;
       } catch (error) {
-        if (error instanceof ApiError && error.status === 409) await showConflict();
+        if (error instanceof ApiError && error.status === 409) return await showConflict();
         else {
-          failed.current = text;
+          const retryable = isOffline(error) || (error instanceof ApiError && (error.status >= 500 || error.status === 408 || error.status === 429));
+          failed.current = { content: text, retryable };
+          retryDelay.current = Math.min(30_000, retryDelay.current * 2);
           setSaveError(errorMessage(error));
         }
         return false;
@@ -135,8 +148,8 @@ export function FileEditor({
   }, [write]);
 
   useEffect(() => {
-    if (!dirty || conflict || saving || content === failed.current) return;
-    const timer = setTimeout(() => void saveNow(), 1000);
+    if (!dirty || conflict || saving || (content === failed.current?.content && !failed.current.retryable)) return;
+    const timer = setTimeout(() => void saveNow(), content === failed.current?.content ? retryDelay.current : 1000);
     return () => clearTimeout(timer);
   }, [content, dirty, conflict, saving, saveNow]);
 

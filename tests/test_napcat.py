@@ -451,9 +451,7 @@ async def test_download_stream_waits_for_complete_and_rejects_corrupt_frames(inv
         assert await task == {"file_name": "a.bin", "file_size": "3", "base64": "YWJj"}
 
 
-async def test_nested_forward_preserves_tree_and_reports_cycle_without_fetching_other_scope() -> (
-    None
-):
+async def test_nested_forward_paths_preserve_tree_and_reject_cycles_or_other_scope() -> None:
     async def remote(action: str, params: JsonObject) -> JsonValue:
         if action == "get_msg":
             raw = message()
@@ -489,12 +487,27 @@ async def test_nested_forward_preserves_tree_and_reports_cycle_without_fetching_
     tools, context, _ = registry(bot)
     result = await tools.execute(context, "qq__get_forward_messages", {"message_id": "30"})
     assert result.status == "ok" and isinstance(result.data, dict)
-    errors = result.data["errors"]
-    assert isinstance(errors, list) and len(errors) == 1
+    assert result.data["forward_paths"] == [["outer", "inner"]]
     assert [
         params["message_id"] for action, params in bot.calls if action == "get_forward_msg"
-    ] == ["outer", "inner"]
-    assert "保留外层" in str(result.data["messages"]) and "image-id" in str(result.data["messages"])
+    ] == ["outer"]
+    assert "保留外层" in str(result.data["messages"])
+    nested = await tools.execute(
+        context,
+        "qq__get_forward_messages",
+        {"message_id": "30", "forward_path": ["outer", "inner"]},
+    )
+    assert nested.status == "ok" and isinstance(nested.data, dict)
+    assert "image-id" in str(nested.data["messages"])
+    assert nested.data["forward_paths"] == []
+    for path in (["other"], ["outer", "inner", "outer"]):
+        assert (
+            await tools.execute(
+                context,
+                "qq__get_forward_messages",
+                {"message_id": "30", "forward_path": [item for item in path]},
+            )
+        ).status == "error"
 
 
 def test_action_coverage_points_to_existing_registered_tools() -> None:

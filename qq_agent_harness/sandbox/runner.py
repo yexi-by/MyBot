@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import errno
 import logging
 import os
 import secrets
@@ -9,12 +10,12 @@ import tomllib
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import BinaryIO, Literal, Protocol
 from uuid import uuid4
 
 import httpx
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from pydantic import Field
 
 from ..contracts import JSON_OBJECT, JsonObject, Model
@@ -35,7 +36,7 @@ class GuardCheck(Protocol):
 
 
 class ExecuteRequest(Model):
-    command: str = Field(min_length=1, max_length=100_000)
+    command: str = Field(min_length=1)
     cwd: str = ""
     owner: str = Field(default="", max_length=128)
 
@@ -46,14 +47,15 @@ class CancelRequest(Model):
 
 class WriteRequest(Model):
     path: str
-    content: str = Field(max_length=8_000_000)
+    content: str
     encoding: Literal["utf8", "base64"] = "utf8"
     overwrite: bool = False
+    append: bool = False
 
 
 class CleanupRequest(Model):
     mode: Literal["cache", "selected", "all"]
-    paths: list[str] = Field(default_factory=list, max_length=1000)
+    paths: list[str] = Field(default_factory=list)
     confirmed: bool = False
 
 
@@ -84,6 +86,8 @@ class Runner:
         self.container_id: str | None = None
         self.cancel_event = asyncio.Event()
         self.owner = ""
+        self.waiting: dict[str, tuple[str | None, asyncio.Event]] = {}
+        self.active_slot: str | None = None
 
     async def status(self) -> JsonObject:
         applied_settings = JSON_OBJECT.validate_python(
@@ -101,16 +105,20 @@ class Runner:
                 "used_bytes": quota.used_bytes,
                 "busy": self.lock.locked() or self.container_id is not None,
                 "execution_id": self.execution_id,
+                "queued": len(self.waiting) - int(self.active_slot is not None),
                 "applied_settings": applied_settings,
             }
-        except SandboxUnavailable, OSError, TimeoutError, httpx.HTTPError, ValueError:
+        except (SandboxUnavailable, OSError, TimeoutError, httpx.HTTPError, ValueError) as error:
             return {
                 "available": False,
-                "reason": "硬配额或网络隔离未就绪，请检查部署环境",
+                "reason": str(error)
+                if isinstance(error, SandboxUnavailable)
+                else f"沙箱环境检查失败（{type(error).__name__}）",
                 "quota_bytes": self.settings.quota_bytes,
                 "used_bytes": None,
                 "busy": self.lock.locked() or self.container_id is not None,
                 "execution_id": self.execution_id,
+                "queued": len(self.waiting) - int(self.active_slot is not None),
                 "applied_settings": applied_settings,
             }
 
@@ -119,10 +127,16 @@ class Runner:
         await self.network_guard.check()
 
     def ensure_idle(self) -> None:
-        if self.lock.locked() or self.container_id is not None:
+        if self.lock.locked() or self.container_id is not None or self.waiting:
             raise HTTPException(409, "共享工作区正在执行或处理文件，请先停止执行")
 
     async def cancel(self, owner: str = "") -> JsonObject:
+        queued = matched = 0
+        for identifier, (waiting_owner, event) in self.waiting.items():
+            if waiting_owner is not None and (not owner or owner == waiting_owner):
+                event.set()
+                matched += 1
+                queued += int(identifier != self.active_slot)
         running = self.execution_id is not None and (not owner or owner == self.owner)
         if running:
             self.cancel_event.set()
@@ -131,21 +145,58 @@ class Runner:
                 self.container_id = None
                 self.execution_id = None
                 self.owner = ""
-        return {"cancelled": running}
+        return {"cancelled": running or matched > 0, "queued_cancelled": queued}
+
+    @asynccontextmanager
+    async def operation_slot(self, owner: str | None) -> AsyncIterator[asyncio.Event | None]:
+        if (
+            len(self.waiting) - int(self.active_slot is not None)
+            >= self.settings.max_pending_operations
+        ):
+            raise HTTPException(429, "工作区等待操作已满，请稍后重试或调整 max_pending_operations")
+        identifier = uuid4().hex
+        event = asyncio.Event()
+        self.waiting[identifier] = (owner, event)
+        acquired = asyncio.create_task(self.lock.acquire())
+        stopped = asyncio.create_task(event.wait())
+        try:
+            await asyncio.wait({acquired, stopped}, return_when=asyncio.FIRST_COMPLETED)
+            if event.is_set():
+                yield None
+            else:
+                if self.container_id is not None:
+                    raise SandboxUnavailable("上一个执行容器尚未回收，请先停止该执行")
+                self.active_slot = identifier
+                yield event
+        finally:
+            self.waiting.pop(identifier, None)
+            if self.active_slot == identifier:
+                self.active_slot = None
+            acquired.cancel()
+            stopped.cancel()
+            await asyncio.gather(acquired, stopped, return_exceptions=True)
+            if not acquired.cancelled() and acquired.exception() is None and acquired.result():
+                self.lock.release()
 
     async def execute(self, request: ExecuteRequest) -> JsonObject:
-        self.ensure_idle()
-        async with self.lock:
+        async with self.operation_slot(request.owner) as cancel_event:
+            if cancel_event is None:
+                return {"status": "cancelled", "exit_code": None, "output": "", "truncated": False}
             await self.ensure_ready()
+            if cancel_event.is_set():
+                return {"status": "cancelled", "exit_code": None, "output": "", "truncated": False}
             cwd = self.workspace.path(request.cwd, allow_root=True)
             if not cwd.is_dir():
                 raise ValueError("执行目录不存在")
             await asyncio.to_thread(self.workspace.prepare)
             self.execution_id = uuid4().hex
             self.owner = request.owner
-            self.cancel_event = asyncio.Event()
+            self.cancel_event = cancel_event
             output = bytearray()
             truncated = False
+            output_complete = False
+            output_path = f".outputs/{self.execution_id}.log"
+            output_file: BinaryIO | None = None
             status, exit_code = "ok", -1
             container_id: str | None = None
             logs: asyncio.Task[None] | None = None
@@ -154,13 +205,28 @@ class Runner:
 
             async def consume(identifier: str) -> None:
                 nonlocal truncated
+                if output_file is None:
+                    raise RuntimeError("输出文件尚未建立")
                 async for chunk in self.engine.logs(identifier):
                     remaining = self.settings.output_limit - len(output)
-                    output.extend(chunk[: max(0, remaining)])
-                    if len(chunk) > remaining:
+                    if len(chunk) > remaining and not truncated:
+                        await asyncio.to_thread(output_file.write, bytes(output))
                         truncated = True
+                    if truncated:
+                        await asyncio.to_thread(output_file.write, chunk)
+                    output.extend(chunk[: max(0, remaining)])
 
             try:
+                await asyncio.to_thread(self.workspace.make_parents, output_path)
+                output_file = self.workspace.path(output_path).open("xb")
+                if cancel_event.is_set():
+                    output_complete = True
+                    return {
+                        "status": "cancelled",
+                        "output": "",
+                        "exit_code": None,
+                        "truncated": False,
+                    }
                 payload = container_config(
                     command=request.command,
                     cwd=request.cwd,
@@ -172,7 +238,16 @@ class Runner:
                 )
                 container_id = await self.engine.create(f"qah-exec-{self.execution_id}", payload)
                 self.container_id = container_id
+                if cancel_event.is_set():
+                    output_complete = True
+                    return {
+                        "status": "cancelled",
+                        "output": "",
+                        "exit_code": None,
+                        "truncated": False,
+                    }
                 await self.engine.start(container_id)
+                deadline = asyncio.get_running_loop().time() + self.settings.command_timeout
                 logs = asyncio.create_task(consume(container_id))
                 wait = asyncio.create_task(self.engine.wait(container_id))
                 cancelled = asyncio.create_task(self.cancel_event.wait())
@@ -188,9 +263,17 @@ class Runner:
                     exit_code = wait.result()
                     status = "ok" if exit_code == 0 else "error"
                     try:
-                        async with asyncio.timeout(5):
-                            await logs
-                    except TimeoutError:
+                        drained, _ = await asyncio.wait(
+                            {logs, cancelled},
+                            timeout=max(0, deadline - asyncio.get_running_loop().time()),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if cancelled in drained:
+                            status = "cancelled"
+                        elif logs in drained:
+                            logs.result()
+                            output_complete = True
+                    except TimeoutError, OSError, httpx.HTTPError:
                         logs.cancel()
                 else:
                     status = "timeout"
@@ -206,6 +289,20 @@ class Runner:
                     if task is not None:
                         pending.append(task)
                 await asyncio.gather(*pending, return_exceptions=True)
+                try:
+                    if output_file is not None and not output_complete and not truncated:
+                        await asyncio.to_thread(output_file.write, bytes(output))
+                        truncated = True
+                except OSError:
+                    output_complete = False
+                    truncated = True
+                finally:
+                    if output_file is not None:
+                        try:
+                            await asyncio.to_thread(output_file.close)
+                        except OSError:
+                            output_complete = False
+                            truncated = True
                 removed = False
                 try:
                     if container_id is not None:
@@ -218,12 +315,19 @@ class Runner:
                         self.container_id = None
                         self.execution_id = None
                         self.owner = ""
+                if output_file is not None and not truncated:
+                    try:
+                        await asyncio.to_thread(self.workspace.cleanup, "selected", [output_path])
+                    except ValueError, OSError:
+                        logger.warning("sandbox_output_cleanup_failed")
             return {
                 "status": status,
                 "execution_id": execution_id,
                 "exit_code": exit_code,
                 "output": output.decode("utf-8", errors="replace"),
                 "truncated": truncated,
+                "output_complete": output_complete,
+                "output_path": output_path if truncated else None,
             }
 
     async def close(self) -> None:
@@ -256,11 +360,11 @@ def create_app(runner: Runner, token: str) -> FastAPI:
     )
 
     @app.exception_handler(SandboxUnavailable)
-    async def unavailable(_request: object, _error: SandboxUnavailable) -> Response:
-        return Response(
-            '{"detail":"沙箱硬配额或网络隔离不可用"}',
-            status_code=503,
-            media_type="application/json",
+    async def unavailable(_request: object, error: SandboxUnavailable) -> Response:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            {"detail": str(error), "error_type": "SandboxUnavailable"}, status_code=503
         )
 
     @app.exception_handler(ValueError)
@@ -270,12 +374,17 @@ def create_app(runner: Runner, token: str) -> FastAPI:
         return JSONResponse({"detail": str(error)}, status_code=400)
 
     @app.exception_handler(OSError)
-    async def filesystem_error(_request: object, _error: OSError) -> Response:
-        return Response(
-            '{"detail":"文件操作失败：请检查路径、容量和权限"}',
-            status_code=400,
-            media_type="application/json",
-        )
+    async def filesystem_error(_request: object, error: OSError) -> Response:
+        from fastapi.responses import JSONResponse
+
+        code, detail = {
+            errno.ENOENT: ("FileNotFound", "文件或目录不存在"),
+            errno.EEXIST: ("FileExists", "目标文件已存在；明确覆盖或追加后再写入"),
+            errno.ENOSPC: ("StorageFull", "磁盘空间不足"),
+            errno.EDQUOT: ("QuotaExceeded", "工作区配额已用尽，可清理文件后重试"),
+            errno.EACCES: ("AccessDenied", "文件权限不允许此操作"),
+        }.get(error.errno or 0, ("FilesystemError", "文件操作失败"))
+        return JSONResponse({"detail": detail, "error_type": code}, status_code=400)
 
     @app.exception_handler(httpx.HTTPError)
     async def engine_error(_request: object, _error: httpx.HTTPError) -> Response:
@@ -296,46 +405,72 @@ def create_app(runner: Runner, token: str) -> FastAPI:
         return await runner.cancel(request.owner)
 
     @app.get("/files")
-    async def files(path: str = "") -> JsonObject:
-        runner.ensure_idle()
-        async with runner.lock:
-            return await asyncio.to_thread(runner.workspace.files, path)
+    async def files(
+        path: str = "", offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1)
+    ) -> JsonObject:
+        async with runner.operation_slot(None):
+            return await asyncio.to_thread(runner.workspace.files, path, offset, limit)
+
+    @app.get("/file/text")
+    async def read_text(
+        path: str, offset: int = Query(default=0, ge=0), limit: int = Query(default=65_536, ge=1)
+    ) -> JsonObject:
+        async with runner.operation_slot(None):
+            return await asyncio.to_thread(
+                runner.workspace.read_text,
+                path,
+                offset,
+                min(limit, runner.settings.transfer_max_bytes),
+            )
 
     @app.get("/file")
     async def read(path: str) -> Response:
-        runner.ensure_idle()
-        async with runner.lock:
-            content = await asyncio.to_thread(runner.workspace.read, path)
+        async with runner.operation_slot(None):
+            content = await asyncio.to_thread(
+                runner.workspace.read, path, runner.settings.transfer_max_bytes
+            )
             return Response(content, media_type="application/octet-stream")
 
     @app.put("/file")
-    async def write(request: WriteRequest) -> JsonObject:
-        runner.ensure_idle()
-        async with runner.lock:
+    async def write(payload: WriteRequest, request: Request) -> JsonObject:
+        async with runner.operation_slot(None):
+            if await request.is_disconnected():
+                raise HTTPException(499, "调用方已断开，文件未写入")
             await runner.quota.check()
             content = (
-                request.content.encode("utf-8")
-                if request.encoding == "utf8"
-                else base64.b64decode(request.content, validate=True)
+                payload.content.encode("utf-8")
+                if payload.encoding == "utf8"
+                else base64.b64decode(payload.content, validate=True)
             )
+            if len(content) > runner.settings.transfer_max_bytes:
+                raise HTTPException(413, "内容超过单次传输预算；请分段追加")
+            if await request.is_disconnected():
+                raise HTTPException(499, "调用方已断开，文件未写入")
             await asyncio.to_thread(
-                runner.workspace.write, request.path, content, overwrite=request.overwrite
+                runner.workspace.write,
+                payload.path,
+                content,
+                overwrite=payload.overwrite,
+                append=payload.append,
             )
-            return {"path": request.path, "bytes": len(content)}
+            return {"path": payload.path, "bytes": len(content)}
 
     @app.post("/file/content")
     async def write_content(request: Request, path: str) -> JsonObject:
-        runner.ensure_idle()
-        async with runner.lock:
+        async with runner.operation_slot(None):
             await runner.quota.check()
             runner.workspace.path(path)
             content = bytearray()
             async for chunk in request.stream():
-                if len(content) + len(chunk) > 50_000_000:
-                    raise HTTPException(413, "传入文件超过单次 50 MB 限制")
+                if len(content) + len(chunk) > runner.settings.transfer_max_bytes:
+                    raise HTTPException(413, "传入文件超过已配置的单次传输预算")
                 content.extend(chunk)
             # 仅创建已经完成边界校验的父路径；整段操作期间没有执行容器。
+            if await request.is_disconnected():
+                raise HTTPException(499, "调用方已断开，文件未写入")
             await asyncio.to_thread(runner.workspace.make_parents, path)
+            if await request.is_disconnected():
+                raise HTTPException(499, "调用方已断开，文件未写入")
             await asyncio.to_thread(runner.workspace.write, path, bytes(content))
             return {"path": path, "bytes": len(content)}
 

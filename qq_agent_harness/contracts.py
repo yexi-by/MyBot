@@ -3,6 +3,7 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
@@ -47,7 +48,6 @@ class ToolResult(Model):
     data: JsonValue = None
     error_type: str | None = None
     message: str = ""
-    recoverable: bool = True
 
     @classmethod
     def success(cls, data: JsonValue = None) -> ToolResult:
@@ -65,6 +65,14 @@ class NapCatConnection(Protocol):
 
 
 @dataclass
+class UnknownOperation:
+    tool: str
+    arguments: JsonObject
+    target: ConversationScope
+    id: str = field(default_factory=lambda: uuid4().hex)
+
+
+@dataclass
 class ToolContext:
     scope: ConversationScope
     turn_id: str
@@ -75,7 +83,8 @@ class ToolContext:
     sent_messages: list[JsonObject] = field(default_factory=list)
     send_attempts: int = 0
     max_sends: int = 5
-    unknown_effects: list[tuple[str, JsonObject, ConversationScope]] = field(default_factory=list)
+    unknown_effects: list[UnknownOperation] = field(default_factory=list)
+    effect_submitted: bool = False
     read_workspace: Callable[[str], Awaitable[bytes]] | None = None
     write_workspace: Callable[[str, bytes], Awaitable[None]] | None = None
     recheck: Callable[[], ToolResult | None] = lambda: None

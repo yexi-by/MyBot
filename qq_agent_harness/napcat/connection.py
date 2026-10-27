@@ -193,7 +193,7 @@ class WebSocketConnection:
                         "NapCat 提交动作时断开，结果未知", submitted=True
                     ) from exc
             # 超时和断线都不能推断带副作用的动作未生效。
-            deadline = self.timeout if timeout is None else min(timeout, self.timeout)
+            deadline = self.timeout if timeout is None else timeout
             return await asyncio.wait_for(future, timeout=deadline)
         finally:
             self.pending.pop(echo, None)
@@ -243,6 +243,7 @@ class NapCatHub:
     def __init__(self, settings: NapCatSettings | None = None):
         self.settings = settings or NapCatSettings()
         self.connections: dict[str, WebSocketConnection] = {}
+        self.dropped_events = 0
 
     def bot_connection(self, bot_id: str) -> WebSocketConnection:
         connection = self.connections.get(bot_id)
@@ -251,7 +252,11 @@ class NapCatHub:
         return connection
 
     def status(self) -> JsonObject:
-        return {"connected": list(self.connections), "baseline_version": "v4.18.41"}
+        return {
+            "connected": list(self.connections),
+            "baseline_version": "v4.18.41",
+            "dropped_events": self.dropped_events,
+        }
 
     async def get_history(self, scope: ConversationScope, count: int) -> list[Message]:
         return await scoped_history(self.bot_connection(scope.bot_id), scope, count)
@@ -268,7 +273,7 @@ class NapCatHub:
         await websocket.accept()
         connection: WebSocketConnection | None = None
         consumer: asyncio.Task[None] | None = None
-        queue: asyncio.Queue[Message] = asyncio.Queue(maxsize=128)
+        queue: asyncio.Queue[Message] = asyncio.Queue(maxsize=self.settings.event_queue_size)
 
         async def consume() -> None:
             while True:
@@ -320,6 +325,7 @@ class NapCatHub:
                 try:
                     queue.put_nowait(message)
                 except asyncio.QueueFull:
+                    self.dropped_events += 1
                     logger.warning("napcat_event_queue_full", extra={"bot_id": bot_id})
         except WebSocketDisconnect:
             pass
@@ -351,7 +357,7 @@ async def scoped_history(
     client = cast(NapCatConnection, connection)
     if count <= 0:
         return []
-    params: JsonObject = {"count": min(count, 300), "reverse_order": False}
+    params: JsonObject = {"count": count, "reverse_order": False}
     params["group_id" if scope.kind == "group" else "user_id"] = scope.peer_id
     if message_seq:
         params["message_seq"] = message_seq
@@ -392,6 +398,11 @@ async def scoped_message(
         if sender_id not in (scope.peer_id, scope.bot_id):
             raise ValueError("消息不属于当前私聊")
         if sender_id == scope.bot_id:
+            target_id = data.get("target_id") or data.get("peer_id")
+            if target_id is not None:
+                if str(target_id) != scope.peer_id:
+                    raise ValueError("消息不属于当前私聊")
+                return object_value(normalize_ids(data))
             # bot 发出的私聊 get_msg 可能不含对端，必须通过定向历史验证归属。
             history = await scoped_history(client, scope, 300)
             if not any(item.message_id == message_id for item in history):

@@ -86,7 +86,7 @@ export const napcatSection: SectionDef = {
       label: "媒体读取超时",
       type: "number",
       ...seconds,
-      help: "读取单个图片、语音、视频或文件的最长时间。",
+      help: "每次媒体下载或 NapCat 刷新的等待时间；一种来源失败后仍可尝试其他来源。",
     },
     {
       key: "media_max_bytes",
@@ -102,10 +102,11 @@ export const napcatSection: SectionDef = {
       label: "媒体并发读取数",
       type: "number",
       min: 1,
-      max: 32,
       integer: true,
       help: "同一批消息中同时读取的媒体数量。",
     },
+    { key: "event_queue_size", label: "接入事件队列", type: "number", min: 1, integer: true,
+      help: "接入队列容量；溢出计数显示在概览页。" },
   ],
 };
 
@@ -141,7 +142,6 @@ export const runtimeSection: SectionDef = {
       label: "同时处理的会话数",
       type: "number",
       min: 1,
-      max: 32,
       integer: true,
       restart: true,
       help: "不同会话可以并行；同一会话的消息始终按顺序处理。",
@@ -151,9 +151,8 @@ export const runtimeSection: SectionDef = {
       label: "每轮模型请求上限",
       type: "number",
       min: 1,
-      max: 100,
       integer: true,
-      help: "一轮对话中发往模型接口的请求总数，包括自动压缩和超限恢复。",
+      help: "一轮对话的正常模型请求上限；压缩请求独立使用相同数量的额度。",
     },
     {
       key: "turn_timeout",
@@ -167,7 +166,6 @@ export const runtimeSection: SectionDef = {
       label: "读取历史消息数",
       type: "number",
       min: 0,
-      max: 300,
       integer: true,
       help: "每轮从 NapCat 读取的近期消息条数，0 表示不读取。",
     },
@@ -176,7 +174,6 @@ export const runtimeSection: SectionDef = {
       label: "排队会话上限",
       type: "number",
       min: 1,
-      max: 1000,
       integer: true,
       help: "等待处理的会话超过上限后，新的唤醒会被丢弃并记录。",
     },
@@ -185,29 +182,24 @@ export const runtimeSection: SectionDef = {
       label: "单会话排队消息上限",
       type: "number",
       min: 1,
-      max: 100,
       integer: true,
       help: "处理期间收到的新唤醒会合并到下一轮，超过上限的被丢弃。",
-    },
-    {
-      key: "tool_result_char_limit",
-      label: "工具结果字符上限",
-      type: "number",
-      min: 1000,
-      integer: true,
-      unit: "字符",
-      help: "超出部分会被截断，并告知模型结果不完整。",
     },
     {
       key: "activity_limit",
       label: "活动记录条数",
       type: "number",
-      min: 10,
-      max: 2000,
+      min: 1,
       integer: true,
       restart: true,
       help: "概览页保留的最近活动数量，只保存在内存中。",
     },
+    { key: "max_retained_sessions", label: "保留会话数", type: "number", min: 1, integer: true,
+      help: "超过容量后回收最久未使用的空闲会话，并记录事件。" },
+    { key: "max_retained_bytes", label: "会话内存预算", type: "bytes", bytes: "binary", min: 1, integer: true,
+      help: "上下文、知识资料和未知动作参数的合计保留预算。" },
+    { key: "config_text_max_bytes", label: "配置文本编辑预算", type: "bytes", bytes: "decimal", min: 1, integer: true,
+      help: "人格、知识库和 TOML 编辑器的单文件读写预算；需要编辑大文件时可提高。" },
   ],
 };
 
@@ -423,7 +415,6 @@ export const limitsSection: SectionDef = {
       label: "每轮最多发送",
       type: "number",
       min: 1,
-      max: 100,
       integer: true,
       unit: "次",
       help: "一轮对话里发送消息的次数上限，文件和合并转发各算一次。",
@@ -528,8 +519,10 @@ export const mcpToolsSection: SectionDef = {
       label: "只读工具",
       type: "tags",
       placeholder: "输入远端工具名后按回车",
-      help: "标记为只读的工具调用失败后允许 Agent 重试。能否调用仍由会话权限决定。",
+      help: "明确声明只读工具；未声明时参考服务的只读注解。调用权限仍由会话策略决定。",
     },
+    { key: "effect_tools", label: "有副作用的工具", type: "tags",
+      help: "强制按副作用处理，优先于服务的只读注解和只读名单。" },
   ],
 };
 
@@ -591,7 +584,6 @@ export const sandboxSection: SectionDef = {
       label: "单次执行时限",
       type: "number",
       ...seconds,
-      max: 600,
       help: "超时会终止执行，已写入的文件保留。",
     },
     {
@@ -599,11 +591,14 @@ export const sandboxSection: SectionDef = {
       label: "输出上限",
       type: "bytes",
       bytes: "binary",
-      min: 1024,
-      max: 16_777_216,
+      min: 1,
       integer: true,
-      help: "单次执行返回的终端输出上限，超出部分截断。",
+      help: "返回到模型的输出预览预算；超出时完整输出保存在工作区，可继续分段读取。",
     },
+    { key: "transfer_max_bytes", label: "单次文件传输预算", type: "bytes", bytes: "decimal", min: 1, integer: true,
+      help: "二进制文件传输与文本写入共用此预算；文本可分段读取或追加。" },
+    { key: "max_pending_operations", label: "工作区等待操作上限", type: "number", min: 1, integer: true,
+      help: "执行与文件操作在有界内存中等待；队列满时明确告知未执行，可稍后重试。" },
   ],
 };
 
@@ -670,6 +665,7 @@ export function defaultMcp(): ObjectValue {
     headers: {},
     timeout: 60,
     read_only_tools: [],
+    effect_tools: [],
   };
 }
 
@@ -860,7 +856,7 @@ export function validateClient(config: ObjectValue): { path: Path; message: stri
   for (const [path, value] of paths)
     if (
       typeof value === "string" &&
-      (value.includes("..") || value.includes(":") || value.startsWith("/") || value.includes("\\"))
+      (value.split("/").includes("..") || value.includes(":") || value.startsWith("/") || value.includes("\\"))
     )
       errors.push({ path, message: "文件必须位于配置目录内" });
   return errors;

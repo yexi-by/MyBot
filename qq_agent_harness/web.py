@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -49,6 +49,12 @@ class ResetSession(Model):
     scope_key: str
     # 会话正在处理时，先停止本轮再重置；否则返回冲突。
     stop: bool = False
+
+
+class ResolveOperation(Model):
+    scope_key: str
+    operation_id: str
+    executed: bool
 
 
 class Cleanup(Model):
@@ -377,9 +383,21 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
                 "restart_required": sandbox_pending,
             }
 
+    @app.post("/api/sessions/operations/resolve")
+    async def resolve_operation(request: ResolveOperation) -> JsonObject:
+        try:
+            runtime.resolve_operation(request.scope_key, request.operation_id, request.executed)
+        except KeyError:
+            raise HTTPException(404, "会话或未知动作已不存在") from None
+        except SessionBusy as error:
+            raise HTTPException(409, str(error)) from None
+        return {"resolved": True}
+
     @app.get("/api/sandbox/files")
-    async def sandbox_files(path: str = "") -> JsonObject:
-        return await runner.files(path)
+    async def sandbox_files(
+        path: str = "", offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1)
+    ) -> JsonObject:
+        return await runner.files(path, offset, limit)
 
     @app.post("/api/sandbox/cleanup")
     async def sandbox_cleanup(request: Cleanup) -> JsonObject:

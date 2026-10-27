@@ -31,6 +31,7 @@ import {
   messageText,
   pretty,
   resetSession,
+  resolveOperation,
   sendPreview,
   senderLabel,
   sessionRoute,
@@ -592,7 +593,7 @@ function Timeline({ detail, botId }: { detail: SessionDetail; botId: string }) {
   );
 }
 
-function SessionSummary({ detail, botId }: { detail: SessionDetail; botId: string }) {
+function SessionSummary({ detail, botId, refresh }: { detail: SessionDetail; botId: string; refresh: () => void }) {
   const tools = useToolTitles();
   const context = detail.context;
   const max = context.max_tokens ?? 0;
@@ -622,7 +623,7 @@ function SessionSummary({ detail, botId }: { detail: SessionDetail; botId: strin
         </div>
         <div>
           <dt>本轮模型请求</dt>
-          <dd className="num">{context.request_count ?? 0} 次</dd>
+          <dd className="num">{context.model_request_count ?? 0} 次；压缩请求 {context.compaction_request_count ?? 0} 次</dd>
         </div>
         <div>
           <dt>上下文压缩</dt>
@@ -658,17 +659,25 @@ function SessionSummary({ detail, botId }: { detail: SessionDetail; botId: strin
             结果未知的动作 · 已禁止原样重试
           </h3>
           <ul className="session-unknown-list">
-            {detail.unknown_operations.map((operation, index) => (
-              <li key={index}>
+            {detail.unknown_operations.map((operation) => (
+              <li key={operation.id}>
                 <span className="session-tool">{tools.get(operation.tool) ?? operation.tool}</span>
                 <span className="small muted">
                   {" → " + (operation.target.kind === "group" ? "群 " : "私聊 ") + operation.target.peer_id}
                 </span>
                 <JsonBlock label="参数" value={operation.arguments} />
+                <div className="row wrap">
+                  <Button size="sm" disabled={isBusy(detail.state)} onClick={async () => {
+                    if (await resolveOperation(detail.scope_key, operation.id, true)) refresh();
+                  }}>核实为已执行</Button>
+                  <Button size="sm" disabled={isBusy(detail.state)} onClick={async () => {
+                    if (await resolveOperation(detail.scope_key, operation.id, false)) refresh();
+                  }}>核实为未执行</Button>
+                </div>
               </li>
             ))}
           </ul>
-          <p className="tiny muted">重置上下文后这些记录仍然保留。</p>
+          <p className="tiny muted">重置上下文保留这些记录；核对实际结果后可解除。处理中请先停止本轮。</p>
         </div>
       )}
       {loaded.length > 0 && (
@@ -789,7 +798,7 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
           刷新失败：{error}。下面是上次读取的内容。
         </p>
       )}
-      <SessionSummary detail={detail} botId={botId} />
+      <SessionSummary detail={detail} botId={botId} refresh={refresh} />
       <Timeline detail={detail} botId={botId} />
     </div>
   );

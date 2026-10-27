@@ -307,19 +307,31 @@ def filtered_groups(value: JsonValue, group_id: str) -> JsonValue:
 
 
 async def invoke(
-    context: ToolContext, action: str, params: JsonObject, *, effects: bool = False
+    context: ToolContext,
+    action: str,
+    params: JsonObject,
+    *,
+    effects: bool = False,
+    count_send: bool = False,
 ) -> ToolResult:
     if context.cancelled():
         return ToolResult(status="cancelled", message="当前轮次已取消，动作未提交")
     denied = context.recheck()
     if denied is not None:
         return denied
+    if count_send:
+        context.send_attempts += 1
+    context.effect_submitted = effects
     try:
         data = await context.napcat.call(action, params)
         return ToolResult.success(normalize_ids(data))
     except NapCatError as exc:
         return ToolResult.failure(str(exc), f"NapCat:{exc.code}")
     except NapCatUnavailable as exc:
+        if not exc.submitted:
+            context.effect_submitted = False
+            if count_send:
+                context.send_attempts -= 1
         return ToolResult(
             status="unknown" if effects and exc.submitted else "error",
             error_type="NapCatUnavailable",
@@ -366,122 +378,139 @@ def action_tool(spec: ActionSpec) -> ToolDefinition:
     )
 
 
-async def forward_bundle(context: ToolContext, message_id: str) -> JsonObject:
-    message = await scoped_message(context.napcat, context.target, message_id)
-    segments = message.get("message", [])
-    if not isinstance(segments, list):
-        return {"messages": [], "errors": []}
-    errors: list[JsonValue] = []
-    calls = 0
-
-    async def expand(value: JsonValue, depth: int, ancestry: frozenset[str]) -> JsonValue:
-        if depth > 24:
-            errors.append(
-                {
-                    "error_type": "ForwardDepthLimit",
-                    "message": "嵌套转发层级超过限制，部分内容未展开",
-                }
-            )
-            return None
-        if isinstance(value, list):
-            if len(value) > 200:
-                errors.append(
-                    {
-                        "error_type": "ForwardCountLimit",
-                        "message": "转发节点超过限制，仅展开前 200 项",
-                    }
-                )
-            return [await expand(item, depth + 1, ancestry) for item in value[:200]]
-        if isinstance(value, dict):
-            result = dict(value)
-            data = value.get("data")
-            if value.get("type") == "forward" and isinstance(data, dict) and data.get("id"):
-                forward_id = str(data["id"])
-                result["data"] = {**data, "messages": await load(forward_id, depth + 1, ancestry)}
+def forward_ids(value: JsonValue) -> list[str]:
+    found: list[str] = []
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, list):
+            pending.extend(reversed(item))
+        elif isinstance(item, dict):
+            data = item.get("data")
+            if item.get("type") == "forward" and isinstance(data, dict) and data.get("id"):
+                identifier = str(data["id"])
+                if identifier not in found:
+                    found.append(identifier)
             else:
-                for key in ("message", "content", "data"):
-                    if key in result:
-                        result[key] = await expand(result[key], depth + 1, ancestry)
-            return result
-        return value
+                pending.extend(reversed(list(item.values())))
+    return found
 
-    async def load(forward_id: str, depth: int, ancestry: frozenset[str]) -> JsonValue:
-        nonlocal calls
-        if forward_id in ancestry or calls >= 20 or depth > 24:
-            errors.append(
-                {
-                    "forward_id": forward_id,
-                    "error_type": "ForwardLimit",
-                    "message": "嵌套转发出现循环或超过展开限额",
-                }
-            )
-            return []
-        calls += 1
+
+async def forward_bundle(
+    context: ToolContext,
+    message_id: str,
+    *,
+    forward_path: list[str] | None = None,
+    offset: int = 0,
+    limit: int | None = 100,
+) -> JsonObject:
+    message = await scoped_message(context.napcat, context.target, message_id)
+    current = message.get("message", [])
+    errors: list[JsonValue] = []
+
+    async def load(identifier: str) -> JsonValue:
         try:
             data = object_value(
-                await context.napcat.call("get_forward_msg", {"message_id": forward_id})
+                await context.napcat.call("get_forward_msg", {"message_id": identifier})
             )
-            return await expand(data.get("messages", []), depth + 1, ancestry | {forward_id})
-        except (NapCatError, TimeoutError, ConnectionError) as exc:
+            return data.get("messages", [])
+        except (NapCatError, TimeoutError, ConnectionError) as error:
             errors.append(
                 {
-                    "forward_id": forward_id,
-                    "error_type": type(exc).__name__,
-                    "message": "部分转发内容无法读取",
+                    "forward_id": identifier,
+                    "error_type": type(error).__name__,
+                    "message": "此转发读取失败，可按原路径重新查询",
                 }
             )
             return []
 
+    ancestry: list[str] = []
+    for identifier in forward_path or []:
+        if identifier in ancestry:
+            raise ValueError("转发路径存在循环")
+        if identifier not in forward_ids(current):
+            raise ValueError("转发路径不属于当前消息")
+        ancestry.append(identifier)
+        current = await load(identifier)
+    bundles: list[tuple[list[str], JsonValue]] = []
+    if ancestry:
+        bundles.append((ancestry, current))
+    else:
+        for identifier in forward_ids(current):
+            bundles.append(([identifier], await load(identifier)))
     nodes: list[JsonValue] = []
-    for segment in segments:
-        if not isinstance(segment, dict) or segment.get("type") != "forward":
-            continue
-        data = segment.get("data")
-        if isinstance(data, dict) and data.get("id"):
-            values = await load(str(data["id"]), 0, frozenset())
-            if isinstance(values, list):
-                nodes.extend(values)
-    return {"messages": nodes, "errors": errors}
+    paths: list[JsonValue] = []
+    for parent, values in bundles:
+        if isinstance(values, list):
+            nodes.extend(values)
+        for identifier in forward_ids(values):
+            if identifier not in parent:
+                paths.append([*parent, identifier])
+    page = nodes[offset:] if limit is None else nodes[offset : offset + limit]
+    return {
+        "messages": page,
+        "total": len(nodes),
+        "next_offset": offset + len(page) if offset + len(page) < len(nodes) else None,
+        "forward_paths": paths,
+        "errors": errors,
+    }
 
 
-async def media_segments(
-    context: ToolContext, request: a.ReadMedia
-) -> tuple[list[JsonObject], list[JsonValue]]:
+@dataclass
+class MediaSelection:
+    segments: list[JsonObject]
+    indexes: list[int]
+    errors: list[JsonValue]
+    total: int
+    next_offset: int | None
+    forward_paths: JsonValue
+
+
+async def media_segments(context: ToolContext, request: a.ReadMedia) -> MediaSelection:
     message = await scoped_message(context.napcat, context.target, request.message_id)
-    raw = message.get("message", [])
     result: list[JsonObject] = []
     errors: list[JsonValue] = []
+    paths: JsonValue = []
 
-    def collect(value: JsonValue, depth: int = 0) -> None:
-        if depth > 30 or len(result) >= 20:
-            return
-        if isinstance(value, list):
-            for item in value:
-                collect(item, depth + 1)
-        elif isinstance(value, dict):
-            if value.get("type") in ("image", "record", "video", "file"):
-                result.append(value)
-            elif "message" in value:
-                collect(value["message"], depth + 1)
-            elif "content" in value:
-                collect(value["content"], depth + 1)
-            elif "messages" in value:
-                collect(value["messages"], depth + 1)
-            elif value.get("type") in ("node", "forward"):
-                collect(value.get("data"), depth + 1)
+    def collect(value: JsonValue) -> None:
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, list):
+                pending.extend(reversed(item))
+            elif isinstance(item, dict):
+                if item.get("type") in ("image", "record", "video", "file"):
+                    result.append(item)
+                else:
+                    for key in ("message", "content", "messages", "data"):
+                        if key in item:
+                            pending.append(item[key])
+                            break
 
-    collect(raw)
-    if request.include_forwards:
-        bundle = await forward_bundle(context, request.message_id)
+    if not request.forward_path:
+        collect(message.get("message", []))
+    if request.include_forwards or request.forward_path:
+        bundle = await forward_bundle(
+            context, request.message_id, forward_path=request.forward_path, limit=None
+        )
         collect(bundle.get("messages"))
+        paths = bundle.get("forward_paths", [])
         failures = bundle.get("errors")
         if isinstance(failures, list):
             errors.extend(failures)
-    if request.indexes is not None:
-        if any(index < 0 or index >= len(result) for index in request.indexes):
+    total = len(result)
+    indexes = request.indexes
+    if indexes is not None:
+        if any(index < 0 or index >= total for index in indexes):
             raise ValueError("媒体索引超出当前消息可读取范围")
-        return [result[index] for index in request.indexes], errors
-    return result, errors
+        next_offset = None
+    else:
+        indexes = list(range(request.offset, min(total, request.offset + request.limit)))
+        end = request.offset + len(indexes)
+        next_offset = end if end < total else None
+    return MediaSelection(
+        [result[index] for index in indexes], indexes, errors, total, next_offset, paths
+    )
 
 
 class SaveMedia(a.ReadMedia):
@@ -760,28 +789,50 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
 
     async def get_forward(context: ToolContext, arguments: JsonObject) -> ToolResult:
         request = a.Forward.model_validate(arguments)
-        return ToolResult.success(await forward_bundle(context, request.message_id))
+        return ToolResult.success(
+            await forward_bundle(
+                context,
+                request.message_id,
+                forward_path=request.forward_path,
+                offset=request.offset,
+                limit=request.limit,
+            )
+        )
 
     async def read_media(context: ToolContext, arguments: JsonObject) -> ToolResult:
         request = a.ReadMedia.model_validate(arguments)
-        segments, errors = await media_segments(context, request)
-        result = await reader.read_many(segments, context.napcat)
+        selection = await media_segments(context, request)
+        result = await reader.read_many(selection.segments, context.napcat)
+        for field in ("media", "errors"):
+            entries = result.get(field)
+            for entry in entries if isinstance(entries, list) else []:
+                if isinstance(entry, dict) and isinstance(index := entry.get("index"), int):
+                    entry["index"] = selection.indexes[index]
         media_errors = result.get("errors")
-        result["errors"] = [*errors, *(media_errors if isinstance(media_errors, list) else [])]
+        result["errors"] = [
+            *selection.errors,
+            *(media_errors if isinstance(media_errors, list) else []),
+        ]
+        result.update(
+            total=selection.total,
+            next_offset=selection.next_offset,
+            forward_paths=selection.forward_paths,
+        )
         return ToolResult.success(result)
 
     async def save_media(context: ToolContext, arguments: JsonObject) -> ToolResult:
         request = SaveMedia.model_validate(arguments)
         if context.write_workspace is None:
             raise ValueError("沙箱文件写入服务不可用")
-        segments, _ = await media_segments(context, request)
-        if len(segments) != 1:
+        selection = await media_segments(context, request)
+        if len(selection.segments) != 1:
             raise ValueError("保存媒体必须通过 indexes 明确选择一个资源")
-        asset = await reader.read(segments[0], context.napcat)
+        asset = await reader.read(selection.segments[0], context.napcat)
         denied = context.recheck()
         if denied is not None:
             return denied
         # runner 的二进制写入以 O_EXCL 原子创建，不做先读取再覆盖的竞态检查。
+        context.effect_submitted = True
         await context.write_workspace(request.destination, asset.content)
         return ToolResult.success(
             {"path": request.destination, "size": len(asset.content), "mime_type": asset.mime_type}
@@ -918,10 +969,6 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
 async def send_message(
     context: ToolContext, request: a.SendMessage, reader: MediaReader
 ) -> ToolResult:
-    if any(item.get("status") == "unknown" for item in context.sent_messages):
-        return ToolResult.failure(
-            "当前轮次有发送结果未知，不能继续重复派发；请先核实结果", "UncertainSend"
-        )
     target = context.target
     destination: JsonObject = {"group_id" if target.kind == "group" else "user_id": target.peer_id}
     actions: list[tuple[str, JsonObject]] = []
@@ -1007,11 +1054,11 @@ async def send_message(
             else:
                 segments.append({"type": part.type, "data": {"file": encoded}})
     flush()
-    if len(context.sent_messages) + len(actions) > context.max_sends:
+    if context.send_attempts + len(actions) > context.max_sends:
         raise ValueError("本轮实际发送次数将超过当前群限制；请合并正文或减少独立文件/转发")
     receipts: list[JsonValue] = []
     for action, params in actions:
-        result = await invoke(context, action, params, effects=True)
+        result = await invoke(context, action, params, effects=True, count_send=True)
         receipt: JsonObject = {"action": action, "status": result.status, "data": result.data}
         receipts.append(receipt)
         if result.status in ("ok", "unknown"):

@@ -70,7 +70,7 @@ class MediaReader:
         )
         try:
             url = httpx.URL(source)
-            for _ in range(4):
+            for _ in range(20):
                 if (
                     url.scheme not in ("http", "https")
                     or not url.host
@@ -136,8 +136,7 @@ class MediaReader:
     async def read(self, segment: JsonObject, connection: NapCatConnection) -> MediaAsset:
         async with self.semaphore:
             try:
-                async with asyncio.timeout(self.settings.media_timeout):
-                    return await self._read(segment, connection)
+                return await self._read(segment, connection)
             except TimeoutError:
                 data = segment.get("data")
                 data = data if isinstance(data, dict) else {}
@@ -288,16 +287,9 @@ class MediaReader:
                 return index, exc
 
         # gather 的并发由 read() 内配置的 semaphore 限制，单项失败不阻断整批。
-        results = await asyncio.gather(*(one(index, segment) for index, segment in selected[:20]))
+        results = await asyncio.gather(*(one(index, segment) for index, segment in selected))
         media: list[JsonValue] = []
         errors: list[JsonValue] = []
-        if len(selected) > 20:
-            errors.append(
-                {
-                    "error_type": "MediaCountLimit",
-                    "message": "本次只读取前 20 项媒体，其余资源未读取",
-                }
-            )
         for index, result in results:
             if isinstance(result, Exception):
                 errors.append(

@@ -17,6 +17,7 @@ from .contracts import (
     ToolContext,
     ToolDefinition,
     ToolResult,
+    UnknownOperation,
     schema,
 )
 from .settings import HarnessSettings, Policy
@@ -28,14 +29,15 @@ class DiscoverInput(Model):
     offset: int = Field(
         default=0,
         ge=0,
-        le=10_000,
         description="分页起点；结果有 next_offset 时继续查询，避免遗漏后面的能力",
     )
+    limit: int = Field(default=40, ge=1, description="本页工具数量；用 next_offset 继续读取")
 
 
 class LoadInput(Model):
-    names: list[str] = Field(
-        min_length=1, max_length=12, description="需要加载完整参数定义的工具名称"
+    names: list[str] = Field(description="需要加载完整参数定义的工具名称")
+    replace: bool = Field(
+        default=False, description="为 true 时仅保留这些工具及内置能力，释放不再需要的工具定义"
     )
 
 
@@ -183,8 +185,9 @@ class ToolRegistry:
                 )
             )
         ]
-        offset = DiscoverInput.model_validate(arguments).offset
-        page = selected[offset : offset + 40]
+        request = DiscoverInput.model_validate(arguments)
+        offset = request.offset
+        page = selected[offset : offset + request.limit]
         return ToolResult.success(
             {
                 "tools": [
@@ -193,20 +196,21 @@ class ToolRegistry:
                 ],
                 "categories": [category for category in sorted({t.category for t in allowed})],
                 "total": len(selected),
-                "next_offset": offset + 40 if offset + 40 < len(selected) else None,
+                "next_offset": offset + len(page) if offset + len(page) < len(selected) else None,
             }
         )
 
     async def load(self, context: ToolContext, arguments: JsonObject) -> ToolResult:
         parsed = LoadInput.model_validate(arguments)
-        definitions: list[JsonValue] = []
         for name in parsed.names:
             tool = self.tools.get(name)
             if not tool or not self.permitted(context.scope, tool)[0]:
                 return ToolResult.failure("工具不存在或未获当前会话授权", "PermissionDenied")
-            definitions.append(self.definition(tool))
+        if parsed.replace:
+            context.loaded_tools.clear()
+            self.initial(context)
         context.loaded_tools.update(parsed.names)
-        return ToolResult.success(definitions)
+        return ToolResult.success({"loaded": [name for name in sorted(context.loaded_tools)]})
 
     def authorize(
         self,
@@ -228,7 +232,7 @@ class ToolRegistry:
         if tool.scope not in ("both", "account", target.kind):
             return ToolResult.failure("工具不适用于目标会话类型", "PermissionDenied")
         name = tool.name
-        if has_at_all(args) and not policy.allow_at_all:
+        if name == "qq__send_message" and has_at_all(args) and not policy.allow_at_all:
             return ToolResult.failure("当前群未允许 @全体", "PermissionDenied")
         for path, rule in policy.parameters.get(name, {}).items():
             for value in values_at(args, path.split(".")):
@@ -260,11 +264,12 @@ class ToolRegistry:
 
     async def execute(self, context: ToolContext, name: str, arguments: JsonObject) -> ToolResult:
         tool = self.tools.get(name)
-        if not tool or name not in context.loaded_tools:
-            return ToolResult.failure("工具尚未加载或不存在，请先发现并加载工具", "ToolNotLoaded")
+        if not tool:
+            return ToolResult.failure("工具不存在，请重新发现可用工具", "ToolNotFound")
         permitted, reason = self.permitted(context.scope, tool)
         if not permitted:
             return ToolResult.failure(reason, "PermissionDenied")
+        context.loaded_tools.add(name)
         if context.cancelled():
             return ToolResult(status="cancelled", message="本轮已停止")
         policy = self.policy(context.scope)
@@ -302,22 +307,31 @@ class ToolRegistry:
                 args = JSON_OBJECT.validate_python(
                     tool.model.model_validate(args).model_dump(mode="json")
                 )
-        except SchemaError, ValidationError, ValueError:
+        except SchemaError as error:
+            path = ".".join(str(part) for part in error.absolute_schema_path)
+            return ToolResult.failure(f"参数不符合 schema；校验位置：{path}", "InvalidArguments")
+        except ValidationError as error:
+            problems = [
+                {"field": [str(part) for part in item["loc"]], "type": item["type"]}
+                for item in error.errors(include_input=False, include_url=False)
+            ]
+            return ToolResult.failure(
+                "参数格式无效，请按字段错误修正", "InvalidArguments"
+            ).model_copy(update={"data": problems})
+        except ValueError:
             return ToolResult.failure(
                 "参数不符合工具 schema，请检查类型、必填字段和取值范围", "InvalidArguments"
             )
         denied = self.authorize(context.scope, tool, args, target)
         if denied:
             return denied
-        if name == "qq__send_message":
-            if context.send_attempts >= policy.max_sends_per_turn:
-                return ToolResult.failure("已达到本轮发送次数限制", "SendLimit")
-            context.send_attempts += 1
         if tool.effects and any(
-            previous_name == name and previous_args == args and previous_target == target
-            for previous_name, previous_args, previous_target in context.unknown_effects
+            operation.tool == name and operation.arguments == args and operation.target == target
+            for operation in context.unknown_effects
         ):
-            return ToolResult(status="unknown", message="此前相同操作结果未知，不能直接重复执行")
+            return ToolResult(
+                status="unknown", message="此前相同操作结果未知；请在控制台核实并解除该记录后重试"
+            )
 
         def recheck() -> ToolResult | None:
             if context.cancelled():
@@ -326,24 +340,25 @@ class ToolRegistry:
             denied = self.authorize(context.scope, tool, args, target)
             if denied:
                 return denied
-            if name == "qq__send_message" and len(context.sent_messages) >= context.max_sends:
+            if name == "qq__send_message" and context.send_attempts >= context.max_sends:
                 return ToolResult.failure("已达到本轮实际发送上限", "SendLimit")
             return None
 
         context.target_scope = target
         context.recheck = recheck
+        context.effect_submitted = False
         try:
             result = await tool.handler(context, args)
         except asyncio.CancelledError:
-            if tool.effects:
+            if tool.effects and context.effect_submitted:
                 # 取消等待不能证明外部动作未生效；随会话保留，下一次唤醒也不得盲目重试。
-                context.unknown_effects.append((name, args, target))
+                context.unknown_effects.append(UnknownOperation(name, args, target))
             raise
         except ValueError as exc:
             result = ToolResult.failure(str(exc), "InvalidArguments")
         except TimeoutError, ConnectionError, OSError:
             result = ToolResult(
-                status="unknown" if tool.effects else "error",
+                status="unknown" if tool.effects and context.effect_submitted else "error",
                 message="工具连接中断或超时；有副作用的操作可能已经生效",
                 error_type="TransportError",
             )
@@ -351,7 +366,7 @@ class ToolRegistry:
             context.target_scope = None
             context.recheck = lambda: None
         if result.status == "unknown" and tool.effects:
-            context.unknown_effects.append((name, args, target))
+            context.unknown_effects.append(UnknownOperation(name, args, target))
         return result
 
     def catalog(self, scope: ConversationScope) -> JsonObject:

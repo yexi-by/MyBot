@@ -223,3 +223,20 @@ export async function resetSession(key: string, busy: boolean): Promise<boolean>
     void runtimeResource.refresh();
   }
 }
+
+export async function resolveOperation(key: string, operationId: string, executed: boolean): Promise<boolean> {
+  if (!(await confirm({
+    title: executed ? "确认这项动作已经执行？" : "确认这项动作没有执行？",
+    message: "请先核对 QQ 回执或实际结果。确认后解除这项动作的未知状态，不会自动执行或重发。",
+    confirmLabel: executed ? "已核实，确实执行了" : "已核实，没有执行",
+    danger: true,
+  }))) return false;
+  try {
+    await post("/api/sessions/operations/resolve", { scope_key: key, operation_id: operationId, executed });
+    toast("已记录核实结果", "success");
+    return true;
+  } catch (error) {
+    toast(errorMessage(error), "danger");
+    return false;
+  }
+}

@@ -225,7 +225,7 @@ async def test_chat_null_optional_fields_finish_after_send_and_survive_next_wake
             assert sessions(runtime)[0]["last_outcome"] == "completed"
             assert len(sent) == 1 and len(bodies) == 2
             await wake(runtime, message("second", "a", "group"))
-            assert sessions(runtime)[0]["last_outcome"] == "completed"
+            assert sessions(runtime)[0]["last_outcome"] == "silent"
             assert len(sent) == 1 and len(bodies) == 3
             assistants = [item for item in bodies[2]["messages"] if item.get("role") == "assistant"]
             assert assistants == [
@@ -311,6 +311,7 @@ async def test_cancel_closes_all_calls_and_unknown_effect_is_not_replayed_on_nex
     dispatched, bodies = [], []
 
     async def blocked(context, _arguments):
+        context.effect_submitted = True
         dispatched.append(context.turn_id)
         entered.set()
         await asyncio.Event().wait()
@@ -377,8 +378,8 @@ async def test_cancel_closes_all_calls_and_unknown_effect_is_not_replayed_on_nex
 
 
 async def test_idle_lru_capacity_and_shutdown_release_retained_sessions(tmp_path, monkeypatch):
-    monkeypatch.setattr("qq_agent_harness.runtime.MAX_RETAINED_SESSIONS", 2)
     store = make_store(tmp_path)
+    store.settings.runtime.max_retained_sessions = 2
     bodies = []
 
     def respond(request):
@@ -539,8 +540,8 @@ async def test_loaded_tool_and_completed_results_survive_model_failure_between_w
 
 
 async def test_byte_budget_reclaims_oversized_idle_context(tmp_path, monkeypatch):
-    monkeypatch.setattr("qq_agent_harness.runtime.MAX_RETAINED_BYTES", 1)
     store = make_store(tmp_path)
+    store.settings.runtime.max_retained_bytes = 1
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda _: httpx.Response(200, json=answer("responses")),
@@ -561,8 +562,8 @@ async def test_byte_budget_reclaims_oversized_idle_context(tmp_path, monkeypatch
 
 
 async def test_capacity_reclamation_never_closes_a_running_session(tmp_path, monkeypatch):
-    monkeypatch.setattr("qq_agent_harness.runtime.MAX_RETAINED_SESSIONS", 1)
     store = make_store(tmp_path)
+    store.settings.runtime.max_retained_sessions = 1
     entered, gate = asyncio.Event(), asyncio.Event()
 
     async def respond(request):
@@ -589,6 +590,6 @@ async def test_capacity_reclamation_never_closes_a_running_session(tmp_path, mon
             gate.set()
             await asyncio.gather(*list(runtime.workers.values()))
             assert set(runtime.sessions) == {"bot:private:a"}
-            assert sessions(runtime)[0]["last_outcome"] == "completed"
+            assert sessions(runtime)[0]["last_outcome"] == "silent"
         finally:
             await runtime.close()

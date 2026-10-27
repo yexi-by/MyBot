@@ -20,6 +20,7 @@ from .context import (
     visible_data,
 )
 from .contracts import JSON_OBJECT, JsonObject, JsonValue, ToolResult
+from .diagnostics import remote_error_metadata
 from .settings import ModelEndpoint
 
 __all__ = [
@@ -146,6 +147,9 @@ class ModelSession:
         self.action_state: JsonObject = {}
         self.request_limit = 64
         self.request_count = 0
+        self.model_request_count = 0
+        self.compaction_request_count = 0
+        self._compaction_failed = False
         self.on_context_event: Callable[[JsonObject], None] | None = None
         self.context_state: JsonObject = {}
         self._background: list[JsonObject] = []
@@ -233,6 +237,9 @@ class ModelSession:
         self.items.append(self._current_input)
         self._note(self._current_input, "wake")
         self.request_count = 0
+        self.model_request_count = 0
+        self.compaction_request_count = 0
+        self._compaction_failed = False
         self.media_bytes = 0
         self.action_state = {}
         self.context_state = {**self.context_state, "request_count": 0}
@@ -253,7 +260,6 @@ class ModelSession:
                                 else "本轮已经结束，此调用尚未执行"
                             ),
                         ),
-                        1000,
                     )
         self.flush_media()
         boundary: JsonObject = {
@@ -426,16 +432,30 @@ class ModelSession:
             "compactions": self._compactions,
             "usage_source": "api_calibrated" if self._usage_anchor else "estimate",
             "request_count": self.request_count,
+            "model_request_count": self.model_request_count,
+            "compaction_request_count": self.compaction_request_count,
         }
         if self.on_context_event is not None:
             self.on_context_event({"phase": phase, **self.context_state, **extra})
 
-    async def _request(self, body: JsonObject) -> JsonObject:
-        if self.request_count >= self.request_limit:
-            raise ModelRequestLimit("本轮模型请求次数已达到上限")
+    async def _request(self, body: JsonObject, *, summary: bool = False) -> JsonObject:
+        count = self.compaction_request_count if summary else self.model_request_count
+        if count >= self.request_limit:
+            raise ModelRequestLimit(
+                "本轮压缩请求次数已达到上限" if summary else "本轮模型请求次数已达到上限"
+            )
+        if summary:
+            self.compaction_request_count += 1
+        else:
+            self.model_request_count += 1
         self.request_count += 1
         self.context_state["request_count"] = self.request_count
+        self.context_state["model_request_count"] = self.model_request_count
+        self.context_state["compaction_request_count"] = self.compaction_request_count
         return await self._post(self.client, self.settings, body)
+
+    async def _summary_request(self, body: JsonObject) -> JsonObject:
+        return await self._request(body, summary=True)
 
     @staticmethod
     async def _post(
@@ -450,22 +470,29 @@ class ModelSession:
                 timeout=config.timeout,
             )
             if response.is_error:
-                if response.status_code in (400, 422) and len(response.content) <= 65_536:
+                error: JsonObject = {}
+                if len(response.content) <= 65_536:
                     try:
                         error = JSON_OBJECT.validate_json(response.content)
                     except ValueError:
                         error = {}
-                    if is_context_overflow(error):
+                    if response.status_code in (400, 422) and is_context_overflow(error):
                         raise ContextWindowExceeded("模型接口报告输入上下文超过窗口")
-                raise ProviderError(f"模型接口返回 HTTP {response.status_code}")
+                details = remote_error_metadata(error)
+                raise ProviderError(
+                    f"模型接口返回 HTTP {response.status_code}"
+                    + (f"；{details}" if details else "")
+                )
             data = JSON_OBJECT.validate_json(response.content)
             if data.get("status") == "failed" and is_context_overflow(data):
                 raise ContextWindowExceeded("模型接口报告输入上下文超过窗口")
             if data.get("status") not in (None, "completed") or data.get("error"):
                 raise ProviderError("模型接口未返回完整成功结果")
             return data
-        except httpx.HTTPError, ValueError:
-            raise ProviderError("模型接口连接失败或返回无效数据") from None
+        except httpx.HTTPError as transport_error:
+            raise ProviderError(f"模型接口连接失败（{type(transport_error).__name__}）") from None
+        except ValueError:
+            raise ProviderError("模型接口响应不是有效 JSON 对象") from None
 
     async def step(self, tools: list[JsonObject]) -> ModelReply:
         if any(not group.complete for group in self._groups):
@@ -570,8 +597,17 @@ class ModelSession:
         self._tools_tokens = estimate_tokens(body.get("tools")) - estimate_tokens([])
         tokens = self._pressure(body)
         self._event("checking", tokens)
-        if tokens >= self.settings.max_context_tokens * 80 // 100:
-            await self._compact(tools)
+        hard_limit = self.settings.max_context_tokens
+        if tokens >= hard_limit or (
+            not self._compaction_failed and tokens >= hard_limit * 80 // 100
+        ):
+            try:
+                await self._compact(tools)
+            except (CompactionError, ContextLimitError, ModelRequestLimit) as error:
+                if tokens >= hard_limit:
+                    raise
+                self._compaction_failed = True
+                self._event("compaction_skipped", tokens, reason=str(error))
 
     @classmethod
     def _summary_body(cls, config: ModelEndpoint, text: str) -> JsonObject:
@@ -668,7 +704,6 @@ class ModelSession:
             # 本地估算按压缩前的校准比例换算，与触发点、目标和尾部保留预算同一口径。
             return tokens * before // current
 
-        trigger = self.settings.max_context_tokens * 80 // 100
         target = self.settings.max_context_tokens * self.settings.compaction_target_percent // 100
         # 轮内压缩沿用会话模型，摘要请求与此前一样不带思考等级。
         summary_config = self.settings.model_copy(update={"reasoning_effort": None})
@@ -679,7 +714,7 @@ class ModelSession:
             all_eligible.update(id(item) for item in group.items)
         fixed = [item for item in self.items if id(item) not in all_eligible]
         fixed_tokens = scaled(estimate_tokens(self._normal_body(tools, fixed)))
-        if fixed_tokens >= trigger:
+        if fixed_tokens >= self.settings.max_context_tokens:
             raise ContextLimitError("当前消息、系统指令、工具或动作状态超过上下文预算")
         # 最近完整调用组按约 16% 窗口保留；过大的单组可以整体进入摘要。
         retained: set[int] = set()
@@ -709,7 +744,7 @@ class ModelSession:
         summary_item: JsonObject = {}
         for attempt in range(2):
             summary = await self._summarize(
-                source if attempt == 0 else summary, summary_config, self._request
+                source if attempt == 0 else summary, summary_config, self._summary_request
             )
             summary_item = {"role": "user", "content": SUMMARY_PREFIX + summary}
             candidate = []
@@ -722,7 +757,11 @@ class ModelSession:
                 else:
                     candidate.append(item)
             after = scaled(estimate_tokens(self._normal_body(tools, candidate)))
-            if after < trigger and after < before and (after <= target or attempt == 1):
+            if (
+                after < self.settings.max_context_tokens
+                and after < before
+                and (after <= target or attempt == 1)
+            ):
                 break
         else:
             raise CompactionError("摘要未能缩小上下文至安全预算，原上下文已保留")
@@ -799,7 +838,7 @@ class ModelSession:
         self._event("compacted", after, before_tokens=before, after_tokens=after, idle=True)
         return before, after
 
-    def result(self, call: ToolCall, result: ToolResult, max_chars: int) -> None:
+    def result(self, call: ToolCall, result: ToolResult) -> None:
         group = next((group for group in reversed(self._groups) if call.id in group.expected), None)
         if group is None or call.id in group.received:
             raise ProviderError("工具结果没有对应的待完成调用")
@@ -821,16 +860,6 @@ class ModelSession:
                 elif isinstance(encoded, str):
                     entry["notice"] = "普通文件仅保留元信息；需要处理文件时使用已授权的沙箱导入能力"
         serialized = json.dumps(data, ensure_ascii=False)
-        if len(serialized) > max_chars:
-            serialized = json.dumps(
-                {
-                    "status": result.status,
-                    "message": "工具结果超过上下文限制，以下为截断预览；请缩小查询范围",
-                    "truncated": True,
-                    "preview": serialized[:max_chars],
-                },
-                ensure_ascii=False,
-            )
         if self.settings.protocol == "chat_completions":
             self._append(
                 {"role": "tool", "tool_call_id": call.id, "content": serialized},

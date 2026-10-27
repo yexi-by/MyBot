@@ -364,6 +364,12 @@ export function OverviewPage() {
         description={data ? "Harness 已运行 " + formatDuration(Date.now() / 1000 - data.started_at) : "运行状态与最近活动"}
       />
       <StatusTiles />
+      {!!data && (data.capacity.rejected_messages > 0 || data.napcat.dropped_events > 0) && (
+        <p className="warning-text small" role="status">
+          本次启动以来，接入队列已丢弃 {data.napcat.dropped_events} 条事件，运行队列已拒收 {data.capacity.rejected_messages} 条唤醒。
+          可在设置中调整队列容量，并查看最近活动。
+        </p>
+      )}
       {runtime.error && !data && (
         <p className="danger-text small" role="alert">
           无法读取运行状态：{runtime.error}

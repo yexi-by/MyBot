@@ -34,6 +34,10 @@ services:
     container_name: mybot-egress
     image: ${HARNESS_IMAGE:?use an explicit application image tag}
     command: ["python", "-m", "qq_agent_harness.sandbox.egress"]
+    environment:
+      HARNESS_EGRESS_PORTS: ${HARNESS_EGRESS_PORTS:-80,443}
+      HARNESS_EGRESS_IDLE_TIMEOUT: ${HARNESS_EGRESS_IDLE_TIMEOUT:-180}
+      HARNESS_EGRESS_CONNECTIONS: ${HARNESS_EGRESS_CONNECTIONS:-32}
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]

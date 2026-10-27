@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Box,
   ChevronRight,
@@ -68,25 +68,31 @@ function Files({ busy }: { busy: boolean }) {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(false);
-  const load = useCallback(async () => {
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [total, setTotal] = useState(0);
+  const sequence = useRef(0);
+  const load = useCallback(async (offset = 0) => {
+    const request = ++sequence.current;
     setLoading(true);
     try {
-      const data = await get<{ path: string; files: SandboxFile[] }>(
-        "/api/sandbox/files?path=" + encodeURIComponent(path),
+      const data = await get<{ path: string; files: SandboxFile[]; total: number; next_offset: number | null }>(
+        "/api/sandbox/files?path=" + encodeURIComponent(path) + "&offset=" + offset,
       );
-      setFiles(
-        [...data.files].sort((a, b) => Number(b.is_dir) - Number(a.is_dir) || a.name.localeCompare(b.name)),
-      );
+      if (request !== sequence.current) return;
+      setFiles((current) => offset ? [...(current ?? []), ...data.files] : data.files);
+      setNextOffset(data.next_offset);
+      setTotal(data.total);
       setError("");
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (request === sequence.current) setError(errorMessage(reason));
     } finally {
-      setLoading(false);
+      if (request === sequence.current) setLoading(false);
     }
   }, [path]);
   useEffect(() => {
     setSelected(new Set());
     void load();
+    return () => { sequence.current++; };
   }, [load]);
   const parts = path ? path.split("/") : [];
   const all = files ?? [];
@@ -199,6 +205,10 @@ function Files({ busy }: { busy: boolean }) {
           </table>
         </div>
       )}
+      {files && <div className="card-body row wrap">
+        <span className="muted small">已显示 {files.length} / {total} 项</span>
+        {nextOffset !== null && <Button size="sm" loading={loading} onClick={() => void load(nextOffset)}>加载下一页</Button>}
+      </div>}
     </section>
   );
 }
@@ -276,13 +286,13 @@ function SandboxOverview() {
                 停止执行
               </Button>
             )}
-            <Button icon={Eraser} disabled={!data.available || data.busy} onClick={() => void cleanup("cache")}>
+            <Button icon={Eraser} disabled={data.busy} onClick={() => void cleanup("cache")}>
               清理依赖缓存
             </Button>
             <Button
               variant="danger-ghost"
               icon={Trash2}
-              disabled={!data.available || data.busy}
+              disabled={data.busy}
               onClick={() => void cleanup("all")}
             >
               清空工作区
@@ -298,9 +308,10 @@ function SandboxOverview() {
             </Button>
           </div>
           {data.busy && <p className="muted small">执行期间不能清理或删除文件。</p>}
+          {!!data.queued && <p className="muted small">另有 {data.queued} 项操作正在等待工作区。</p>}
         </div>
       </section>
-      {data.available && <Files busy={data.busy} />}
+      <Files busy={data.busy} />
     </div>
   );
 }

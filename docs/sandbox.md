@@ -38,21 +38,23 @@ docker compose up -d runner
 
 runner 在启动时读取资源配置和连接令牌，随后保持这份生效快照。修改沙箱参数后，需要执行 `docker compose up -d --force-recreate runner`；WebUI 中的应用重启只重启 Harness，不会重建 runner。`GET /status` 在可用和不可用状态都返回 `applied_settings`，供应用对比实际生效资源；该字段不包含 `runner_token` 或 `runner_url`。连接地址或令牌变更后，还需重启 Harness 使连接快照一致。
 
-沙箱只连接 Docker internal 网络。host 防火墙只放行其到专用出口代理的 TCP 3128，禁止连接宿主或其他目标，并拒绝 IPv6。出口代理仅接受公网 IPv4 的 HTTP 80/HTTPS 443，解析后连接核验过的 IP，阻止私网地址、IPv4 别名、DNS 重绑定与重定向至私网。代理不持有应用凭据。
+沙箱只连接 Docker internal 网络。host 防火墙只放行其到专用出口代理的 TCP 3128，禁止连接宿主或其他目标，并拒绝 IPv6。出口代理接受核验过的公网 IPv4/IPv6 地址，按 DNS 候选逐个尝试连接，阻止私网地址、IPv4 别名、DNS 重绑定与重定向至私网。默认开放 80/443，可通过 egress 的 `HARNESS_EGRESS_PORTS` 显式设置允许的 HTTP/HTTPS 端口；`HARNESS_EGRESS_IDLE_TIMEOUT` 默认 180 秒，仅限制无流量的空闲连接，`HARNESS_EGRESS_CONNECTIONS` 默认 32。实际 IPv6 出口还依赖 Docker 和宿主网络路由。代理不持有应用凭据。
 
 需要在宿主重启或防火墙规则重建后重新应用 `prepare-network.sh`。它只维护来源为沙箱网桥的专用规则，活动执行存在时拒绝更改；runner 在执行前核验 INPUT/FORWARD/DOCKER-USER 入口处的首条规则、完整专用链顺序、IPv6 拒绝规则以及实际 Docker internal 网络配置，避免规则虽然存在却被更早的 ACCEPT/RETURN 绕过。bridge netfilter 必须已经启用。核验失败时关闭执行能力，不得将代理放在普通沙箱可访问的应用控制网络里。
 
 ## 生命周期与清理
 
-每个命令创建无特权、只读根文件系统的容器；同一时间只执行一个命令。默认 2 CPU、4 GiB 内存、256 进程、120 秒超时和 1 MiB 回传输出。结束、超时、取消后强制回收整个容器，清除子进程及短暂容器日志；共享文件不删除。runner 启动时仅回收带专用执行标签的遗留容器。
+每个命令创建无特权、只读根文件系统的容器；同一时间只执行一个命令，其他命令在内存中等待，按 owner 可取消尚未开始的执行；文件读取与写入同样等待工作区释放。`max_pending_operations` 默认允许 32 项等待操作，超过容量返回 429 并说明本次未执行。默认 2 CPU、4 GiB 内存、256 进程、120 秒超时和 1 MiB 输出预览。超出预览时完整输出保存到工作区 `.outputs/`，回执带 `output_path` 供分段读取；日志收尾受本次执行剩余时间约束并可取消，未完整读取会标明 `output_complete=false`，不再固定 5 秒丢弃尾部。结束、超时、取消后强制回收整个容器，清除子进程及短暂容器日志；共享文件不删除。runner 启动时仅回收带专用执行标签的遗留容器。
 
 普通目录写权限不足以防止 Btrfs 子卷绕过父子卷的配额：Linux v6.12 的子卷创建路径只检查目录写入/执行权限，拥有源子卷也可创建快照。因此执行镜像包含只读 bootstrap，runner 固定以 `/usr/local/bin/python -I -S /usr/local/libexec/qah-sandbox-guard.py` 启动；共享 HOME 的用户 site、`.pth` 和 `PYTHONPATH` 不会在防护安装前运行。[内核创建路径](https://github.com/torvalds/linux/blob/v6.12/fs/btrfs/ioctl.c)
 
 bootstrap 设置 `no_new_privs` 后叠加 seccomp BPF，保留 Docker 默认过滤器。它按 ioctl 命令低 16 位拒绝 `0x9401/0x940e/0x9417/0x9418`（子卷/快照创建）和 `0x9428–0x942b`（配额控制），返回 `EPERM`；正常 `FICLONE` 文件复制不受这层过滤影响。过滤随 fork/exec 继承且不能撤销。只有原生小端 64 位 Linux x86_64/aarch64 支持启动；x32、32 位 compat 或其他 ABI 被拒绝，无法安装过滤器时退出 126，绝不继续执行命令。跨架构模拟不属于支持的部署方式。[Btrfs ioctl 定义](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/btrfs.h)、[叠加 seccomp 语义](https://docs.kernel.org/userspace-api/seccomp_filter.html)
 
-WebUI 可以查看文件与占用，清理缓存、选定文件或全部工作区。正在执行时清理返回 409；停止后才能清理。清理不跟随符号链接，不触及配置和知识库。工作区满时返回错误，不自动删除其他成果。
+WebUI 可以分页查看文件与占用，清理缓存、选定文件或全部工作区；配额或网络检查失败时仍保留文件与清理入口。正在执行时清理返回 409；停止后才能清理。清理不跟随符号链接，不触及配置和知识库。工作区满时返回错误，不自动删除其他成果。
 
-API：`GET /status`、`GET /files?path=`、`GET /file?path=`、`PUT /file`、`POST /exec`、`POST /cancel`、`POST /cleanup`。只有可信应用调用 runner API，WebUI 通过应用代理访问。代码工具本身没有清空工作区的 API。
+API：`GET /status`、`GET /files?path=&offset=&limit=`、`GET /file?path=`、`GET /file/text?path=&offset=&limit=`、`PUT /file`（支持 append）、`POST /exec`、`POST /cancel`、`POST /cleanup`。只有可信应用调用 runner API，WebUI 通过应用代理访问。代码工具本身没有清空工作区的 API。
+
+文本不再因超过 1 MiB 整份拒读；`/file/text` 返回 `total_bytes` 和 `next_offset`，UTF-8 字符不会被切断。`sandbox.transfer_max_bytes` 统一二进制传输和文本写入的单次预算，默认 50 MB，大文本可以分段追加。追加也按修改已有文件授权，不能绕过群策略对 `overwrite` 的限制。
 
 ## 验证
 

@@ -39,7 +39,7 @@ class RunnerClient:
             json=body,
             params=params,
             headers={"Authorization": f"Bearer {settings.runner_token}"},
-            timeout=settings.command_timeout + 30,
+            timeout=httpx.Timeout(connect=30, read=None, write=30, pool=30),
         )
         response.raise_for_status()
         return response
@@ -56,9 +56,26 @@ class RunnerClient:
             }
         return JSON_OBJECT.validate_python((await self.request("GET", "/status")).json())
 
-    async def files(self, path: str = "") -> JsonObject:
+    async def files(self, path: str = "", offset: int = 0, limit: int = 100) -> JsonObject:
         return JSON_OBJECT.validate_python(
-            (await self.request("GET", "/files", params={"path": path})).json()
+            (
+                await self.request(
+                    "GET",
+                    "/files",
+                    params={"path": path, "offset": str(offset), "limit": str(limit)},
+                )
+            ).json()
+        )
+
+    async def read_text(self, path: str, offset: int = 0, limit: int = 65_536) -> JsonObject:
+        return JSON_OBJECT.validate_python(
+            (
+                await self.request(
+                    "GET",
+                    "/file/text",
+                    params={"path": path, "offset": str(offset), "limit": str(limit)},
+                )
+            ).json()
         )
 
     async def cleanup(
@@ -88,8 +105,10 @@ class RunnerClient:
         settings = self.get_settings()
         if not settings.enabled or not settings.runner_token:
             raise ValueError("共享沙箱未启用或缺少连接凭据")
-        if len(data) > 50_000_000:
-            raise ValueError("传入文件超过单次 50 MB 限制")
+        if len(data) > settings.transfer_max_bytes:
+            raise ValueError(
+                f"传入文件超过已配置的单次传输上限（{settings.transfer_max_bytes} 字节）"
+            )
         response = await self.http.post(
             settings.runner_url.rstrip("/") + "/file/content",
             params={"path": path},
@@ -102,11 +121,20 @@ class RunnerClient:
         )
         response.raise_for_status()
 
-    async def write_file(self, path: str, content: str, overwrite: bool = False) -> JsonObject:
+    async def write_file(
+        self, path: str, content: str, overwrite: bool = False, append: bool = False
+    ) -> JsonObject:
         return JSON_OBJECT.validate_python(
             (
                 await self.request(
-                    "PUT", "/file", body={"path": path, "content": content, "overwrite": overwrite}
+                    "PUT",
+                    "/file",
+                    body={
+                        "path": path,
+                        "content": content,
+                        "overwrite": overwrite,
+                        "append": append,
+                    },
                 )
             ).json()
         )

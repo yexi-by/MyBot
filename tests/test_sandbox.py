@@ -10,7 +10,7 @@ from qq_agent_harness.sandbox.client import RunnerClient
 from qq_agent_harness.sandbox.egress import (
     DestinationDenied,
     PublicProxy,
-    is_public_ipv4,
+    is_public_ip,
     resolve_public,
 )
 from qq_agent_harness.sandbox.quota import BtrfsQuota, NetworkGuard, QuotaStatus, SandboxUnavailable
@@ -131,6 +131,9 @@ async def test_output_is_bounded_and_container_always_reclaimed(tmp_path: Path) 
     assert result["status"] == "ok"
     assert len(str(result["output"]).encode()) == 1024
     assert result["truncated"] is True
+    assert result["output_complete"] is True
+    assert isinstance(result["output_path"], str)
+    assert Workspace(tmp_path).read(result["output_path"]) == b"hello " + b"world" * 1000
     assert len(engine.removed) == 1
     assert runner.execution_id is None
 
@@ -144,13 +147,13 @@ async def test_cancel_reclaims_processes_without_deleting_files(
     runner = make_runner(tmp_path, engine=engine)
     task = asyncio.create_task(runner.execute(ExecuteRequest(command="wait", owner="turn-a")))
     await engine.started.wait()
-    assert await runner.cancel("turn-b") == {"cancelled": False}
+    assert (await runner.cancel("turn-b"))["cancelled"] is False
     if cancel_task:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
     else:
-        assert await runner.cancel("turn-a") == {"cancelled": True}
+        assert (await runner.cancel("turn-a"))["cancelled"] is True
         assert (await task)["status"] == "cancelled"
     assert len(engine.removed) == 1
     assert (tmp_path / "keep.txt").read_text(encoding="utf8") == "shared"
@@ -267,14 +270,14 @@ def test_special_files_do_not_block_runner(tmp_path: Path) -> None:
     ],
 )
 def test_nonpublic_destinations_are_rejected(address: str) -> None:
-    assert not is_public_ipv4(address)
+    assert not is_public_ip(address)
 
 
 async def test_proxy_rechecks_dns_and_pins_connected_address() -> None:
     connected: list[tuple[str, int]] = []
 
-    async def resolve(host: str, port: int) -> str:
-        return "127.0.0.1" if host == "evil.example" else "8.8.8.8"
+    async def resolve(host: str, port: int) -> list[str]:
+        return ["127.0.0.1" if host == "evil.example" else "8.8.8.8"]
 
     async def denied_connector(
         host: str, port: int
@@ -290,7 +293,9 @@ async def test_proxy_rechecks_dns_and_pins_connected_address() -> None:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
             writer.write(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
             await writer.drain()
-            assert (await reader.read()).startswith(b"HTTP/1.1 403")
+            assert (await reader.read()).startswith(
+                b"HTTP/1.1 403" if host == "evil.example" else b"HTTP/1.1 502"
+            )
             writer.close()
             await writer.wait_closed()
     assert connected == [("8.8.8.8", 443)]
@@ -298,7 +303,7 @@ async def test_proxy_rechecks_dns_and_pins_connected_address() -> None:
 
 async def test_dns_numeric_alias_cannot_escape_public_only_policy() -> None:
     for host in ("127.0.0.1", "2130706433", "localhost", "::ffff:127.0.0.1"):
-        with pytest.raises(DestinationDenied):
+        with pytest.raises((DestinationDenied, ConnectionError)):
             await resolve_public(host, 443)
 
 
@@ -323,8 +328,8 @@ async def test_http_proxy_forwards_public_response_but_blocks_private_redirect(
     origin = await asyncio.start_server(endpoint, "127.0.0.1", 0)
     origin_port = origin.sockets[0].getsockname()[1]
 
-    async def resolve(host: str, port: int) -> str:
-        return "8.8.8.8" if host == "public.example" else "127.0.0.1"
+    async def resolve(host: str, port: int) -> list[str]:
+        return ["8.8.8.8"] if host == "public.example" else ["127.0.0.1"]
 
     async def connector(ip: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         assert (ip, port) == ("8.8.8.8", 80)

@@ -242,7 +242,7 @@ async def test_model_switch_shows_previous_context_expanded_without_reasoning():
             client=client,
         )
         reply = await session.step([])
-        session.result(reply.calls[0], ToolResult.success({"message_id": "sent-1"}), 1000)
+        session.result(reply.calls[0], ToolResult.success({"message_id": "sent-1"}))
         session.end_turn("completed")
         await session.configure(ModelEndpoint(protocol="responses", model="test"), "SYSTEM")
     entries = project(session)
@@ -262,6 +262,7 @@ async def test_reset_forgets_context_but_keeps_duplicate_guards(tmp_path):
     dispatched, bodies = [], []
 
     async def send(context, _arguments):
+        context.effect_submitted = True
         dispatched.append(context.turn_id)
         entered.set()
         await asyncio.Event().wait()

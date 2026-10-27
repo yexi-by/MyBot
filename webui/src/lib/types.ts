@@ -67,6 +67,7 @@ export interface SandboxStatus {
   restart_required: boolean;
   configuration_notice?: string;
   execution_id?: string | null;
+  queued?: number;
 }
 export interface SandboxFile {
   path: string;
@@ -80,6 +81,8 @@ export interface TurnContext {
   trigger_tokens?: number;
   compactions?: number;
   request_count?: number;
+  model_request_count?: number;
+  compaction_request_count?: number;
   usage_source?: string;
 }
 export interface Turn {
@@ -90,7 +93,7 @@ export interface Turn {
   started_at: number;
   rounds?: number;
   context?: TurnContext;
-  /** 闲时压缩：会话闲置后在后台压缩上下文，期间到达的唤醒排队等待。 */
+  /** 闲时压缩：新唤醒到达时中断压缩，保留原文并立即接入。 */
   idle?: boolean;
 }
 export type SessionState = "idle" | "queued" | "running" | "compacting";
@@ -115,6 +118,7 @@ export interface SessionCapacity {
   max_sessions: number;
   bytes: number;
   max_bytes: number;
+  rejected_messages: number;
 }
 export interface QQMessage {
   message_id: string;
@@ -165,6 +169,7 @@ export type SessionEntry = EntryBase &
     | { kind: "other"; label: string; text: string }
   );
 export interface UnknownOperation {
+  id: string;
   tool: string;
   arguments: Json;
   target: { bot_id: string; kind: string; peer_id: string };
@@ -191,6 +196,7 @@ export interface McpStatus {
   message?: string;
   error_type?: string;
   tools?: number;
+  excluded_tools?: { name: string; reason: string }[];
 }
 export interface RuntimeEnvelope {
   started_at: number;
@@ -202,6 +208,7 @@ export interface RuntimeEnvelope {
     connected: string[];
     expected_bot_id: string;
     baseline_version: string;
+    dropped_events: number;
   };
   mcp: Record<string, McpStatus>;
 }

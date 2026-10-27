@@ -11,11 +11,14 @@ from datetime import timedelta
 import anyio
 import httpx
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import McpError
 from mcp.shared.message import SessionMessage
-from mcp.types import CallToolResult
+from mcp.types import CONNECTION_CLOSED, CallToolResult
 
 from .contracts import JSON_OBJECT, JsonObject, JsonValue, ToolContext, ToolDefinition, ToolResult
 from .registry import ToolRegistry
@@ -107,13 +110,20 @@ class MCPManager:
                     if disconnected.is_set():
                         raise ConnectionError("MCP connection closed")
                     connected_at = time.monotonic()
-                    self.statuses[name] = {"state": "connected"}
+                    self.statuses[name] = {**self.statuses[name], "state": "connected"}
                     # EOF 立即唤醒；目录的定期刷新不承担断线探测职责。
                     while True:
                         try:
                             await asyncio.wait_for(disconnected.wait(), REFRESH_INTERVAL)
                         except TimeoutError:
-                            await self._refresh(name, config, session, disconnected, disconnect)
+                            try:
+                                await self._refresh(name, config, session, disconnected, disconnect)
+                            except McpError, ValueError:
+                                self.statuses[name] = {
+                                    **self.statuses[name],
+                                    "state": "connected",
+                                    "message": "工具目录刷新失败，保留上次可用目录；稍后重新刷新",
+                                }
                             continue
                         raise ConnectionError("MCP connection closed")
             except asyncio.CancelledError:
@@ -178,19 +188,31 @@ class MCPManager:
         cursor: str | None = None
         definitions: list[ToolDefinition] = []
         seen_cursors: set[str] = set()
+        excluded: list[JsonValue] = []
         while True:
             page = await session.list_tools(cursor)
             for item in page.tools:
                 if not re.fullmatch(r"[A-Za-z0-9_-]+", item.name):
-                    raise ValueError("MCP 工具名称无效")
-                parameters = JSON_OBJECT.validate_python(item.inputSchema)
+                    excluded.append({"name": item.name, "reason": "工具名称不符合调用协议"})
+                    continue
+                try:
+                    parameters = JSON_OBJECT.validate_python(item.inputSchema)
+                    Draft202012Validator.check_schema(parameters)
+                except ValueError, SchemaError:
+                    excluded.append({"name": item.name, "reason": "工具参数 schema 无效"})
+                    continue
                 # 禁止 JSON schema 的远程引用触发额外网络读取。
                 if any(
                     isinstance(ref, str) and not ref.startswith("#")
                     for ref in find_refs(parameters)
                 ):
-                    raise ValueError("不支持 MCP schema 外部引用")
-                effects = item.name not in config.read_only_tools
+                    excluded.append({"name": item.name, "reason": "工具 schema 含外部引用"})
+                    continue
+                # 注解只描述执行特征，不授予调用权限；本地声明可覆盖服务提供的特征。
+                effects = item.name in config.effect_tools or not (
+                    item.name in config.read_only_tools
+                    or (item.annotations is not None and item.annotations.readOnlyHint is True)
+                )
                 # 远端标题只用于控制台展示，不参与授权判断。
                 title = item.title or (item.annotations.title if item.annotations else None)
                 definitions.append(
@@ -207,8 +229,6 @@ class MCPManager:
                         title=title or item.name,
                     )
                 )
-                if len(definitions) > 1000:
-                    raise ValueError("MCP 工具目录超过上限")
             cursor = page.nextCursor
             if cursor is None:
                 break
@@ -221,8 +241,12 @@ class MCPManager:
         owned: dict[str, ToolDefinition] = {}
         self.directories[name] = owned
         for definition in definitions:
+            if definition.name in owned:
+                excluded.append({"name": definition.name, "reason": "工具名称重复"})
+                continue
             self.registry.add(definition)
             owned[definition.name] = definition
+        self.statuses[name] = {**self.statuses.get(name, {}), "excluded_tools": excluded}
 
     @staticmethod
     def _handler(
@@ -239,6 +263,9 @@ class MCPManager:
             operation: asyncio.Task[CallToolResult] | None = None
             connection_lost: asyncio.Task[bool] | None = None
             try:
+                if denied := _context.recheck():
+                    return denied
+                _context.effect_submitted = effects
                 operation = asyncio.create_task(
                     session.call_tool(
                         name, arguments, read_timeout_seconds=timedelta(seconds=timeout)
@@ -278,12 +305,43 @@ class MCPManager:
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except McpError as error:
+                # -32000 也可能是服务端普通错误；是否断线由接收通道确认。
+                if error.error.code in (CONNECTION_CLOSED, 408, -32001):
+                    return ToolResult(
+                        status="unknown" if effects else "error",
+                        message=f"MCP 未取得回执（JSON-RPC {error.error.code}）",
+                        error_type="MCPTransportError",
+                    )
+                return ToolResult.failure(
+                    f"MCP 调用被拒绝（JSON-RPC {error.error.code}）；请检查工具参数",
+                    "MCPRemoteError",
+                )
+            except TimeoutError, httpx.TimeoutException:
+                return ToolResult(
+                    status="unknown" if effects else "error",
+                    message="MCP 单次调用超时；连接与其他工具保留",
+                    error_type="MCPTimeout",
+                )
+            except (
+                ConnectionError,
+                OSError,
+                httpx.TransportError,
+                anyio.EndOfStream,
+                anyio.BrokenResourceError,
+                anyio.ClosedResourceError,
+            ):
                 disconnect()
                 return ToolResult(
                     status="unknown" if effects else "error",
-                    message="MCP 调用失败或超时；副作用状态无法确认",
+                    message="MCP 连接已中断；已提交动作的状态以实际回执为准",
                     error_type="MCPError",
+                )
+            except Exception as error:
+                return ToolResult(
+                    status="unknown" if effects else "error",
+                    message=f"MCP 单次调用失败（{type(error).__name__}）；其他工具仍可调用",
+                    error_type=type(error).__name__,
                 )
             finally:
                 pending = [task for task in (operation, connection_lost) if task is not None]
