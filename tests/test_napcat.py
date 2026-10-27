@@ -74,8 +74,6 @@ def registry(
     for tool in tools:
         result.add(tool)
     context = ToolContext(scope, "test-turn", bot)
-    result.initial(context)
-    context.loaded_tools.update(tool.name for tool in tools)
     return result, context, settings
 
 

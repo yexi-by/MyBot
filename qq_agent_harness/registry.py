@@ -1,60 +1,25 @@
-"""按群授权、按需披露与工具执行共用同一目录。"""
+"""按群授权的完整工具定义与执行共用同一目录。"""
 
 import asyncio
 import copy
-import re
 from collections.abc import Callable, Mapping
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as SchemaError
-from pydantic import Field, ValidationError
+from pydantic import ValidationError
 
 from .contracts import (
     JSON_OBJECT,
     ConversationScope,
     JsonObject,
     JsonValue,
-    Model,
     ToolContext,
     ToolDefinition,
     ToolResult,
     UnknownOperation,
-    schema,
+    compact_schema,
 )
 from .settings import HarnessSettings, Policy
-
-INITIAL_TOOLS = frozenset(
-    {
-        "harness__discover_tools",
-        "harness__load_tools",
-        "qq__send_message",
-        "qq__read_media",
-        "qq__get_history",
-        "qq__get_message",
-    }
-)
-DISCOVERY_LOAD_LIMIT = 8
-
-
-class DiscoverInput(Model):
-    query: str = Field(default="", description="需要的能力或关键词；空字符串列出当前可用工具")
-    category: str = Field(default="", description="可选能力分类")
-    offset: int = Field(
-        default=0,
-        ge=0,
-        description="分页起点；结果有 next_offset 时继续查询，避免遗漏后面的能力",
-    )
-    limit: int = Field(default=40, ge=1, description="本页工具数量；用 next_offset 继续读取")
-    auto_load: bool = Field(
-        default=True, description="自动加载本页最相关的前 8 个工具，下轮可直接调用"
-    )
-
-
-class LoadInput(Model):
-    names: list[str] = Field(description="需要加载完整参数定义的工具名称")
-    replace: bool = Field(
-        default=False, description="为 true 时仅保留这些工具及内置能力，释放不再需要的工具定义"
-    )
 
 
 def values_at(value: JsonValue, parts: list[str]) -> list[JsonValue]:
@@ -81,63 +46,12 @@ def has_at_all(value: JsonValue) -> bool:
     return isinstance(value, list) and any(has_at_all(item) for item in value)
 
 
-def search_tokens(query: str) -> set[str]:
-    """保留标识符和中文短词，并用双字片段召回未分词的中文请求。"""
-    tokens: set[str] = set()
-    for part in re.findall(r"[a-z0-9_]+(?:\.[a-z0-9_]+)*|[\u3400-\u9fff]+", query):
-        tokens.add(part)
-        if re.fullmatch(r"[\u3400-\u9fff]{3,}", part):
-            tokens.update(part[index : index + 2] for index in range(len(part) - 1))
-    return tokens - {"查看", "获取", "查询", "当前", "一下", "工具", "帮我", "需要"}
-
-
-def relevance(tool: ToolDefinition, query: str, tokens: set[str]) -> int:
-    name = tool.name.casefold()
-    fields = (
-        (name, 20),
-        (" ".join(tool.search_terms).casefold(), 16),
-        (tool.title.casefold(), 12),
-        (tool.category.casefold(), 6),
-        (tool.description.casefold(), 1),
-    )
-    score = sum(
-        max((weight for text, weight in fields if token in text), default=0) for token in tokens
-    )
-    if query == name:
-        score += 10000
-    elif name.startswith(query):
-        score += 5000
-    return score
-
-
 class ToolRegistry:
     def __init__(self, settings: Callable[[], HarnessSettings]) -> None:
         self.settings = settings
         self.tools: dict[str, ToolDefinition] = {}
         # 分类 ID 到控制台名称；插入顺序即展示顺序。
         self.category_labels: dict[str, str] = {}
-        self.add(
-            ToolDefinition(
-                "harness__discover_tools",
-                "当你需要查找可辅助当前对话的能力时，主动搜索工具；也可在缺少资料、需要计算或处理 QQ 操作时发现相关能力。",
-                "harness",
-                schema(DiscoverInput),
-                self.discover,
-                model=DiscoverInput,
-                title="发现工具",
-            )
-        )
-        self.add(
-            ToolDefinition(
-                "harness__load_tools",
-                "当你已选定需要使用的工具时，加载其完整参数定义；随后以实际工具名称调用，不在普通正文里描述为已经执行。",
-                "harness",
-                schema(LoadInput),
-                self.load,
-                model=LoadInput,
-                title="加载工具",
-            )
-        )
 
     def add(self, tool: ToolDefinition) -> None:
         if tool.name in self.tools:
@@ -167,8 +81,6 @@ class ToolRegistry:
         conversation = self.settings().conversation(scope)
         if not conversation.enabled:
             return False, "当前会话未启用"
-        if tool.category == "harness":
-            return True, ""
         if tool.name.startswith("sandbox__") and not self.settings().sandbox.enabled:
             return False, "此部署尚未启用共享沙箱"
         if tool.scope not in ("both", "account", scope.kind):
@@ -181,23 +93,15 @@ class ToolRegistry:
                 return False, f"还需开放 {dependency}"
         return allowed, "" if allowed else "当前会话未开放此能力"
 
-    def initial(self, context: ToolContext) -> None:
-        context.loaded_tools.update(
-            name
-            for name in INITIAL_TOOLS
-            if (tool := self.tools.get(name)) and self.permitted(context.scope, tool)[0]
-        )
-
     def definitions(self, context: ToolContext) -> list[JsonObject]:
         return [
-            self.definition(tool, context.scope)
-            for name in sorted(context.loaded_tools)
-            if (tool := self.tools.get(name)) and self.permitted(context.scope, tool)[0]
+            self.definition(self.tools[name], context.scope)
+            for name in sorted(self.tools)
+            if self.permitted(context.scope, self.tools[name])[0]
         ]
 
     def definition(self, tool: ToolDefinition, scope: ConversationScope) -> JsonObject:
-        parameters = copy.deepcopy(tool.parameters)
-        description = tool.description
+        parameters = compact_schema(tool.parameters)
         if tool.cross_scope:
             properties = parameters.get("properties")
             if isinstance(properties, dict):
@@ -214,66 +118,7 @@ class ToolRegistry:
                         "minLength": 1,
                         "description": "跨私聊目标 QQ 号；省略表示当前会话",
                     }
-        if tool.name == "harness__discover_tools":
-            counts: dict[str, int] = {}
-            for candidate in self.tools.values():
-                if candidate.category != "harness" and self.permitted(scope, candidate)[0]:
-                    counts[candidate.category] = counts.get(candidate.category, 0) + 1
-            categories = "、".join(f"{name}（{count}）" for name, count in sorted(counts.items()))
-            description = (
-                "按能力、关键词或分类发现工具；默认自动加载本页前 8 个，下轮即可调用。"
-                f"当前可用 category（工具数）：{categories or '无'}。"
-            )
-        return {"name": tool.name, "description": description, "parameters": parameters}
-
-    async def discover(self, context: ToolContext, arguments: JsonObject) -> ToolResult:
-        request = DiscoverInput.model_validate(arguments)
-        query = request.query.strip().casefold()
-        tokens = search_tokens(query)
-        allowed = [
-            tool
-            for tool in self.tools.values()
-            if self.permitted(context.scope, tool)[0] and tool.category != "harness"
-        ]
-        ranked = [
-            (relevance(tool, query, tokens) if query else 0, tool)
-            for tool in allowed
-            if not request.category or request.category == tool.category
-        ]
-        selected = [
-            tool
-            for score, tool in sorted(ranked, key=lambda item: (-item[0], item[1].name))
-            if not query or score > 0
-        ]
-        offset = request.offset
-        page = selected[offset : offset + request.limit]
-        loaded = [tool.name for tool in page[:DISCOVERY_LOAD_LIMIT]] if request.auto_load else []
-        context.loaded_tools.update(loaded)
-        return ToolResult.success(
-            {
-                "tools": [
-                    {"name": t.name, "description": t.description, "category": t.category}
-                    for t in page
-                ],
-                "categories": [category for category in sorted({t.category for t in allowed})],
-                "loaded": [name for name in loaded],
-                "total": len(selected),
-                "next_offset": offset + len(page) if offset + len(page) < len(selected) else None,
-            }
-        )
-
-    async def load(self, context: ToolContext, arguments: JsonObject) -> ToolResult:
-        parsed = LoadInput.model_validate(arguments)
-        for name in parsed.names:
-            tool = self.tools.get(name)
-            if not tool or not self.permitted(context.scope, tool)[0]:
-                return ToolResult.failure("工具不存在或未获当前会话授权", "PermissionDenied")
-        if parsed.replace:
-            context.loaded_tools.clear()
-            context.used_tools.clear()
-            self.initial(context)
-        context.loaded_tools.update(parsed.names)
-        return ToolResult.success({"loaded": [name for name in sorted(context.loaded_tools)]})
+        return {"name": tool.name, "description": tool.description, "parameters": parameters}
 
     def authorize(
         self,
@@ -346,11 +191,10 @@ class ToolRegistry:
     async def execute(self, context: ToolContext, name: str, arguments: JsonObject) -> ToolResult:
         tool = self.tools.get(name)
         if not tool:
-            return ToolResult.failure("工具不存在，请重新发现可用工具", "ToolNotFound")
+            return ToolResult.failure("工具不存在，请使用当前提供的工具", "ToolNotFound")
         permitted, reason = self.permitted(context.scope, tool)
         if not permitted:
             return ToolResult.failure(reason, "PermissionDenied")
-        context.loaded_tools.add(name)
         if context.cancelled():
             return ToolResult(status="cancelled", message="本轮已停止")
         policy = self.policy(context.scope)
@@ -450,10 +294,6 @@ class ToolRegistry:
         previous_check_tool = context.check_tool
         context.check_tool = check_tool
         context.effect_submitted = False
-        if tool.category != "harness":
-            if name in context.used_tools:
-                context.used_tools.remove(name)
-            context.used_tools.append(name)
         try:
             result = await tool.handler(context, args)
         except asyncio.CancelledError:
@@ -484,7 +324,7 @@ class ToolRegistry:
             item = tool.public()
             item.update(allowed=allowed, reason=reason)
             tools.append(item)
-        present = {t.category for t in self.tools.values() if t.category != "harness"}
+        present = {t.category for t in self.tools.values()}
         known = [name for name in self.category_labels if name in present]
         ordered = known + sorted(present - set(known))
         return {
@@ -493,9 +333,5 @@ class ToolRegistry:
         }
 
     def available(self, scope: ConversationScope) -> list[str]:
-        """当前配置下该会话可调用的业务工具；内置的发现与加载不计入。"""
-        return [
-            name
-            for name, tool in self.tools.items()
-            if tool.category != "harness" and self.permitted(scope, tool)[0]
-        ]
+        """当前配置下该会话可调用的全部工具，按名称稳定排序。"""
+        return [name for name, tool in sorted(self.tools.items()) if self.permitted(scope, tool)[0]]

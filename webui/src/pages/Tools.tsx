@@ -45,7 +45,6 @@ function Catalog({ selected }: { selected: string }) {
   const all = useMemo(() => {
     const order = new Map((tools.data?.categories ?? []).map((item, index) => [item.id, index]));
     return (tools.data?.tools ?? [])
-      .filter((tool) => tool.category !== "harness")
       .map((tool, index) => ({ tool, index }))
       .sort(
         (a, b) =>

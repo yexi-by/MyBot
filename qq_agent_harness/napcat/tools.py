@@ -574,15 +574,6 @@ ACTION_TITLES = {
 }
 
 
-ACTION_SEARCH_TERMS = {
-    "get_group_info": ("群主", "群名", "人数", "容量"),
-    "get_group_detail_info": ("群主", "群介绍", "加群问题"),
-    "get_group_member_list": ("找人", "群主", "管理员", "群成员", "昵称", "群名片"),
-    "get_group_member_info": ("群成员", "成员资料", "群名片", "群头衔", "身份"),
-    "get_stranger_info": ("账号资料", "签名", "QQ等级", "注册时间"),
-}
-
-
 def action_tool(spec: ActionSpec) -> ToolDefinition:
     async def handle(context: ToolContext, arguments: JsonObject) -> ToolResult:
         params = JSON_OBJECT.validate_python(
@@ -630,7 +621,6 @@ def action_tool(spec: ActionSpec) -> ToolDefinition:
         cross_scope=spec.scope in ("both", "group", "private"),
         model=spec.model,
         title=ACTION_TITLES.get(spec.action, spec.summary),
-        search_terms=ACTION_SEARCH_TERMS.get(spec.action, ()),
     )
 
 
@@ -1207,9 +1197,6 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
                 cross_scope=True,
                 model=model,
                 title=title,
-                search_terms=("看图", "头像", "群头像", "图片", "语音", "视频", "收藏表情", "相册")
-                if name == "qq__read_media"
-                else (),
             )
         )
     tools.append(
@@ -1224,7 +1211,6 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             model=SaveMedia,
             requires=("sandbox__write_file",),
             title="保存媒体到共享工作区",
-            search_terms=("保存图片", "下载头像", "保存媒体", "相册", "收藏表情"),
         )
     )
     tools.append(

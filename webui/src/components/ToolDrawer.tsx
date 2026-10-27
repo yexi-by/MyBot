@@ -28,31 +28,55 @@ const typeNames: Record<string, string> = {
 /** 解析 pydantic 生成的本地引用（#/$defs/…）。 */
 function resolve(schema: ObjectValue, root: ObjectValue): ObjectValue {
   const ref = schema.$ref;
-  return typeof ref === "string" && ref.startsWith("#/$defs/") ? object(object(root.$defs)[ref.slice(8)]) : schema;
+  return typeof ref === "string" && ref.startsWith("#/$defs/")
+    ? { ...object(object(root.$defs)[ref.slice(8)]), ...schema }
+    : schema;
 }
 
 function variantsOf(schema: ObjectValue) {
   return [schema.anyOf, schema.oneOf].find(Array.isArray);
 }
 
-function choicesOf(schema: ObjectValue): Json[] | undefined {
-  return schema.const !== undefined ? [schema.const] : Array.isArray(schema.enum) ? schema.enum : undefined;
+function choicesOf(raw: ObjectValue, root: ObjectValue, references = new Set<string>(), depth = 0): Json[] | undefined {
+  if (depth >= 32) return undefined;
+  const reference = typeof raw.$ref === "string" ? raw.$ref : "";
+  if (reference && references.has(reference)) return undefined;
+  const next = reference ? new Set([...references, reference]) : references;
+  const schema = resolve(raw, root);
+  if (schema.const !== undefined) return [schema.const];
+  if (Array.isArray(schema.enum)) return schema.enum;
+  const variants = variantsOf(schema);
+  if (!variants) return undefined;
+  const values = new Map<string, Json>();
+  for (const variant of variants) {
+    const branch = resolve(object(variant), root);
+    if (branch.type === "null") continue;
+    const choices = choicesOf(branch, root, next, depth + 1);
+    // 含开放类型的联合并不是有限枚举，不把其中一支误报为全部可选值。
+    if (!choices) return undefined;
+    for (const value of choices) values.set(JSON.stringify(value), value);
+  }
+  return values.size ? [...values.values()] : undefined;
 }
 
-function typeLabel(raw: ObjectValue, root: ObjectValue): string {
+function typeLabel(raw: ObjectValue, root: ObjectValue, references = new Set<string>(), depth = 0): string {
+  if (depth >= 32) return "复杂类型";
+  const reference = typeof raw.$ref === "string" ? raw.$ref : "";
+  if (reference && references.has(reference)) return "递归结构";
+  const next = reference ? new Set([...references, reference]) : references;
   const schema = resolve(raw, root);
   if (schema.const !== undefined) return "固定值";
   if (Array.isArray(schema.enum)) return "可选值";
   // 可省略的参数常写成“类型或 null”，只展示实际类型。
   const variants = variantsOf(schema);
   if (variants)
-    return [...new Set(variants.map((item) => typeLabel(object(item), root)))].filter((item) => item !== "空").join(" 或 ") || "空";
+    return [...new Set(variants.map((item) => typeLabel(object(item), root, next, depth + 1)))].filter((item) => item !== "空").join(" 或 ") || "空";
   const type = schema.type;
   if (Array.isArray(type))
     return type.filter((item) => item !== "null").map((item) => typeNames[String(item)] ?? String(item)).join(" 或 ") || "空";
   if (type === "array") {
     const items = object(schema.items);
-    return Object.keys(items).length ? typeLabel(items, root) + "列表" : "列表";
+    return Object.keys(items).length ? typeLabel(items, root, next, depth + 1) + "列表" : "列表";
   }
   return typeof type === "string" ? (typeNames[type] ?? type) : "任意";
 }
@@ -69,7 +93,7 @@ function objectShape(raw: ObjectValue, root: ObjectValue): ObjectValue | null {
   for (const variant of objects)
     for (const [name, value] of Object.entries(object(variant.properties))) {
       const property = resolve(object(value), root);
-      const choices = choicesOf(property);
+      const choices = choicesOf(property, root);
       const existing = properties[name] === undefined ? undefined : object(properties[name]);
       if (existing && !(choices && Array.isArray(existing.enum))) continue;
       const merged: ObjectValue = { ...(existing ?? property) };
@@ -105,7 +129,7 @@ function parameterRows(shape: ObjectValue, root: ObjectValue, prefix = "", depth
       type: typeLabel(property, root),
       required: required.includes(name),
       description: typeof property.description === "string" ? property.description : "",
-      values: choicesOf(property) ?? [],
+      values: choicesOf(property, root) ?? [],
       depth,
     });
     if (depth >= 2) continue;

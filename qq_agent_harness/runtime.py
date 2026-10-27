@@ -40,8 +40,6 @@ logger = logging.getLogger(__name__)
 
 # 空闲会话只按容量回收，不因等待下一条消息而超时销毁。
 MAX_MESSAGE_IDS = 2048
-# 跨轮只保留最近实际使用的额外工具；发现但未使用的定义不驻留。
-MAX_RETAINED_TOOLS = 12
 # 闲时压缩按固定间隔检查；同时进行的压缩数量有上限，不占用会话并发名额。
 IDLE_SCAN_SECONDS = 15
 MAX_IDLE_COMPACTIONS = 2
@@ -59,7 +57,6 @@ class ConversationSession:
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     message_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     wake_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
-    loaded_tools: list[str] = field(default_factory=list)
     unknown_effects: list[UnknownOperation] = field(default_factory=list)
     knowledge: list[tuple[str, str]] = field(default_factory=list)
     updated_at: float = 0
@@ -433,19 +430,9 @@ class AgentRuntime:
             read_workspace=read_workspace,
             write_workspace=write_workspace,
         )
-        self.registry.initial(context)
-        initial_tools = set(context.loaded_tools)
         session: ModelSession | None = None
         retained = self.sessions.get(key)
         if retained:
-            context.used_tools.extend(
-                name
-                for name in retained.loaded_tools
-                if name not in initial_tools
-                and (tool := self.registry.tools.get(name))
-                and self.registry.permitted(scope, tool)[0]
-            )
-            context.loaded_tools.update(context.used_tools)
             context.unknown_effects = retained.unknown_effects
         executed: dict[str, tuple[str, JsonObject, ToolResult]] = {}
         outcome = "error"
@@ -723,22 +710,6 @@ class AgentRuntime:
             if session is not None and retained is not None:
                 update_actions()
                 session.end_turn(outcome, interrupted_call)
-                retained.loaded_tools = (
-                    sorted(
-                        name
-                        for name in initial_tools
-                        if (tool := self.registry.tools.get(name))
-                        and self.registry.permitted(scope, tool)[0]
-                    )
-                    + [
-                        name
-                        for name in context.used_tools
-                        if name not in initial_tools
-                        and name in context.loaded_tools
-                        and (tool := self.registry.tools.get(name))
-                        and self.registry.permitted(scope, tool)[0]
-                    ][-MAX_RETAINED_TOOLS:]
-                )
                 retained.updated_at = time.time()
                 retained.outcome = outcome
                 retained.retained_bytes = retained.measure()
@@ -772,7 +743,6 @@ class AgentRuntime:
                 raise SessionBusy("停止期间会话又被唤醒，请稍后再试")
         model, retained.model = retained.model, None
         retained.session_id = uuid.uuid4().hex
-        retained.loaded_tools = []
         retained.knowledge = []
         # 清空已读历史，下次唤醒像新会话一样补入近期 QQ 历史。
         retained.message_ids.clear()
@@ -873,7 +843,7 @@ class AgentRuntime:
                 scrub(message.model_dump(mode="json", exclude={"scope"}))
                 for message in self.pending.get(key, [])
             ],
-            "loaded_tools": [name for name in sorted(retained.loaded_tools)],
+            "available_tools": [name for name in self.registry.available(retained.scope)],
             "unknown_operations": [
                 scrub(
                     {

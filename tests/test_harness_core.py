@@ -111,8 +111,6 @@ async def test_disclosure_permissions_revocation_and_unknown_are_enforced(tmp_pa
     b = ToolContext(
         ConversationScope(bot_id="bot", kind="group", peer_id="b"), "two", FakeConnection()
     )
-    registry.initial(a)
-    registry.initial(b)
     assert (await registry.execute(b, tool.name, {})).status == "error"
     assert not dispatched
     assert (await registry.execute(a, tool.name, {"target_group_id": "b"})).status == "error"
@@ -150,11 +148,7 @@ async def test_known_tool_direct_call_still_checks_target_and_authorization(tmp_
     context = ToolContext(
         ConversationScope(bot_id="bot", kind="group", peer_id="a"), "turn", FakeConnection()
     )
-    registry.initial(context)
     assert (await registry.execute(context, tool.name, {})).status == "ok"
-    assert (
-        await registry.execute(context, "harness__load_tools", {"names": [tool.name]})
-    ).status == "ok"
     assert (
         await registry.execute(context, tool.name, {"target_user_id": "person"})
     ).error_type == "PermissionDenied"
@@ -424,10 +418,8 @@ def test_tool_access_follows_each_conversation_policy(tmp_path):
     assert "qq__get_history" in scopes["group:a"] and "qq__send_message" not in scopes["group:a"]
     assert scopes["group:b"] == ["qq__get_history"]
     assert scopes["private"] == []
-    # 内置发现工具始终可用，沙箱在本部署未启用，两者都不能出现在开放列表里。
-    assert not any(
-        name.startswith(("harness__", "sandbox__")) for names in scopes.values() for name in names
-    )
+    # 沙箱在本部署未启用，不能出现在开放列表里。
+    assert not any(name.startswith("sandbox__") for names in scopes.values() for name in names)
 
 
 def test_napcat_group_directory_handles_offline_and_upstream_failure(tmp_path):
@@ -798,10 +790,11 @@ async def test_compaction_keeps_action_receipts_and_does_not_replay_unknown_send
         normal_requests.append(body)
         calls = []
         if len(normal_requests) == 1:
-            calls = [
-                call("send-1", "qq__send_message", {}),
-                call("load-1", "harness__load_tools", {"names": ["qq__large_info"]}),
-            ]
+            assert {tool["function"]["name"] for tool in body["tools"]} == {
+                "qq__send_message",
+                "qq__large_info",
+            }
+            calls = [call("send-1", "qq__send_message", {})]
         elif len(normal_requests) == 2:
             calls = [call("facts-1", "qq__large_info", {})]
         elif len(normal_requests) == 3:
@@ -905,36 +898,6 @@ def test_null_enum_is_rejected_without_overwriting_toml(tmp_path):
     with pytest.raises(ConfigError):
         store.save(data, store.last_sha)
     assert store.path.read_bytes() == original
-
-
-@pytest.mark.asyncio
-async def test_tool_discovery_pages_all_authorized_capabilities(tmp_path):
-    store = make_store(tmp_path)
-    store.settings.private.policy.categories["fixture"] = True
-    registry = ToolRegistry(lambda: store.settings)
-
-    async def unused(_context, _arguments):
-        return ToolResult.success()
-
-    for index in range(45):
-        registry.add(
-            ToolDefinition(
-                f"fixture__{index}", "可用能力", "fixture", schema(Empty), unused, model=Empty
-            )
-        )
-    context = ToolContext(
-        ConversationScope(bot_id="bot", kind="private", peer_id="p"), "turn", FakeConnection()
-    )
-    registry.initial(context)
-    first = await registry.execute(context, "harness__discover_tools", {})
-    assert isinstance(first.data, dict)
-    assert first.data["total"] == 45 and first.data["next_offset"] == 40
-    second = await registry.execute(context, "harness__discover_tools", {"offset": 40})
-    assert isinstance(second.data, dict) and isinstance(second.data["tools"], list)
-    assert len(second.data["tools"]) == 5 and second.data["next_offset"] is None
-    store.settings.private.policy.categories["fixture"] = False
-    denied = await registry.execute(context, "harness__discover_tools", {})
-    assert isinstance(denied.data, dict) and denied.data["total"] == 0
 
 
 def test_sandbox_pending_is_based_on_runner_applied_settings(tmp_path):

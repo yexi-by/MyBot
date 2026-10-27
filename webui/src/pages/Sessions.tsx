@@ -598,7 +598,7 @@ function SessionSummary({ detail, botId, refresh }: { detail: SessionDetail; bot
   const context = detail.context;
   const max = context.max_tokens ?? 0;
   const used = context.input_tokens ?? 0;
-  const loaded = detail.loaded_tools.filter((name) => !name.startsWith("harness__"));
+  const available = detail.available_tools;
   return (
     <section className="card session-overview">
       {max > 0 && (
@@ -680,11 +680,11 @@ function SessionSummary({ detail, botId, refresh }: { detail: SessionDetail; bot
           <p className="tiny muted">重置上下文保留这些记录；核对实际结果后可解除。处理中请先停止本轮。</p>
         </div>
       )}
-      {loaded.length > 0 && (
+      {available.length > 0 && (
         <div className="session-block">
-          <h3>已加载的工具（上一轮结束时）</h3>
+          <h3>当前可用工具</h3>
           <span className="chips">
-            {loaded.map((name) => (
+            {available.map((name) => (
               <span key={name} className="chip" title={name}>
                 {tools.get(name) ?? name}
               </span>

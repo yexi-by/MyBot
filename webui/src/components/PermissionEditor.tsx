@@ -33,10 +33,7 @@ export function PermissionEditor({ base, kind }: { base: Path; kind: "group" | "
   const conversation = object(getAt(state.draft, base));
   const policy = object(conversation.policy);
   const policyPath = [...base, "policy"];
-  const all = useMemo(
-    () => (tools.data?.tools ?? []).filter((tool) => tool.category !== "harness"),
-    [tools.data],
-  );
+  const all = tools.data?.tools ?? [];
   const catalog = useMemo(() => new Map((tools.data?.tools ?? []).map((tool) => [tool.name, tool])), [tools.data]);
   const labels = useMemo(
     () => new Map((tools.data?.categories ?? []).map((category) => [category.id, category.label])),

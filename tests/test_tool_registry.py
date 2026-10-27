@@ -1,4 +1,4 @@
-"""工具检索、按需披露和聚合查询授权的行为回归。"""
+"""完整工具目录、实时权限和聚合查询授权的行为回归。"""
 
 from typing import Literal
 
@@ -56,30 +56,19 @@ def setup_registry() -> tuple[ToolRegistry, ToolContext, Policy]:
     return registry, context, settings.groups["10"].policy
 
 
-async def test_chinese_search_ranks_intent_and_loads_only_authorized_top_results() -> None:
+async def test_all_authorized_tools_are_immediately_visible_in_stable_order() -> None:
     registry, context, policy = setup_registry()
-    for index in range(20):
+    for index in reversed(range(45)):
         registry.add(
             ToolDefinition(
                 f"fixture__group_{index:02}",
-                "查看当前群中的普通信息",
+                "当前群查询",
                 "fixture",
                 schema(Empty),
                 echo,
                 title="群信息",
             )
         )
-    registry.add(
-        ToolDefinition(
-            "fixture__avatar",
-            "读取 QQ 图片",
-            "fixture",
-            schema(Empty),
-            echo,
-            title="头像读取",
-            search_terms=("用户头像", "群头像", "群主头像"),
-        )
-    )
     registry.add(
         ToolDefinition(
             "fixture__hidden_avatar",
@@ -91,44 +80,30 @@ async def test_chinese_search_ranks_intent_and_loads_only_authorized_top_results
     )
     policy.tools["fixture__hidden_avatar"] = False
 
-    found = await registry.execute(
-        context, "harness__discover_tools", {"query": "查看群主头像", "limit": 1}
-    )
-    assert isinstance(found.data, dict)
-    assert found.data["loaded"] == ["fixture__avatar"]
-    assert "fixture__avatar" in context.loaded_tools
-    assert (await registry.execute(context, "fixture__avatar", {})).status == "ok"
-    assert "fixture__hidden_avatar" not in context.loaded_tools
-
-    broad = await registry.execute(context, "harness__discover_tools", {"query": "群"})
-    assert isinstance(broad.data, dict)
-    assert isinstance(broad.data["loaded"], list) and len(broad.data["loaded"]) == 8
-    assert isinstance(broad.data["tools"], list)
-    assert all(
-        isinstance(item, dict) and item["name"] != "fixture__hidden_avatar"
-        for item in broad.data["tools"]
-    )
-    context.loaded_tools.clear()
-    disabled = await registry.execute(
-        context, "harness__discover_tools", {"query": "fixture__avatar", "auto_load": False}
-    )
-    assert isinstance(disabled.data, dict) and disabled.data["loaded"] == []
-    assert "fixture__avatar" not in context.loaded_tools
+    expected = [f"fixture__group_{index:02}" for index in range(45)]
+    assert [item["name"] for item in registry.definitions(context)] == expected
+    assert registry.available(context.scope) == expected
+    assert (await registry.execute(context, expected[-1], {})).status == "ok"
 
 
-async def test_initial_reads_and_category_disclosure_follow_live_permissions() -> None:
+async def test_definitions_follow_live_permissions_and_catalog_changes() -> None:
     registry, context, policy = setup_registry()
     for name in ("qq__read_media", "qq__get_history", "qq__get_message", "qq__send_message"):
         registry.add(ToolDefinition(name, "基础能力", "fixture", schema(Empty), echo))
     policy.tools["qq__read_media"] = False
-    registry.initial(context)
     definitions = {item["name"]: item for item in registry.definitions(context)}
     assert "qq__get_history" in definitions and "qq__get_message" in definitions
     assert "qq__read_media" not in definitions
-    assert "fixture（3）" in str(definitions["harness__discover_tools"]["description"])
+    registry.add(ToolDefinition("fixture__added", "新增能力", "fixture", schema(Empty), echo))
+    assert "fixture__added" in [item["name"] for item in registry.definitions(context)]
+    registry.remove_prefix("fixture__")
+    assert "fixture__added" not in [item["name"] for item in registry.definitions(context)]
+    assert (await registry.execute(context, "fixture__added", {})).error_type == "ToolNotFound"
     policy.categories["fixture"] = False
     assert (await registry.execute(context, "qq__get_history", {})).error_type == "PermissionDenied"
-    assert all(item["name"] != "qq__get_history" for item in registry.definitions(context))
+    assert registry.definitions(context) == []
+    policy.tools["qq__read_media"] = True
+    assert [item["name"] for item in registry.definitions(context)] == ["qq__read_media"]
 
 
 @pytest.mark.parametrize(
@@ -162,7 +137,7 @@ def test_target_schema_matches_policy_and_tool_scope(
     assert "target_group_id" not in str(tool.parameters)
 
 
-async def test_lazy_call_returns_schema_without_input_and_records_actual_use() -> None:
+async def test_direct_call_returns_schema_without_input_and_observes_revocation() -> None:
     registry, context, policy = setup_registry()
     for name in ("fixture__a", "fixture__b"):
         registry.add(
@@ -181,11 +156,9 @@ async def test_lazy_call_returns_schema_without_input_and_records_actual_use() -
     assert isinstance(invalid.data, dict) and isinstance(invalid.data["schema"], dict)
     assert "SECRET_SENTINEL" not in invalid.model_dump_json()
     assert "target_group_id" not in str(invalid.data)
-    assert "fixture__a" in context.loaded_tools and not context.used_tools
     for name in ("fixture__a", "fixture__b", "fixture__a"):
         result = await registry.execute(context, name, {"user_id": "30"})
         assert result.status == "ok"
-    assert context.used_tools == ["fixture__b", "fixture__a"]
     policy.tools["fixture__a"] = False
     denied = await registry.execute(context, "fixture__a", {"user_id": "30"})
     assert denied.error_type == "PermissionDenied"

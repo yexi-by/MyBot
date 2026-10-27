@@ -117,15 +117,14 @@ function useCommands(): Command[] {
     for (const id of Object.keys(object(config.mcp)))
       list.push({ id: "mcp:" + id, group: "MCP 服务", title: id, icon: Plug, run: go("/tools/mcp/" + enc(id)) });
     for (const tool of tools?.tools ?? [])
-      if (tool.category !== "harness")
-        list.push({
-          id: "tool:" + tool.name,
-          group: "工具",
-          title: tool.title,
-          detail: tool.name,
-          icon: Wrench,
-          run: go("/tools?tool=" + enc(tool.name)),
-        });
+      list.push({
+        id: "tool:" + tool.name,
+        group: "工具",
+        title: tool.title,
+        detail: tool.name,
+        icon: Wrench,
+        run: go("/tools?tool=" + enc(tool.name)),
+      });
     for (const file of files ?? [])
       list.push({
         id: "file:" + file,

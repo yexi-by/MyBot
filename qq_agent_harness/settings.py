@@ -32,14 +32,6 @@ class Policy(Model):
     cross_private: bool = False
     max_sends_per_turn: int = Field(default=5, ge=1)
 
-    @model_validator(mode="after")
-    def builtins_are_not_overrides(self) -> Policy:
-        if "harness" in self.categories or any(
-            name.startswith("harness__") for name in (*self.tools, *self.parameters)
-        ):
-            raise ValueError("工具发现和加载属于运行内置能力，不能单独覆盖权限")
-        return self
-
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 Modality = Literal["text", "image", "audio", "video"]

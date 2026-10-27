@@ -24,7 +24,6 @@ export function evaluate(
   catalog: Map<string, Tool>,
 ): Access {
   if (conversation.enabled !== true) return { allowed: false, reason: "会话未启用" };
-  if (tool.category === "harness") return { allowed: true, reason: "" };
   if (tool.name.startsWith("sandbox__") && object(config.sandbox).enabled !== true)
     return { allowed: false, reason: "共享沙箱未启用" };
   if (tool.scope !== "both" && tool.scope !== "account" && tool.scope !== kind)

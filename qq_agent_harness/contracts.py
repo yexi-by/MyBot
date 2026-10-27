@@ -1,8 +1,10 @@
 """协议边界和共享工具契约。"""
 
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
+from urllib.parse import unquote
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
@@ -79,9 +81,6 @@ class ToolContext:
     napcat: NapCatConnection
     cancelled: Callable[[], bool] = lambda: False
     target_scope: ConversationScope | None = None
-    loaded_tools: set[str] = field(default_factory=set)
-    # 实际进入 handler 的工具，按最近调用顺序保留；发现与加载不算实际使用。
-    used_tools: list[str] = field(default_factory=list)
     sent_messages: list[JsonObject] = field(default_factory=list)
     send_attempts: int = 0
     max_sends: int = 5
@@ -116,8 +115,6 @@ class ToolDefinition:
     requires: tuple[str, ...] = ()
     # 面向控制台的简短名称；模型看到的仍是 description。
     title: str = ""
-    # 精准检索别名，不混入通用权限/安全说明，也不追加到模型描述。
-    search_terms: tuple[str, ...] = ()
 
     def public(self) -> JsonObject:
         return {
@@ -132,5 +129,99 @@ class ToolDefinition:
         }
 
 
+_SCHEMA_MAPS = {
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+    "dependencies",
+}
+_SCHEMA_ARRAYS = {"allOf", "anyOf", "oneOf", "prefixItems"}
+_SCHEMA_CHILDREN = {
+    "additionalProperties",
+    "unevaluatedProperties",
+    "propertyNames",
+    "contains",
+    "items",
+    "additionalItems",
+    "unevaluatedItems",
+    "not",
+    "if",
+    "then",
+    "else",
+    "contentSchema",
+}
+_SIMPLE_TYPES = {"string", "number", "integer", "boolean", "array", "object", "null"}
+_STRING_CONSTRAINTS = {"minLength", "maxLength", "pattern", "format"}
+
+
+def _compact_nullable_union(node: JsonObject) -> None:
+    branches = node.get("anyOf")
+    if not isinstance(branches, list) or "type" in node:
+        return
+    types: list[JsonValue] = []
+    constraints: JsonObject = {}
+    for branch in branches:
+        if not isinstance(branch, dict):
+            return
+        kind = branch.get("type")
+        if not isinstance(kind, str) or kind not in _SIMPLE_TYPES or kind in types:
+            return
+        allowed = {"type"} | (_STRING_CONSTRAINTS if kind == "string" else set())
+        if set(branch) - allowed:
+            return
+        types.append(kind)
+        constraints.update({key: value for key, value in branch.items() if key != "type"})
+    if "null" not in types or len(types) < 2 or constraints.keys() & node.keys():
+        return
+    # 字符串约束对 null 和其他类型不生效；复杂分支及父级同名约束不合并。
+    node.pop("anyOf")
+    node["type"] = types
+    node.update(constraints)
+
+
+def _references_union_branch(value: JsonValue) -> bool:
+    if isinstance(value, list):
+        return any(_references_union_branch(child) for child in value)
+    if not isinstance(value, dict):
+        return False
+    if any(
+        isinstance(reference := value.get(key), str) and "/anyOf/" in unquote(reference)
+        for key in ("$ref", "$dynamicRef")
+    ):
+        return True
+    return any(_references_union_branch(child) for child in value.values())
+
+
+def _compact_schema_node(node: JsonObject, *, flatten_nullable: bool) -> None:
+    node.pop("title", None)
+    if node.get("default", False) is None:
+        node.pop("default")
+    if node.get("required") == []:
+        node.pop("required")
+    for key, value in list(node.items()):
+        if key in _SCHEMA_MAPS and isinstance(value, dict):
+            for child in value.values():
+                if isinstance(child, dict):
+                    _compact_schema_node(child, flatten_nullable=flatten_nullable)
+        elif key in _SCHEMA_CHILDREN and isinstance(value, dict):
+            _compact_schema_node(value, flatten_nullable=flatten_nullable)
+        elif (key in _SCHEMA_ARRAYS or key == "items") and isinstance(value, list):
+            for child in value:
+                if isinstance(child, dict):
+                    _compact_schema_node(child, flatten_nullable=flatten_nullable)
+    if flatten_nullable:
+        _compact_nullable_union(node)
+
+
+def compact_schema(parameters: JsonObject) -> JsonObject:
+    """精简冗余 schema 表达；只遍历 schema 位置，保留业务字段、数据和校验语义。"""
+    result = deepcopy(parameters)
+    # MCP 可用 JSON Pointer 直接引用 anyOf 子分支，此时必须保留原树形路径。
+    _compact_schema_node(result, flatten_nullable=not _references_union_branch(parameters))
+    return result
+
+
 def schema(model: type[BaseModel]) -> JsonObject:
-    return JSON_OBJECT.validate_python(model.model_json_schema())
+    return compact_schema(JSON_OBJECT.validate_python(model.model_json_schema()))

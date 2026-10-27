@@ -141,7 +141,7 @@ async def test_preflight_send_failure_preserves_budget_and_other_messages_can_fo
     assert len([name for name, _ in bot.calls if name == "send_group_msg"]) == 2
 
 
-async def test_non_qq_data_and_loading_more_than_twelve_tools_remain_usable():
+async def test_non_qq_data_and_more_than_twelve_tools_remain_usable():
     tools, context, settings = registry(Bot())
     settings.groups["10"].policy.allow_at_all = False
 
@@ -151,17 +151,10 @@ async def test_non_qq_data_and_loading_more_than_twelve_tools_remain_usable():
     names = [f"inspect_{index}" for index in range(15)]
     for name in names:
         tools.add(ToolDefinition(name, "检查数据", "messages.read", {"type": "object"}, inspect))
-    loaded = await tools.execute(
-        context,
-        "harness__load_tools",
-        JSON_OBJECT.validate_python({"names": names, "replace": True}),
-    )
-    assert loaded.status == "ok"
+    exposed = {str(item["name"]) for item in tools.definitions(context)}
+    assert set(names) <= exposed and "qq__send_message" in exposed
     result = await tools.execute(context, names[0], {"sample": {"type": "at", "qq": "all"}})
     assert result.status == "ok"
-    await tools.execute(context, "harness__load_tools", {"names": [names[0]], "replace": True})
-    exposed = {str(item["name"]) for item in tools.definitions(context)}
-    assert names[0] in exposed and names[1] not in exposed and "qq__send_message" in exposed
 
 
 async def test_unknown_operation_console_resolution_does_not_replay_or_bypass_permission(tmp_path):

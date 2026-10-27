@@ -177,7 +177,7 @@ export interface UnknownOperation {
 export interface SessionDetail extends RetainedSession {
   version: number;
   pending_messages: QQMessage[];
-  loaded_tools: string[];
+  available_tools: string[];
   unknown_operations: UnknownOperation[];
   /** 与上次读取的会话和版本相同时为 null，沿用已有条目。 */
   entries: SessionEntry[] | null;

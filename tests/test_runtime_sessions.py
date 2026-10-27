@@ -326,43 +326,37 @@ async def test_only_new_history_is_added_and_persona_updates_without_losing_sess
             await runtime.close()
 
 
-async def test_next_wake_keeps_only_recent_used_tools_and_rechecks_permission(tmp_path):
+@pytest.mark.parametrize("protocol", ["chat_completions", "responses"])
+async def test_all_authorized_tools_are_stable_across_rounds_and_wakes_until_revoked(
+    tmp_path, protocol
+):
     store = make_store(tmp_path)
-    store.settings.runtime.max_model_rounds = 3
+    store.settings.providers["test"].protocol = protocol
+    store.settings.runtime.max_model_rounds = 2
     registry = ToolRegistry(lambda: store.settings)
     names = [f"lookup__item_{index:02d}" for index in range(16)]
+    dispatched = []
 
-    async def read(_context, _arguments):
+    async def read(context, _arguments):
+        dispatched.append(context.turn_id)
         return ToolResult.success({"found": True})
 
-    for name in names:
+    for name in reversed(names):
         registry.add(ToolDefinition(name, "查询", "messages.read", schema(Empty), read))
     bodies = []
 
-    def calls(*items):
-        return {
-            "status": "completed",
-            "output": [
-                {
-                    "type": "function_call",
-                    "call_id": f"{len(bodies)}-{index}",
-                    "name": name,
-                    "arguments": json.dumps(arguments),
-                }
-                for index, (name, arguments) in enumerate(items)
-            ],
-        }
-
     def respond(request):
         bodies.append(json.loads(request.content))
-        if len(bodies) == 1:
-            payload = calls(("harness__load_tools", {"names": names}))
-        elif len(bodies) == 2:
-            payload = calls(*[(name, {}) for name in names[:14]])
-        elif len(bodies) == 4:
-            payload = calls((names[0], {}))
+        index = len(bodies)
+        if index in (1, 3, 5):
+            name = names[{1: 0, 3: 15, 5: 3}[index]]
+            payload = tool_response(protocol, f"call-{index}")
+            if protocol == "responses":
+                payload["output"][0]["name"] = name
+            else:
+                payload["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = name
         else:
-            payload = answer("responses", "完成")
+            payload = answer(protocol, "完成")
         return httpx.Response(200, json=payload)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
@@ -375,12 +369,24 @@ async def test_next_wake_keeps_only_recent_used_tools_and_rechecks_permission(tm
         try:
             await wake(runtime, message("first"))
             await wake(runtime, message("second"))
-            resumed = {tool["name"] for tool in bodies[3]["tools"]}
-            assert resumed.intersection(names) == set(names[2:14])
+            definitions = bodies[0]["tools"]
+            assert all(body["tools"] == definitions for body in bodies[:4])
+            assert [
+                (tool if protocol == "responses" else tool["function"])["name"]
+                for tool in definitions
+            ] == names
             store.settings.private.policy.tools[names[3]] = False
+            detail = runtime.inspect(message("first").scope.key, since=None, session_id="")
+            assert detail is not None and detail["available_tools"] == [
+                name for name in names if name != names[3]
+            ]
             await wake(runtime, message("third"))
-            resumed = {tool["name"] for tool in bodies[5]["tools"]}
-            assert resumed.intersection(names) == {names[0], *names[4:14]}
+            resumed = {
+                (tool if protocol == "responses" else tool["function"])["name"]
+                for tool in bodies[4]["tools"]
+            }
+            assert resumed == set(names) - {names[3]}
+            assert len(dispatched) == 2
             assert all(item["last_outcome"] == "silent" for item in sessions(runtime))
         finally:
             await runtime.close()
@@ -498,7 +504,7 @@ async def test_cancel_closes_all_calls_and_unknown_effect_is_not_replayed_on_nex
             ]
             assert statuses == ["unknown", "cancelled"]
             assert "unknown" in json.dumps(bodies[2])
-            # 保留已加载工具，不等于保留旧权限；撤权后模型猜工具名也不能调用。
+            # 已披露的目录不替代执行时授权；撤权后模型猜工具名也不能调用。
             store.settings.private.policy.tools["qq__send_message"] = False
             await wake(runtime, message("third"))
             assert len(dispatched) == 1
@@ -611,7 +617,7 @@ async def test_protocol_switch_preserves_visible_facts_without_old_wire_objects(
         assert bodies[-1]["messages"][0]["content"] == "NEW_SYSTEM"
 
 
-async def test_loaded_tool_and_completed_results_survive_model_failure_between_wakes(tmp_path):
+async def test_completed_results_survive_model_failure_between_wakes(tmp_path):
     store = make_store(tmp_path)
     registry = ToolRegistry(lambda: store.settings)
     dispatched, bodies = [], []
@@ -626,9 +632,9 @@ async def test_loaded_tool_and_completed_results_survive_model_failure_between_w
         body = json.loads(request.content)
         bodies.append(body)
         index = len(bodies)
-        if index == 5:
+        if index == 4:
             return httpx.Response(503)
-        if index in (1, 2, 4):
+        if index in (1, 3):
             return httpx.Response(
                 200,
                 json={
@@ -637,10 +643,8 @@ async def test_loaded_tool_and_completed_results_survive_model_failure_between_w
                         {
                             "type": "function_call",
                             "call_id": f"call-{index}",
-                            "name": "harness__load_tools" if index == 1 else "qq__lookup",
-                            "arguments": json.dumps({"names": ["qq__lookup"]})
-                            if index == 1
-                            else "{}",
+                            "name": "qq__lookup",
+                            "arguments": "{}",
                         }
                     ],
                 },
@@ -662,7 +666,7 @@ async def test_loaded_tool_and_completed_results_survive_model_failure_between_w
             await wake(runtime, message("third"))
             assert sessions(runtime)[0]["session_id"] == identifier
             assert len(dispatched) == 2
-            assert "qq__lookup" in [tool["name"] for tool in bodies[3]["tools"]]
+            assert "qq__lookup" in [tool["name"] for tool in bodies[0]["tools"]]
             assert all(
                 text in json.dumps(bodies[-1])
                 for text in ("LOOKUP_RESULT_1", "LOOKUP_RESULT_2", "INPUT_first", "INPUT_second")
