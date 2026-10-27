@@ -35,6 +35,8 @@ api_key = ""
 timeout = 120.0
 store_supported = true
 
+[providers.default.headers]
+
 [groups]
 
 [private]

@@ -83,9 +83,16 @@ class ProviderSettings(Model):
     protocol: Literal["chat_completions", "responses"] = "responses"
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
     timeout: float = Field(default=120, gt=0)
     proxy: str | None = None
     store_supported: bool = True
+
+    def request_headers(self) -> dict[str, str]:
+        headers = dict(self.headers)
+        if not any(key.lower() == "authorization" for key in headers):
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
 
 class ModelEndpoint(ProviderSettings):

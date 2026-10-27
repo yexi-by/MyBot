@@ -564,3 +564,39 @@ async def test_responses_failed_context_error_in_http_success_can_recover_once()
         reply = await session.step([])
         assert reply.text == "done" and session.request_count == 3
     assert "tools" not in bodies[1] and "tools" in bodies[2]
+
+
+async def test_provider_custom_headers_are_sent_and_can_override_authorization():
+    seen = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(dict(request.headers))
+        return httpx.Response(200, json=answer("responses", "ok"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        session = ModelSession(
+            ModelEndpoint(
+                model="test",
+                api_key="sk-key",
+                headers={"User-Agent": "MyBot/1.0", "X-Title": "Harness"},
+            ),
+            "system",
+            "current",
+            client=client,
+        )
+        await session.step([])
+        await session.configure(
+            ModelEndpoint(
+                model="test",
+                api_key="sk-key",
+                headers={"authorization": "Custom token-123"},
+            ),
+            "system",
+        )
+        session.begin_turn("next")
+        await session.step([])
+
+    assert seen[0]["authorization"] == "Bearer sk-key"
+    assert seen[0]["user-agent"] == "MyBot/1.0"
+    assert seen[0]["x-title"] == "Harness"
+    assert seen[1]["authorization"] == "Custom token-123"

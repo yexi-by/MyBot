@@ -258,6 +258,13 @@ export const providerRequestSection: SectionDef = {
       type: "toggle",
       help: "要求服务端不保存对话记录。接口不认识该参数时请关闭。",
     },
+    {
+      key: "headers",
+      label: "自定义请求头",
+      type: "map",
+      placeholder: "请求头名称",
+      help: "调用模型和拉取模型列表时附带的 HTTP 请求头。只用于请求接口，不会发给 Agent。",
+    },
   ],
 };
 
@@ -649,6 +656,7 @@ export function defaultProvider(): ObjectValue {
     protocol: "responses",
     base_url: "https://api.openai.com/v1",
     api_key: "",
+    headers: {},
     timeout: 120,
     proxy: null,
     store_supported: true,
@@ -761,6 +769,8 @@ const conversationParts: Record<string, string> = {
   parameters: "参数限制",
   model: "会话模型",
   idle_compaction: "闲时压缩",
+  headers: "自定义请求头",
+  env: "环境变量",
 };
 function scoped(prefix: string, rest: Path, name: string | undefined) {
   // 会话模型和压缩模型的字段同名，带上所属部分以便区分。
@@ -783,7 +793,7 @@ export function fieldLabel(config: ObjectValue, path: Path): string {
   const [head, id] = path;
   if (head === "groups") return scoped("群 " + id, path.slice(2), name);
   if (head === "private") return scoped("私聊", path.slice(1), name);
-  if (head === "providers") return scoped("服务商 " + id, [], name);
+  if (head === "providers") return scoped("服务商 " + id, path.slice(2), name);
   if (head === "mcp") return scoped("MCP " + id, path.slice(2), name);
   if (name) return name;
   if (head === "persona_file") return "人格文件";

@@ -407,22 +407,28 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     async def sandbox_cancel() -> JsonObject:
         return await runner.cancel()
 
-    model_cache: dict[str, tuple[float, list[str]]] = {}
+    model_cache: dict[str, tuple[float, object, list[str]]] = {}
 
     @app.get("/api/providers/{provider_id}/models")
     async def models(provider_id: str, refresh: bool = False) -> JsonObject:
         config = store.settings.providers.get(provider_id)
         if config is None:
             raise HTTPException(404, "请先保存服务商")
+        fingerprint = (
+            config.base_url,
+            config.api_key,
+            tuple(sorted(config.headers.items())),
+            config.proxy,
+        )
         cached = model_cache.get(provider_id)
-        if cached and cached[0] > time.monotonic() and not refresh:
-            return {"models": [model for model in cached[1]]}
+        if cached and cached[0] > time.monotonic() and cached[1] == fingerprint and not refresh:
+            return {"models": [model for model in cached[2]]}
         async with httpx.AsyncClient(
             timeout=config.timeout, proxy=config.proxy, trust_env=False
         ) as client:
             response = await client.get(
                 config.base_url.rstrip("/") + "/models",
-                headers={"Authorization": f"Bearer {config.api_key}"},
+                headers=config.request_headers(),
             )
             if not response.is_success:
                 raise HTTPException(502, f"模型列表接口返回 HTTP {response.status_code}")
@@ -437,7 +443,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
                 if isinstance(entries, list)
                 else []
             )
-        model_cache[provider_id] = (time.monotonic() + 30, ids)
+        model_cache[provider_id] = (time.monotonic() + 30, fingerprint, ids)
         return {"models": [model for model in ids]}
 
     @app.post("/api/system/{operation}")

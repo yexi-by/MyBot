@@ -460,9 +460,11 @@ export function KeyValueInput({
   const entries = Object.entries(data);
   return (
     <div className="kv">
-      {entries.length > 0 && (
+      {(entries.length > 0 || key.length > 0 || text.length > 0) && (
         <div className="kv-head">
-          <span className="muted tiny">已添加 {entries.length} 项</span>
+          <span className="muted tiny">
+            {entries.length > 0 ? `已添加 ${entries.length} 项` : "输入名称和值后按回车或点右侧添加"}
+          </span>
           <Button size="sm" variant="ghost" icon={visible ? EyeOff : Eye} onClick={() => setVisible(!visible)}>
             {visible ? "隐藏值" : "显示值"}
           </Button>
@@ -794,7 +796,7 @@ export function ConfigField({
     case "checks":
       return shell(<ChecksInput id={id} value={value} onChange={update} options={def.options ?? []} />);
     case "map":
-      return shell(<KeyValueInput id={id} value={value} onChange={update} />);
+      return shell(<KeyValueInput id={id} value={value} onChange={update} keyPlaceholder={def.placeholder} />);
     case "provider":
       return shell(
         <ProviderSelect

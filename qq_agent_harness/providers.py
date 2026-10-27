@@ -470,7 +470,7 @@ class ModelSession:
         try:
             response = await client.post(
                 config.base_url.rstrip("/") + endpoint,
-                headers={"Authorization": f"Bearer {config.api_key}"},
+                headers=config.request_headers(),
                 json=body,
                 timeout=config.timeout,
             )

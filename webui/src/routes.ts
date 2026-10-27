@@ -154,7 +154,9 @@ export async function focusField(path: Path) {
   const id = fieldId(path);
   // 页面切换后等字段渲染出来再定位，最多等待约 1 秒。
   for (let attempt = 0; attempt < 20; attempt++) {
-    const element = document.getElementById(id);
+    const element =
+      document.getElementById(id) ??
+      (path.length > 1 ? document.getElementById(fieldId(path.slice(0, -1))) : null);
     if (element) {
       element.scrollIntoView({
         behavior: prefersReducedMotion() ? "instant" : "smooth",
