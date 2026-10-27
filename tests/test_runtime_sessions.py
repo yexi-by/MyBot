@@ -178,6 +178,76 @@ async def test_same_group_reuses_history_and_tool_results_but_resets_turn_limits
         assert not runtime.sessions
 
 
+@pytest.mark.parametrize("text", ["完成", None], ids=["text", "silent"])
+async def test_chat_null_optional_fields_finish_after_send_and_survive_next_wake(tmp_path, text):
+    store = make_store(tmp_path)
+    store.settings.providers["test"].protocol = "chat_completions"
+    registry = ToolRegistry(lambda: store.settings)
+    bodies, sent = [], []
+
+    async def send(context, _arguments):
+        sent.append(context.turn_id)
+        receipt: JsonObject = {
+            "action": "send_group_msg",
+            "status": "ok",
+            "data": {"message_id": "sent-1"},
+        }
+        context.sent_messages.append(receipt)
+        return ToolResult.success(receipt)
+
+    registry.add(
+        ToolDefinition(
+            "qq__send_message", "发送", "messages.send", schema(Empty), send, effects=True
+        )
+    )
+
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            data = tool_response("chat_completions", "send-once")
+        else:
+            data = answer("chat_completions", text)
+            data["choices"][0]["message"]["tool_calls"] = None
+        data["choices"][0]["message"].update(
+            refusal=None, reasoning_content=None, reasoning_details=None
+        )
+        return httpx.Response(200, json={**data, "usage": None})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        runtime = AgentRuntime(
+            store,
+            registry,
+            FakeHub(),
+            session_factory=lambda *args: ModelSession(*args, client=client),
+        )
+        try:
+            await wake(runtime, message("first", "a", "group"))
+            assert sessions(runtime)[0]["last_outcome"] == "completed"
+            assert len(sent) == 1 and len(bodies) == 2
+            await wake(runtime, message("second", "a", "group"))
+            assert sessions(runtime)[0]["last_outcome"] == "completed"
+            assert len(sent) == 1 and len(bodies) == 3
+            assistants = [item for item in bodies[2]["messages"] if item.get("role") == "assistant"]
+            assert assistants == [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "send-once",
+                            "type": "function",
+                            "function": {"name": "qq__send_message", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "assistant", "content": text},
+            ]
+            results = [item for item in bodies[2]["messages"] if item.get("role") == "tool"]
+            assert len(results) == 1 and json.loads(results[0]["content"])["status"] == "ok"
+        finally:
+            await runtime.close()
+
+
 async def test_only_new_history_is_added_and_persona_updates_without_losing_session(tmp_path):
     store = make_store(tmp_path)
     store.settings.runtime.history_count = 60

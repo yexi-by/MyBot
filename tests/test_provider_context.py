@@ -516,6 +516,30 @@ async def test_incomplete_normal_response_does_not_append_or_execute_calls(proto
         assert session.items == original and session.request_count == 1
 
 
+@pytest.mark.parametrize(
+    "calls",
+    [{}, "", False, 0, [None], [{"id": "call-1", "function": None}]],
+    ids=["object", "string", "boolean", "number", "null-call", "null-function"],
+)
+async def test_chat_null_handling_does_not_accept_malformed_tool_calls(calls):
+    def respond(request):
+        data = answer("chat_completions")
+        data["choices"][0]["message"]["tool_calls"] = calls
+        return httpx.Response(200, json=data)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        session = ModelSession(
+            ProviderSettings(protocol="chat_completions", model="test"),
+            "system",
+            "current",
+            client=client,
+        )
+        original = copy.deepcopy(session.items)
+        with pytest.raises(ProviderError, match="工具调用格式无效"):
+            await session.step([])
+        assert session.items == original and session.request_count == 1
+
+
 async def test_responses_failed_context_error_in_http_success_can_recover_once():
     bodies = []
 

@@ -477,6 +477,8 @@ class ModelSession:
             message = choices[0].get("message")
             if not isinstance(message, dict):
                 raise ProviderError("模型未返回 message")
+            # 可选字段的 null 按缺省处理，避免把空工具列表误判为协议错误或带入后续请求。
+            # content=null 是工具调用消息的有效正文表示，仍需保留。
             assistant = {
                 key: value
                 for key, value in message.items()
@@ -489,10 +491,11 @@ class ModelSession:
                     "reasoning_content",
                     "reasoning_details",
                 )
+                and (value is not None or key == "content")
             }
             assistant["role"] = "assistant"
             reply = ModelReply(text=str(message.get("content") or ""))
-            calls = message.get("tool_calls", [])
+            calls = assistant.get("tool_calls", [])
             if not isinstance(calls, list):
                 raise ProviderError("模型工具调用格式无效")
             for call in calls:
