@@ -1,6 +1,7 @@
 """NapCat 能力目录与类型化内置工具。发送只有一个入口，读写来源由可信上下文绑定。"""
 
 import base64
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -372,6 +373,17 @@ async def invoke(
         data = await context.napcat.call(action, params)
         return ToolResult.success(normalize_ids(data))
     except NapCatError as exc:
+        if effects and re.search(
+            r"Timeout: NTEvent\s+serviceAndMethod:NodeIKernelMsgService/sendMsg\s+"
+            r"ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate\b",
+            str(exc),
+        ):
+            # 上游已调用 sendMsg，只是没等到匹配的成功通知，不能断言未送达。
+            return ToolResult(
+                status="unknown",
+                error_type=f"NapCat:{exc.code}",
+                message="QQ 发送接口已调用，但等待发送成功回执超时；是否送达尚未确认，核实前不要重发。",
+            )
         return ToolResult.failure(str(exc), f"NapCat:{exc.code}")
     except NapCatUnavailable as exc:
         if not exc.submitted:
@@ -1328,10 +1340,13 @@ async def send_message(
         if result.status in ("ok", "unknown"):
             context.sent_messages.append(receipt)
         if result.status != "ok":
+            has_success = any(
+                isinstance(item, dict) and item.get("status") == "ok" for item in receipts
+            )
             return ToolResult(
                 status=result.status,
                 data={"receipts": receipts},
                 error_type=result.error_type,
-                message=result.message + " 已成功的前序部分不要重发。",
+                message=result.message + (" 已成功的前序部分不要重发。" if has_success else ""),
             )
     return ToolResult.success({"receipts": receipts})
