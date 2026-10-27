@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import re
 from collections.abc import Callable, Mapping
 
 from jsonschema import Draft202012Validator
@@ -22,6 +23,18 @@ from .contracts import (
 )
 from .settings import HarnessSettings, Policy
 
+INITIAL_TOOLS = frozenset(
+    {
+        "harness__discover_tools",
+        "harness__load_tools",
+        "qq__send_message",
+        "qq__read_media",
+        "qq__get_history",
+        "qq__get_message",
+    }
+)
+DISCOVERY_LOAD_LIMIT = 8
+
 
 class DiscoverInput(Model):
     query: str = Field(default="", description="需要的能力或关键词；空字符串列出当前可用工具")
@@ -32,6 +45,9 @@ class DiscoverInput(Model):
         description="分页起点；结果有 next_offset 时继续查询，避免遗漏后面的能力",
     )
     limit: int = Field(default=40, ge=1, description="本页工具数量；用 next_offset 继续读取")
+    auto_load: bool = Field(
+        default=True, description="自动加载本页最相关的前 8 个工具，下轮可直接调用"
+    )
 
 
 class LoadInput(Model):
@@ -63,6 +79,35 @@ def has_at_all(value: JsonValue) -> bool:
                 return True
         return any(has_at_all(item) for item in value.values())
     return isinstance(value, list) and any(has_at_all(item) for item in value)
+
+
+def search_tokens(query: str) -> set[str]:
+    """保留标识符和中文短词，并用双字片段召回未分词的中文请求。"""
+    tokens: set[str] = set()
+    for part in re.findall(r"[a-z0-9_]+(?:\.[a-z0-9_]+)*|[\u3400-\u9fff]+", query):
+        tokens.add(part)
+        if re.fullmatch(r"[\u3400-\u9fff]{3,}", part):
+            tokens.update(part[index : index + 2] for index in range(len(part) - 1))
+    return tokens - {"查看", "获取", "查询", "当前", "一下", "工具", "帮我", "需要"}
+
+
+def relevance(tool: ToolDefinition, query: str, tokens: set[str]) -> int:
+    name = tool.name.casefold()
+    fields = (
+        (name, 20),
+        (" ".join(tool.search_terms).casefold(), 16),
+        (tool.title.casefold(), 12),
+        (tool.category.casefold(), 6),
+        (tool.description.casefold(), 1),
+    )
+    score = sum(
+        max((weight for text, weight in fields if token in text), default=0) for token in tokens
+    )
+    if query == name:
+        score += 10000
+    elif name.startswith(query):
+        score += 5000
+    return score
 
 
 class ToolRegistry:
@@ -137,57 +182,73 @@ class ToolRegistry:
         return allowed, "" if allowed else "当前会话未开放此能力"
 
     def initial(self, context: ToolContext) -> None:
-        context.loaded_tools.update({"harness__discover_tools", "harness__load_tools"})
-        send = self.tools.get("qq__send_message")
-        if send and self.permitted(context.scope, send)[0]:
-            context.loaded_tools.add(send.name)
+        context.loaded_tools.update(
+            name
+            for name in INITIAL_TOOLS
+            if (tool := self.tools.get(name)) and self.permitted(context.scope, tool)[0]
+        )
 
     def definitions(self, context: ToolContext) -> list[JsonObject]:
         return [
-            self.definition(tool)
+            self.definition(tool, context.scope)
             for name in sorted(context.loaded_tools)
             if (tool := self.tools.get(name)) and self.permitted(context.scope, tool)[0]
         ]
 
-    @staticmethod
-    def definition(tool: ToolDefinition) -> JsonObject:
+    def definition(self, tool: ToolDefinition, scope: ConversationScope) -> JsonObject:
         parameters = copy.deepcopy(tool.parameters)
+        description = tool.description
         if tool.cross_scope:
             properties = parameters.get("properties")
             if isinstance(properties, dict):
-                properties["target_group_id"] = {
-                    "type": "string",
-                    "description": "仅在当前群策略明确允许跨群时指定目标群；省略表示当前会话",
-                }
-                properties["target_user_id"] = {
-                    "type": "string",
-                    "description": "仅在当前会话策略允许跨私聊时指定目标；省略表示当前会话",
-                }
-        return {"name": tool.name, "description": tool.description, "parameters": parameters}
+                policy = self.policy(scope)
+                if tool.scope in ("both", "group") and policy.cross_groups:
+                    properties["target_group_id"] = {
+                        "type": "string",
+                        "enum": [name for name in sorted(policy.cross_groups)],
+                        "description": "跨群目标；省略表示当前会话",
+                    }
+                if tool.scope in ("both", "private") and policy.cross_private:
+                    properties["target_user_id"] = {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "跨私聊目标 QQ 号；省略表示当前会话",
+                    }
+        if tool.name == "harness__discover_tools":
+            counts: dict[str, int] = {}
+            for candidate in self.tools.values():
+                if candidate.category != "harness" and self.permitted(scope, candidate)[0]:
+                    counts[candidate.category] = counts.get(candidate.category, 0) + 1
+            categories = "、".join(f"{name}（{count}）" for name, count in sorted(counts.items()))
+            description = (
+                "按能力、关键词或分类发现工具；默认自动加载本页前 8 个，下轮即可调用。"
+                f"当前可用 category（工具数）：{categories or '无'}。"
+            )
+        return {"name": tool.name, "description": description, "parameters": parameters}
 
     async def discover(self, context: ToolContext, arguments: JsonObject) -> ToolResult:
-        query = str(arguments.get("query", "")).casefold()
-        category = arguments.get("category", "")
+        request = DiscoverInput.model_validate(arguments)
+        query = request.query.strip().casefold()
+        tokens = search_tokens(query)
         allowed = [
             tool
             for tool in self.tools.values()
             if self.permitted(context.scope, tool)[0] and tool.category != "harness"
         ]
+        ranked = [
+            (relevance(tool, query, tokens) if query else 0, tool)
+            for tool in allowed
+            if not request.category or request.category == tool.category
+        ]
         selected = [
             tool
-            for tool in allowed
-            if (not category or category == tool.category)
-            and (
-                not query
-                or any(
-                    word in (tool.name + tool.description + tool.category).casefold()
-                    for word in query.split()
-                )
-            )
+            for score, tool in sorted(ranked, key=lambda item: (-item[0], item[1].name))
+            if not query or score > 0
         ]
-        request = DiscoverInput.model_validate(arguments)
         offset = request.offset
         page = selected[offset : offset + request.limit]
+        loaded = [tool.name for tool in page[:DISCOVERY_LOAD_LIMIT]] if request.auto_load else []
+        context.loaded_tools.update(loaded)
         return ToolResult.success(
             {
                 "tools": [
@@ -195,6 +256,7 @@ class ToolRegistry:
                     for t in page
                 ],
                 "categories": [category for category in sorted({t.category for t in allowed})],
+                "loaded": [name for name in loaded],
                 "total": len(selected),
                 "next_offset": offset + len(page) if offset + len(page) < len(selected) else None,
             }
@@ -208,6 +270,7 @@ class ToolRegistry:
                 return ToolResult.failure("工具不存在或未获当前会话授权", "PermissionDenied")
         if parsed.replace:
             context.loaded_tools.clear()
+            context.used_tools.clear()
             self.initial(context)
         context.loaded_tools.update(parsed.names)
         return ToolResult.success({"loaded": [name for name in sorted(context.loaded_tools)]})
@@ -262,6 +325,24 @@ class ToolRegistry:
                     )
         return None
 
+    def invalid_arguments(
+        self,
+        scope: ConversationScope,
+        tool: ToolDefinition,
+        message: str,
+        problems: JsonValue = None,
+    ) -> ToolResult:
+        return ToolResult(
+            status="error",
+            error_type="InvalidArguments",
+            message=message,
+            data={
+                "tool": tool.name,
+                "schema": self.definition(tool, scope)["parameters"],
+                "problems": problems,
+            },
+        )
+
     async def execute(self, context: ToolContext, name: str, arguments: JsonObject) -> ToolResult:
         tool = self.tools.get(name)
         if not tool:
@@ -309,18 +390,20 @@ class ToolRegistry:
                 )
         except SchemaError as error:
             path = ".".join(str(part) for part in error.absolute_schema_path)
-            return ToolResult.failure(f"参数不符合 schema；校验位置：{path}", "InvalidArguments")
+            return self.invalid_arguments(
+                context.scope, tool, f"参数不符合 schema；校验位置：{path}"
+            )
         except ValidationError as error:
-            problems = [
+            problems: list[JsonValue] = [
                 {"field": [str(part) for part in item["loc"]], "type": item["type"]}
                 for item in error.errors(include_input=False, include_url=False)
             ]
-            return ToolResult.failure(
-                "参数格式无效，请按字段错误修正", "InvalidArguments"
-            ).model_copy(update={"data": problems})
+            return self.invalid_arguments(
+                context.scope, tool, "参数格式无效，请按字段错误修正", problems
+            )
         except ValueError:
-            return ToolResult.failure(
-                "参数不符合工具 schema，请检查类型、必填字段和取值范围", "InvalidArguments"
+            return self.invalid_arguments(
+                context.scope, tool, "参数不符合工具 schema，请检查类型、必填字段和取值范围"
             )
         denied = self.authorize(context.scope, tool, args, target)
         if denied:
@@ -344,9 +427,33 @@ class ToolRegistry:
                 return ToolResult.failure("已达到本轮实际发送上限", "SendLimit")
             return None
 
+        def check_tool(child_name: str, child_arguments: JsonObject) -> ToolResult | None:
+            denied = recheck()
+            if denied:
+                return denied
+            child = self.tools.get(child_name)
+            if child is None or not self.permitted(context.scope, child)[0]:
+                return ToolResult.failure("聚合查询所需能力未获授权", "PermissionDenied")
+            child_args = copy.deepcopy(child_arguments)
+            try:
+                Draft202012Validator(child.parameters).validate(child_args)
+                if child.model:
+                    child_args = JSON_OBJECT.validate_python(
+                        child.model.model_validate(child_args).model_dump(mode="json")
+                    )
+            except SchemaError, ValueError:
+                return ToolResult.failure("聚合查询参数无效", "InvalidArguments")
+            return self.authorize(context.scope, child, child_args, target)
+
         context.target_scope = target
         context.recheck = recheck
+        previous_check_tool = context.check_tool
+        context.check_tool = check_tool
         context.effect_submitted = False
+        if tool.category != "harness":
+            if name in context.used_tools:
+                context.used_tools.remove(name)
+            context.used_tools.append(name)
         try:
             result = await tool.handler(context, args)
         except asyncio.CancelledError:
@@ -365,6 +472,7 @@ class ToolRegistry:
         finally:
             context.target_scope = None
             context.recheck = lambda: None
+            context.check_tool = previous_check_tool
         if result.status == "unknown" and tool.effects:
             context.unknown_effects.append(UnknownOperation(name, args, target))
         return result

@@ -213,8 +213,6 @@ def _entry(kind: str, content: JsonValue) -> JsonObject:
                 "messages": [_message(message) for message in messages],
                 "notice": data.get("历史限制") or "",
             }
-        if kind == "history" and "历史消息" in data:
-            return {"kind": "history", "message": _message(data["历史消息"])}
         if kind == "knowledge" and isinstance(files := data.get("当前知识库"), list):
             return {
                 "kind": "knowledge",
@@ -276,6 +274,15 @@ def project(session: ModelSession) -> list[JsonObject]:
                 entries.append(
                     {**base, "kind": "result", "call_id": call_id, "result": _result(item)}
                 )
+        elif (
+            kind == "history"
+            and (data := _parse(item.get("content"))) is not None
+            and isinstance(messages := data.get("历史消息"), list)
+        ):
+            # 模型按批次接收历史；控制台仍逐条展示，沿用现有消息视图。
+            entries.extend(
+                {**base, "kind": "history", "message": _message(message)} for message in messages
+            )
         else:
             entry = {**base, **_entry(kind, item.get("content"))}
             if kind == "summary" and note is not None:

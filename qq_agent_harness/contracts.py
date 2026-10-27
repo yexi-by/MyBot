@@ -80,6 +80,8 @@ class ToolContext:
     cancelled: Callable[[], bool] = lambda: False
     target_scope: ConversationScope | None = None
     loaded_tools: set[str] = field(default_factory=set)
+    # 实际进入 handler 的工具，按最近调用顺序保留；发现与加载不算实际使用。
+    used_tools: list[str] = field(default_factory=list)
     sent_messages: list[JsonObject] = field(default_factory=list)
     send_attempts: int = 0
     max_sends: int = 5
@@ -88,6 +90,9 @@ class ToolContext:
     read_workspace: Callable[[str], Awaitable[bytes]] | None = None
     write_workspace: Callable[[str, bytes], Awaitable[None]] | None = None
     recheck: Callable[[], ToolResult | None] = lambda: None
+    check_tool: Callable[[str, JsonObject], ToolResult | None] = lambda _name, _args: (
+        ToolResult.failure("聚合查询尚未建立授权上下文", "PermissionDenied")
+    )
 
     @property
     def target(self) -> ConversationScope:
@@ -111,6 +116,8 @@ class ToolDefinition:
     requires: tuple[str, ...] = ()
     # 面向控制台的简短名称；模型看到的仍是 description。
     title: str = ""
+    # 精准检索别名，不混入通用权限/安全说明，也不追加到模型描述。
+    search_terms: tuple[str, ...] = ()
 
     def public(self) -> JsonObject:
         return {

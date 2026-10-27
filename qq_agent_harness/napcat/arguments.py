@@ -25,6 +25,26 @@ class UserFresh(User):
     no_cache: bool = Field(default=False, description="是否刷新远端缓存")
 
 
+class MemberInfo(UserFresh):
+    include_profile: bool = Field(
+        default=True, description="同时读取 QQ 公开资料；需获准调用 get_stranger_info"
+    )
+    include_status: bool = Field(
+        default=False, description="同时读取在线状态；需获准调用 nc_get_user_status"
+    )
+
+
+class GroupMemberList(Fresh):
+    role: Literal["owner", "admin", "member"] | None = Field(
+        default=None, description="按群主、管理员或普通成员身份筛选"
+    )
+    query: str | None = Field(
+        default=None, max_length=100, description="按昵称、群名片、QQ 号或头衔模糊搜索"
+    )
+    limit: int = Field(default=50, ge=1, le=100, description="本页成员数，最多 100")
+    offset: int = Field(default=0, ge=0, description="筛选后列表的分页起点")
+
+
 class MemberBan(User):
     duration: int = Field(default=60, ge=0, description="禁言秒数，0 为解除禁言")
 
@@ -160,12 +180,44 @@ class Forward(MessageId):
     limit: int = Field(default=100, ge=1, description="本次读取条数；有 next_offset 时可继续")
 
 
-class ReadMedia(Forward):
+class ReadMedia(Model):
+    message_id: Id | None = Field(
+        default=None, description="当前会话中的消息 ID；读取消息或合并转发附件时填写"
+    )
+    user_id: str | None = Field(
+        default=None, pattern=r"^[1-9][0-9]*$", description="读取此 QQ 号的公开头像"
+    )
+    group_avatar: bool = Field(default=False, description="读取当前获准目标群的头像")
+    media_url: str | None = Field(
+        default=None,
+        min_length=1,
+        description="QQ 官方图床图片 URL，仅允许 qpic.cn、qlogo.cn、nt.qq.com.cn 及其子域名",
+    )
+    forward_path: list[str] = Field(
+        default_factory=list,
+        description="消息内嵌套转发路径，使用返回的 forward_paths；只适用于 message_id 来源",
+    )
+    offset: int = Field(default=0, ge=0, description="媒体分页起点")
     indexes: list[int] | None = Field(
         default=None, description="媒体段的零起点索引；先选取指定索引，不受前页数量限制"
     )
     include_forwards: bool = Field(default=True, description="是否展开当前消息中合并转发的媒体")
     limit: int = Field(default=20, ge=1, description="未指定 indexes 时读取的媒体数量")
+
+    @model_validator(mode="after")
+    def one_source(self) -> ReadMedia:
+        if (
+            sum(
+                (bool(self.message_id), bool(self.user_id), self.group_avatar, bool(self.media_url))
+            )
+            != 1
+        ):
+            raise ValueError(
+                "必须且只能指定 message_id、user_id、group_avatar 或 media_url 一种来源"
+            )
+        if self.forward_path and self.message_id is None:
+            raise ValueError("forward_path 只能与 message_id 一起使用")
+        return self
 
 
 class Folder(Model):

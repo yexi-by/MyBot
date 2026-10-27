@@ -17,9 +17,11 @@ from qq_agent_harness.contracts import (
     ToolResult,
     schema,
 )
+from qq_agent_harness.napcat.arguments import ReadMedia
 from qq_agent_harness.providers import ModelSession
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime
+from qq_agent_harness.settings import ParameterRule
 
 
 def tool_response(protocol, *identifiers):
@@ -248,8 +250,12 @@ async def test_chat_null_optional_fields_finish_after_send_and_survive_next_wake
             await runtime.close()
 
 
-async def test_only_new_history_is_added_and_persona_updates_without_losing_session(tmp_path):
+@pytest.mark.parametrize("protocol", ["chat_completions", "responses"])
+async def test_only_new_history_is_added_and_persona_updates_without_losing_session(
+    tmp_path, protocol
+):
     store = make_store(tmp_path)
+    store.settings.providers["test"].protocol = protocol
     store.settings.runtime.history_count = 60
     (tmp_path / "knowledge.md").write_text("KNOWLEDGE_ONE", encoding="utf-8")
     store.settings.knowledge_files = ["knowledge.md"]
@@ -261,7 +267,7 @@ async def test_only_new_history_is_added_and_persona_updates_without_losing_sess
     registry.add(ToolDefinition("qq__get_history", "历史", "messages.read", {}, read))
 
     class Hub(FakeHub):
-        history = [message("old")]
+        history = [message("older"), message("old"), message("old"), message("first")]
 
         async def get_history(self, scope, count):
             return self.history
@@ -271,7 +277,7 @@ async def test_only_new_history_is_added_and_persona_updates_without_losing_sess
 
     def respond(request):
         bodies.append(json.loads(request.content))
-        return httpx.Response(200, json=answer("responses", "REPLY_ONE"))
+        return httpx.Response(200, json=answer(protocol, "REPLY_ONE"))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         runtime = AgentRuntime(
@@ -279,23 +285,149 @@ async def test_only_new_history_is_added_and_persona_updates_without_losing_sess
         )
         try:
             await wake(runtime, message("first"))
+            field = "messages" if protocol == "chat_completions" else "input"
+            history_parts = [item for item in bodies[0][field] if "INPUT_older" in str(item)]
+            assert len(history_parts) == 1
+            history_data = json.loads(history_parts[0]["content"])
+            assert [item["message_id"] for item in history_data["历史消息"]] == ["older", "old"]
+            assert all("scope" not in item for item in history_data["历史消息"])
+            detail = runtime.inspect(message("first").scope.key, since=None, session_id="")
+            assert detail is not None and isinstance(entries := detail["entries"], list)
+            assert [
+                historical["message_id"]
+                for item in entries
+                if isinstance(item, dict)
+                and item.get("kind") == "history"
+                and isinstance(historical := item.get("message"), dict)
+            ] == ["older", "old"]
             identifier = sessions(runtime)[0]["session_id"]
             hub.history = [message("old"), message("first"), message("new-history")]
             (tmp_path / "persona.md").write_text("UPDATED_PERSONA", encoding="utf-8")
             await wake(runtime, message("second"))
             serialized = json.dumps(bodies[-1])
-            assert serialized.count("INPUT_old") == 1
+            assert serialized.count('INPUT_old\\"') == 1
+            assert serialized.count("INPUT_older") == 1
             assert serialized.count("INPUT_first") == 1
             assert serialized.count("INPUT_new-history") == 1
             assert serialized.count("KNOWLEDGE_ONE") == 1
-            assert bodies[-1]["input"][0]["content"].endswith("UPDATED_PERSONA")
+            assert bodies[-1][field][0]["content"].endswith("UPDATED_PERSONA")
             assert sessions(runtime)[0]["session_id"] == identifier
-            parts = bodies[-1]["input"]
-            previous = next(i for i, item in enumerate(parts) if item.get("type") == "message")
+            parts = bodies[-1][field]
+            previous = next(
+                i
+                for i, item in enumerate(parts)
+                if item.get("type") == "message" or item.get("role") == "assistant"
+            )
             new_history = next(
                 i for i, item in enumerate(parts) if "INPUT_new-history" in str(item)
             )
             assert new_history > previous
+        finally:
+            await runtime.close()
+
+
+async def test_next_wake_keeps_only_recent_used_tools_and_rechecks_permission(tmp_path):
+    store = make_store(tmp_path)
+    store.settings.runtime.max_model_rounds = 3
+    registry = ToolRegistry(lambda: store.settings)
+    names = [f"lookup__item_{index:02d}" for index in range(16)]
+
+    async def read(_context, _arguments):
+        return ToolResult.success({"found": True})
+
+    for name in names:
+        registry.add(ToolDefinition(name, "查询", "messages.read", schema(Empty), read))
+    bodies = []
+
+    def calls(*items):
+        return {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": f"{len(bodies)}-{index}",
+                    "name": name,
+                    "arguments": json.dumps(arguments),
+                }
+                for index, (name, arguments) in enumerate(items)
+            ],
+        }
+
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            payload = calls(("harness__load_tools", {"names": names}))
+        elif len(bodies) == 2:
+            payload = calls(*[(name, {}) for name in names[:14]])
+        elif len(bodies) == 4:
+            payload = calls((names[0], {}))
+        else:
+            payload = answer("responses", "完成")
+        return httpx.Response(200, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        runtime = AgentRuntime(
+            store,
+            registry,
+            FakeHub(),
+            session_factory=lambda *args: ModelSession(*args, client=client),
+        )
+        try:
+            await wake(runtime, message("first"))
+            await wake(runtime, message("second"))
+            resumed = {tool["name"] for tool in bodies[3]["tools"]}
+            assert resumed.intersection(names) == set(names[2:14])
+            store.settings.private.policy.tools[names[3]] = False
+            await wake(runtime, message("third"))
+            resumed = {tool["name"] for tool in bodies[5]["tools"]}
+            assert resumed.intersection(names) == {names[0], *names[4:14]}
+            assert all(item["last_outcome"] == "silent" for item in sessions(runtime))
+        finally:
+            await runtime.close()
+
+
+async def test_automatic_message_media_obeys_the_same_source_restrictions_as_tool_calls(tmp_path):
+    store = make_store(tmp_path)
+    policy = store.settings.private.policy
+    policy.tools["qq__read_media"] = True
+    policy.parameters["qq__read_media"] = {"user_id": ParameterRule(allowed=["20"])}
+    registry = ToolRegistry(lambda: store.settings)
+    selected = []
+
+    async def read(_context, _arguments):
+        raise AssertionError("模型不应主动读取媒体")
+
+    registry.add(
+        ToolDefinition(
+            "qq__read_media", "媒体", "media.read", schema(ReadMedia), read, model=ReadMedia
+        )
+    )
+
+    async def read_media(segments, _connection) -> JsonObject:
+        selected.append(segments)
+        return {"media": []}
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=answer("responses")))
+    ) as client:
+        runtime = AgentRuntime(
+            store,
+            registry,
+            FakeHub(),
+            session_factory=lambda *args: ModelSession(*args, client=client),
+        )
+        runtime.read_media = read_media
+        picture = {"type": "image", "data": {"url": "https://gchat.qpic.cn/image"}}
+        try:
+            first = message("first")
+            first.segments.append(picture)
+            await wake(runtime, first)
+            assert selected == [[]]
+            policy.parameters["qq__read_media"]["user_id"].allowed = [None, "20"]
+            second = message("second")
+            second.segments.append(picture)
+            await wake(runtime, second)
+            assert selected == [[], [picture]]
         finally:
             await runtime.close()
 

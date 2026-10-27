@@ -28,6 +28,7 @@ from .connection import (
     scoped_message,
 )
 from .media import MediaReader
+from .media_sources import non_message_segment
 
 BASELINE_VERSION = "v4.18.41"
 BASELINE_COMMIT = "859eb530c5801577633c2c3ae871d23586edf281"
@@ -96,14 +97,43 @@ ACTION_SPECS = (
     ),
     ActionSpec("get_recent_contact", "了解近期联系对象", a.Count, "contacts.read", "account"),
     ActionSpec("get_group_list", "了解机器人加入的群", a.Fresh, "account.read", "account"),
-    ActionSpec("get_group_info", "了解当前群名称与规模", a.Empty, "groups.read"),
-    ActionSpec("get_group_info_ex", "了解当前群的扩展资料", a.Empty, "groups.read"),
-    ActionSpec("get_group_detail_info", "查看当前群详细资料", a.Empty, "groups.read"),
-    ActionSpec("get_group_share_link", "取得当前群的分享链接", a.Empty, "groups.read"),
-    ActionSpec("get_group_member_list", "了解当前群成员", a.Fresh, "members.read"),
-    ActionSpec("get_group_member_info", "核实当前群某位成员的资料", a.UserFresh, "members.read"),
     ActionSpec(
-        "get_stranger_info", "核实指定 QQ 账号的公开资料", a.UserFresh, "members.read", "account"
+        "get_group_info",
+        "查询群名称、人数、容量和群主 QQ 号；群主缺失时按授权从成员列表补齐",
+        a.Empty,
+        "groups.read",
+    ),
+    ActionSpec(
+        "get_group_info_ex",
+        "读取群扩展协议标识；查群主或群介绍用 get_group_detail_info",
+        a.Empty,
+        "groups.read",
+    ),
+    ActionSpec(
+        "get_group_detail_info",
+        "查询群主 QQ 号、群介绍、加群问题和群规模，返回整理后的资料",
+        a.Empty,
+        "groups.read",
+    ),
+    ActionSpec("get_group_share_link", "取得当前群的分享链接", a.Empty, "groups.read"),
+    ActionSpec(
+        "get_group_member_list",
+        "按身份、昵称、群名片、QQ 号或头衔查找成员，返回分页列表；已知 QQ 号用 get_group_member_info",
+        a.GroupMemberList,
+        "members.read",
+    ),
+    ActionSpec(
+        "get_group_member_info",
+        "查询指定成员的群名片、头衔、群主/管理员身份、入群与最后发言时间；可按授权附带 QQ 公开资料和在线状态",
+        a.MemberInfo,
+        "members.read",
+    ),
+    ActionSpec(
+        "get_stranger_info",
+        "查询 QQ 账号全局公开资料：昵称、签名 longNick、注册时间 regTime、等级 qqLevel、性别与地区；群名片和群身份用 get_group_member_info",
+        a.UserFresh,
+        "members.read",
+        "account",
     ),
     ActionSpec("nc_get_user_status", "确认指定 QQ 账号在线状态", a.User, "members.read", "account"),
     ActionSpec("get_group_honor_info", "查看当前群荣誉信息", a.Honor, "groups.read"),
@@ -122,7 +152,7 @@ ACTION_SPECS = (
     ),
     ActionSpec(
         "get_group_ignored_notifies",
-        "查看当前群被忽略的通知",
+        "查看当前群被忽略的通知记录；仅查被忽略的加群申请用 get_group_ignore_add_request",
         a.Empty,
         "groups.read",
         inject_peer=False,
@@ -130,7 +160,7 @@ ACTION_SPECS = (
     ),
     ActionSpec(
         "get_group_ignore_add_request",
-        "查看当前群被忽略的加群请求",
+        "查看当前群被忽略的加群申请；一般入群请求与邀请用 get_group_system_msg",
         a.Empty,
         "groups.read",
         inject_peer=False,
@@ -179,7 +209,7 @@ ACTION_SPECS = (
     ),
     ActionSpec(
         "set_essence_msg",
-        "将当前群消息设为精华",
+        "将当前群消息设为精华；取消使用 delete_essence_msg",
         a.MessageId,
         "messages.manage",
         effects=True,
@@ -188,7 +218,7 @@ ACTION_SPECS = (
     ),
     ActionSpec(
         "delete_essence_msg",
-        "移除当前群消息的精华标记",
+        "移除当前群消息的精华标记；添加使用 set_essence_msg",
         a.MessageId,
         "messages.manage",
         effects=True,
@@ -207,7 +237,7 @@ ACTION_SPECS = (
     ),
     ActionSpec(
         "set_msg_emoji_like",
-        "对当前会话消息作表情回应",
+        "添加或取消消息的指定表情回应：set=true 添加，set=false 取消",
         a.Reaction,
         "messages.manage",
         "both",
@@ -274,13 +304,29 @@ ACTION_SPECS = (
     ActionSpec(
         "set_qq_profile", "修改机器人公开资料", a.QQProfile, "account.manage", "account", True
     ),
-    ActionSpec("fetch_custom_face", "查找机器人收藏的表情图片", a.Count, "account.read", "account"),
+    ActionSpec(
+        "fetch_custom_face",
+        "列出收藏表情的图片 URL，可用 read_media 的 media_url 查看；删除前先用 fetch_custom_face_detail 获取 resId",
+        a.Count,
+        "account.read",
+        "account",
+    ),
     ActionSpec(
         "get_collection_list", "查看机器人收藏内容", a.Collection, "account.read", "account"
     ),
     ActionSpec("get_profile_like", "查看机器人资料点赞情况", a.Signed, "account.read", "account"),
-    ActionSpec("get_ai_characters", "查看当前群可用 AI 语音角色", a.AICharacters, "media.read"),
-    ActionSpec("get_ai_record", "为当前群生成 QQ AI 语音资源", a.AIRecord, "media.read"),
+    ActionSpec(
+        "get_ai_characters",
+        "查询群 AI 语音角色 character ID；发送时直接在 send_message.parts 中使用 type=ai_voice、character、text",
+        a.AICharacters,
+        "media.read",
+    ),
+    ActionSpec(
+        "get_ai_record",
+        "生成 QQ AI 语音资源供读取处理；只需发送时直接用 send_message.parts 的 ai_voice，无需先生成资源",
+        a.AIRecord,
+        "media.read",
+    ),
     ActionSpec("get_qun_album_list", "浏览当前群相册", a.Empty, "albums.read"),
     ActionSpec("get_group_album_media_list", "浏览当前群相册中的媒体", a.AlbumMedia, "albums.read"),
     ActionSpec("translate_en2zh", "翻译不熟悉的英文词句", a.Words, "utilities.read", "account"),
@@ -347,11 +393,205 @@ async def invoke(
         )
 
 
+MEMBER_FIELDS = (
+    "user_id",
+    "nickname",
+    "card",
+    "role",
+    "title",
+    "sex",
+    "age",
+    "area",
+    "level",
+    "join_time",
+    "last_sent_time",
+    "title_expire_time",
+    "shut_up_timestamp",
+)
+
+
+def member_page(value: JsonValue, request: a.GroupMemberList) -> JsonObject:
+    if not isinstance(value, list):
+        raise ValueError("NapCat 未返回有效的群成员列表")
+    members = [item for item in value if isinstance(item, dict)]
+    query = (request.query or "").strip().casefold()
+    matched = [
+        member
+        for member in members
+        if (request.role is None or member.get("role") == request.role)
+        and (
+            not query
+            or any(
+                query in str(member.get(field, "")).casefold()
+                for field in ("nickname", "card", "user_id", "title")
+            )
+        )
+    ]
+    page = matched[request.offset : request.offset + request.limit]
+    end = request.offset + len(page)
+    return {
+        "total": len(members),
+        "matched": len(matched),
+        "items": [{key: member[key] for key in MEMBER_FIELDS if key in member} for member in page],
+        "next_offset": end if end < len(matched) else None,
+    }
+
+
+def group_summary(value: JsonValue, group_id: str) -> JsonObject:
+    if not isinstance(value, dict):
+        raise ValueError("NapCat 未返回有效的群资料")
+    fields = {
+        "group_name": ("group_name", "groupName"),
+        "member_count": ("member_count", "memberNum"),
+        "max_member_count": ("max_member_count", "maxMemberNum"),
+        "group_memo": ("group_memo", "groupMemo"),
+        "group_remark": ("group_remark",),
+        "group_all_shut": ("group_all_shut",),
+        "group_question": ("group_question", "groupQuestion"),
+        "group_create_time": ("group_create_time", "groupCreateTime"),
+        "group_class": ("group_class", "groupClassExt"),
+    }
+    result: JsonObject = {"group_id": group_id, "owner_id": None}
+    for key, aliases in fields.items():
+        for alias in aliases:
+            item = value.get(alias)
+            if isinstance(item, (str, int, float, bool)):
+                result[key] = item
+                break
+    for alias in ("owner_id", "ownerUin", "group_owner"):
+        owner = value.get(alias)
+        if (
+            isinstance(owner, (str, int))
+            and not isinstance(owner, bool)
+            and str(owner).isdigit()
+            and int(owner) > 0
+        ):
+            result["owner_id"] = str(owner)
+            break
+    return result
+
+
+async def additional_query(
+    context: ToolContext, action: str, arguments: JsonObject, params: JsonObject
+) -> ToolResult:
+    denied = context.check_tool("qq__" + action, arguments)
+    if denied is not None:
+        return denied
+    return await invoke(context, action, params)
+
+
+async def complete_group_owner(context: ToolContext, summary: JsonObject) -> ToolResult | None:
+    if summary.get("owner_id"):
+        return None
+    request = a.GroupMemberList(role="owner", limit=1)
+    response = await additional_query(
+        context,
+        "get_group_member_list",
+        JSON_OBJECT.validate_python(request.model_dump()),
+        {"group_id": context.target.peer_id, "no_cache": request.no_cache},
+    )
+    if response.status == "cancelled":
+        return response
+    if response.status != "ok":
+        summary["owner_lookup"] = {"status": response.status, "error_type": response.error_type}
+        return None
+    if not isinstance(response.data, list):
+        summary["owner_lookup"] = {"status": "error", "error_type": "InvalidResponse"}
+        return None
+    page = member_page(response.data, request)
+    members = page["items"]
+    if isinstance(members, list) and members and isinstance(members[0], dict):
+        owner = members[0].get("user_id")
+        if (
+            isinstance(owner, (str, int))
+            and not isinstance(owner, bool)
+            and str(owner).isdigit()
+            and int(owner) > 0
+        ):
+            summary["owner_id"] = str(owner)
+    if not summary["owner_id"]:
+        summary["owner_lookup"] = {"status": "unavailable"}
+    return None
+
+
+async def complete_member(
+    context: ToolContext, result: ToolResult, request: a.MemberInfo
+) -> ToolResult:
+    if not isinstance(result.data, dict):
+        raise ValueError("NapCat 未返回有效的群成员资料")
+    member = {key: result.data[key] for key in MEMBER_FIELDS if key in result.data}
+    member["avatar"] = {"tool": "qq__read_media", "user_id": request.user_id}
+    for include, action, field, args in (
+        (
+            request.include_profile,
+            "get_stranger_info",
+            "profile",
+            {"user_id": request.user_id, "no_cache": request.no_cache},
+        ),
+        (request.include_status, "nc_get_user_status", "status", {"user_id": request.user_id}),
+    ):
+        if not include:
+            continue
+        params = JSON_OBJECT.validate_python(args)
+        response = await additional_query(context, action, params, params)
+        if response.status == "cancelled":
+            return response
+        if response.status == "ok":
+            member[field] = response.data
+        else:
+            member[field + "_error"] = {
+                "status": response.status,
+                "error_type": response.error_type,
+            }
+    result.data = member
+    return result
+
+
+ACTION_TITLES = {
+    "get_group_info": "查询群基本资料",
+    "get_group_info_ex": "查询群扩展标识",
+    "get_group_detail_info": "查询群详细资料",
+    "get_group_member_list": "查找群成员",
+    "get_group_member_info": "查询成员资料",
+    "get_stranger_info": "查询 QQ 公开资料",
+    "get_group_ignored_notifies": "读取被忽略的群通知",
+    "get_group_ignore_add_request": "读取被忽略的加群请求",
+    "set_essence_msg": "设置精华消息",
+    "delete_essence_msg": "取消精华消息",
+    "set_msg_emoji_like": "添加或取消表情回应",
+    "fetch_custom_face": "浏览收藏表情",
+    "fetch_custom_face_detail": "读取收藏表情资源信息",
+    "delete_custom_face": "删除收藏表情",
+    "get_ai_characters": "查询 AI 语音角色",
+    "get_ai_record": "生成 AI 语音资源",
+    "get_emoji_likes": "读取群消息指定表情回应者",
+    "fetch_emoji_like": "分页读取指定表情回应者",
+    "set_group_todo": "设置群待办",
+    "complete_group_todo": "完成群待办",
+    "cancel_group_todo": "取消群待办",
+    "set_group_album_media_like": "点赞群相册媒体",
+    "cancel_group_album_media_like": "取消群相册媒体点赞",
+}
+
+
+ACTION_SEARCH_TERMS = {
+    "get_group_info": ("群主", "群名", "人数", "容量"),
+    "get_group_detail_info": ("群主", "群介绍", "加群问题"),
+    "get_group_member_list": ("找人", "群主", "管理员", "群成员", "昵称", "群名片"),
+    "get_group_member_info": ("群成员", "成员资料", "群名片", "群头衔", "身份"),
+    "get_stranger_info": ("账号资料", "签名", "QQ等级", "注册时间"),
+}
+
+
 def action_tool(spec: ActionSpec) -> ToolDefinition:
     async def handle(context: ToolContext, arguments: JsonObject) -> ToolResult:
         params = JSON_OBJECT.validate_python(
             spec.model.model_validate(arguments).model_dump(exclude_none=True)
         )
+        if spec.action == "get_group_member_list":
+            params = {"no_cache": params["no_cache"]}
+        elif spec.action == "get_group_member_info":
+            params = {"user_id": params["user_id"], "no_cache": params["no_cache"]}
         if spec.message_bound:
             await scoped_message(context.napcat, context.target, str(params["message_id"]))
         if spec.inject_peer:
@@ -362,11 +602,26 @@ def action_tool(spec: ActionSpec) -> ToolDefinition:
         result = await invoke(context, spec.action, params, effects=spec.effects)
         if result.status == "ok" and spec.filter_groups:
             result.data = filtered_groups(result.data, context.target.peer_id)
+        if result.status != "ok":
+            return result
+        if spec.action == "get_group_member_list":
+            result.data = member_page(result.data, a.GroupMemberList.model_validate(arguments))
+        elif spec.action in ("get_group_info", "get_group_detail_info"):
+            result.data = group_summary(result.data, context.target.peer_id)
+            interrupted = await complete_group_owner(context, result.data)
+            if interrupted:
+                return interrupted
+            avatar: JsonObject = {"tool": "qq__read_media", "group_avatar": True}
+            if context.target != context.scope:
+                avatar["target_group_id"] = context.target.peer_id
+            result.data["avatar"] = avatar
+        elif spec.action == "get_group_member_info":
+            return await complete_member(context, result, a.MemberInfo.model_validate(arguments))
         return result
 
     return ToolDefinition(
         spec.name,
-        f"当你需要{spec.summary}来理解对话或完成你判断有必要的行动时，主动调用此工具。典型场景包括对话提及相关对象而你缺少资料，或当前群策略允许且有必要调整对应状态。作用范围由当前会话及已授权目标绑定。",
+        spec.summary,
         spec.category,
         schema(spec.model),
         handle,
@@ -374,7 +629,8 @@ def action_tool(spec: ActionSpec) -> ToolDefinition:
         scope=spec.scope,
         cross_scope=spec.scope in ("both", "group", "private"),
         model=spec.model,
-        title=spec.summary,
+        title=ACTION_TITLES.get(spec.action, spec.summary),
+        search_terms=ACTION_SEARCH_TERMS.get(spec.action, ()),
     )
 
 
@@ -467,7 +723,6 @@ class MediaSelection:
 
 
 async def media_segments(context: ToolContext, request: a.ReadMedia) -> MediaSelection:
-    message = await scoped_message(context.napcat, context.target, request.message_id)
     result: list[JsonObject] = []
     errors: list[JsonValue] = []
     paths: JsonValue = []
@@ -482,22 +737,37 @@ async def media_segments(context: ToolContext, request: a.ReadMedia) -> MediaSel
                 if item.get("type") in ("image", "record", "video", "file"):
                     result.append(item)
                 else:
+                    if item.get("type") == "forward":
+                        data = item.get("data")
+                        # 有原生 ID 的转发统一由 forward_bundle 展开，不能同时读取内联副本。
+                        if (
+                            not request.include_forwards
+                            or isinstance(data, dict)
+                            and data.get("id")
+                        ):
+                            continue
                     for key in ("message", "content", "messages", "data"):
                         if key in item:
                             pending.append(item[key])
                             break
 
-    if not request.forward_path:
-        collect(message.get("message", []))
-    if request.include_forwards or request.forward_path:
-        bundle = await forward_bundle(
-            context, request.message_id, forward_path=request.forward_path, limit=None
-        )
-        collect(bundle.get("messages"))
-        paths = bundle.get("forward_paths", [])
-        failures = bundle.get("errors")
-        if isinstance(failures, list):
-            errors.extend(failures)
+    source = non_message_segment(context.target, request)
+    if source is not None:
+        result.append(source)
+    else:
+        assert request.message_id is not None
+        message = await scoped_message(context.napcat, context.target, request.message_id)
+        if not request.forward_path:
+            collect(message.get("message", []))
+        if request.include_forwards or request.forward_path:
+            bundle = await forward_bundle(
+                context, request.message_id, forward_path=request.forward_path, limit=None
+            )
+            collect(bundle.get("messages"))
+            paths = bundle.get("forward_paths", [])
+            failures = bundle.get("errors")
+            if isinstance(failures, list):
+                errors.extend(failures)
     total = len(result)
     indexes = request.indexes
     if indexes is not None:
@@ -581,11 +851,15 @@ EXTRA_SPECS = (
         True,
     ),
     ActionSpec(
-        "fetch_custom_face_detail", "查看收藏表情的原生资源信息", a.Count, "account.read", "account"
+        "fetch_custom_face_detail",
+        "查询收藏表情的 URL 与 resId；删除时把 resId 传给 delete_custom_face.res_id",
+        a.Count,
+        "account.read",
+        "account",
     ),
     ActionSpec(
         "delete_custom_face",
-        "删除机器人收藏的指定表情",
+        "删除收藏表情；res_id 必须使用 fetch_custom_face_detail 返回的 resId",
         a.DeleteFaces,
         "account.manage",
         "account",
@@ -593,14 +867,14 @@ EXTRA_SPECS = (
     ),
     ActionSpec(
         "get_emoji_likes",
-        "查看当前群消息的表情回应",
+        "按已知 emoji_id 读取群消息点亮该表情的用户列表；群聊/私聊分页用 fetch_emoji_like",
         a.ReactionList,
         "messages.read",
         message_bound=True,
     ),
     ActionSpec(
         "fetch_emoji_like",
-        "分页查看当前会话消息的表情回应",
+        "按已知 emojiId 分页查询群聊或私聊消息点亮该表情的用户列表；用返回的 cookie 续页，不枚举所有表情",
         a.EmojiPage,
         "messages.read",
         "both",
@@ -634,7 +908,7 @@ EXTRA_SPECS = (
     ),
     ActionSpec(
         "set_group_todo",
-        "将当前群消息设置为 QQ 群待办",
+        "将群消息设为 QQ 群待办；完成用 complete_group_todo，取消用 cancel_group_todo",
         a.GroupTodo,
         "groups.manage",
         effects=True,
@@ -642,7 +916,7 @@ EXTRA_SPECS = (
     ),
     ActionSpec(
         "complete_group_todo",
-        "完成当前群消息对应的 QQ 群待办",
+        "完成群消息对应的 QQ 群待办；创建用 set_group_todo，取消用 cancel_group_todo",
         a.GroupTodo,
         "groups.manage",
         effects=True,
@@ -650,7 +924,7 @@ EXTRA_SPECS = (
     ),
     ActionSpec(
         "cancel_group_todo",
-        "取消当前群消息对应的 QQ 群待办",
+        "取消群消息对应的 QQ 群待办；创建用 set_group_todo，标为完成用 complete_group_todo",
         a.GroupTodo,
         "groups.manage",
         effects=True,
@@ -658,14 +932,14 @@ EXTRA_SPECS = (
     ),
     ActionSpec(
         "set_group_album_media_like",
-        "点赞当前群相册媒体",
+        "点赞群相册媒体；取消使用 cancel_group_album_media_like",
         a.AlbumLike,
         "albums.manage",
         effects=True,
     ),
     ActionSpec(
         "cancel_group_album_media_like",
-        "取消当前群相册媒体点赞",
+        "取消群相册媒体点赞；添加使用 set_group_album_media_like",
         a.AlbumLike,
         "albums.manage",
         effects=True,
@@ -905,7 +1179,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         (
             "qq__read_media",
             "读取媒体内容",
-            "当你需要理解当前消息或转发中的图片、语音、视频和文件时，主动读取其实际内容。单个资源失败返回部分错误。",
+            "读取消息或转发中的媒体、指定 QQ 用户头像、当前群头像或 QQ 官方图床图片。message_id、user_id、group_avatar、media_url 四选一；单个资源失败返回部分错误。",
             a.ReadMedia,
             "media.read",
             read_media,
@@ -914,7 +1188,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         (
             "qq__send_message",
             "发送消息",
-            "当你判断有必要在 QQ 发言或交付文件时，主动调用此唯一发送入口。明确安排正文、引用、艾特及媒体顺序；普通模型正文不会发送，结果未知时不得重发。",
+            "在 QQ 发言或交付文件的唯一入口，按 parts 顺序发送正文、引用、艾特、媒体；AI 语音直接用 type=ai_voice、character、text。普通模型正文不会发送，结果未知时不得重发。",
             a.SendMessage,
             "messages.send",
             send,
@@ -933,12 +1207,15 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
                 cross_scope=True,
                 model=model,
                 title=title,
+                search_terms=("看图", "头像", "群头像", "图片", "语音", "视频", "收藏表情", "相册")
+                if name == "qq__read_media"
+                else (),
             )
         )
     tools.append(
         ToolDefinition(
             "qq__save_media_to_workspace",
-            "当你需要用沙箱代码分析或转换 QQ 媒体时，主动将当前会话中的一个媒体保存到共享工作区；先选定资源和文件名，避免覆盖无关成果。",
+            "将消息媒体、QQ 用户头像、群头像或 QQ 官方图床图片保存到共享工作区，用于代码分析和转换。与 read_media 共用四选一来源；指定一个资源和相对文件名，不覆盖已有文件。",
             "media.read",
             schema(SaveMedia),
             save_media,
@@ -947,6 +1224,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             model=SaveMedia,
             requires=("sandbox__write_file",),
             title="保存媒体到共享工作区",
+            search_terms=("保存图片", "下载头像", "保存媒体", "相册", "收藏表情"),
         )
     )
     tools.append(

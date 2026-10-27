@@ -16,6 +16,7 @@ from pydantic import JsonValue
 from ..contracts import JsonObject, NapCatConnection
 from ..settings import NapCatSettings
 from .connection import NapCatError, object_value
+from .media_sources import qq_media_url
 
 logger = logging.getLogger(__name__)
 
@@ -64,13 +65,21 @@ class MediaReader:
         self.semaphore = asyncio.Semaphore(self.settings.media_concurrency)
 
     async def download(self, source: str) -> tuple[bytes, str]:
+        return await self._download(source)
+
+    async def _download(self, source: str, *, qq_image: bool = False) -> tuple[bytes, str]:
         own_client = self.client is None
         client = self.client or httpx.AsyncClient(
             trust_env=False, timeout=self.settings.media_timeout
         )
         try:
-            url = httpx.URL(source)
+            try:
+                url = httpx.URL(source)
+            except httpx.InvalidURL as exc:
+                raise ValueError("媒体 URL 格式无效") from exc
             for _ in range(20):
+                if qq_image:
+                    url = qq_media_url(str(url))
                 if (
                     url.scheme not in ("http", "https")
                     or not url.host
@@ -89,13 +98,19 @@ class MediaReader:
                         location = response.headers.get("location")
                         if not location:
                             raise ValueError("媒体重定向缺少目标")
-                        url = url.join(location)
+                        try:
+                            url = url.join(location)
+                        except httpx.InvalidURL as exc:
+                            raise ValueError("媒体重定向 URL 格式无效") from exc
                         continue
                     if response.status_code >= 400:
                         raise ValueError(f"媒体 HTTP 下载失败（{response.status_code}）")
                     length = response.headers.get("content-length")
-                    if length and int(length) > self.settings.media_max_bytes:
-                        raise ValueError("媒体超过配置的体积上限")
+                    if length:
+                        if not length.isascii() or not length.isdecimal():
+                            raise ValueError("媒体 HTTP 长度格式无效")
+                        if int(length) > self.settings.media_max_bytes:
+                            raise ValueError("媒体超过配置的体积上限")
                     chunks: list[bytes] = []
                     size = 0
                     async for chunk in response.aiter_bytes():
@@ -103,9 +118,23 @@ class MediaReader:
                         if size > self.settings.media_max_bytes:
                             raise ValueError("媒体超过配置的体积上限")
                         chunks.append(chunk)
-                    return b"".join(chunks), response.headers.get(
-                        "content-type", "application/octet-stream"
-                    ).split(";")[0]
+                    content = b"".join(chunks)
+                    mime = response.headers.get("content-type", "application/octet-stream").split(
+                        ";"
+                    )[0]
+                    if qq_image:
+                        # QQ 图床可能返回 octet-stream；按图片头识别，拒绝 HTML 错误页与任意文件。
+                        if content.startswith(b"\x89PNG\r\n\x1a\n"):
+                            mime = "image/png"
+                        elif content.startswith(b"\xff\xd8\xff"):
+                            mime = "image/jpeg"
+                        elif content.startswith((b"GIF87a", b"GIF89a")):
+                            mime = "image/gif"
+                        elif content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+                            mime = "image/webp"
+                        else:
+                            raise ValueError("QQ 图床未返回支持的 PNG、JPEG、GIF 或 WebP 图片")
+                    return content, mime
             raise ValueError("媒体重定向次数超过限制")
         finally:
             if own_client:
@@ -157,6 +186,16 @@ class MediaReader:
         data = segment.get("data")
         if not isinstance(data, dict):
             raise ValueError("媒体消息段缺少 data")
+        if data.get("qq_image") is True:
+            url = data.get("url")
+            if not isinstance(url, str):
+                raise ValueError("QQ 图片缺少 URL")
+            try:
+                content, mime = await self._download(url, qq_image=True)
+            except httpx.HTTPError as exc:
+                # HTTP 异常可携带带签名的图床 URL，不回传原始异常正文。
+                raise ValueError("QQ 图片下载连接失败或超时") from exc
+            return MediaAsset("image", content, mime, "qq_http")
         original_path = str(data.get("path") or data.get("file") or "")
         has_url = isinstance(data.get("url"), str) and bool(data["url"])
         details = {

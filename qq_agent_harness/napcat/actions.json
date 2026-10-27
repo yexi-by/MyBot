@@ -113,14 +113,14 @@
       "action": "cancel_group_album_media_like",
       "status": "implemented",
       "tool": "qq__cancel_group_album_media_like",
-      "reason": "取消当前群相册媒体点赞",
+      "reason": "取消群相册媒体点赞；添加使用 set_group_album_media_like",
       "source": "packages/napcat-onebot/action/extends/SetGroupAlbumMediaLike.ts"
     },
     {
       "action": "cancel_group_todo",
       "status": "implemented",
       "tool": "qq__cancel_group_todo",
-      "reason": "取消当前群消息对应的 QQ 群待办",
+      "reason": "取消群消息对应的 QQ 群待办；创建用 set_group_todo，标为完成用 complete_group_todo",
       "source": "packages/napcat-onebot/action/packet/CancelGroupTodo.ts"
     },
     {
@@ -162,7 +162,7 @@
       "action": "complete_group_todo",
       "status": "implemented",
       "tool": "qq__complete_group_todo",
-      "reason": "完成当前群消息对应的 QQ 群待办",
+      "reason": "完成群消息对应的 QQ 群待办；创建用 set_group_todo，取消用 cancel_group_todo",
       "source": "packages/napcat-onebot/action/packet/CompleteGroupTodo.ts"
     },
     {
@@ -197,14 +197,14 @@
       "action": "delete_custom_face",
       "status": "implemented",
       "tool": "qq__delete_custom_face",
-      "reason": "删除机器人收藏的指定表情",
+      "reason": "删除收藏表情；res_id 必须使用 fetch_custom_face_detail 返回的 resId",
       "source": "packages/napcat-onebot/action/extends/CustomFace.ts"
     },
     {
       "action": "delete_essence_msg",
       "status": "implemented",
       "tool": "qq__delete_essence_msg",
-      "reason": "移除当前群消息的精华标记",
+      "reason": "移除当前群消息的精华标记；添加使用 set_essence_msg",
       "source": "packages/napcat-onebot/action/group/DelEssenceMsg.ts"
     },
     {
@@ -288,21 +288,21 @@
       "action": "fetch_custom_face",
       "status": "implemented",
       "tool": "qq__fetch_custom_face",
-      "reason": "查找机器人收藏的表情图片",
+      "reason": "列出收藏表情的图片 URL，可用 read_media 的 media_url 查看；删除前先用 fetch_custom_face_detail 获取 resId",
       "source": "packages/napcat-onebot/action/extends/FetchCustomFace.ts"
     },
     {
       "action": "fetch_custom_face_detail",
       "status": "implemented",
       "tool": "qq__fetch_custom_face_detail",
-      "reason": "查看收藏表情的原生资源信息",
+      "reason": "查询收藏表情的 URL 与 resId；删除时把 resId 传给 delete_custom_face.res_id",
       "source": "packages/napcat-onebot/action/extends/CustomFace.ts"
     },
     {
       "action": "fetch_emoji_like",
       "status": "implemented",
       "tool": "qq__fetch_emoji_like",
-      "reason": "分页查看当前会话消息的表情回应",
+      "reason": "按已知 emojiId 分页查询群聊或私聊消息点亮该表情的用户列表；用返回的 cookie 续页，不枚举所有表情",
       "source": "packages/napcat-onebot/action/extends/FetchEmojiLike.ts"
     },
     {
@@ -337,14 +337,14 @@
       "action": "get_ai_characters",
       "status": "implemented",
       "tool": "qq__get_ai_characters",
-      "reason": "查看当前群可用 AI 语音角色",
+      "reason": "查询群 AI 语音角色 character ID；发送时直接在 send_message.parts 中使用 type=ai_voice、character、text",
       "source": "packages/napcat-onebot/action/extends/GetAiCharacters.ts"
     },
     {
       "action": "get_ai_record",
       "status": "implemented",
       "tool": "qq__get_ai_record",
-      "reason": "为当前群生成 QQ AI 语音资源",
+      "reason": "生成 QQ AI 语音资源供读取处理；只需发送时直接用 send_message.parts 的 ai_voice，无需先生成资源",
       "source": "packages/napcat-onebot/action/group/GetAiRecord.ts"
     },
     {
@@ -393,7 +393,7 @@
       "action": "get_emoji_likes",
       "status": "implemented",
       "tool": "qq__get_emoji_likes",
-      "reason": "查看当前群消息的表情回应",
+      "reason": "按已知 emoji_id 读取群消息点亮该表情的用户列表；群聊/私聊分页用 fetch_emoji_like",
       "source": "packages/napcat-onebot/action/extends/GetEmojiLikes.ts"
     },
     {
@@ -484,7 +484,7 @@
       "action": "get_group_detail_info",
       "status": "implemented",
       "tool": "qq__get_group_detail_info",
-      "reason": "查看当前群详细资料",
+      "reason": "查询群主 QQ 号、群介绍、加群问题和群规模，返回整理后的资料",
       "source": "packages/napcat-onebot/action/group/GetGroupDetailInfo.ts"
     },
     {
@@ -519,28 +519,28 @@
       "action": "get_group_ignore_add_request",
       "status": "implemented",
       "tool": "qq__get_group_ignore_add_request",
-      "reason": "查看当前群被忽略的加群请求",
+      "reason": "查看当前群被忽略的加群申请；一般入群请求与邀请用 get_group_system_msg",
       "source": "packages/napcat-onebot/action/extends/GetGroupAddRequest.ts"
     },
     {
       "action": "get_group_ignored_notifies",
       "status": "implemented",
       "tool": "qq__get_group_ignored_notifies",
-      "reason": "查看当前群被忽略的通知",
+      "reason": "查看当前群被忽略的通知记录；仅查被忽略的加群申请用 get_group_ignore_add_request",
       "source": "packages/napcat-onebot/action/group/GetGroupIgnoredNotifies.ts"
     },
     {
       "action": "get_group_info",
       "status": "implemented",
       "tool": "qq__get_group_info",
-      "reason": "了解当前群名称与规模",
+      "reason": "查询群名称、人数、容量和群主 QQ 号；群主缺失时按授权从成员列表补齐",
       "source": "packages/napcat-onebot/action/group/GetGroupInfo.ts"
     },
     {
       "action": "get_group_info_ex",
       "status": "implemented",
       "tool": "qq__get_group_info_ex",
-      "reason": "了解当前群的扩展资料",
+      "reason": "读取群扩展协议标识；查群主或群介绍用 get_group_detail_info",
       "source": "packages/napcat-onebot/action/extends/GetGroupInfoEx.ts"
     },
     {
@@ -554,14 +554,14 @@
       "action": "get_group_member_info",
       "status": "implemented",
       "tool": "qq__get_group_member_info",
-      "reason": "核实当前群某位成员的资料",
+      "reason": "查询指定成员的群名片、头衔、群主/管理员身份、入群与最后发言时间；可按授权附带 QQ 公开资料和在线状态",
       "source": "packages/napcat-onebot/action/group/GetGroupMemberInfo.ts"
     },
     {
       "action": "get_group_member_list",
       "status": "implemented",
       "tool": "qq__get_group_member_list",
-      "reason": "了解当前群成员",
+      "reason": "按身份、昵称、群名片、QQ 号或头衔查找成员，返回分页列表；已知 QQ 号用 get_group_member_info",
       "source": "packages/napcat-onebot/action/group/GetGroupMemberList.ts"
     },
     {
@@ -736,7 +736,7 @@
       "action": "get_stranger_info",
       "status": "implemented",
       "tool": "qq__get_stranger_info",
-      "reason": "核实指定 QQ 账号的公开资料",
+      "reason": "查询 QQ 账号全局公开资料：昵称、签名 longNick、注册时间 regTime、等级 qqLevel、性别与地区；群名片和群身份用 get_group_member_info",
       "source": "packages/napcat-onebot/action/go-cqhttp/GetStrangerInfo.ts"
     },
     {
@@ -981,7 +981,7 @@
       "action": "set_essence_msg",
       "status": "implemented",
       "tool": "qq__set_essence_msg",
-      "reason": "将当前群消息设为精华",
+      "reason": "将当前群消息设为精华；取消使用 delete_essence_msg",
       "source": "packages/napcat-onebot/action/group/SetEssenceMsg.ts"
     },
     {
@@ -1023,7 +1023,7 @@
       "action": "set_group_album_media_like",
       "status": "implemented",
       "tool": "qq__set_group_album_media_like",
-      "reason": "点赞当前群相册媒体",
+      "reason": "点赞群相册媒体；取消使用 cancel_group_album_media_like",
       "source": "packages/napcat-onebot/action/extends/SetGroupAlbumMediaLike.ts"
     },
     {
@@ -1135,7 +1135,7 @@
       "action": "set_group_todo",
       "status": "implemented",
       "tool": "qq__set_group_todo",
-      "reason": "将当前群消息设置为 QQ 群待办",
+      "reason": "将群消息设为 QQ 群待办；完成用 complete_group_todo，取消用 cancel_group_todo",
       "source": "packages/napcat-onebot/action/packet/SetGroupTodo.ts"
     },
     {
@@ -1156,7 +1156,7 @@
       "action": "set_msg_emoji_like",
       "status": "implemented",
       "tool": "qq__set_msg_emoji_like",
-      "reason": "对当前会话消息作表情回应",
+      "reason": "添加或取消消息的指定表情回应：set=true 添加，set=false 取消",
       "source": "packages/napcat-onebot/action/msg/SetMsgEmojiLike.ts"
     },
     {
