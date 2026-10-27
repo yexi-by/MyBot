@@ -706,7 +706,7 @@ function ConversationDetail({ route }: { route: ConversationRoute }) {
                         onSelect: async () => {
                           const accepted = await confirm({
                             title: "删除群 " + route.id + "？",
-                            message: "Agent 将不再响应这个群，它的唤醒词、能力权限和参数限制会一并删除。",
+                            message: "Agent 将不再响应这个群，它的唤醒词、模型设置、能力权限和参数限制会一并删除。",
                             confirmLabel: "删除",
                             danger: true,
                           });
@@ -734,6 +734,25 @@ function ConversationDetail({ route }: { route: ConversationRoute }) {
           }
         >
           {kind === "private" ? "私聊未启用，Agent 不会回复任何私聊消息。" : "这个群未启用，Agent 不会响应群里的消息。"}
+        </Banner>
+      )}
+      {enabled && !hasSessionModel(state.draft, conversation) && route.tab !== "model" && (
+        <Banner
+          tone="danger"
+          icon={CircleAlert}
+          actions={
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() =>
+                void navigate(conversationRoute(kind, route.id, "model"), { replace: true, keepScroll: true })
+              }
+            >
+              选择模型
+            </Button>
+          }
+        >
+          还没有选好会话模型，Agent 不会回复这个会话。
         </Banner>
       )}
       <Tabs
@@ -791,6 +810,7 @@ export function ConversationsPage({ route }: { route: ConversationRoute }) {
     <div className="page">
       <PageHeader
         title="会话"
+        description="分别管理私聊和各群的启用开关、唤醒方式、会话模型与能力权限。"
         actions={
           <Button icon={Plus} onClick={() => setAdding(true)}>
             添加群
@@ -802,7 +822,7 @@ export function ConversationsPage({ route }: { route: ConversationRoute }) {
           <ConversationDetail key={route.kind + route.id} route={route} />
         ) : (
           <EmptyState icon={MessagesSquare} title="选择一个会话">
-            在左侧选择私聊或群，查看唤醒方式和能力权限。
+            在左侧选择私聊或群，查看唤醒方式、模型设置和能力权限。
           </EmptyState>
         )}
       </MasterDetail>

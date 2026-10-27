@@ -242,7 +242,12 @@ class ModelSession:
         self._compaction_failed = False
         self.media_bytes = 0
         self.action_state = {}
-        self.context_state = {**self.context_state, "request_count": 0}
+        self.context_state = {
+            **self.context_state,
+            "request_count": 0,
+            "model_request_count": 0,
+            "compaction_request_count": 0,
+        }
 
     def end_turn(self, outcome: str, interrupted_call: str | None = None) -> None:
         """中断也必须闭合协议；未开始的调用不执行，进行中的调用不伪称失败。"""

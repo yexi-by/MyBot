@@ -23,14 +23,21 @@ async function createFile(existing: string[]) {
     placeholder: "例如 knowledge/faq.md",
     initial: ".md",
     confirmLabel: "创建",
-    validate: (value) =>
-      !isText(value)
-        ? "文件名须以 .md 或 .txt 结尾"
-        : value.startsWith("/") || value.includes("..") || value.includes(":") || value.includes("\\")
-          ? "只能使用配置目录内的相对路径，用 / 分隔子目录"
-          : existing.includes(value)
-            ? "已有同名文件"
-            : "",
+    validate: (value) => {
+      const parts = value.split("/");
+      const leaf = parts.at(-1) ?? "";
+      if (!/^[^/]+\.(md|txt)$/i.test(leaf)) return "请填写文件名，并以 .md 或 .txt 结尾";
+      if (
+        value.startsWith("/") ||
+        value.includes(":") ||
+        value.includes("\\") ||
+        parts.some((part) => !part || part === "." || part === "..")
+      ) {
+        return "只能使用配置目录内的相对路径，用 / 分隔子目录";
+      }
+      if (existing.includes(value)) return "已有同名文件";
+      return "";
+    },
   });
   if (!path) return;
   try {

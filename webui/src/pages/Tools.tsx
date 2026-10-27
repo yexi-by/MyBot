@@ -310,6 +310,7 @@ function McpDetail({ name }: { name: string }) {
         suggestions={{ read_only_tools: discovered, effect_tools: discovered }}
         describe={{
           read_only_tools: (item) => discovered.find((tool) => tool.value === item)?.label,
+          effect_tools: (item) => discovered.find((tool) => tool.value === item)?.label,
         }}
       />
     </div>

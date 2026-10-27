@@ -17,7 +17,7 @@ import {
   Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { save, useConfig } from "../lib/config";
+import { getConfig, save, useConfig } from "../lib/config";
 import { groupTitle, scopeLabel } from "../lib/conversations";
 import { turnState } from "../lib/labels";
 import { navigate } from "../lib/navigation";
@@ -33,7 +33,7 @@ import { sessionRoute } from "../lib/sessions";
 import { setTheme } from "../lib/theme";
 import { object } from "../lib/types";
 import type { Path } from "../lib/types";
-import { setPalette, toast, useUi } from "../lib/ui";
+import { setConflictDialog, setPalette, toast, useUi } from "../lib/ui";
 import { focusField, navItems, settingsSections } from "../routes";
 import { fieldInstances } from "../schema/fields";
 
@@ -153,9 +153,23 @@ function useCommands(): Command[] {
         keywords: "save ctrl+s",
         icon: Save,
         run: () =>
-          void save().then((ok) => {
-            if (ok) toast("配置已保存", "success");
-          }),
+          void (async () => {
+            const before = getConfig();
+            if (!before.loaded) return;
+            if (before.conflict) {
+              setConflictDialog(true);
+              return;
+            }
+            if (!before.changed.length) {
+              toast("没有需要保存的修改");
+              return;
+            }
+            if (await save()) toast("配置已保存", "success");
+            else {
+              const after = getConfig();
+              if (after.issues.length) toast("有 " + after.issues.length + " 处需要修正后才能保存", "danger");
+            }
+          })(),
       },
       { id: "action:add-group", group: "操作", title: "添加群", icon: Hash, run: go("/conversations?add=1") },
       { id: "action:add-provider", group: "操作", title: "添加服务商", icon: Sparkles, run: go("/providers?add=1") },

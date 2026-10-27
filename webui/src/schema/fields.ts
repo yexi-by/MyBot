@@ -333,7 +333,7 @@ export const idleCompactionSection: SectionDef = {
       key: "enabled",
       label: "启用闲时压缩",
       type: "toggle",
-      help: "压缩进行中再次唤醒时，会等压缩完成后再回复。",
+      help: "压缩进行中收到新消息时，会立即中断压缩并保留原上下文直接回复。",
     },
     {
       key: "after_minutes",

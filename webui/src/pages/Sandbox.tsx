@@ -80,6 +80,10 @@ function Files({ busy }: { busy: boolean }) {
       );
       if (request !== sequence.current) return;
       setFiles((current) => offset ? [...(current ?? []), ...data.files] : data.files);
+      if (!offset) {
+        const visible = new Set(data.files.map((file) => file.path));
+        setSelected((current) => (current.size ? new Set([...current].filter((item) => visible.has(item))) : current));
+      }
       setNextOffset(data.next_offset);
       setTotal(data.total);
       setError("");
@@ -205,8 +209,8 @@ function Files({ busy }: { busy: boolean }) {
           </table>
         </div>
       )}
-      {files && <div className="card-body row wrap">
-        <span className="muted small">已显示 {files.length} / {total} 项</span>
+      {!error && all.length > 0 && <div className="card-body row wrap">
+        <span className="muted small">已显示 {all.length} / {total} 项</span>
         {nextOffset !== null && <Button size="sm" loading={loading} onClick={() => void load(nextOffset)}>加载下一页</Button>}
       </div>}
     </section>
