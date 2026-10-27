@@ -90,6 +90,8 @@ export interface Turn {
   started_at: number;
   rounds?: number;
   context?: TurnContext;
+  /** 闲时压缩：会话闲置后在后台压缩上下文，期间到达的唤醒排队等待。 */
+  idle?: boolean;
 }
 export type SessionState = "idle" | "queued" | "running" | "compacting";
 export interface RetainedSession {
@@ -136,7 +138,8 @@ interface EntryBase {
 /** 会话上下文中的一条可见内容；推理与媒体原始数据不在其中。 */
 export type SessionEntry = EntryBase &
   (
-    | { kind: "system" | "summary" | "transfer"; text: string }
+    | { kind: "system" | "transfer"; text: string }
+    | { kind: "summary"; text: string; origin?: "turn" | "idle" | ""; model?: string }
     | { kind: "knowledge"; files: { path: string; text: string }[] }
     | { kind: "history"; message: QQMessage }
     | { kind: "wake"; messages: QQMessage[]; notice: string }

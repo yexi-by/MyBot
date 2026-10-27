@@ -108,11 +108,11 @@ function useCommands(): Command[] {
     for (const [id, value] of Object.entries(object(config.providers)))
       list.push({
         id: "provider:" + id,
-        group: "模型连接",
+        group: "服务商",
         title: id,
-        detail: String(object(value).model || "未填写模型") + (config.active_provider === id ? " · 当前使用" : ""),
+        detail: String(object(value).base_url || "未填写接口地址"),
         icon: Sparkles,
-        run: go("/models/" + enc(id)),
+        run: go("/providers/" + enc(id)),
       });
     for (const id of Object.keys(object(config.mcp)))
       list.push({ id: "mcp:" + id, group: "MCP 服务", title: id, icon: Plug, run: go("/tools/mcp/" + enc(id)) });
@@ -158,7 +158,7 @@ function useCommands(): Command[] {
           }),
       },
       { id: "action:add-group", group: "操作", title: "添加群", icon: Hash, run: go("/conversations?add=1") },
-      { id: "action:add-provider", group: "操作", title: "添加模型连接", icon: Sparkles, run: go("/models?add=1") },
+      { id: "action:add-provider", group: "操作", title: "添加服务商", icon: Sparkles, run: go("/providers?add=1") },
       { id: "action:light", group: "操作", title: "切换到浅色主题", keywords: "theme", icon: Sun, run: () => setTheme("light") },
       { id: "action:dark", group: "操作", title: "切换到深色主题", keywords: "theme", icon: Moon, run: () => setTheme("dark") },
       { id: "action:system", group: "操作", title: "主题跟随系统", keywords: "theme", icon: Monitor, run: () => setTheme("system") },

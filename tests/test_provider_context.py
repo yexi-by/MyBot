@@ -18,7 +18,7 @@ from qq_agent_harness.providers import (
     ModelSession,
     ProviderError,
 )
-from qq_agent_harness.settings import ProviderSettings
+from qq_agent_harness.settings import ModelEndpoint
 
 
 def answer(protocol, text="完成", **extra):
@@ -93,7 +93,7 @@ async def test_initial_background_is_chunked_before_first_normal_request(protoco
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(
+            ModelEndpoint(
                 protocol=protocol, model="test", max_context_tokens=4096, reasoning_effort="high"
             ),
             "固定人格",
@@ -141,7 +141,7 @@ async def test_compaction_keeps_recent_protocol_group_and_excludes_reasoning(pro
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(protocol=protocol, model="test", max_context_tokens=8192),
+            ModelEndpoint(protocol=protocol, model="test", max_context_tokens=8192),
             "system",
             "CURRENT",
             client=client,
@@ -207,7 +207,7 @@ async def test_usage_counts_cached_input_once_and_reasoning_output_once(protocol
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(protocol=protocol, model="test", max_context_tokens=4096),
+            ModelEndpoint(protocol=protocol, model="test", max_context_tokens=4096),
             "system",
             "current",
             client=client,
@@ -245,7 +245,7 @@ async def test_summary_failure_preserves_original_context(protocol, invalid):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(protocol=protocol, model="test", max_context_tokens=4096),
+            ModelEndpoint(protocol=protocol, model="test", max_context_tokens=4096),
             "system",
             "CURRENT",
             client=client,
@@ -266,7 +266,7 @@ async def test_summary_cancellation_is_atomic():
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(model="test", max_context_tokens=4096),
+            ModelEndpoint(model="test", max_context_tokens=4096),
             "system",
             "CURRENT",
             client=client,
@@ -284,7 +284,7 @@ async def test_fixed_current_and_tool_schemas_fail_without_any_http_request():
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(model="test", max_context_tokens=4096),
+            ModelEndpoint(model="test", max_context_tokens=4096),
             "system",
             "CURRENT " * 2000,
             client=client,
@@ -295,7 +295,7 @@ async def test_fixed_current_and_tool_schemas_fail_without_any_http_request():
             await session.step([])
         assert session.items == original and session.request_count == 0
         session = ModelSession(
-            ProviderSettings(model="test", max_context_tokens=4096),
+            ModelEndpoint(model="test", max_context_tokens=4096),
             "system",
             "current",
             client=client,
@@ -314,7 +314,7 @@ async def test_large_image_uses_independent_budget_and_is_preserved():
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(model="test", max_context_tokens=16384),
+            ModelEndpoint(model="test", max_context_tokens=16384),
             "system",
             "current",
             client=client,
@@ -350,7 +350,7 @@ async def test_explicit_overflow_compacts_once_and_never_replays_tools(protocol)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(protocol=protocol, model="test", max_context_tokens=8192),
+            ModelEndpoint(protocol=protocol, model="test", max_context_tokens=8192),
             "system",
             "current",
             client=client,
@@ -386,7 +386,7 @@ async def test_unrelated_errors_do_not_trigger_compaction(status, code, message)
         return httpx.Response(status, json={"error": {"code": code, "message": message}})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        session = ModelSession(ProviderSettings(model="test"), "system", "current", client=client)
+        session = ModelSession(ModelEndpoint(model="test"), "system", "current", client=client)
         session.add_background("background")
         with pytest.raises(ProviderError, match=f"HTTP {status}"):
             await session.step([])
@@ -403,7 +403,7 @@ async def test_summary_requests_share_turn_limit_and_keep_original_on_partial_fa
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(model="test", max_context_tokens=4096),
+            ModelEndpoint(model="test", max_context_tokens=4096),
             "system",
             "current",
             client=client,
@@ -425,7 +425,7 @@ async def test_incomplete_tool_group_cannot_be_sent_or_summarized():
         return httpx.Response(200, json=call_answer("responses", "pending"))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        session = ModelSession(ProviderSettings(model="test"), "system", "current", client=client)
+        session = ModelSession(ModelEndpoint(model="test"), "system", "current", client=client)
         await session.step([])
         session.add_background("more background")
         with pytest.raises(ProviderError, match="尚未完整回填"):
@@ -450,7 +450,7 @@ async def test_usage_calibration_can_correct_conservative_text_overestimate():
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        session = ModelSession(ProviderSettings(model="test"), "system", "a" * 6000, client=client)
+        session = ModelSession(ModelEndpoint(model="test"), "system", "a" * 6000, client=client)
         await session.step([])
         assert session.context_state["input_tokens"] == 1025
         assert session.context_state["usage_source"] == "api_calibrated"
@@ -473,7 +473,7 @@ async def test_high_fixed_occupancy_can_summarize_recent_group_as_a_whole():
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(model="test", max_context_tokens=4096),
+            ModelEndpoint(model="test", max_context_tokens=4096),
             "system",
             "CURRENT-" + "a" * 5000,
             client=client,
@@ -508,7 +508,7 @@ async def test_incomplete_normal_response_does_not_append_or_execute_calls(proto
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(protocol=protocol, model="test"), "system", "current", client=client
+            ModelEndpoint(protocol=protocol, model="test"), "system", "current", client=client
         )
         original = copy.deepcopy(session.items)
         with pytest.raises(ProviderError):
@@ -529,7 +529,7 @@ async def test_chat_null_handling_does_not_accept_malformed_tool_calls(calls):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(protocol="chat_completions", model="test"),
+            ModelEndpoint(protocol="chat_completions", model="test"),
             "system",
             "current",
             client=client,
@@ -559,7 +559,7 @@ async def test_responses_failed_context_error_in_http_success_can_recover_once()
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        session = ModelSession(ProviderSettings(model="test"), "system", "current", client=client)
+        session = ModelSession(ModelEndpoint(model="test"), "system", "current", client=client)
         session.add_background("background " * 300)
         reply = await session.step([])
         assert reply.text == "done" and session.request_count == 3

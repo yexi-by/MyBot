@@ -23,9 +23,11 @@ export function accessScope(key: string, groups: Map<string, GroupInfo>) {
   };
 }
 
-export function conversationRoute(kind: "group" | "private", id: string, permissions = false) {
+export type ConversationTab = "general" | "model" | "permissions";
+
+export function conversationRoute(kind: "group" | "private", id: string, tab: ConversationTab = "general") {
   return (
     (kind === "private" ? "/conversations/private" : "/conversations/group/" + encodeURIComponent(id)) +
-    (permissions ? "?tab=permissions" : "")
+    (tab === "general" ? "" : "?tab=" + tab)
   );
 }

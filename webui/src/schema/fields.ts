@@ -13,6 +13,7 @@ export type FieldType =
   | "tags"
   | "checks"
   | "map"
+  | "provider"
   | "model";
 export interface Option {
   value: string;
@@ -39,6 +40,8 @@ export interface FieldDef {
   typed?: boolean;
   /** secret：提供随机生成。 */
   generate?: boolean;
+  /** provider：空值也是有效选择时的说明，例如“使用会话模型”。 */
+  emptyLabel?: string;
   hidden?: (config: ObjectValue, base: Path) => boolean;
 }
 export interface SectionDef {
@@ -246,51 +249,6 @@ export const providerApiSection: SectionDef = {
   ],
 };
 
-export const providerModelSection: SectionDef = {
-  id: "provider-model",
-  title: "模型",
-  fields: [
-    {
-      key: "model",
-      label: "模型名称",
-      type: "model",
-      help: "列表来自接口返回的模型；读取失败时可以直接输入。",
-    },
-    {
-      key: "reasoning_effort",
-      label: "思考等级",
-      type: "select",
-      nullable: true,
-      placeholder: "不发送（使用接口默认）",
-      options: ["none", "minimal", "low", "medium", "high", "xhigh", "max"].map(
-        (value) => ({ value, label: value }),
-      ),
-      help: "只在模型支持时选择。不支持的取值会让请求直接失败，不会自动降级。",
-    },
-    {
-      key: "max_context_tokens",
-      label: "上下文窗口",
-      type: "number",
-      min: 4096,
-      integer: true,
-      unit: "token",
-      help: "填写模型的总上下文长度，不是回复长度上限。",
-    },
-    {
-      key: "modalities",
-      label: "支持的输入类型",
-      type: "checks",
-      options: [
-        { value: "text", label: "文本" },
-        { value: "image", label: "图片" },
-        { value: "audio", label: "音频" },
-        { value: "video", label: "视频" },
-      ],
-      help: "只勾选模型实际支持的类型；收到不支持的媒体时会明确报错。",
-    },
-  ],
-};
-
 export const providerRequestSection: SectionDef = {
   id: "provider-request",
   title: "请求",
@@ -307,6 +265,136 @@ export const providerRequestSection: SectionDef = {
       label: "请求附带 store: false",
       type: "toggle",
       help: "要求服务端不保存对话记录。接口不认识该参数时请关闭。",
+    },
+  ],
+};
+
+const reasoningField: FieldDef = {
+  key: "reasoning_effort",
+  label: "思考等级",
+  type: "select",
+  nullable: true,
+  placeholder: "不发送（使用接口默认）",
+  options: ["none", "minimal", "low", "medium", "high", "xhigh", "max"].map((value) => ({
+    value,
+    label: value,
+  })),
+  help: "只在模型支持时选择。不支持的取值会让请求直接失败，不会自动降级。",
+};
+
+export const sessionModelSection: SectionDef = {
+  id: "session-model",
+  title: "会话模型",
+  description: "这个会话回复时使用的模型。",
+  fields: [
+    { key: "provider", label: "服务商", type: "provider", placeholder: "选择服务商" },
+    {
+      key: "name",
+      label: "模型名称",
+      type: "model",
+      help: "列表来自服务商接口；读取失败时可以直接输入。",
+    },
+    reasoningField,
+    {
+      key: "max_context_tokens",
+      label: "上下文预算",
+      type: "number",
+      min: 4096,
+      integer: true,
+      unit: "token",
+      help: "不要超过模型的总上下文长度。设得更小会让会话更早压缩，每次唤醒发送的内容也更少。",
+    },
+    {
+      key: "compaction_target_percent",
+      label: "压缩目标",
+      type: "number",
+      min: 10,
+      max: 70,
+      integer: true,
+      unit: "%",
+      help: "上下文达到预算的 80% 时，用会话模型把旧资料压缩到预算的这个比例。",
+    },
+    {
+      key: "modalities",
+      label: "支持的输入类型",
+      type: "checks",
+      options: [
+        { value: "text", label: "文本" },
+        { value: "image", label: "图片" },
+        { value: "audio", label: "音频" },
+        { value: "video", label: "视频" },
+      ],
+      help: "只勾选模型实际支持的类型；收到不支持的媒体时会明确报错。",
+    },
+  ],
+};
+
+const idleOff = (config: ObjectValue, base: Path) => getAt(config, [...base, "enabled"]) !== true;
+
+export const idleCompactionSection: SectionDef = {
+  id: "idle-compaction",
+  title: "闲时压缩",
+  description:
+    "会话闲置后，把人格和知识库以外的全部内容压缩成一份摘要，不保留原文。服务商的缓存过期后，再次唤醒只需按摘要计费。",
+  fields: [
+    {
+      key: "enabled",
+      label: "启用闲时压缩",
+      type: "toggle",
+      help: "压缩进行中再次唤醒时，会等压缩完成后再回复。",
+    },
+    {
+      key: "after_minutes",
+      label: "闲置多久后压缩",
+      type: "number",
+      min: 1,
+      max: 10080,
+      integer: true,
+      unit: "分钟",
+      help: "从一轮结束时开始计时，每段闲置只压缩一次。建议略长于服务商的缓存保留时间。",
+      hidden: idleOff,
+    },
+    {
+      key: "min_tokens",
+      label: "最少上下文",
+      type: "number",
+      min: 0,
+      integer: true,
+      unit: "token",
+      help: "上下文低于这个量时不压缩，避免为很短的对话付压缩费用。",
+      hidden: idleOff,
+    },
+  ],
+};
+
+const compactorOff = (config: ObjectValue, base: Path) => idleOff(config, base.slice(0, -1));
+const ownCompactorOff = (config: ObjectValue, base: Path) =>
+  compactorOff(config, base) || !getAt(config, [...base, "provider"]);
+
+export const compactionModelSection: SectionDef = {
+  id: "compaction-model",
+  title: "压缩模型",
+  description: "生成闲时压缩摘要的模型，可以选用比会话模型便宜的模型。",
+  fields: [
+    {
+      key: "provider",
+      label: "服务商",
+      type: "provider",
+      emptyLabel: "使用会话模型",
+      help: "选择“使用会话模型”时，摘要请求不发送思考等级。",
+      hidden: compactorOff,
+    },
+    { key: "name", label: "模型名称", type: "model", hidden: ownCompactorOff },
+    { ...reasoningField, hidden: ownCompactorOff },
+    {
+      key: "max_context_tokens",
+      label: "上下文窗口",
+      type: "number",
+      min: 4096,
+      integer: true,
+      unit: "token",
+      help: "压缩模型的总上下文长度；会话内容超过时分段摘要。",
+      hidden: ownCompactorOff,
     },
   ],
 };
@@ -534,20 +622,40 @@ export function defaultPolicy(): ObjectValue {
     max_sends_per_turn: 5,
   };
 }
+export function defaultSessionModel(): ObjectValue {
+  return {
+    provider: "",
+    name: "",
+    reasoning_effort: null,
+    max_context_tokens: 128000,
+    compaction_target_percent: 50,
+    modalities: ["text", "image"],
+  };
+}
+export function defaultIdleCompaction(): ObjectValue {
+  return {
+    enabled: false,
+    after_minutes: 10,
+    min_tokens: 16000,
+    model: { provider: "", name: "", reasoning_effort: null, max_context_tokens: 128000 },
+  };
+}
 export function defaultConversation(): ObjectValue {
-  return { enabled: false, keywords: [], policy: defaultPolicy() };
+  return {
+    enabled: false,
+    keywords: [],
+    model: defaultSessionModel(),
+    idle_compaction: defaultIdleCompaction(),
+    policy: defaultPolicy(),
+  };
 }
 export function defaultProvider(): ObjectValue {
   return {
     protocol: "responses",
     base_url: "https://api.openai.com/v1",
     api_key: "",
-    model: "",
-    max_context_tokens: 128000,
-    reasoning_effort: null,
     timeout: 120,
     proxy: null,
-    modalities: ["text", "image"],
     store_supported: true,
   };
 }
@@ -563,6 +671,16 @@ export function defaultMcp(): ObjectValue {
     timeout: 60,
     read_only_tools: [],
   };
+}
+
+/** 私聊和各群在配置中的路径与内容；私聊所有对象共用一套。 */
+export function conversationEntries(config: ObjectValue): [Path, ObjectValue][] {
+  return [
+    [["private"], object(config.private)],
+    ...Object.entries(object(config.groups)).map(
+      ([id, value]) => [["groups", id], object(value)] as [Path, ObjectValue],
+    ),
+  ];
 }
 
 export interface FieldInstance {
@@ -585,9 +703,8 @@ export function fieldInstances(config: ObjectValue): FieldInstance[] {
   add(serverSection, ["server"], "/settings/server");
   add(sandboxSection, ["sandbox"], "/sandbox/settings");
   for (const id of Object.keys(object(config.providers))) {
-    const route = "/models/" + enc(id);
+    const route = "/providers/" + enc(id);
     add(providerApiSection, ["providers", id], route);
-    add(providerModelSection, ["providers", id], route);
     add(providerRequestSection, ["providers", id], route);
   }
   for (const id of Object.keys(object(config.mcp))) {
@@ -605,30 +722,29 @@ export function fieldInstances(config: ObjectValue): FieldInstance[] {
   for (const [base, route] of conversations) {
     add(wakeSection, base, route);
     add(limitsSection, [...base, "policy"], route);
+    add(sessionModelSection, [...base, "model"], route + "?tab=model");
+    add(idleCompactionSection, [...base, "idle_compaction"], route + "?tab=model");
+    add(compactionModelSection, [...base, "idle_compaction", "model"], route + "?tab=model");
   }
   return output;
+}
+
+/** 会话内路径所在的标签页查询串。 */
+function conversationTab(rest: Path): string {
+  const [section, key] = rest.map(String);
+  if (section === "model" || section === "idle_compaction") return "?tab=model";
+  if (section === "policy" && ["categories", "tools", "parameters"].includes(key))
+    return "?tab=permissions";
+  return "";
 }
 
 /** 配置路径对应的页面；用于错误提示和保存记录的跳转。 */
 export function routeForPath(path: Path): string {
   const [head, id] = path;
   if (head === "groups" && id !== undefined)
-    return (
-      "/conversations/group/" +
-      enc(String(id)) +
-      (path[2] === "policy" && ["categories", "tools", "parameters"].includes(String(path[3]))
-        ? "?tab=permissions"
-        : "")
-    );
-  if (head === "private")
-    return (
-      "/conversations/private" +
-      (path[1] === "policy" && ["categories", "tools", "parameters"].includes(String(path[2]))
-        ? "?tab=permissions"
-        : "")
-    );
-  if (head === "providers" && id !== undefined) return "/models/" + enc(String(id));
-  if (head === "active_provider") return "/models";
+    return "/conversations/group/" + enc(String(id)) + conversationTab(path.slice(2));
+  if (head === "private") return "/conversations/private" + conversationTab(path.slice(1));
+  if (head === "providers" && id !== undefined) return "/providers/" + enc(String(id));
   if (head === "mcp" && id !== undefined) return "/tools/mcp/" + enc(String(id));
   if (head === "persona_file" || head === "knowledge_files") return "/prompts";
   if (head === "sandbox") return "/sandbox/settings";
@@ -647,9 +763,18 @@ const conversationParts: Record<string, string> = {
   categories: "能力权限",
   tools: "工具权限",
   parameters: "参数限制",
+  model: "会话模型",
+  idle_compaction: "闲时压缩",
 };
 function scoped(prefix: string, rest: Path, name: string | undefined) {
-  if (name) return prefix + " · " + name;
+  // 会话模型和压缩模型的字段同名，带上所属部分以便区分。
+  const part =
+    rest[0] === "model"
+      ? "会话模型"
+      : rest[0] === "idle_compaction" && rest[1] === "model"
+        ? "压缩模型"
+        : "";
+  if (name) return prefix + (part ? " · " + part : "") + " · " + name;
   const key = String(rest[0] === "policy" ? (rest[1] ?? "") : (rest[0] ?? ""));
   return conversationParts[key] ? prefix + " · " + conversationParts[key] : prefix;
 }
@@ -662,10 +787,9 @@ export function fieldLabel(config: ObjectValue, path: Path): string {
   const [head, id] = path;
   if (head === "groups") return scoped("群 " + id, path.slice(2), name);
   if (head === "private") return scoped("私聊", path.slice(1), name);
-  if (head === "providers") return scoped("模型连接 " + id, [], name);
+  if (head === "providers") return scoped("服务商 " + id, [], name);
   if (head === "mcp") return scoped("MCP " + id, path.slice(2), name);
   if (name) return name;
-  if (head === "active_provider") return "当前模型连接";
   if (head === "persona_file") return "人格文件";
   if (head === "knowledge_files") return "知识库文件";
   return path.join(".");
@@ -717,9 +841,13 @@ export function validateClient(config: ObjectValue): { path: Path; message: stri
         )
           errors.push({ path: [...path, "max_length"], message: "最大长度须为不小于 0 的整数" });
       }
-  const active = String(config.active_provider || "");
-  if (active && !Object.hasOwn(object(config.providers), active))
-    errors.push({ path: ["active_provider"], message: "当前模型连接不存在，请重新选择" });
+  const providers = object(config.providers);
+  for (const [base, conversation] of conversationEntries(config))
+    for (const part of [["model"], ["idle_compaction", "model"]]) {
+      const provider = getAt(conversation, [...part, "provider"]);
+      if (typeof provider === "string" && provider && !Object.hasOwn(providers, provider))
+        errors.push({ path: [...base, ...part, "provider"], message: "所选服务商不存在，请重新选择" });
+    }
   const persona = config.persona_file;
   if (typeof persona !== "string" || !persona.trim())
     errors.push({ path: ["persona_file"], message: "请选择人格文件" });

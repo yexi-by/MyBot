@@ -98,6 +98,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         watcher = asyncio.create_task(watch_config())
+        runtime.start()
         if connect_mcp:
             await mcp.start()
         try:
@@ -394,7 +395,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     async def models(provider_id: str, refresh: bool = False) -> JsonObject:
         config = store.settings.providers.get(provider_id)
         if config is None:
-            raise HTTPException(404, "请先保存模型连接")
+            raise HTTPException(404, "请先保存服务商")
         cached = model_cache.get(provider_id)
         if cached and cached[0] > time.monotonic() and not refresh:
             return {"models": [model for model in cached[1]]}

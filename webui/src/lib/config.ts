@@ -126,7 +126,13 @@ export async function loadConfig() {
 }
 
 export function change(path: Path, value: Json | undefined) {
-  const draft = setAt(state.draft, path, value);
+  changeMany([[path, value]]);
+}
+
+/** 一次写入多个字段，合并为一次校验和自动保存。 */
+export function changeMany(entries: [Path, Json | undefined][]) {
+  let draft = state.draft;
+  for (const [path, value] of entries) draft = setAt(draft, path, value);
   emit({
     draft,
     changed: diff(state.base, draft),

@@ -1,5 +1,4 @@
 # QQ Agent Harness；不要提交真实密钥。
-active_provider = "default"
 persona_file = "persona.md"
 knowledge_files = ["knowledge.md"]
 
@@ -25,16 +24,12 @@ max_pending_messages = 20
 tool_result_char_limit = 24000
 activity_limit = 200
 
+# 服务商只负责连接；模型在各会话的 model 和 idle_compaction.model 中选择。
 [providers.default]
 protocol = "responses"
 base_url = "https://api.openai.com/v1"
 api_key = ""
-model = ""
-max_context_tokens = 128000
-# 思考等级未配置时不发送；按接口实际支持可选 none/minimal/low/medium/high/xhigh/max。
-# reasoning_effort = "high"
 timeout = 120.0
-modalities = ["text", "image"]
 store_supported = true
 
 [groups]
@@ -42,6 +37,30 @@ store_supported = true
 [private]
 enabled = false
 keywords = []
+
+# 会话模型；未填写模型名称时该会话不回复。
+[private.model]
+provider = "default"
+name = ""
+# 思考等级未配置时不发送；按接口实际支持可选 none/minimal/low/medium/high/xhigh/max。
+# reasoning_effort = "high"
+# 上下文预算：达到 80% 时用会话模型把旧资料压缩到预算的 compaction_target_percent。
+max_context_tokens = 128000
+compaction_target_percent = 50
+modalities = ["text", "image"]
+
+# 闲时压缩：闲置 after_minutes 分钟且上下文不少于 min_tokens 时，
+# 把人格和知识库以外的全部内容压缩成一份摘要，不保留原文。
+[private.idle_compaction]
+enabled = false
+after_minutes = 10
+min_tokens = 16000
+
+# 压缩模型；provider 留空时使用会话模型。
+[private.idle_compaction.model]
+provider = ""
+name = ""
+max_context_tokens = 128000
 
 [private.policy]
 allow_at_all = false

@@ -94,6 +94,13 @@ class ConfigStore:
                     }
                 )
             raise ConfigError(issues) from None
+        if missing := settings.missing_providers():
+            raise ConfigError(
+                [
+                    {"path": [part for part in path], "message": "所选服务商不存在"}
+                    for path in missing
+                ]
+            )
         for name in settings.persona_paths:
             path = self.resolve_file(name)
             if path == self.path:

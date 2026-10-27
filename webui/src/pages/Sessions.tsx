@@ -479,9 +479,12 @@ function StandaloneEntry({
     return (
       <section className="session-standalone session-digest">
         <div className="entry-head">
-          <span className="entry-label">压缩摘要</span>
+          <span className="entry-label">{entry.origin === "idle" ? "闲时压缩摘要" : "压缩摘要"}</span>
           <span className="tiny muted">
-            {entry.turn !== null ? "第 " + entry.turn + " 轮时生成，" : ""}替代了更早的原文
+            {entry.origin === "idle"
+              ? (entry.turn !== null ? "第 " + entry.turn + " 轮后闲置时生成，" : "闲置时生成，") + "替代了此前的全部对话原文"
+              : (entry.turn !== null ? "第 " + entry.turn + " 轮时生成，" : "") + "替代了更早的原文"}
+            {entry.model ? " · " + entry.model : ""}
           </span>
           {entry.at !== null && <time className="tiny muted num entry-time">{formatClock(entry.at)}</time>}
         </div>
@@ -493,7 +496,7 @@ function StandaloneEntry({
       <details className="session-standalone">
         <summary>
           <span className="entry-label">切换模型前的资料</span>
-          <span className="tiny muted">模型连接切换时转入的可见历史</span>
+          <span className="tiny muted">切换服务商或模型时转入的可见历史</span>
         </summary>
         <pre className="entry-pre">{entry.text}</pre>
       </details>

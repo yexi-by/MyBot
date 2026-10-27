@@ -10,9 +10,9 @@ import { runtimeResource, useResource } from "./lib/resource";
 import { cycleTheme, themeLabels, useTheme } from "./lib/theme";
 import { activeSaver, setConflictDialog, setNav, setPalette, toast, useUi } from "./lib/ui";
 import { ConversationsPage } from "./pages/Conversations";
-import { ModelsPage } from "./pages/Models";
 import { OverviewPage } from "./pages/Overview";
 import { PromptsPage } from "./pages/Prompts";
+import { ProvidersPage } from "./pages/Providers";
 import { SandboxPage } from "./pages/Sandbox";
 import { SessionsPage } from "./pages/Sessions";
 import { SettingsPage } from "./pages/Settings";
@@ -195,8 +195,8 @@ function Page({ route }: { route: Route }) {
       return <SessionsPage route={route} />;
     case "conversations":
       return <ConversationsPage route={route} />;
-    case "models":
-      return <ModelsPage id={route.id} />;
+    case "providers":
+      return <ProvidersPage id={route.id} />;
     case "prompts":
       return <PromptsPage path={route.path} />;
     case "tools":

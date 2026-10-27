@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 MAX_RETAINED_SESSIONS = 100
 MAX_RETAINED_BYTES = 256 * 1024 * 1024
 MAX_MESSAGE_IDS = 2048
+# 闲时压缩按固定间隔检查；同时进行的压缩数量有上限，不占用会话并发名额。
+IDLE_SCAN_SECONDS = 15
+MAX_IDLE_COMPACTIONS = 2
 
 
 class SessionBusy(RuntimeError):
@@ -49,6 +52,7 @@ class SessionBusy(RuntimeError):
 class ConversationSession:
     # None 表示上下文已在控制台重置，下次唤醒时重新建立；防重记录仍随对象保留。
     model: ModelSession | None
+    scope: ConversationScope
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     message_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     wake_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
@@ -58,6 +62,9 @@ class ConversationSession:
     updated_at: float = 0
     outcome: str = ""
     retained_bytes: int = 0
+    # 每段闲置只压缩一次，下一轮结束后重新计时；用量在轮次结束时估算一次。
+    idle_compacted: bool = False
+    idle_tokens: int = 0
 
     def remember(self, identifiers: list[str], *, wake: bool = False) -> None:
         for values in (self.message_ids, self.wake_ids) if wake else (self.message_ids,):
@@ -112,6 +119,8 @@ class AgentRuntime:
         self.stopping: set[str] = set()
         self.seen: OrderedDict[tuple[str, str], float] = OrderedDict()
         self.sessions: OrderedDict[str, ConversationSession] = OrderedDict()
+        self.compacting: set[str] = set()
+        self.idle_task: asyncio.Task[None] | None = None
         self.closing = False
         self.read_workspace: Callable[[str], Awaitable[bytes]] | None = None
         self.write_workspace: Callable[[str, bytes], Awaitable[None]] | None = None
@@ -195,17 +204,25 @@ class AgentRuntime:
             self.turns[key] = {"scope_key": key, "state": "queued", "started_at": time.time()}
             self.workers[key] = asyncio.create_task(self._worker(key))
 
-    async def _worker(self, key: str) -> None:
+    async def _worker(self, key: str, *, idle: bool = False) -> None:
+        # 闲时压缩占用会话的处理位置：期间到达的唤醒只排队，压缩结束后再开始本轮。
+        compacting = idle
         try:
+            if idle:
+                await self._compact_idle(key)
+            compacting = False
             while self.pending.get(key):
                 async with self.semaphore:
                     batch = self.pending.pop(key, [])
                     if batch:
                         await self._turn(batch)
         except asyncio.CancelledError:
-            self.record(
-                key, "turn", "本轮已停止；已提交的外部操作不会被自动撤销", status="cancelled"
-            )
+            if compacting:
+                self.record(key, "compaction", "闲时压缩已停止，原上下文保留", status="cancelled")
+            else:
+                self.record(
+                    key, "turn", "本轮已停止；已提交的外部操作不会被自动撤销", status="cancelled"
+                )
         except Exception as exc:
             self.record(key, "error", f"会话连接或运行失败：{type(exc).__name__}", status="error")
         finally:
@@ -213,6 +230,7 @@ class AgentRuntime:
             self.turns.pop(key, None)
             self.workers.pop(key, None)
             self.stopping.discard(key)
+            self.compacting.discard(key)
             await self._trim_sessions()
 
     async def _trim_sessions(self) -> None:
@@ -228,14 +246,109 @@ class AgentRuntime:
                 await retained.model.close()
             self.record(idle, "session", "内存容量达到上限，已回收最久未使用的空闲会话")
 
+    def start(self) -> None:
+        """启动闲时压缩检查；由应用生命周期调用。"""
+        if self.idle_task is None:
+            self.idle_task = asyncio.create_task(self._idle_loop())
+
+    async def _idle_loop(self) -> None:
+        while True:
+            await asyncio.sleep(IDLE_SCAN_SECONDS)
+            self.compact_idle_sessions()
+
+    def compact_idle_sessions(self, now: float | None = None) -> list[str]:
+        """为闲置够久且上下文够大的会话启动压缩；返回本次启动的会话键。"""
+        if self.closing:
+            return []
+        now = time.time() if now is None else now
+        started: list[str] = []
+        for key, retained in self.sessions.items():
+            if len(self.compacting) >= MAX_IDLE_COMPACTIONS:
+                break
+            if key in self.workers or retained.model is None or retained.idle_compacted:
+                continue
+            settings = self.store.settings.conversation(retained.scope).idle_compaction
+            if (
+                not settings.enabled
+                or now - retained.updated_at < settings.after_minutes * 60
+                or retained.idle_tokens < settings.min_tokens
+            ):
+                continue
+            retained.idle_compacted = True
+            self.compacting.add(key)
+            self.turns[key] = {
+                "scope_key": key,
+                "state": "compacting",
+                "started_at": time.time(),
+                "idle": True,
+                "context": retained.model.context_state,
+            }
+            self.workers[key] = asyncio.create_task(self._worker(key, idle=True))
+            started.append(key)
+        return started
+
+    async def _compact_idle(self, key: str) -> None:
+        """压缩失败、超时都保留原上下文，随后照常处理等待中的唤醒。"""
+        retained = self.sessions.get(key)
+        try:
+            if retained is None or (session := retained.model) is None:
+                return
+            config = self.store.settings
+            endpoint = config.compaction_endpoint(retained.scope)
+            if endpoint is None:
+                self.record(key, "compaction", "未配置有效模型，跳过闲时压缩", status="error")
+                return
+            self.record(
+                key,
+                "compaction",
+                f"会话已闲置，正在用 {endpoint.model} 压缩上下文",
+                status="running",
+            )
+            try:
+                async with asyncio.timeout(config.runtime.turn_timeout):
+                    before, after = await session.compact_idle(
+                        endpoint, request_limit=config.runtime.max_model_rounds
+                    )
+            except TimeoutError:
+                self.record(key, "compaction", "闲时压缩超时，原上下文保留", status="timeout")
+                return
+            except ProviderError as exc:
+                # 消息由协议层生成固定脱敏文本，不含上游响应正文。
+                self.record(key, "compaction", f"闲时压缩失败，原上下文保留：{exc}", status="error")
+                return
+            except Exception as exc:
+                self.record(
+                    key,
+                    "compaction",
+                    f"闲时压缩发生 {type(exc).__name__}，原上下文保留",
+                    status="error",
+                )
+                logger.error(
+                    "idle_compaction_failed scope=%s error_type=%s", key, type(exc).__name__
+                )
+                return
+            if retained.knowledge and not session.contains("knowledge"):
+                # 知识库原文此前已在轮内压缩时并入摘要；下次唤醒重新补入当前原文。
+                retained.knowledge = []
+            retained.idle_tokens = after
+            retained.retained_bytes = retained.measure()
+            self.record(
+                key,
+                "compaction",
+                f"闲时压缩完成（{endpoint.model}）：{before} → {after} token",
+                status="completed",
+            )
+        finally:
+            self.compacting.discard(key)
+
     async def _turn(self, batch: list[Message]) -> None:
         current = batch[-1]
         scope = current.scope
         key = scope.key
         config = self.store.settings
-        provider = config.providers.get(config.active_provider)
-        if provider is None or not provider.model:
-            self.record(key, "error", "未配置有效模型，不启动推理")
+        endpoint = config.session_endpoint(scope)
+        if endpoint is None:
+            self.record(key, "error", "会话未选择有效模型，不启动推理")
             return
         turn_id = uuid.uuid4().hex
         self.turns[key] = {
@@ -361,16 +474,16 @@ class AgentRuntime:
                 )
                 persona = self.store.resolve_file(config.persona_file).read_text(encoding="utf-8")
                 if retained is None or retained.model is None:
-                    session = self.session_factory(provider, compose_prompt(persona), conversation)
+                    session = self.session_factory(endpoint, compose_prompt(persona), conversation)
                     if retained is None:
-                        retained = ConversationSession(session)
+                        retained = ConversationSession(session, scope)
                         self.sessions[key] = retained
                     else:
                         retained.model = session
                     context.unknown_effects = retained.unknown_effects
                 else:
                     session = retained.model
-                    await session.configure(provider, compose_prompt(persona))
+                    await session.configure(endpoint, compose_prompt(persona))
                     session.begin_turn(conversation)
                 self.sessions.move_to_end(key)
                 self.turns[key]["session_id"] = retained.session_id
@@ -543,6 +656,8 @@ class AgentRuntime:
                 retained.updated_at = time.time()
                 retained.outcome = outcome
                 retained.retained_bytes = retained.measure()
+                retained.idle_compacted = False
+                retained.idle_tokens = session.idle_pressure()
                 self.sessions.move_to_end(key)
 
     async def cancel(self, key: str) -> bool:
@@ -585,6 +700,10 @@ class AgentRuntime:
 
     async def close(self) -> None:
         self.closing = True
+        if self.idle_task is not None:
+            self.idle_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.idle_task
         await asyncio.gather(*(self.cancel(key) for key in list(self.workers)))
         sessions, self.sessions = self.sessions, OrderedDict()
         await asyncio.gather(

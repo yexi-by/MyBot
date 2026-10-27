@@ -9,6 +9,7 @@ import {
   Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import type { ConversationTab } from "./lib/conversations";
 import { navigate, prefersReducedMotion } from "./lib/navigation";
 import type { Path } from "./lib/types";
 import { fieldId, routeForPath } from "./schema/fields";
@@ -36,9 +37,9 @@ export type Route =
       page: "conversations";
       kind: "group" | "private" | null;
       id: string;
-      tab: "general" | "permissions";
+      tab: ConversationTab;
     }
-  | { page: "models"; id: string }
+  | { page: "providers"; id: string }
   | { page: "prompts"; path: string }
   | { page: "tools"; view: "catalog" | "mcp" | "napcat"; id: string; tool: string }
   | { page: "sandbox"; view: "overview" | "settings" }
@@ -62,14 +63,16 @@ export function parseRoute(location: string): Route {
   // 会话键形如 `机器人:group:群号`，整体编码为一段路径。
   if (head === "sessions" && parts.length <= 2) return { page: "sessions", key: decode(second) };
   if (head === "conversations") {
-    const tab = query.get("tab") === "permissions" ? "permissions" : "general";
+    const requested = query.get("tab");
+    const tab: ConversationTab =
+      requested === "permissions" || requested === "model" ? requested : "general";
     if (second === "private" && parts.length === 2)
       return { page: "conversations", kind: "private", id: "", tab };
     if (second === "group" && third && parts.length === 3)
       return { page: "conversations", kind: "group", id: decode(third), tab };
     if (!second) return { page: "conversations", kind: null, id: "", tab };
   }
-  if (head === "models" && parts.length <= 2) return { page: "models", id: decode(second) };
+  if (head === "providers" && parts.length <= 2) return { page: "providers", id: decode(second) };
   if (head === "prompts" && parts.length === 1)
     return { page: "prompts", path: query.get("path") ?? "" };
   if (head === "tools") {
@@ -99,7 +102,7 @@ export function legacyRedirect(location: string): string | null {
   switch (url.pathname) {
     case "/connections": {
       const provider = query.get("provider");
-      return provider ? "/models/" + enc(provider) : "/models";
+      return provider ? "/providers/" + enc(provider) : "/providers";
     }
     case "/groups": {
       const id = query.get("id");
@@ -121,6 +124,9 @@ export function legacyRedirect(location: string): string | null {
     case "/runtime":
       return "/";
     default:
+      // 模型页已改为服务商页，模型改在各会话中选择。
+      if (url.pathname === "/models" || url.pathname.startsWith("/models/"))
+        return "/providers" + url.pathname.slice("/models".length);
       return null;
   }
 }
@@ -135,7 +141,7 @@ export const navItems: NavItem[] = [
   { path: "/", label: "概览", icon: LayoutDashboard, page: "overview" },
   { path: "/sessions", label: "上下文", icon: ScrollText, page: "sessions" },
   { path: "/conversations", label: "会话", icon: MessagesSquare, page: "conversations" },
-  { path: "/models", label: "模型", icon: Sparkles, page: "models" },
+  { path: "/providers", label: "服务商", icon: Sparkles, page: "providers" },
   { path: "/prompts", label: "提示词", icon: FileText, page: "prompts" },
   { path: "/tools", label: "工具", icon: Wrench, page: "tools" },
   { path: "/sandbox", label: "沙箱", icon: Box, page: "sandbox" },

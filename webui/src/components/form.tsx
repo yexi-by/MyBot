@@ -581,6 +581,10 @@ export function ModelPicker({
   const ticket = useRef(0);
   const load = async (refresh = false) => {
     const current = ++ticket.current;
+    if (!providerId) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const result = await get<{ models: string[] }>(
@@ -599,14 +603,14 @@ export function ModelPicker({
         tone: "error",
         text:
           error instanceof ApiError && error.status === 404
-            ? "连接保存后才能读取模型列表"
+            ? "服务商保存后才能读取模型列表"
             : "无法读取模型列表：" + errorMessage(error) + "。仍可直接输入模型名称",
       });
     } finally {
       if (current === ticket.current) setLoading(false);
     }
   };
-  // 接口地址、密钥等保存后重新读取（跳过服务端缓存），新建的连接保存后也会自动读取。
+  // 接口地址、密钥等保存后重新读取（跳过服务端缓存），新建的服务商保存后也会自动读取。
   const saved = useConfig().base;
   const savedKey = JSON.stringify(
     ["protocol", "base_url", "api_key", "proxy", "timeout"].map((key) =>
@@ -641,13 +645,51 @@ export function ModelPicker({
         loading={loading}
         emptyText="没有可选模型，可直接输入"
         freeTextHint="没有匹配的模型，将使用输入的名称"
-        onRefresh={() => void load(true)}
+        onRefresh={providerId ? () => void load(true) : undefined}
         refreshLabel="重新读取模型列表"
       />
-      {status.text && (
-        <p className={"field-status" + (status.tone === "error" ? " is-error" : "")}>{status.text}</p>
+      {!providerId ? (
+        <p className="field-status">先选择服务商，再从它的模型列表中选择</p>
+      ) : (
+        status.text && (
+          <p className={"field-status" + (status.tone === "error" ? " is-error" : "")}>{status.text}</p>
+        )
       )}
     </>
+  );
+}
+
+/** 服务商选择：选项来自配置中的服务商；已删除的旧值保留显示，由校验提示重新选择。 */
+function ProviderSelect({
+  id,
+  def,
+  value,
+  onChange,
+  invalid,
+}: {
+  id: string;
+  def: FieldDef;
+  value: string;
+  onChange: (value: Json) => void;
+  invalid: boolean;
+}) {
+  const providers = Object.keys(object(useConfig().draft.providers));
+  const options = [
+    ...(def.emptyLabel !== undefined ? [{ value: "", label: def.emptyLabel }] : []),
+    ...providers.map((name) => ({ value: name, label: name })),
+    ...(value && !providers.includes(value) ? [{ value, label: value + "（已不存在）" }] : []),
+  ];
+  return (
+    <Combobox
+      id={id}
+      label={def.label}
+      value={value}
+      invalid={invalid}
+      placeholder={def.placeholder}
+      options={options}
+      emptyText="还没有服务商，请先在服务商页添加"
+      onChange={onChange}
+    />
   );
 }
 
@@ -753,16 +795,29 @@ export function ConfigField({
       return shell(<ChecksInput id={id} value={value} onChange={update} options={def.options ?? []} />);
     case "map":
       return shell(<KeyValueInput id={id} value={value} onChange={update} />);
-    case "model":
+    case "provider":
       return shell(
-        <ModelPicker
+        <ProviderSelect
           id={id}
-          providerId={String(base[1] ?? "")}
+          def={def}
           value={typeof value === "string" ? value : ""}
           onChange={update}
           invalid={!!error}
         />,
       );
+    case "model": {
+      // 模型列表来自同一组设置里选中的服务商。
+      const provider = getAt(state.draft, [...base, "provider"]);
+      return shell(
+        <ModelPicker
+          id={id}
+          providerId={typeof provider === "string" ? provider : ""}
+          value={typeof value === "string" ? value : ""}
+          onChange={update}
+          invalid={!!error}
+        />,
+      );
+    }
     default:
       return shell(
         <TextInput

@@ -14,6 +14,7 @@ import { Badge, Button, EmptyState, Meter, Segmented, StatusDot } from "../compo
 import { PageHeader, SearchInput } from "../components/shell";
 import { useConfig } from "../lib/config";
 import { scopeLabel } from "../lib/conversations";
+import { conversationRefs, hasSessionModel } from "../lib/models";
 import { formatBytes, formatClock, formatDuration, formatNumber, formatRelative, parseScopeKey } from "../lib/format";
 import { activityKind, mcpState, resultStatus, turnState, usageSources } from "../lib/labels";
 import { linkHandler } from "../lib/navigation";
@@ -25,7 +26,7 @@ import {
   useResource,
 } from "../lib/resource";
 import { sessionRoute, stopTurn } from "../lib/sessions";
-import { object } from "../lib/types";
+import { getAt, object } from "../lib/types";
 import type { Activity, RetainedSession, Turn } from "../lib/types";
 import type { Tone } from "../lib/ui";
 
@@ -73,9 +74,16 @@ function StatusTiles() {
   const sandbox = useResource(sandboxResource, sandboxEnabled ? 15_000 : 0).data;
   const napcat = object(draft.napcat);
   const bots = runtime?.napcat.connected ?? [];
-  const providers = object(draft.providers);
-  const active = String(draft.active_provider || "");
-  const provider = object(providers[active]);
+  const names = useGroupNames();
+  const providers = Object.keys(object(draft.providers));
+  // 只看已启用的会话：启用了却没选好模型的会话不会回复。
+  const enabledRefs = conversationRefs(draft, names).filter(
+    (ref) => object(getAt(draft, ref.base)).enabled === true,
+  );
+  const missing = enabledRefs.filter((ref) => !hasSessionModel(draft, object(getAt(draft, ref.base))));
+  const models = [
+    ...new Set(enabledRefs.map((ref) => String(getAt(draft, [...ref.base, "model", "name"]) ?? ""))),
+  ];
   const groups = Object.values(object(draft.groups)).map(object);
   const enabledGroups = groups.filter((group) => group.enabled === true).length;
   const privateEnabled = object(draft.private).enabled === true;
@@ -88,11 +96,23 @@ function StatusTiles() {
     : !napcat.token
       ? ["未设置连接密钥", "NapCat 无法接入，请先在设置中填写密钥", "danger"]
       : ["等待连接", <span className="mono">{napcatAddress(object(draft.server).port)}</span>, "warning"];
-  const model: [string, ReactNode, Tone] = !active
-    ? ["未选择", "Agent 不会回复，请先选择模型连接", "danger"]
-    : !provider.model
-      ? [active, "没有填写模型名称，Agent 不会回复", "danger"]
-      : [String(provider.model), "模型连接 " + active, "success"];
+  const model: [string, ReactNode, Tone, string] = !providers.length
+    ? ["未添加服务商", "添加服务商后，在会话中选择模型", "danger", "/providers"]
+    : !enabledRefs.length
+      ? ["—", "还没有启用的会话", "neutral", "/conversations"]
+      : missing.length
+        ? [
+            missing.length + " 个会话未选模型",
+            missing.map((ref) => ref.label).join("、") + " 不会回复",
+            "danger",
+            missing[0].route,
+          ]
+        : [
+            models.length === 1 ? models[0] : models.length + " 个模型",
+            "已启用的会话都已选好模型",
+            "success",
+            "/conversations",
+          ];
   const sessions: [string, ReactNode, Tone] = [
     enabledGroups + " / " + groups.length + " 个群",
     "私聊" + (privateEnabled ? "已启用" : "未启用"),
@@ -125,11 +145,11 @@ function StatusTiles() {
       <Tile icon={Radio} label="QQ 连接" value={qq[0]} detail={qq[1]} tone={qq[2]} to="/settings/napcat" />
       <Tile
         icon={Sparkles}
-        label="当前模型"
+        label="会话模型"
         value={model[0]}
         detail={model[1]}
         tone={model[2]}
-        to={active ? "/models/" + encodeURIComponent(active) : "/models"}
+        to={model[3]}
       />
       <Tile
         icon={MessagesSquare}
@@ -160,7 +180,7 @@ function TurnRow({ turn }: { turn: Turn }) {
           <a href={route} onClick={linkHandler(route)}>
             {scopeLabel(turn.scope_key, groups)}
           </a>
-          <Badge tone={state.tone}>{state.text}</Badge>
+          <Badge tone={state.tone}>{turn.idle ? "闲时压缩" : state.text}</Badge>
         </div>
         <div className="turn-meta muted">
           开始于 {formatRelative(turn.started_at)}

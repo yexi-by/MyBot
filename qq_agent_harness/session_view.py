@@ -277,5 +277,10 @@ def project(session: ModelSession) -> list[JsonObject]:
                     {**base, "kind": "result", "call_id": call_id, "result": _result(item)}
                 )
         else:
-            entries.append({**base, **_entry(kind, item.get("content"))})
+            entry = {**base, **_entry(kind, item.get("content"))}
+            if kind == "summary" and note is not None:
+                # 标出摘要由轮内还是闲时压缩生成，以及生成摘要的模型。
+                entry["origin"] = note.origin
+                entry["model"] = note.model
+            entries.append(entry)
     return [cleaned for entry in entries if isinstance(cleaned := scrub(entry), dict)]

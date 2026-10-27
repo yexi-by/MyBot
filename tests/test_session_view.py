@@ -25,7 +25,7 @@ from qq_agent_harness.providers import ModelSession
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime, ConversationSession, SessionBusy
 from qq_agent_harness.session_view import project
-from qq_agent_harness.settings import ProviderSettings
+from qq_agent_harness.settings import ModelEndpoint
 from qq_agent_harness.web import create_app
 
 REASONING = "PRIVATE_REASONING_TEXT"
@@ -202,7 +202,7 @@ async def test_compacted_context_shows_summary_in_place_of_original_text(protoco
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(protocol=protocol, model="test", max_context_tokens=4096),
+            ModelEndpoint(protocol=protocol, model="test", max_context_tokens=4096),
             "SYSTEM",
             "FIRST_INPUT_" * 300,
             client=client,
@@ -236,7 +236,7 @@ async def test_model_switch_shows_previous_context_expanded_without_reasoning():
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(protocol="chat_completions", model="test"),
+            ModelEndpoint(protocol="chat_completions", model="test"),
             "SYSTEM",
             first,
             client=client,
@@ -244,7 +244,7 @@ async def test_model_switch_shows_previous_context_expanded_without_reasoning():
         reply = await session.step([])
         session.result(reply.calls[0], ToolResult.success({"message_id": "sent-1"}), 1000)
         session.end_turn("completed")
-        await session.configure(ProviderSettings(protocol="responses", model="test"), "SYSTEM")
+        await session.configure(ModelEndpoint(protocol="responses", model="test"), "SYSTEM")
     entries = project(session)
     assert [entry["kind"] for entry in entries] == ["system", "transfer"]
     # 切换前的唤醒消息、调用参数和结果按展开后的结构显示，推理不随资料转入。
@@ -374,7 +374,7 @@ def test_session_detail_and_reset_api(tmp_path):
     app = create_app(store.path, connect_mcp=False)
     with TestClient(app) as client:
         model = ModelSession(
-            ProviderSettings(model="test"),
+            ModelEndpoint(model="test"),
             "SYSTEM",
             json.dumps(
                 {
@@ -386,7 +386,7 @@ def test_session_detail_and_reset_api(tmp_path):
             ),
         )
         model.end_turn("completed")
-        app.state.runtime.sessions[scope.key] = ConversationSession(model)
+        app.state.runtime.sessions[scope.key] = ConversationSession(model, scope)
         detail = client.get("/api/sessions/detail", params={"key": scope.key}).json()
         assert [entry["kind"] for entry in detail["entries"]] == ["system", "wake", "boundary"]
         assert detail["entries"][1]["messages"][0]["segments"][0]["data"]["text"] == "API_INPUT"

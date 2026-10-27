@@ -588,6 +588,31 @@ a.activity-scope:hover {
 .picker-empty {
   padding: 12px;
 }
+.picker-check {
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, max-content);
+  cursor: pointer;
+}
+
+/* ---------- 会话模型与服务商 ---------- */
+.model-actions {
+  flex-wrap: wrap;
+}
+.model-parts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+.model-parts legend {
+  margin-bottom: 8px;
+  padding: 0;
+}
+.catalog-chips {
+  max-height: 200px;
+  overflow-y: auto;
+}
 
 /* ---------- 提示词与文本编辑 ---------- */
 .detail-editor {

@@ -26,9 +26,11 @@ from qq_agent_harness.runtime import AgentRuntime
 from qq_agent_harness.settings import (
     ConversationSettings,
     HarnessSettings,
+    ModelEndpoint,
     Policy,
     ProviderSettings,
     RuntimeSettings,
+    SessionModelSettings,
 )
 from qq_agent_harness.web import create_app
 
@@ -61,14 +63,17 @@ class FakeHub:
 
 def make_store(tmp_path: Path) -> ConfigStore:
     (tmp_path / "persona.md").write_text("测试人格", encoding="utf-8")
+
+    def model() -> SessionModelSettings:
+        return SessionModelSettings(provider="test", name="test")
+
     config = HarnessSettings(
-        active_provider="test",
-        providers={"test": ProviderSettings(model="test")},
+        providers={"test": ProviderSettings()},
         groups={
-            "a": ConversationSettings(enabled=True),
-            "b": ConversationSettings(enabled=True, policy=Policy(categories={})),
+            "a": ConversationSettings(enabled=True, model=model()),
+            "b": ConversationSettings(enabled=True, model=model(), policy=Policy(categories={})),
         },
-        private=ConversationSettings(enabled=True),
+        private=ConversationSettings(enabled=True, model=model()),
         runtime=RuntimeSettings(history_count=0),
     )
     path = tmp_path / "harness.toml"
@@ -244,7 +249,7 @@ async def test_protocol_tool_roundtrip_keeps_call_ids_and_reasoning(protocol):
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        config = ProviderSettings(protocol=protocol, model="test")
+        config = ModelEndpoint(protocol=protocol, model="test")
         session = ModelSession(config, "system", "user", client=client)
         reply = await session.step([])
         session.result(reply.calls[0], ToolResult.success({"value": "ok"}), 1000)
@@ -263,7 +268,7 @@ async def test_protocol_tool_roundtrip_keeps_call_ids_and_reasoning(protocol):
 
 
 def test_media_uses_native_parts_and_reports_unsupported():
-    session = ModelSession(ProviderSettings(model="test"), "system", "conversation")
+    session = ModelSession(ModelEndpoint(model="test"), "system", "conversation")
     assert session.add_media([MediaInput("image", "image/png", "aGVsbG8=")]) == []
     content = session.items[-1]["content"]
     assert (
@@ -507,7 +512,7 @@ async def test_inflight_message_replay_and_disconnect_are_visible(tmp_path):
 @pytest.mark.asyncio
 async def test_entire_context_budget_includes_persona_and_tool_schemas(tmp_path):
     store = make_store(tmp_path)
-    store.settings.providers["test"].max_context_tokens = 4096
+    store.settings.private.model.max_context_tokens = 4096
     (tmp_path / "persona.md").write_text("非常长的资料" * 2000, encoding="utf-8")
 
     def unexpected_request(_request):
@@ -560,7 +565,7 @@ async def test_multiple_tool_results_precede_attached_media():
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
         session = ModelSession(
-            ProviderSettings(protocol="chat_completions", model="test"),
+            ModelEndpoint(protocol="chat_completions", model="test"),
             "system",
             "chat",
             client=client,
@@ -722,9 +727,8 @@ async def test_knowledge_injection_is_kept_out_of_system_role(tmp_path):
 @pytest.mark.asyncio
 async def test_compaction_keeps_action_receipts_and_does_not_replay_unknown_send(tmp_path):
     store = make_store(tmp_path)
-    provider = store.settings.providers["test"]
-    provider.protocol = "chat_completions"
-    provider.max_context_tokens = 8192
+    store.settings.providers["test"].protocol = "chat_completions"
+    store.settings.private.model.max_context_tokens = 8192
     store.settings.runtime.max_model_rounds = 50
     store.settings.runtime.tool_result_char_limit = 100_000
     registry = ToolRegistry(lambda: store.settings)

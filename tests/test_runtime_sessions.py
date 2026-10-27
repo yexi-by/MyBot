@@ -411,7 +411,7 @@ async def test_idle_lru_capacity_and_shutdown_release_retained_sessions(tmp_path
 
 @pytest.mark.parametrize("protocol", ["chat_completions", "responses"])
 async def test_previous_turn_input_is_compactable_and_summary_survives_next_wake(protocol):
-    from qq_agent_harness.settings import ProviderSettings
+    from qq_agent_harness.settings import ModelEndpoint
 
     bodies = []
 
@@ -423,7 +423,7 @@ async def test_previous_turn_input_is_compactable_and_summary_survives_next_wake
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(protocol=protocol, model="test", max_context_tokens=4096),
+            ModelEndpoint(protocol=protocol, model="test", max_context_tokens=4096),
             "SYSTEM",
             "FIRST_INPUT_" * 300,
             client=client,
@@ -444,7 +444,7 @@ async def test_previous_turn_input_is_compactable_and_summary_survives_next_wake
 
 
 async def test_protocol_switch_preserves_visible_facts_without_old_wire_objects():
-    from qq_agent_harness.settings import ProviderSettings
+    from qq_agent_harness.settings import ModelEndpoint
 
     bodies = []
 
@@ -458,7 +458,7 @@ async def test_protocol_switch_preserves_visible_facts_without_old_wire_objects(
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ProviderSettings(protocol="responses", model="one"),
+            ModelEndpoint(protocol="responses", model="one"),
             "SYSTEM",
             "FIRST_INPUT",
             client=client,
@@ -466,7 +466,7 @@ async def test_protocol_switch_preserves_visible_facts_without_old_wire_objects(
         await session.step([])
         session.end_turn("completed")
         await session.configure(
-            ProviderSettings(protocol="chat_completions", model="two"), "NEW_SYSTEM"
+            ModelEndpoint(protocol="chat_completions", model="two"), "NEW_SYSTEM"
         )
         session.begin_turn("SECOND_INPUT")
         await session.step([])
