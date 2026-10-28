@@ -1,14 +1,28 @@
 FROM ghcr.io/astral-sh/uv:0.13.4 AS uv
 FROM node:24.22.1-bookworm-slim AS node
 FROM python:3.14.8-slim-bookworm
-COPY --from=uv /uv /usr/local/bin/uv
+COPY --from=uv /uv /uvx /usr/local/bin/
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
  && apt-get update \
- && apt-get install -y --no-install-recommends bash ca-certificates curl git ripgrep build-essential zip unzip \
+ && apt-get install -y --no-install-recommends \
+    bash ca-certificates curl git ripgrep fd-find tree jq file less procps patch \
+    build-essential pkg-config \
+    zip unzip xz-utils zstd bzip2 7zip \
+    ffmpeg imagemagick poppler-utils qpdf pandoc graphviz \
+    tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim \
+    sqlite3 \
+    fontconfig fonts-noto-cjk fonts-noto-color-emoji \
+ && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+ && fc-cache -fv \
  && rm -rf /var/lib/apt/lists/* \
+ && uv pip install --system --no-cache \
+    requests httpx beautifulsoup4 lxml pyyaml charset-normalizer \
+    numpy pandas scipy sympy \
+    matplotlib seaborn pillow qrcode imageio pytesseract graphviz \
+    pymupdf pypdf pdfplumber openpyxl python-docx python-pptx reportlab markdown \
  && useradd --uid 1000 --create-home sandbox
 COPY qq_agent_harness/sandbox/bootstrap.py /usr/local/libexec/qah-sandbox-guard.py
 RUN chmod 0555 /usr/local/libexec/qah-sandbox-guard.py

@@ -14,7 +14,7 @@
 docker build -f Dockerfile.sandbox -t qq-agent-harness-sandbox:1.0.0 .
 ```
 
-Python 3.14.8、uv 0.13.4、Node.js 24.22.1/npm 来自固定版本镜像，另带 Git、ripgrep、基础编译和压缩工具。运行时根目录只读，依赖和缓存应写到 `/workspace`，例如 `uv venv .venv` 后用该环境安装包。`HOME`、临时目录、uv/npm 缓存均位于同一配额空间。
+Python 3.14.8、uv/uvx 0.13.4、Node.js 24.22.1/npm 来自固定版本镜像，预装 Git、ripgrep、fd、jq、编译与全格式压缩工具、FFmpeg、ImageMagick、Poppler/QPDF、Pandoc、Graphviz、Tesseract 中英 OCR、SQLite、Noto CJK/Emoji 字体，以及常用科学计算、绘图、文档与网络 Python 库。运行时根目录只读，新增依赖和缓存应写到 `/workspace`，例如 `uv venv .venv` 后用该环境安装包。`HOME`、临时目录、uv/npm/Matplotlib 缓存均位于同一配额空间。
 
 ## 初始化工作区与公网出口
 
