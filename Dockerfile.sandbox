@@ -25,7 +25,8 @@ RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     pymupdf pypdf pdfplumber openpyxl python-docx python-pptx reportlab markdown \
  && useradd --uid 1000 --create-home sandbox
 COPY qq_agent_harness/sandbox/bootstrap.py /usr/local/libexec/qah-sandbox-guard.py
-RUN chmod 0555 /usr/local/libexec/qah-sandbox-guard.py
+RUN chmod 0555 /usr/local/libexec/qah-sandbox-guard.py \
+ && ln -sf /usr/bin/7zz /usr/local/bin/7z
 USER 1000:1000
 WORKDIR /workspace
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
