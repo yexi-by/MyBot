@@ -245,7 +245,7 @@ async def test_summary_failure_preserves_original_context(protocol, invalid):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ModelEndpoint(protocol=protocol, model="test", max_context_tokens=4096),
+            ModelEndpoint(protocol=protocol, model="test", max_context_tokens=4096, max_retries=0),
             "system",
             "CURRENT",
             client=client,

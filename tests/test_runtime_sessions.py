@@ -18,6 +18,7 @@ from qq_agent_harness.contracts import (
     schema,
 )
 from qq_agent_harness.napcat.arguments import ReadMedia
+from qq_agent_harness.prompts import SILENT_RESPONSE
 from qq_agent_harness.providers import ModelSession
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime
@@ -180,7 +181,7 @@ async def test_same_group_reuses_history_and_tool_results_but_resets_turn_limits
         assert not runtime.sessions
 
 
-@pytest.mark.parametrize("text", ["完成", None], ids=["text", "silent"])
+@pytest.mark.parametrize("text", ["完成", SILENT_RESPONSE], ids=["text", "silent"])
 async def test_chat_null_optional_fields_finish_after_send_and_survive_next_wake(tmp_path, text):
     store = make_store(tmp_path)
     store.settings.providers["test"].protocol = "chat_completions"

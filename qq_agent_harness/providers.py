@@ -111,6 +111,21 @@ def permanent_request_error(data: JsonObject) -> bool:
     return any(isinstance(error.get(key), str) and error[key] in codes for key in ("code", "type"))
 
 
+def output_text(content: JsonValue) -> str:
+    """只提取可见正文和明确拒绝；推理项目不能代替实际输出。"""
+    if isinstance(content, str):
+        return content
+    texts: list[str] = []
+    for part in content if isinstance(content, list) else []:
+        if not isinstance(part, dict):
+            continue
+        kind = part.get("type")
+        value = part.get("refusal") if kind == "refusal" else part.get("text")
+        if kind in ("text", "output_text", "refusal") and isinstance(value, str):
+            texts.append(value)
+    return "".join(texts)
+
+
 @dataclass
 class ResponseGroup:
     items: list[JsonObject]
@@ -570,6 +585,16 @@ class ModelSession:
                 self._request_event(kind, "attempt", retry, config.max_retries)
             try:
                 data = await self._post(client, config, body)
+                # 在重试边界内检查实际输出；空响应不能写进上下文或被报告为恢复成功。
+                reply, _ = self._parse_reply(config, data)
+                if not reply.calls and not reply.text.strip():
+                    raise ModelRequestError(
+                        "模型接口返回空响应（无可见正文且无工具调用）",
+                        reason="empty_response",
+                        retryable=True,
+                    )
+                if kind != "model":
+                    self._summary_text(config, data)
             except ModelRequestError as error:
                 if not error.retryable or retry == config.max_retries:
                     self._request_event(kind, "failed", retry, config.max_retries, error=error)
@@ -688,7 +713,7 @@ class ModelSession:
             await self._compact(tools, force=True)
             body = self._normal_body(tools)
             data = await self._request(body)
-        reply, output = self._parse_reply(data)
+        reply, output = self._parse_reply(self.settings, data)
         call_ids = [call.id for call in reply.calls]
         if len(call_ids) != len(set(call_ids)):
             raise ProviderError("模型返回重复工具调用标识")
@@ -710,8 +735,10 @@ class ModelSession:
         self._event("checking", self._pressure(self._normal_body(tools)))
         return reply
 
-    def _parse_reply(self, data: JsonObject) -> tuple[ModelReply, list[JsonObject]]:
-        config = self.settings
+    @staticmethod
+    def _parse_reply(
+        config: ModelEndpoint, data: JsonObject
+    ) -> tuple[ModelReply, list[JsonObject]]:
         if config.protocol == "chat_completions":
             choices = data.get("choices")
             if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -738,7 +765,16 @@ class ModelSession:
                 and (value is not None or key == "content")
             }
             assistant["role"] = "assistant"
-            reply = ModelReply(text=str(message.get("content") or ""))
+            reply = ModelReply(
+                text="\n".join(
+                    text
+                    for text in (
+                        output_text(message.get("content")),
+                        output_text(message.get("refusal")),
+                    )
+                    if text
+                )
+            )
             calls = assistant.get("tool_calls", [])
             if not isinstance(calls, list):
                 raise ProviderError("模型工具调用格式无效")
@@ -766,11 +802,7 @@ class ModelSession:
                     parse_call(item.get("call_id"), item.get("name"), item.get("arguments"))
                 )
             elif item.get("type") == "message" and isinstance(parts := item.get("content"), list):
-                reply.text += "".join(
-                    str(part.get("text", ""))
-                    for part in parts
-                    if isinstance(part, dict) and part.get("type") == "output_text"
-                )
+                reply.text += output_text(parts)
         return reply, output_items
 
     async def _ensure_budget(self, tools: list[JsonObject]) -> None:
@@ -840,6 +872,7 @@ class ModelSession:
                 or not isinstance(message, dict)
                 or message.get("tool_calls")
                 or message.get("function_call")
+                or message.get("refusal")
                 or not isinstance(text := message.get("content"), str)
                 or not text.strip()
             ):

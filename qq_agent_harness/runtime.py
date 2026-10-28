@@ -24,7 +24,7 @@ from .contracts import (
     UnknownOperation,
 )
 from .napcat.arguments import ReadMedia
-from .prompts import compose_prompt
+from .prompts import SILENT_RESPONSE, compose_prompt
 from .providers import (
     CompactionError,
     ContextLimitError,
@@ -677,10 +677,17 @@ class AgentRuntime:
                 self.turns[key]["rounds"] = session.request_count
                 if not reply.calls:
                     outcome = "completed" if context.sent_messages else "silent"
+                    ending = (
+                        "本轮结束"
+                        if context.sent_messages
+                        else "模型明确选择本轮不发言"
+                        if reply.text.strip() == SILENT_RESPONSE
+                        else "本轮结束，未调用发送工具；普通输出未发送"
+                    )
                     self.record(
                         key,
                         "turn",
-                        "本轮结束" if context.sent_messages else "本轮静默结束；普通输出未发送",
+                        ending,
                         status=outcome,
                     )
                     return

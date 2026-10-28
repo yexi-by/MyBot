@@ -20,6 +20,7 @@ from qq_agent_harness.contracts import (
     schema,
 )
 from qq_agent_harness.napcat import NapCatError
+from qq_agent_harness.prompts import SILENT_RESPONSE
 from qq_agent_harness.providers import MediaInput, ModelReply, ModelSession
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime
@@ -330,7 +331,7 @@ async def test_new_messages_merge_into_next_round_and_cancel_stops_waiting(tmp_p
             )
             started.set()
             await gate.wait()
-            return ModelReply()
+            return ModelReply(text=SILENT_RESPONSE)
 
     runtime = AgentRuntime(store, registry, FakeHub(), session_factory=Session)
     scope = ConversationScope(bot_id="bot", kind="private", peer_id="person")
@@ -482,7 +483,7 @@ async def test_inflight_message_replay_and_disconnect_are_visible(tmp_path):
             count += 1
             entered.set()
             await gate.wait()
-            return ModelReply()
+            return ModelReply(text=SILENT_RESPONSE)
 
     runtime = AgentRuntime(
         store, ToolRegistry(lambda: store.settings), FakeHub(), session_factory=Session
@@ -650,7 +651,7 @@ async def test_send_workspace_bridge_respects_read_parameter_policy(tmp_path):
                     {
                         "message": {
                             "role": "assistant",
-                            "content": "",
+                            "content": None if calls else SILENT_RESPONSE,
                             "tool_calls": calls,
                         }
                     }
@@ -704,7 +705,7 @@ async def test_knowledge_injection_is_kept_out_of_system_role(tmp_path):
     class Session(ModelSession):
         async def step(self, tools):
             seen.extend(self.items)
-            return ModelReply()
+            return ModelReply(text=SILENT_RESPONSE)
 
     runtime = AgentRuntime(
         store, ToolRegistry(lambda: store.settings), FakeHub(), session_factory=Session
@@ -814,7 +815,7 @@ async def test_compaction_keeps_action_receipts_and_does_not_replay_unknown_send
                         "finish_reason": "tool_calls" if calls else "stop",
                         "message": {
                             "role": "assistant",
-                            "content": "",
+                            "content": None if calls else SILENT_RESPONSE,
                             "tool_calls": calls,
                         },
                     }
@@ -858,7 +859,7 @@ async def test_context_request_counter_is_visible_while_response_is_pending(tmp_
         entered.set()
         await release.wait()
         return httpx.Response(
-            200, json={"choices": [{"message": {"role": "assistant", "content": ""}}]}
+            200, json={"choices": [{"message": {"role": "assistant", "content": SILENT_RESPONSE}}]}
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
