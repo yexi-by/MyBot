@@ -9,7 +9,6 @@ from jsonschema.exceptions import ValidationError as SchemaError
 from pydantic import ValidationError
 
 from .contracts import (
-    JSON_OBJECT,
     ConversationScope,
     JsonObject,
     JsonValue,
@@ -227,11 +226,8 @@ class ToolRegistry:
         if tool.scope not in ("both", "account", target.kind):
             return ToolResult.failure("工具不适用于指定的目标会话类型", "PermissionDenied")
         try:
-            Draft202012Validator(tool.parameters).validate(args)
-            if tool.model:
-                args = JSON_OBJECT.validate_python(
-                    tool.model.model_validate(args).model_dump(mode="json")
-                )
+            prepared = tool.binding.prepare(args)
+            args = prepared.arguments
         except SchemaError as error:
             path = ".".join(str(part) for part in error.absolute_schema_path)
             return self.invalid_arguments(
@@ -280,11 +276,7 @@ class ToolRegistry:
                 return ToolResult.failure("聚合查询所需能力未获授权", "PermissionDenied")
             child_args = copy.deepcopy(child_arguments)
             try:
-                Draft202012Validator(child.parameters).validate(child_args)
-                if child.model:
-                    child_args = JSON_OBJECT.validate_python(
-                        child.model.model_validate(child_args).model_dump(mode="json")
-                    )
+                child_args = child.binding.prepare(child_args).arguments
             except SchemaError, ValueError:
                 return ToolResult.failure("聚合查询参数无效", "InvalidArguments")
             return self.authorize(context.scope, child, child_args, target)
@@ -295,7 +287,7 @@ class ToolRegistry:
         context.check_tool = check_tool
         context.effect_submitted = False
         try:
-            result = await tool.handler(context, args)
+            result = await prepared.invoke(context)
         except asyncio.CancelledError:
             if tool.effects and context.effect_submitted:
                 # 取消等待不能证明外部动作未生效；随会话保留，下一次唤醒也不得盲目重试。

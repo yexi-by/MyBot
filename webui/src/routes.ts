@@ -94,43 +94,6 @@ export function parseRoute(location: string): Route {
   return { page: "missing" };
 }
 
-/** 旧版控制台的地址，书签和外部链接仍可打开。 */
-export function legacyRedirect(location: string): string | null {
-  const url = new URL(location, window.location.origin);
-  const query = url.searchParams;
-  const enc = encodeURIComponent;
-  switch (url.pathname) {
-    case "/connections": {
-      const provider = query.get("provider");
-      return provider ? "/providers/" + enc(provider) : "/providers";
-    }
-    case "/groups": {
-      const id = query.get("id");
-      return id ? "/conversations/group/" + enc(id) : "/conversations";
-    }
-    case "/private":
-      return "/conversations/private";
-    case "/mcp": {
-      const id = query.get("id");
-      return id ? "/tools/mcp/" + enc(id) : "/tools/mcp";
-    }
-    case "/persona":
-      return "/prompts";
-    case "/files": {
-      const path = query.get("path") ?? "";
-      if (path.toLowerCase().endsWith(".toml")) return "/settings/config-file";
-      return path ? "/prompts?path=" + enc(path) : "/prompts";
-    }
-    case "/runtime":
-      return "/";
-    default:
-      // 模型页已改为服务商页，模型改在各会话中选择。
-      if (url.pathname === "/models" || url.pathname.startsWith("/models/"))
-        return "/providers" + url.pathname.slice("/models".length);
-      return null;
-  }
-}
-
 export interface NavItem {
   path: string;
   label: string;

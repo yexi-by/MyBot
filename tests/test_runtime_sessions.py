@@ -15,9 +15,12 @@ from qq_agent_harness.contracts import (
     Message,
     ToolDefinition,
     ToolResult,
+    json_binding,
+    model_binding,
     schema,
 )
 from qq_agent_harness.napcat.arguments import ReadMedia
+from qq_agent_harness.napcat.media import MediaBatch
 from qq_agent_harness.prompts import SILENT_RESPONSE
 from qq_agent_harness.providers import ModelSession
 from qq_agent_harness.registry import ToolRegistry
@@ -114,10 +117,8 @@ async def test_same_group_reuses_history_and_tool_results_but_resets_turn_limits
             "qq__send_message",
             "发送",
             "messages.send",
-            schema(Empty),
-            send,
+            model_binding(Empty, send),
             effects=True,
-            model=Empty,
         )
     )
 
@@ -200,7 +201,11 @@ async def test_chat_null_optional_fields_finish_after_send_and_survive_next_wake
 
     registry.add(
         ToolDefinition(
-            "qq__send_message", "发送", "messages.send", schema(Empty), send, effects=True
+            "qq__send_message",
+            "发送",
+            "messages.send",
+            json_binding(schema(Empty), send),
+            effects=True,
         )
     )
 
@@ -265,7 +270,7 @@ async def test_only_new_history_is_added_and_persona_updates_without_losing_sess
     async def read(_context, _arguments):
         return ToolResult.success([])
 
-    registry.add(ToolDefinition("qq__get_history", "历史", "messages.read", {}, read))
+    registry.add(ToolDefinition("qq__get_history", "历史", "messages.read", json_binding({}, read)))
 
     class Hub(FakeHub):
         history = [message("older"), message("old"), message("old"), message("first")]
@@ -343,7 +348,9 @@ async def test_all_authorized_tools_are_stable_across_rounds_and_wakes_until_rev
         return ToolResult.success({"found": True})
 
     for name in reversed(names):
-        registry.add(ToolDefinition(name, "查询", "messages.read", schema(Empty), read))
+        registry.add(
+            ToolDefinition(name, "查询", "messages.read", json_binding(schema(Empty), read))
+        )
     bodies = []
 
     def respond(request):
@@ -405,14 +412,12 @@ async def test_automatic_message_media_obeys_the_same_source_restrictions_as_too
         raise AssertionError("模型不应主动读取媒体")
 
     registry.add(
-        ToolDefinition(
-            "qq__read_media", "媒体", "media.read", schema(ReadMedia), read, model=ReadMedia
-        )
+        ToolDefinition("qq__read_media", "媒体", "media.read", model_binding(ReadMedia, read))
     )
 
-    async def read_media(segments, _connection) -> JsonObject:
+    async def read_media(segments, _connection) -> MediaBatch:
         selected.append(segments)
-        return {"media": []}
+        return MediaBatch()
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _: httpx.Response(200, json=answer("responses")))
@@ -461,10 +466,8 @@ async def test_cancel_closes_all_calls_and_unknown_effect_is_not_replayed_on_nex
             "qq__send_message",
             "发送",
             "messages.send",
-            schema(Empty),
-            blocked,
+            model_binding(Empty, blocked),
             effects=True,
-            model=Empty,
         )
     )
 
@@ -628,7 +631,9 @@ async def test_completed_results_survive_model_failure_between_wakes(tmp_path):
         dispatched.append(context.turn_id)
         return ToolResult.success({"fact": f"LOOKUP_RESULT_{len(dispatched)}"})
 
-    registry.add(ToolDefinition("qq__lookup", "查询", "messages.read", schema(Empty), lookup))
+    registry.add(
+        ToolDefinition("qq__lookup", "查询", "messages.read", json_binding(schema(Empty), lookup))
+    )
 
     def respond(request):
         body = json.loads(request.content)

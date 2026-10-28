@@ -23,6 +23,7 @@ from qq_agent_harness.contracts import (
     ToolContext,
     ToolDefinition,
     ToolResult,
+    json_binding,
 )
 from qq_agent_harness.mcp_tools import MCPManager
 from qq_agent_harness.napcat.media import MediaReader
@@ -150,7 +151,11 @@ async def test_non_qq_data_and_more_than_twelve_tools_remain_usable():
 
     names = [f"inspect_{index}" for index in range(15)]
     for name in names:
-        tools.add(ToolDefinition(name, "检查数据", "messages.read", {"type": "object"}, inspect))
+        tools.add(
+            ToolDefinition(
+                name, "检查数据", "messages.read", json_binding({"type": "object"}, inspect)
+            )
+        )
     exposed = {str(item["name"]) for item in tools.definitions(context)}
     assert set(names) <= exposed and "qq__send_message" in exposed
     result = await tools.execute(context, names[0], {"sample": {"type": "at", "qq": "all"}})
@@ -168,7 +173,11 @@ async def test_unknown_operation_console_resolution_does_not_replay_or_bypass_pe
         return ToolResult(status="unknown") if len(calls) == 1 else ToolResult.success()
 
     tool = ToolDefinition(
-        "example_effect", "测试动作", "messages.send", {"type": "object"}, effect, effects=True
+        "example_effect",
+        "测试动作",
+        "messages.send",
+        json_binding({"type": "object"}, effect),
+        effects=True,
     )
     app.state.registry.add(tool)
     scope = GROUP.model_copy(update={"peer_id": "a"})

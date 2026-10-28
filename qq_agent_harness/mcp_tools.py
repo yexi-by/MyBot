@@ -20,7 +20,15 @@ from mcp.shared.exceptions import McpError
 from mcp.shared.message import SessionMessage
 from mcp.types import CONNECTION_CLOSED, CallToolResult
 
-from .contracts import JSON_OBJECT, JsonObject, JsonValue, ToolContext, ToolDefinition, ToolResult
+from .contracts import (
+    JSON_OBJECT,
+    JsonObject,
+    JsonValue,
+    ToolContext,
+    ToolDefinition,
+    ToolResult,
+    json_binding,
+)
 from .registry import ToolRegistry
 from .settings import MCPSettings
 
@@ -221,9 +229,16 @@ class MCPManager:
                         item.description
                         or f"当你需要 {item.name} 能力辅助当前对话时，可主动调用。",
                         f"mcp.{name}",
-                        parameters,
-                        self._handler(
-                            session, item.name, config.timeout, effects, disconnected, disconnect
+                        json_binding(
+                            parameters,
+                            self._handler(
+                                session,
+                                item.name,
+                                config.timeout,
+                                effects,
+                                disconnected,
+                                disconnect,
+                            ),
                         ),
                         effects=effects,
                         title=title or item.name,

@@ -15,6 +15,7 @@ from qq_agent_harness.contracts import ConversationScope, JsonObject, Message, T
 from qq_agent_harness.napcat import MediaReader, NapCatHub, build_tools
 from qq_agent_harness.napcat.connection import (
     NapCatUnavailable,
+    normalize_ids,
     parse_message,
     scoped_history,
     scoped_message,
@@ -49,13 +50,13 @@ class Bot:
     ) -> JsonValue:
         self.calls.append((action, params))
         if self.handler:
-            return await self.handler(action, params)
+            return normalize_ids(await self.handler(action, params))
         if action == "get_msg":
             return message(str(params["message_id"]))
         if action in ("get_group_msg_history", "get_friend_msg_history"):
             return {"messages": [message()]}
         if action.startswith(("send_", "upload_")):
-            return {"message_id": 99}
+            return {"message_id": "99"}
         return None
 
 
@@ -243,10 +244,10 @@ async def test_media_uses_url_first_refreshes_only_failure_and_returns_partial_e
             ],
             bot,
         )
-    media = result["media"]
-    errors = result["errors"]
-    assert isinstance(media, list) and len(media) == 2
-    assert isinstance(errors, list) and len(errors) == 1
+    media = result.media
+    errors = result.errors
+    assert len(media) == 2
+    assert len(errors) == 1
     assert bot.calls == [("get_image", {"file": "second"})]
     assert all(
         request.url.host == "8.8.8.8" and request.headers["Host"] == "media.example"
@@ -325,9 +326,12 @@ async def test_reverse_websocket_callback_can_call_api_without_deadlock() -> Non
         await socket.incoming.put(None)
 
     await socket.incoming.put(message(sender="1"))
-    await socket.incoming.put(message())
+    incoming = message()
+    incoming["message"] = [{"type": "reply", "data": {"id": 9007199254740993}}]
+    await socket.incoming.put(incoming)
     await asyncio.wait_for(hub.serve(cast(WebSocket, socket), callback), 1)
     assert [event.sender_id for event in received] == ["20"]
+    assert received[0].segments == [{"type": "reply", "data": {"id": "9007199254740993"}}]
     assert reply == [{"user_id": "1"}]
     assert hub.status()["connected"] == []
 
@@ -393,9 +397,9 @@ async def test_media_count_and_batch_budget_are_explicit_partial_errors() -> Non
         ],
         Bot(remote),
     )
-    media, errors = result["media"], result["errors"]
-    assert isinstance(media, list) and len(media) == 1
-    assert isinstance(errors, list) and len(errors) == 1
+    media, errors = result.media, result.errors
+    assert len(media) == 1
+    assert len(errors) == 1
 
 
 @pytest.mark.parametrize("invalid", ["", "order", "length", "quota"])

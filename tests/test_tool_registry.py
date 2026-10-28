@@ -13,6 +13,8 @@ from qq_agent_harness.contracts import (
     ToolContext,
     ToolDefinition,
     ToolResult,
+    json_binding,
+    model_binding,
     schema,
 )
 from qq_agent_harness.registry import ToolRegistry
@@ -43,6 +45,10 @@ async def echo(context: ToolContext, arguments: JsonObject) -> ToolResult:
     return ToolResult.success({"scope": context.target.key, "arguments": arguments})
 
 
+async def user_echo(context: ToolContext, request: UserInput) -> ToolResult:
+    return ToolResult.success({"scope": context.target.key, "user_id": request.user_id})
+
+
 def setup_registry() -> tuple[ToolRegistry, ToolContext, Policy]:
     policy = Policy(categories={"fixture": True})
     settings = HarnessSettings(
@@ -64,8 +70,7 @@ async def test_all_authorized_tools_are_immediately_visible_in_stable_order() ->
                 f"fixture__group_{index:02}",
                 "当前群查询",
                 "fixture",
-                schema(Empty),
-                echo,
+                json_binding(schema(Empty), echo),
                 title="群信息",
             )
         )
@@ -74,8 +79,7 @@ async def test_all_authorized_tools_are_immediately_visible_in_stable_order() ->
             "fixture__hidden_avatar",
             "群主头像",
             "fixture",
-            schema(Empty),
-            echo,
+            json_binding(schema(Empty), echo),
         )
     )
     policy.tools["fixture__hidden_avatar"] = False
@@ -89,12 +93,14 @@ async def test_all_authorized_tools_are_immediately_visible_in_stable_order() ->
 async def test_definitions_follow_live_permissions_and_catalog_changes() -> None:
     registry, context, policy = setup_registry()
     for name in ("qq__read_media", "qq__get_history", "qq__get_message", "qq__send_message"):
-        registry.add(ToolDefinition(name, "基础能力", "fixture", schema(Empty), echo))
+        registry.add(ToolDefinition(name, "基础能力", "fixture", json_binding(schema(Empty), echo)))
     policy.tools["qq__read_media"] = False
     definitions = {item["name"]: item for item in registry.definitions(context)}
     assert "qq__get_history" in definitions and "qq__get_message" in definitions
     assert "qq__read_media" not in definitions
-    registry.add(ToolDefinition("fixture__added", "新增能力", "fixture", schema(Empty), echo))
+    registry.add(
+        ToolDefinition("fixture__added", "新增能力", "fixture", json_binding(schema(Empty), echo))
+    )
     assert "fixture__added" in [item["name"] for item in registry.definitions(context)]
     registry.remove_prefix("fixture__")
     assert "fixture__added" not in [item["name"] for item in registry.definitions(context)]
@@ -127,7 +133,12 @@ def test_target_schema_matches_policy_and_tool_scope(
     policy.cross_groups = cross_groups
     policy.cross_private = cross_private
     tool = ToolDefinition(
-        "fixture__lookup", "资料", "fixture", schema(UserInput), echo, scope=scope, cross_scope=True
+        "fixture__lookup",
+        "资料",
+        "fixture",
+        json_binding(schema(UserInput), echo),
+        scope=scope,
+        cross_scope=True,
     )
     registry.add(tool)
     definition = registry.definition(tool, context.scope)
@@ -145,9 +156,7 @@ async def test_direct_call_returns_schema_without_input_and_observes_revocation(
                 name,
                 "用户资料",
                 "fixture",
-                schema(UserInput),
-                echo,
-                model=UserInput,
+                model_binding(UserInput, user_echo),
                 cross_scope=True,
             )
         )
@@ -171,7 +180,8 @@ async def test_aggregate_check_enforces_child_parameters_parent_revocation_and_c
     cancel = False
     context.cancelled = lambda: cancel
 
-    async def aggregate(ctx: ToolContext, arguments: JsonObject) -> ToolResult:
+    async def aggregate(ctx: ToolContext, request: UserInput) -> ToolResult:
+        arguments = request.model_dump(mode="json")
         denied = ctx.check_tool("fixture__child", arguments)
         if denied:
             return denied
@@ -181,13 +191,11 @@ async def test_aggregate_check_enforces_child_parameters_parent_revocation_and_c
 
     registry.add(
         ToolDefinition(
-            "fixture__parent", "复合查询", "fixture", schema(UserInput), aggregate, model=UserInput
+            "fixture__parent", "复合查询", "fixture", model_binding(UserInput, aggregate)
         )
     )
     registry.add(
-        ToolDefinition(
-            "fixture__child", "子查询", "fixture", schema(UserInput), echo, model=UserInput
-        )
+        ToolDefinition("fixture__child", "子查询", "fixture", model_binding(UserInput, user_echo))
     )
     policy.parameters["fixture__child"] = {"user_id": ParameterRule(allowed=["30"])}
     denied = await registry.execute(context, "fixture__parent", {"user_id": "40"})

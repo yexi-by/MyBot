@@ -17,7 +17,7 @@ import { SandboxPage } from "./pages/Sandbox";
 import { SessionsPage } from "./pages/Sessions";
 import { SettingsPage } from "./pages/Settings";
 import { ToolsPage } from "./pages/Tools";
-import { legacyRedirect, navItems, parseRoute } from "./routes";
+import { navItems, parseRoute } from "./routes";
 import type { Route } from "./routes";
 
 function isTyping(target: EventTarget | null) {
@@ -225,11 +225,6 @@ export default function App() {
   const state = useConfig();
   const ui = useUi();
   const route = parseRoute(location);
-
-  useEffect(() => {
-    const target = legacyRedirect(location);
-    if (target) void navigate(target, { replace: true });
-  }, [location]);
 
   useEffect(() => {
     void loadConfig();

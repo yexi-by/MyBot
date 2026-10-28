@@ -11,7 +11,7 @@ from test_harness_core import Empty, FakeHub, make_store
 from test_provider_context import answer, call_answer
 from test_runtime_sessions import message, wake
 
-from qq_agent_harness.contracts import JsonObject, ToolDefinition, ToolResult, schema
+from qq_agent_harness.contracts import JsonObject, ToolDefinition, ToolResult, json_binding, schema
 from qq_agent_harness.diagnostics import DiagnosticFormatter
 from qq_agent_harness.prompts import SILENT_RESPONSE
 from qq_agent_harness.providers import ModelSession, ProviderError
@@ -142,10 +142,16 @@ async def test_empty_reply_after_search_recovers_or_fails_without_repeating_sear
         context.sent_messages.append({"action": "send_msg", "status": "ok", "data": receipt})
         return ToolResult.success(receipt)
 
-    registry.add(ToolDefinition("lookup", "搜索", "messages.read", schema(Empty), lookup))
+    registry.add(
+        ToolDefinition("lookup", "搜索", "messages.read", json_binding(schema(Empty), lookup))
+    )
     registry.add(
         ToolDefinition(
-            "qq__send_message", "发送", "messages.send", schema(Empty), send, effects=True
+            "qq__send_message",
+            "发送",
+            "messages.send",
+            json_binding(schema(Empty), send),
+            effects=True,
         )
     )
 
@@ -449,7 +455,9 @@ async def test_retry_after_tool_result_does_not_repeat_completed_action(
         return ToolResult.success({"receipt": "RECORDED"})
 
     registry.add(
-        ToolDefinition("lookup", "测试动作", "messages.read", schema(Empty), action, effects=True)
+        ToolDefinition(
+            "lookup", "测试动作", "messages.read", json_binding(schema(Empty), action), effects=True
+        )
     )
 
     def respond(request):

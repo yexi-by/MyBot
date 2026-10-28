@@ -17,7 +17,7 @@ from qq_agent_harness.contracts import (
     ToolContext,
     ToolDefinition,
     ToolResult,
-    schema,
+    model_binding,
 )
 from qq_agent_harness.napcat import NapCatError
 from qq_agent_harness.prompts import SILENT_RESPONSE
@@ -99,11 +99,9 @@ async def test_disclosure_permissions_revocation_and_unknown_are_enforced(tmp_pa
         "qq__send_message",
         "发送",
         "messages.send",
-        schema(Empty),
-        side_effect,
+        model_binding(Empty, side_effect),
         effects=True,
         cross_scope=True,
-        model=Empty,
     )
     registry.add(tool)
     a = ToolContext(
@@ -139,11 +137,9 @@ async def test_known_tool_direct_call_still_checks_target_and_authorization(tmp_
         "qq__group_info",
         "群资料",
         "messages.read",
-        schema(Empty),
-        permitted,
+        model_binding(Empty, permitted),
         scope="group",
         cross_scope=True,
-        model=Empty,
     )
     registry.add(tool)
     context = ToolContext(
@@ -616,9 +612,7 @@ async def test_send_workspace_bridge_respects_read_parameter_policy(tmp_path):
         pytest.fail("回调不得通过重新执行工具绕过授权")
 
     registry.add(
-        ToolDefinition(
-            "sandbox__read_file", "读文件", "sandbox", schema(ReadFile), unused, model=ReadFile
-        )
+        ToolDefinition("sandbox__read_file", "读文件", "sandbox", model_binding(ReadFile, unused))
     )
     hub = FakeHub()
 
@@ -746,10 +740,8 @@ async def test_compaction_keeps_action_receipts_and_does_not_replay_unknown_send
             "qq__send_message",
             "发送当前会话消息",
             "messages.send",
-            schema(Empty),
-            send,
+            model_binding(Empty, send),
             effects=True,
-            model=Empty,
         )
     )
     registry.add(
@@ -757,9 +749,7 @@ async def test_compaction_keeps_action_receipts_and_does_not_replay_unknown_send
             "qq__large_info",
             "读取测试资料",
             "messages.read",
-            schema(Empty),
-            large_info,
-            model=Empty,
+            model_binding(Empty, large_info),
         )
     )
 

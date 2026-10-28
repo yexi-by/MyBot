@@ -2,7 +2,6 @@
 
 import base64
 import re
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -10,20 +9,19 @@ from typing import Literal
 from pydantic import BaseModel, Field, JsonValue
 
 from ..contracts import (
-    JSON_OBJECT,
     JsonObject,
     Model,
+    ToolBinding,
     ToolContext,
     ToolDefinition,
     ToolResult,
-    schema,
+    model_binding,
 )
 from ..settings import NapCatSettings
 from . import arguments as a
 from .connection import (
     NapCatError,
     NapCatUnavailable,
-    normalize_ids,
     object_value,
     scoped_history,
     scoped_message,
@@ -371,7 +369,7 @@ async def invoke(
     context.effect_submitted = effects
     try:
         data = await context.napcat.call(action, params)
-        return ToolResult.success(normalize_ids(data))
+        return ToolResult.success(data)
     except NapCatError as exc:
         if effects and re.search(
             r"Timeout: NTEvent\s+serviceAndMethod:NodeIKernelMsgService/sendMsg\s+"
@@ -499,7 +497,7 @@ async def complete_group_owner(context: ToolContext, summary: JsonObject) -> Too
     response = await additional_query(
         context,
         "get_group_member_list",
-        JSON_OBJECT.validate_python(request.model_dump()),
+        request.model_dump(mode="json"),
         {"group_id": context.target.peer_id, "no_cache": request.no_cache},
     )
     if response.status == "cancelled":
@@ -533,7 +531,7 @@ async def complete_member(
         raise ValueError("NapCat 未返回有效的群成员资料")
     member = {key: result.data[key] for key in MEMBER_FIELDS if key in result.data}
     member["avatar"] = {"tool": "qq__read_media", "user_id": request.user_id}
-    for include, action, field, args in (
+    queries: tuple[tuple[bool, str, str, JsonObject], ...] = (
         (
             request.include_profile,
             "get_stranger_info",
@@ -541,10 +539,10 @@ async def complete_member(
             {"user_id": request.user_id, "no_cache": request.no_cache},
         ),
         (request.include_status, "nc_get_user_status", "status", {"user_id": request.user_id}),
-    ):
+    )
+    for include, action, field, params in queries:
         if not include:
             continue
-        params = JSON_OBJECT.validate_python(args)
         response = await additional_query(context, action, params, params)
         if response.status == "cancelled":
             return response
@@ -587,13 +585,11 @@ ACTION_TITLES = {
 
 
 def action_tool(spec: ActionSpec) -> ToolDefinition:
-    async def handle(context: ToolContext, arguments: JsonObject) -> ToolResult:
-        params = JSON_OBJECT.validate_python(
-            spec.model.model_validate(arguments).model_dump(exclude_none=True)
-        )
-        if spec.action == "get_group_member_list":
+    async def handle(context: ToolContext, request: BaseModel) -> ToolResult:
+        params: JsonObject = request.model_dump(mode="json", exclude_none=True)
+        if isinstance(request, a.GroupMemberList):
             params = {"no_cache": params["no_cache"]}
-        elif spec.action == "get_group_member_info":
+        elif isinstance(request, a.MemberInfo):
             params = {"user_id": params["user_id"], "no_cache": params["no_cache"]}
         if spec.message_bound:
             await scoped_message(context.napcat, context.target, str(params["message_id"]))
@@ -607,8 +603,8 @@ def action_tool(spec: ActionSpec) -> ToolDefinition:
             result.data = filtered_groups(result.data, context.target.peer_id)
         if result.status != "ok":
             return result
-        if spec.action == "get_group_member_list":
-            result.data = member_page(result.data, a.GroupMemberList.model_validate(arguments))
+        if isinstance(request, a.GroupMemberList):
+            result.data = member_page(result.data, request)
         elif spec.action in ("get_group_info", "get_group_detail_info"):
             result.data = group_summary(result.data, context.target.peer_id)
             interrupted = await complete_group_owner(context, result.data)
@@ -618,20 +614,18 @@ def action_tool(spec: ActionSpec) -> ToolDefinition:
             if context.target != context.scope:
                 avatar["target_group_id"] = context.target.peer_id
             result.data["avatar"] = avatar
-        elif spec.action == "get_group_member_info":
-            return await complete_member(context, result, a.MemberInfo.model_validate(arguments))
+        elif isinstance(request, a.MemberInfo):
+            return await complete_member(context, result, request)
         return result
 
     return ToolDefinition(
         spec.name,
         spec.summary,
         spec.category,
-        schema(spec.model),
-        handle,
+        model_binding(spec.model, handle),
         effects=spec.effects,
         scope=spec.scope,
         cross_scope=spec.scope in ("both", "group", "private"),
-        model=spec.model,
         title=ACTION_TITLES.get(spec.action, spec.summary),
     )
 
@@ -990,8 +984,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
     def avatar_tool(group: bool) -> ToolDefinition:
         action = "set_group_portrait" if group else "set_qq_avatar"
 
-        async def avatar(context: ToolContext, arguments: JsonObject) -> ToolResult:
-            source = a.ImageSource.model_validate(arguments)
+        async def avatar(context: ToolContext, source: a.ImageSource) -> ToolResult:
             if source.workspace_path:
                 if not context.read_workspace:
                     raise ValueError("共享工作区不可用")
@@ -1009,19 +1002,16 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             "qq__" + action,
             "当你判断有必要更新当前群或机器人头像时，主动调用。图片从获准的共享工作区或公网读取，不接受宿主机路径。",
             "groups.manage" if group else "account.manage",
-            schema(a.ImageSource),
-            avatar,
+            model_binding(a.ImageSource, avatar),
             effects=True,
             scope="group" if group else "account",
             cross_scope=group,
-            model=a.ImageSource,
             title="更新当前群头像" if group else "更新机器人头像",
         )
 
     tools.extend((avatar_tool(True), avatar_tool(False)))
 
-    async def history(context: ToolContext, arguments: JsonObject) -> ToolResult:
-        request = a.History.model_validate(arguments)
+    async def history(context: ToolContext, request: a.History) -> ToolResult:
         if request.before_message_id:
             await scoped_message(context.napcat, context.target, request.before_message_id)
         messages = await scoped_history(
@@ -1057,14 +1047,12 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             }
         )
 
-    async def get_message(context: ToolContext, arguments: JsonObject) -> ToolResult:
-        request = a.MessageId.model_validate(arguments)
+    async def get_message(context: ToolContext, request: a.MessageId) -> ToolResult:
         return ToolResult.success(
             await scoped_message(context.napcat, context.target, request.message_id)
         )
 
-    async def get_forward(context: ToolContext, arguments: JsonObject) -> ToolResult:
-        request = a.Forward.model_validate(arguments)
+    async def get_forward(context: ToolContext, request: a.Forward) -> ToolResult:
         return ToolResult.success(
             await forward_bundle(
                 context,
@@ -1075,29 +1063,29 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             )
         )
 
-    async def read_media(context: ToolContext, arguments: JsonObject) -> ToolResult:
-        request = a.ReadMedia.model_validate(arguments)
+    async def read_media(context: ToolContext, request: a.ReadMedia) -> ToolResult:
         selection = await media_segments(context, request)
-        result = await reader.read_many(selection.segments, context.napcat)
-        for field in ("media", "errors"):
-            entries = result.get(field)
-            for entry in entries if isinstance(entries, list) else []:
-                if isinstance(entry, dict) and isinstance(index := entry.get("index"), int):
-                    entry["index"] = selection.indexes[index]
-        media_errors = result.get("errors")
-        result["errors"] = [
-            *selection.errors,
-            *(media_errors if isinstance(media_errors, list) else []),
-        ]
-        result.update(
-            total=selection.total,
-            next_offset=selection.next_offset,
-            forward_paths=selection.forward_paths,
+        batch = await reader.read_many(selection.segments, context.napcat)
+        return ToolResult.success(
+            {
+                "media": [
+                    {"index": selection.indexes[index], **asset.public()}
+                    for index, asset in batch.media
+                ],
+                "errors": [
+                    *selection.errors,
+                    *(
+                        {**error.public(), "index": selection.indexes[error.index]}
+                        for error in batch.errors
+                    ),
+                ],
+                "total": selection.total,
+                "next_offset": selection.next_offset,
+                "forward_paths": selection.forward_paths,
+            }
         )
-        return ToolResult.success(result)
 
-    async def save_media(context: ToolContext, arguments: JsonObject) -> ToolResult:
-        request = SaveMedia.model_validate(arguments)
+    async def save_media(context: ToolContext, request: SaveMedia) -> ToolResult:
         if context.write_workspace is None:
             raise ValueError("沙箱文件写入服务不可用")
         selection = await media_segments(context, request)
@@ -1114,11 +1102,10 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             {"path": request.destination, "size": len(asset.content), "mime_type": asset.mime_type}
         )
 
-    async def send(context: ToolContext, arguments: JsonObject) -> ToolResult:
-        return await send_message(context, a.SendMessage.model_validate(arguments), reader)
+    async def send(context: ToolContext, request: a.SendMessage) -> ToolResult:
+        return await send_message(context, request, reader)
 
-    async def add_request(context: ToolContext, arguments: JsonObject) -> ToolResult:
-        request = a.GroupRequest.model_validate(arguments)
+    async def add_request(context: ToolContext, request: a.GroupRequest) -> ToolResult:
         raw = await context.napcat.call("get_group_system_msg", {})
         filtered = filtered_groups(raw, context.target.peer_id)
 
@@ -1136,78 +1123,61 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         return await invoke(
             context,
             "set_group_add_request",
-            JSON_OBJECT.validate_python(request.model_dump()),
+            request.model_dump(mode="json"),
             effects=True,
         )
 
-    custom: list[
-        tuple[
-            str,
-            str,
-            str,
-            type[BaseModel],
-            str,
-            Callable[[ToolContext, JsonObject], Awaitable[ToolResult]],
-            bool,
-        ]
-    ] = [
+    custom: list[tuple[str, str, str, ToolBinding, str, bool]] = [
         (
             "qq__get_history",
             "读取会话历史",
             "主动补充当前会话上下文、核对前文或按北京时间筛选近期消息。远端历史不是完整归档。",
-            a.History,
+            model_binding(a.History, history),
             "messages.read",
-            history,
             False,
         ),
         (
             "qq__get_message",
             "读取单条消息",
             "当你需要核实当前会话的引用、消息原文或消息段时，主动读取这条消息；不会读取其他会话。",
-            a.MessageId,
+            model_binding(a.MessageId, get_message),
             "messages.read",
-            get_message,
             False,
         ),
         (
             "qq__get_forward_messages",
             "展开合并转发",
             "当对话提及合并转发但缺少内容时，主动展开当前会话消息中的转发节点。必须提供外层消息 ID。",
-            a.Forward,
+            model_binding(a.Forward, get_forward),
             "messages.read",
-            get_forward,
             False,
         ),
         (
             "qq__read_media",
             "读取媒体内容",
             "读取消息或转发中的媒体、指定 QQ 用户头像、当前群头像或 QQ 官方图床图片。message_id、user_id、group_avatar、media_url 四选一；单个资源失败返回部分错误。",
-            a.ReadMedia,
+            model_binding(a.ReadMedia, read_media),
             "media.read",
-            read_media,
             False,
         ),
         (
             "qq__send_message",
             "发送消息",
             "在 QQ 发言或交付文件的唯一入口，按 parts 顺序发送正文、引用、艾特、媒体；AI 语音直接用 type=ai_voice、character、text。普通模型正文不会发送，结果未知时不得重发。",
-            a.SendMessage,
+            model_binding(a.SendMessage, send),
             "messages.send",
-            send,
             True,
         ),
     ]
-    for name, title, description, model, category, handler, effects in custom:
+    for name, title, description, binding, category, effects in custom:
         tools.append(
             ToolDefinition(
                 name,
                 description,
                 category,
-                schema(model),
-                handler,
+                binding,
                 effects=effects,
                 cross_scope=True,
-                model=model,
                 title=title,
             )
         )
@@ -1216,11 +1186,9 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             "qq__save_media_to_workspace",
             "将消息媒体、QQ 用户头像、群头像或 QQ 官方图床图片保存到共享工作区，用于代码分析和转换。与 read_media 共用四选一来源；指定一个资源和相对文件名，不覆盖已有文件。",
             "media.read",
-            schema(SaveMedia),
-            save_media,
+            model_binding(SaveMedia, save_media),
             effects=True,
             cross_scope=True,
-            model=SaveMedia,
             requires=("sandbox__write_file",),
             title="保存媒体到共享工作区",
         )
@@ -1230,12 +1198,10 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             "qq__set_group_add_request",
             "当你判断有必要处理当前群入群申请时，主动调用；申请必须能从当前群请求列表验证归属。",
             "groups.manage",
-            schema(a.GroupRequest),
-            add_request,
+            model_binding(a.GroupRequest, add_request),
             effects=True,
             scope="group",
             cross_scope=True,
-            model=a.GroupRequest,
             title="处理当前群入群申请",
         )
     )

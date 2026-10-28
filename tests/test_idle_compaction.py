@@ -13,7 +13,7 @@ from test_runtime_sessions import message, sessions, tool_response, wake
 
 from qq_agent_harness.configuration import ConfigError, ConfigStore
 from qq_agent_harness.context import estimate_tokens
-from qq_agent_harness.contracts import JsonObject, ToolDefinition, ToolResult, schema
+from qq_agent_harness.contracts import JsonObject, ToolDefinition, ToolResult, model_binding
 from qq_agent_harness.providers import ContextLimitError, ModelSession
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime
@@ -488,9 +488,7 @@ async def test_knowledge_folded_by_turn_compaction_returns_after_idle_compaction
             "qq__send_message",
             "读取大量资料",
             "messages.send",
-            schema(Empty),
-            large,
-            model=Empty,
+            model_binding(Empty, large),
         )
     )
     turns: list[JsonObject] = []

@@ -7,6 +7,7 @@ from typing import Literal, Protocol
 from urllib.parse import unquote
 from uuid import uuid4
 
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 JsonObject = dict[str, JsonValue]
@@ -61,6 +62,8 @@ class ToolResult(Model):
 
 
 class NapCatConnection(Protocol):
+    """协议入口负责把 QQ/NapCat 标识规范化为字符串。"""
+
     async def call(
         self, action: str, params: JsonObject, *, timeout: float | None = None
     ) -> JsonValue: ...
@@ -102,19 +105,33 @@ ToolHandler = Callable[[ToolContext, JsonObject], Awaitable[ToolResult]]
 
 
 @dataclass(frozen=True)
+class PreparedToolCall:
+    arguments: JsonObject
+    invoke: Callable[[ToolContext], Awaitable[ToolResult]]
+
+
+@dataclass(frozen=True)
+class ToolBinding:
+    parameters: JsonObject
+    prepare: Callable[[JsonObject], PreparedToolCall]
+
+
+@dataclass(frozen=True)
 class ToolDefinition:
     name: str
     description: str
     category: str
-    parameters: JsonObject
-    handler: ToolHandler
+    binding: ToolBinding
     effects: bool = False
     scope: Literal["both", "group", "private", "account"] = "both"
     cross_scope: bool = False
-    model: type[BaseModel] | None = None
     requires: tuple[str, ...] = ()
     # 面向控制台的简短名称；模型看到的仍是 description。
     title: str = ""
+
+    @property
+    def parameters(self) -> JsonObject:
+        return self.binding.parameters
 
     def public(self) -> JsonObject:
         return {
@@ -225,3 +242,32 @@ def compact_schema(parameters: JsonObject) -> JsonObject:
 
 def schema(model: type[BaseModel]) -> JsonObject:
     return compact_schema(JSON_OBJECT.validate_python(model.model_json_schema()))
+
+
+def model_binding[Arguments: BaseModel](
+    model: type[Arguments],
+    handler: Callable[[ToolContext, Arguments], Awaitable[ToolResult]],
+) -> ToolBinding:
+    parameters = schema(model)
+    validator = Draft202012Validator(parameters)
+
+    def prepare(arguments: JsonObject) -> PreparedToolCall:
+        # schema 限制原始 JSON 类型，避免 Pydantic 将字符串/布尔值隐式转成数字。
+        # 模型只在此构造一次，执行跨字段约束并补齐参与授权的默认值。
+        validator.validate(arguments)
+        request = model.model_validate(arguments)
+        return PreparedToolCall(
+            request.model_dump(mode="json"), lambda context: handler(context, request)
+        )
+
+    return ToolBinding(parameters, prepare)
+
+
+def json_binding(parameters: JsonObject, handler: ToolHandler) -> ToolBinding:
+    validator = Draft202012Validator(parameters)
+
+    def prepare(arguments: JsonObject) -> PreparedToolCall:
+        validator.validate(arguments)
+        return PreparedToolCall(arguments, lambda context: handler(context, arguments))
+
+    return ToolBinding(parameters, prepare)

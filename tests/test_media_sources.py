@@ -13,6 +13,7 @@ from qq_agent_harness.contracts import (
     ToolContext,
     ToolDefinition,
     ToolResult,
+    json_binding,
     schema,
 )
 from qq_agent_harness.napcat.arguments import Empty, ReadMedia
@@ -116,8 +117,8 @@ async def test_qq_image_redirect_rechecks_domain_and_public_address(redirect: st
         segment = non_message_segment(GROUP, ReadMedia(user_id="20"))
         assert segment is not None
         result = await reader.read_many([segment], Bot())
-    assert len(requests) == 1 and result["media"] == []
-    assert isinstance(result["errors"], list) and len(result["errors"]) == 1
+    assert len(requests) == 1 and result.media == []
+    assert len(result.errors) == 1
 
 
 @pytest.mark.parametrize("body,budget", [(b"<html>error</html>", 1024), (PNG, 10)])
@@ -132,7 +133,7 @@ async def test_qq_images_reject_error_pages_and_excess_bytes(body: bytes, budget
         segment = non_message_segment(GROUP, ReadMedia(media_url="https://gchat.qpic.cn/image"))
         assert segment is not None
         result = await reader.read_many([segment], Bot())
-    assert result["media"] == [] and result["errors"]
+    assert result.media == [] and result.errors
 
 
 async def test_forward_inline_media_is_expanded_once_without_deduplicating_real_repeats() -> None:
@@ -188,7 +189,9 @@ async def test_save_public_image_obeys_cancellation_before_workspace_write(
         tools, context, settings = registry(Bot())
         settings.sandbox.enabled = True
         tools.add(
-            ToolDefinition("sandbox__write_file", "写文件", "media.read", schema(Empty), unused)
+            ToolDefinition(
+                "sandbox__write_file", "写文件", "media.read", json_binding(schema(Empty), unused)
+            )
         )
         context.write_workspace = write
         context.cancelled = lambda: cancelled

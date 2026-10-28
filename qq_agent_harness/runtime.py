@@ -1,6 +1,7 @@
 """有界内存对话循环；无业务存档、重启恢复或自动发送。"""
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -9,11 +10,11 @@ from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Protocol
 
 from .configuration import ConfigStore
 from .contracts import (
-    JSON_OBJECT,
     ConversationScope,
     JsonObject,
     JsonValue,
@@ -24,6 +25,7 @@ from .contracts import (
     UnknownOperation,
 )
 from .napcat.arguments import ReadMedia
+from .napcat.media import MediaBatch
 from .prompts import SILENT_RESPONSE, compose_prompt
 from .providers import (
     CompactionError,
@@ -35,6 +37,7 @@ from .providers import (
 )
 from .registry import ToolRegistry
 from .session_view import project, scrub
+from .settings import HarnessSettings
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +104,7 @@ class Hub(Protocol):
 
 
 SessionFactory = Callable[..., ModelSession]
+type ExecutedCalls = dict[str, tuple[str, JsonObject, ToolResult]]
 
 
 class AgentRuntime:
@@ -132,7 +136,7 @@ class AgentRuntime:
         self.read_workspace: Callable[[str], Awaitable[bytes]] | None = None
         self.write_workspace: Callable[[str, bytes], Awaitable[None]] | None = None
         self.read_media: (
-            Callable[[list[JsonObject], NapCatConnection], Awaitable[JsonObject]] | None
+            Callable[[list[JsonObject], NapCatConnection], Awaitable[MediaBatch]] | None
         ) = None
 
     def record(self, scope_key: str, kind: str, message: str, **extra: str) -> None:
@@ -428,124 +432,17 @@ class AgentRuntime:
             "rounds": 0,
         }
 
-        async def read_workspace(path: str) -> bytes:
-            tool = self.registry.tools.get("sandbox__read_file")
-            if not tool or not self.read_workspace:
-                raise ValueError("当前群未开放共享工作区读取能力")
-            denied = self.registry.authorize(
-                scope,
-                tool,
-                {
-                    "path": path,
-                    "offset": 0,
-                    "limit": self.store.settings.sandbox.transfer_max_bytes,
-                },
-            )
-            if denied:
-                raise ValueError(denied.message)
-            return await self.read_workspace(path)
-
-        async def write_workspace(path: str, data: bytes) -> None:
-            tool = self.registry.tools.get("sandbox__write_file")
-            if not tool or not self.write_workspace:
-                raise ValueError("当前群未开放共享工作区写入能力")
-            denied = self.registry.authorize(
-                scope, tool, {"path": path, "overwrite": False, "append": False}
-            )
-            if denied:
-                raise ValueError(denied.message)
-            if any(
-                key == "content" or key.startswith("content.")
-                for key in self.registry.policy(scope).parameters.get(tool.name, {})
-            ):
-                raise ValueError("二进制导入不能满足该群对文本写入内容的限制")
-            await self.write_workspace(path, data)
-
-        context = ToolContext(
-            scope,
-            turn_id,
-            self.hub.bot_connection(scope.bot_id),
-            cancelled=lambda: key in self.stopping,
-            read_workspace=read_workspace,
-            write_workspace=write_workspace,
-        )
+        context = self._tool_context(scope, turn_id)
         session: ModelSession | None = None
         retained = self.sessions.get(key)
         if retained:
             context.unknown_effects = retained.unknown_effects
-        executed: dict[str, tuple[str, JsonObject, ToolResult]] = {}
+        executed: ExecutedCalls = {}
         outcome = "error"
         interrupted_call: str | None = None
 
-        def update_actions() -> None:
-            if session is None:
-                return
-            receipts: list[JsonValue] = []
-            for receipt in context.sent_messages:
-                safe_receipt = {"action": receipt.get("action"), "status": receipt.get("status")}
-                if isinstance(data := receipt.get("data"), dict):
-                    for name in ("message_id", "res_id", "file_id"):
-                        if isinstance(identifier := data.get(name), (str, int)):
-                            safe_receipt[name] = str(identifier)
-                receipts.append(safe_receipt)
-            session.action_state = {
-                "sent_receipts": receipts,
-                "send_attempts": context.send_attempts,
-                "max_sends_per_turn": self.registry.policy(scope).max_sends_per_turn,
-                "executed_calls": [
-                    {"call_id": call_id, "tool": name, "status": result.status}
-                    for call_id, (name, _arguments, result) in executed.items()
-                ],
-                "unknown_operations": [
-                    {
-                        "id": operation.id,
-                        "tool": operation.tool,
-                        "target": operation.target.model_dump(mode="json"),
-                    }
-                    for operation in context.unknown_effects
-                ],
-            }
-
-        def context_event(event: JsonObject) -> None:
-            phase = event.get("phase")
-            self.turns[key]["state"] = "compacting" if phase == "compacting" else "running"
-            if session is not None:
-                # 请求及重试发出时原地递增计数；等待响应期间 UI 也能看到真实次数。
-                self.turns[key]["context"] = session.context_state
-            if isinstance(count := event.get("request_count"), int):
-                self.turns[key]["rounds"] = count
-            if phase == "compacting":
-                self.record(
-                    key, "compaction", "上下文达到预算，正在强制压缩旧资料", status="running"
-                )
-            elif phase == "compacted":
-                self.record(
-                    key,
-                    "compaction",
-                    f"上下文已压缩：{event.get('before_tokens')} → {event.get('after_tokens')} token；继续本轮",
-                    status="completed",
-                )
-            elif phase == "compaction_skipped":
-                self.record(
-                    key, "compaction", "压缩未完成，当前输入仍在窗口内，继续本轮", status="warning"
-                )
-
         try:
-            history_error = ""
-            try:
-                history_tool = self.registry.tools.get("qq__get_history")
-                history = (
-                    await self.hub.get_history(scope, config.runtime.history_count)
-                    if config.runtime.history_count
-                    and history_tool
-                    and not self.registry.authorize(
-                        scope, history_tool, {"count": config.runtime.history_count}
-                    )
-                    else []
-                )
-            except TimeoutError, ConnectionError, ValueError, OSError:
-                history = []
-                history_error = "NapCat 历史暂不可用；仅依据本轮收到的消息，不能假设此前没有对话。"
+            history, history_error = await self._load_history(scope, config)
             conversation = json.dumps(
                 {
                     "来源会话": scope.model_dump(),
@@ -570,107 +467,13 @@ class AgentRuntime:
             self.sessions.move_to_end(key)
             self.turns[key]["session_id"] = retained.session_id
             session.request_limit = config.runtime.max_model_rounds
-            session.on_context_event = context_event
+            session.on_context_event = partial(self._context_event, key, session)
             session.on_request_event = lambda event: self._model_request_event(key, event)
-            # 资料与当前输入分开：旧历史和知识可以压缩，当前消息及安全规则保持完整。
-            knowledge = [
-                (path, self.store.resolve_file(path).read_text(encoding="utf-8"))
-                for path in config.knowledge_files
-            ]
-            if knowledge != retained.knowledge:
-                session.add_background(
-                    json.dumps(
-                        {
-                            "当前知识库": [
-                                {"文件": path, "资料": text} for path, text in knowledge
-                            ],
-                            "说明": "当前版本替代此前知识库资料；移除的文件不再作为当前知识依据。",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    "knowledge",
-                )
-                retained.knowledge = knowledge
-            current_ids = {message.message_id for message in batch}
-            waiting_ids = {message.message_id for message in self.pending.get(key, [])}
-            known_ids = current_ids | waiting_ids | retained.message_ids.keys()
-            new_history = [
-                message
-                for message in {message.message_id: message for message in history}.values()
-                if message.message_id not in known_ids
-            ]
-            if new_history:
-                session.add_background(
-                    json.dumps(
-                        {
-                            "来源会话": scope.model_dump(mode="json"),
-                            "历史消息": [
-                                message.model_dump(mode="json", exclude={"scope"})
-                                for message in new_history
-                            ],
-                        },
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    "history",
-                )
-                retained.remember([message.message_id for message in new_history])
-            retained.remember([message.message_id for message in batch], wake=True)
-            session.media_limit = config.napcat.media_max_bytes
-            media_tool = self.registry.tools.get("qq__read_media")
-            if self.read_media and media_tool and self.registry.permitted(scope, media_tool)[0]:
-                raw = await self.read_media(
-                    [
-                        s
-                        for message in batch
-                        if not self.registry.authorize(
-                            scope,
-                            media_tool,
-                            JSON_OBJECT.validate_python(
-                                ReadMedia(
-                                    message_id=message.message_id, include_forwards=False
-                                ).model_dump(mode="json")
-                            ),
-                        )
-                        for s in message.segments
-                        if s.get("type") in ("image", "record", "video")
-                    ],
-                    context.napcat,
-                )
-                media: list[MediaInput] = []
-                media_items = raw.get("media")
-                for item in media_items if isinstance(media_items, list) else []:
-                    if isinstance(item, dict) and item.get("type") in (
-                        "image",
-                        "audio",
-                        "video",
-                    ):
-                        kind = item["type"]
-                        if kind in ("image", "audio", "video"):
-                            media.append(
-                                MediaInput(
-                                    kind,
-                                    str(item.get("mime_type", "")),
-                                    str(item.get("base64", "")),
-                                )
-                            )
-                errors = session.add_media(media)
-                media_errors = raw.get("errors")
-                if errors or media_errors:
-                    session.add_notice(
-                        json.dumps(
-                            {
-                                "media_errors": [
-                                    *errors,
-                                    *(media_errors if isinstance(media_errors, list) else []),
-                                ]
-                            },
-                            ensure_ascii=False,
-                        )
-                    )
+            self._add_background(session, retained, batch, history, config)
+            await self._add_media(session, context, batch, config)
             for round_number in range(config.runtime.max_model_rounds):
                 definitions = self.registry.definitions(context)
-                update_actions()
+                self._update_actions(session, context, executed)
                 self.turns[key]["rounds"] = round_number + 1
                 reply = await session.step(definitions)
                 self.turns[key]["context"] = session.context_state
@@ -749,7 +552,7 @@ class AgentRuntime:
             )
         finally:
             if session is not None and retained is not None:
-                update_actions()
+                self._update_actions(session, context, executed)
                 session.end_turn(outcome, interrupted_call)
                 retained.updated_at = time.time()
                 retained.outcome = outcome
@@ -757,6 +560,218 @@ class AgentRuntime:
                 retained.idle_compacted = False
                 retained.idle_tokens = session.idle_pressure()
                 self.sessions.move_to_end(key)
+
+    def _tool_context(self, scope: ConversationScope, turn_id: str) -> ToolContext:
+        key = scope.key
+
+        async def read_workspace(path: str) -> bytes:
+            tool = self.registry.tools.get("sandbox__read_file")
+            if not tool or not self.read_workspace:
+                raise ValueError("当前群未开放共享工作区读取能力")
+            denied = self.registry.authorize(
+                scope,
+                tool,
+                {
+                    "path": path,
+                    "offset": 0,
+                    "limit": self.store.settings.sandbox.transfer_max_bytes,
+                },
+            )
+            if denied:
+                raise ValueError(denied.message)
+            return await self.read_workspace(path)
+
+        async def write_workspace(path: str, data: bytes) -> None:
+            tool = self.registry.tools.get("sandbox__write_file")
+            if not tool or not self.write_workspace:
+                raise ValueError("当前群未开放共享工作区写入能力")
+            denied = self.registry.authorize(
+                scope, tool, {"path": path, "overwrite": False, "append": False}
+            )
+            if denied:
+                raise ValueError(denied.message)
+            if any(
+                key == "content" or key.startswith("content.")
+                for key in self.registry.policy(scope).parameters.get(tool.name, {})
+            ):
+                raise ValueError("二进制导入不能满足该群对文本写入内容的限制")
+            await self.write_workspace(path, data)
+
+        return ToolContext(
+            scope,
+            turn_id,
+            self.hub.bot_connection(scope.bot_id),
+            cancelled=lambda: key in self.stopping,
+            read_workspace=read_workspace,
+            write_workspace=write_workspace,
+        )
+
+    def _update_actions(
+        self, session: ModelSession, context: ToolContext, executed: ExecutedCalls
+    ) -> None:
+        receipts: list[JsonValue] = []
+        for receipt in context.sent_messages:
+            safe_receipt = {"action": receipt.get("action"), "status": receipt.get("status")}
+            if isinstance(data := receipt.get("data"), dict):
+                for name in ("message_id", "res_id", "file_id"):
+                    if isinstance(identifier := data.get(name), (str, int)):
+                        safe_receipt[name] = str(identifier)
+            receipts.append(safe_receipt)
+        session.action_state = {
+            "sent_receipts": receipts,
+            "send_attempts": context.send_attempts,
+            "max_sends_per_turn": self.registry.policy(context.scope).max_sends_per_turn,
+            "executed_calls": [
+                {"call_id": call_id, "tool": name, "status": result.status}
+                for call_id, (name, _arguments, result) in executed.items()
+            ],
+            "unknown_operations": [
+                {
+                    "id": operation.id,
+                    "tool": operation.tool,
+                    "target": operation.target.model_dump(mode="json"),
+                }
+                for operation in context.unknown_effects
+            ],
+        }
+
+    def _context_event(self, key: str, session: ModelSession, event: JsonObject) -> None:
+        phase = event.get("phase")
+        self.turns[key]["state"] = "compacting" if phase == "compacting" else "running"
+        # 请求及重试发出时原地递增计数；等待响应期间 UI 也能看到真实次数。
+        self.turns[key]["context"] = session.context_state
+        if isinstance(count := event.get("request_count"), int):
+            self.turns[key]["rounds"] = count
+        if phase == "compacting":
+            self.record(key, "compaction", "上下文达到预算，正在强制压缩旧资料", status="running")
+        elif phase == "compacted":
+            self.record(
+                key,
+                "compaction",
+                f"上下文已压缩：{event.get('before_tokens')} → {event.get('after_tokens')} token；继续本轮",
+                status="completed",
+            )
+        elif phase == "compaction_skipped":
+            self.record(
+                key, "compaction", "压缩未完成，当前输入仍在窗口内，继续本轮", status="warning"
+            )
+
+    async def _load_history(
+        self, scope: ConversationScope, config: HarnessSettings
+    ) -> tuple[list[Message], str]:
+        history_error = ""
+        try:
+            history_tool = self.registry.tools.get("qq__get_history")
+            history = (
+                await self.hub.get_history(scope, config.runtime.history_count)
+                if config.runtime.history_count
+                and history_tool
+                and not self.registry.authorize(
+                    scope, history_tool, {"count": config.runtime.history_count}
+                )
+                else []
+            )
+        except TimeoutError, ConnectionError, ValueError, OSError:
+            history = []
+            history_error = "NapCat 历史暂不可用；仅依据本轮收到的消息，不能假设此前没有对话。"
+        return history, history_error
+
+    def _add_background(
+        self,
+        session: ModelSession,
+        retained: ConversationSession,
+        batch: list[Message],
+        history: list[Message],
+        config: HarnessSettings,
+    ) -> None:
+        scope = retained.scope
+        key = scope.key
+        # 资料与当前输入分开：旧历史和知识可以压缩，当前消息及安全规则保持完整。
+        knowledge = [
+            (path, self.store.resolve_file(path).read_text(encoding="utf-8"))
+            for path in config.knowledge_files
+        ]
+        if knowledge != retained.knowledge:
+            session.add_background(
+                json.dumps(
+                    {
+                        "当前知识库": [{"文件": path, "资料": text} for path, text in knowledge],
+                        "说明": "当前版本替代此前知识库资料；移除的文件不再作为当前知识依据。",
+                    },
+                    ensure_ascii=False,
+                ),
+                "knowledge",
+            )
+            retained.knowledge = knowledge
+        current_ids = {message.message_id for message in batch}
+        waiting_ids = {message.message_id for message in self.pending.get(key, [])}
+        known_ids = current_ids | waiting_ids | retained.message_ids.keys()
+        new_history = [
+            message
+            for message in {message.message_id: message for message in history}.values()
+            if message.message_id not in known_ids
+        ]
+        if new_history:
+            session.add_background(
+                json.dumps(
+                    {
+                        "来源会话": scope.model_dump(mode="json"),
+                        "历史消息": [
+                            message.model_dump(mode="json", exclude={"scope"})
+                            for message in new_history
+                        ],
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                "history",
+            )
+            retained.remember([message.message_id for message in new_history])
+        retained.remember([message.message_id for message in batch], wake=True)
+
+    async def _add_media(
+        self,
+        session: ModelSession,
+        context: ToolContext,
+        batch: list[Message],
+        config: HarnessSettings,
+    ) -> None:
+        session.media_limit = config.napcat.media_max_bytes
+        scope = context.scope
+        tool = self.registry.tools.get("qq__read_media")
+        if self.read_media is None or tool is None or not self.registry.permitted(scope, tool)[0]:
+            return
+        segments = [
+            segment
+            for message in batch
+            if not self.registry.authorize(
+                scope,
+                tool,
+                ReadMedia(message_id=message.message_id, include_forwards=False).model_dump(
+                    mode="json"
+                ),
+            )
+            for segment in message.segments
+            if segment.get("type") in ("image", "record", "video")
+        ]
+        result = await self.read_media(segments, context.napcat)
+        media = [
+            MediaInput(
+                "audio" if asset.type == "record" else asset.type,
+                asset.mime_type,
+                base64.b64encode(asset.content).decode("ascii"),
+            )
+            for _, asset in result.media
+            if asset.type != "file"
+        ]
+        errors = session.add_media(media)
+        if errors or result.errors:
+            session.add_notice(
+                json.dumps(
+                    {"media_errors": [*errors, *(error.public() for error in result.errors)]},
+                    ensure_ascii=False,
+                )
+            )
 
     async def cancel(self, key: str) -> bool:
         task = self.workers.get(key)

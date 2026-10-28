@@ -1,7 +1,9 @@
 """会话上下文查看：可见内容投影、重置语义与接口映射。"""
 
 import asyncio
+import base64
 import json
+from collections.abc import Awaitable, Callable
 
 import httpx
 import pytest
@@ -16,11 +18,14 @@ from qq_agent_harness.contracts import (
     JsonValue,
     Message,
     Model,
+    ToolContext,
     ToolDefinition,
-    ToolHandler,
     ToolResult,
+    json_binding,
+    model_binding,
     schema,
 )
+from qq_agent_harness.napcat.media import MediaAsset, MediaBatch
 from qq_agent_harness.providers import ModelSession
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime, ConversationSession, SessionBusy
@@ -37,15 +42,13 @@ class SendText(Model):
     text: str
 
 
-def send_tool(handler: ToolHandler) -> ToolDefinition:
+def send_tool(handler: Callable[[ToolContext, SendText], Awaitable[ToolResult]]) -> ToolDefinition:
     return ToolDefinition(
         "qq__send_message",
         "发送",
         "messages.send",
-        schema(SendText),
-        handler,
+        model_binding(SendText, handler),
         effects=True,
-        model=SendText,
     )
 
 
@@ -110,7 +113,11 @@ async def test_view_follows_turns_without_reasoning_or_raw_media(tmp_path, proto
         return ToolResult.success(receipt)
 
     registry.add(send_tool(send))
-    registry.add(ToolDefinition("qq__read_media", "媒体", "messages.read", schema(Empty), unused))
+    registry.add(
+        ToolDefinition(
+            "qq__read_media", "媒体", "messages.read", json_binding(schema(Empty), unused)
+        )
+    )
 
     def respond(request):
         bodies.append(json.loads(request.content))
@@ -122,9 +129,9 @@ async def test_view_follows_turns_without_reasoning_or_raw_media(tmp_path, proto
         )
         return httpx.Response(200, json=payload)
 
-    async def read_media(segments, _connection) -> JsonObject:
-        image: JsonObject = {"type": "image", "mime_type": "image/png", "base64": MEDIA}
-        return {"media": [image] if segments else []}
+    async def read_media(segments, _connection) -> MediaBatch:
+        image = MediaAsset("image", base64.b64decode(MEDIA), "image/png", "fixture")
+        return MediaBatch(media=[(0, image)] if segments else [])
 
     scope = ConversationScope(bot_id="bot", kind="group", peer_id="a")
     pictured = Message(
@@ -269,7 +276,11 @@ async def test_reset_forgets_context_but_keeps_duplicate_guards(tmp_path):
         return ToolResult.success()
 
     registry.add(send_tool(send))
-    registry.add(ToolDefinition("qq__get_history", "历史", "messages.read", schema(Empty), unused))
+    registry.add(
+        ToolDefinition(
+            "qq__get_history", "历史", "messages.read", json_binding(schema(Empty), unused)
+        )
+    )
 
     class HistoryHub(FakeHub):
         async def get_history(self, scope: ConversationScope, count: int):

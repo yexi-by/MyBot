@@ -7,11 +7,11 @@ import logging
 import mimetypes
 import socket
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import httpx
-from pydantic import JsonValue
 
 from ..contracts import JsonObject, NapCatConnection
 from ..settings import NapCatSettings
@@ -34,7 +34,7 @@ async def resolve_public(host: str) -> str:
 
 @dataclass(frozen=True)
 class MediaAsset:
-    type: str
+    type: Literal["image", "record", "video", "file"]
     content: bytes
     mime_type: str
     source: str
@@ -47,6 +47,22 @@ class MediaAsset:
             "size": len(self.content),
             "source": self.source,
         }
+
+
+@dataclass(frozen=True)
+class MediaFailure:
+    index: int
+    error_type: str
+    message: str
+
+    def public(self) -> JsonObject:
+        return {"index": self.index, "error_type": self.error_type, "message": self.message}
+
+
+@dataclass
+class MediaBatch:
+    media: list[tuple[int, MediaAsset]] = field(default_factory=list)
+    errors: list[MediaFailure] = field(default_factory=list)
 
 
 class MediaReader:
@@ -182,7 +198,9 @@ class MediaReader:
                 raise
 
     async def _read(self, segment: JsonObject, connection: NapCatConnection) -> MediaAsset:
-        kind = str(segment.get("type", "file"))
+        kind = segment.get("type")
+        if kind not in ("image", "record", "video", "file"):
+            raise ValueError("不支持的媒体消息段类型")
         data = segment.get("data")
         if not isinstance(data, dict):
             raise ValueError("媒体消息段缺少 data")
@@ -304,36 +322,31 @@ class MediaReader:
 
     async def read_many(
         self, segments: Sequence[JsonObject], connection: NapCatConnection
-    ) -> JsonObject:
+    ) -> MediaBatch:
         selected = [
             (index, segment)
             for index, segment in enumerate(segments)
             if segment.get("type") in ("image", "record", "video", "file")
         ]
         total_bytes = 0
-        budget_lock = asyncio.Lock()
 
         async def one(index: int, segment: JsonObject) -> tuple[int, MediaAsset | Exception]:
             nonlocal total_bytes
             try:
                 asset = await self.read(segment, connection)
-                async with budget_lock:
-                    if total_bytes + len(asset.content) > self.settings.media_max_bytes:
-                        raise ValueError("本批媒体总量超过配置上限")
-                    total_bytes += len(asset.content)
+                if total_bytes + len(asset.content) > self.settings.media_max_bytes:
+                    raise ValueError("本批媒体总量超过配置上限")
+                total_bytes += len(asset.content)
                 return index, asset
             except (NapCatError, ValueError, OSError, httpx.HTTPError, TimeoutError) as exc:
                 return index, exc
 
         # gather 的并发由 read() 内配置的 semaphore 限制，单项失败不阻断整批。
         results = await asyncio.gather(*(one(index, segment) for index, segment in selected))
-        media: list[JsonValue] = []
-        errors: list[JsonValue] = []
+        batch = MediaBatch()
         for index, result in results:
             if isinstance(result, Exception):
-                errors.append(
-                    {"index": index, "error_type": type(result).__name__, "message": str(result)}
-                )
+                batch.errors.append(MediaFailure(index, type(result).__name__, str(result)))
             else:
-                media.append({"index": index, **result.public()})
-        return {"media": media, "errors": errors}
+                batch.media.append((index, result))
+        return batch

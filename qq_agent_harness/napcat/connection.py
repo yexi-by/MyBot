@@ -137,7 +137,7 @@ def parse_message(
     elif isinstance(raw_segments, list):
         for segment in raw_segments:
             if isinstance(segment, dict):
-                segments.append(object_value(normalize_ids(segment)))
+                segments.append(segment)
     raw_time = payload.get("time", 0)
     if not isinstance(raw_time, (str, int, float)) or isinstance(raw_time, bool):
         return None
@@ -319,7 +319,7 @@ class NapCatHub:
                     return
                 if payload.get("post_type") != "message":
                     continue
-                message = parse_message(payload)
+                message = parse_message(object_value(normalize_ids(payload)))
                 if message is None or message.sender_id == bot_id:
                     continue
                 try:
@@ -402,9 +402,9 @@ async def scoped_message(
             if target_id is not None:
                 if str(target_id) != scope.peer_id:
                     raise ValueError("消息不属于当前私聊")
-                return object_value(normalize_ids(data))
+                return data
             # bot 发出的私聊 get_msg 可能不含对端，必须通过定向历史验证归属。
             history = await scoped_history(client, scope, 300)
             if not any(item.message_id == message_id for item in history):
                 raise ValueError("无法验证该私聊消息的会话归属")
-    return object_value(normalize_ids(data))
+    return data
