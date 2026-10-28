@@ -52,6 +52,13 @@ FIELDS = (
     "bot_id",
     "action",
     "scope_key",
+    "request_kind",
+    "attempt",
+    "retry",
+    "max_retries",
+    "delay_seconds",
+    "http_status",
+    "error_type",
 )
 
 

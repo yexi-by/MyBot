@@ -12,6 +12,7 @@ function lookup(table: Record<string, Label>, key: string | undefined): Label {
 const activityKinds: Record<string, Label> = {
   turn: { text: "对话", tone: "neutral" },
   tool: { text: "工具调用", tone: "neutral" },
+  model: { text: "模型请求", tone: "neutral" },
   compaction: { text: "上下文压缩", tone: "neutral" },
   session: { text: "会话回收", tone: "warning" },
   reset: { text: "会话重置", tone: "neutral" },
@@ -30,6 +31,7 @@ const results: Record<string, Label> = {
   silent: { text: "未发送消息", tone: "neutral" },
   warning: { text: "提示", tone: "warning" },
   running: { text: "进行中", tone: "accent" },
+  retrying: { text: "等待重试", tone: "warning" },
   error: { text: "失败", tone: "danger" },
   unknown: { text: "结果未知", tone: "warning" },
   cancelled: { text: "已停止", tone: "neutral" },
@@ -45,6 +47,7 @@ const turnStates: Record<string, Label> = {
   queued: { text: "排队中", tone: "neutral" },
   running: { text: "运行中", tone: "accent" },
   compacting: { text: "压缩上下文", tone: "warning" },
+  retrying: { text: "等待重试", tone: "warning" },
 };
 export const turnState = (state: string | undefined) =>
   lookup(turnStates, state);

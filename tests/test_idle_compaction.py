@@ -377,9 +377,13 @@ async def test_wake_interrupts_idle_compaction_and_keeps_original_context(tmp_pa
     assert "INPUT_first" in context
 
 
-async def test_failed_idle_compaction_keeps_context_and_is_not_retried(tmp_path):
+async def test_exhausted_idle_compaction_keeps_context_and_is_not_rescheduled(
+    tmp_path, monkeypatch
+):
     store = make_store(tmp_path)
     enable_idle(store, ModelChoice(provider="cheap", name="small"))
+    store.settings.providers["cheap"].max_retries = 2
+    monkeypatch.setattr("qq_agent_harness.providers.retry_delay", lambda *_: 0)
     summaries = 0
     turns: list[JsonObject] = []
 
@@ -405,7 +409,7 @@ async def test_failed_idle_compaction_keeps_context_and_is_not_retried(tmp_path)
         assert runtime.compact_idle_sessions(now=ended + 3600) == []
         await wake(runtime, message("second", "a", "group", "member"))
         await runtime.close()
-    assert summaries == 1
+    assert summaries == 3
     assert "INPUT_first" in context_text(turns[-1])
 
 

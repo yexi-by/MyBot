@@ -386,7 +386,9 @@ async def test_unrelated_errors_do_not_trigger_compaction(status, code, message)
         return httpx.Response(status, json={"error": {"code": code, "message": message}})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        session = ModelSession(ModelEndpoint(model="test"), "system", "current", client=client)
+        session = ModelSession(
+            ModelEndpoint(model="test", max_retries=0), "system", "current", client=client
+        )
         session.add_background("background")
         with pytest.raises(ProviderError, match=f"HTTP {status}"):
             await session.step([])
@@ -508,7 +510,10 @@ async def test_incomplete_normal_response_does_not_append_or_execute_calls(proto
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ModelEndpoint(protocol=protocol, model="test"), "system", "current", client=client
+            ModelEndpoint(protocol=protocol, model="test", max_retries=0),
+            "system",
+            "current",
+            client=client,
         )
         original = copy.deepcopy(session.items)
         with pytest.raises(ProviderError):

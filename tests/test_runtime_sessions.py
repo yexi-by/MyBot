@@ -619,6 +619,7 @@ async def test_protocol_switch_preserves_visible_facts_without_old_wire_objects(
 
 async def test_completed_results_survive_model_failure_between_wakes(tmp_path):
     store = make_store(tmp_path)
+    store.settings.providers["test"].max_retries = 0
     registry = ToolRegistry(lambda: store.settings)
     dispatched, bodies = [], []
 

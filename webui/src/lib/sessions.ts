@@ -7,9 +7,9 @@ import { confirm, toast } from "./ui";
 
 export const sessionRoute = (key: string) => "/sessions/" + encodeURIComponent(key);
 
-/** 排队、运行或压缩中的会话不能直接重置，查看器也按更短间隔刷新。 */
+/** 排队、运行、重试或压缩中的会话不能直接重置，查看器也按更短间隔刷新。 */
 export const isBusy = (state: string | undefined) =>
-  state === "queued" || state === "running" || state === "compacting";
+  state === "queued" || state === "running" || state === "compacting" || state === "retrying";
 
 /**
  * QQ 消息段或发送参数中的一段转成可读文字。NapCat 消息段的字段在 data 里，

@@ -1,9 +1,13 @@
 """Chat Completions 和 Responses 的协议适配，无供应商品牌分支。"""
 
+import asyncio
 import json
+import math
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from typing import Literal
 
 import httpx
@@ -46,6 +50,64 @@ SUMMARY_PREFIX = (
 )
 
 Send = Callable[[JsonObject], Awaitable[JsonObject]]
+RequestKind = Literal["model", "compaction", "idle_compaction"]
+
+
+class ModelRequestError(ProviderError):
+    """请求边界产生的脱敏错误；是否重试不依赖上游错误正文。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        retryable: bool = False,
+        http_status: int = 0,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.retryable = retryable
+        self.http_status = http_status
+        self.retry_after = retry_after
+
+
+def retry_delay(retry: int, retry_after: float | None) -> float:
+    return retry_after if retry_after is not None else min(30.0, 2.0 ** min(retry - 1, 5))
+
+
+def retry_after_seconds(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            date = parsedate_to_datetime(value)
+            seconds = (date if date.tzinfo else date.replace(tzinfo=UTC)).timestamp() - time.time()
+        except TypeError, ValueError, OverflowError:
+            return None
+    return min(60.0, max(0.0, seconds)) if math.isfinite(seconds) else None
+
+
+def permanent_request_error(data: JsonObject) -> bool:
+    error = data.get("error")
+    if not isinstance(error, dict):
+        return False
+    codes = {
+        "invalid_request_error",
+        "invalid_request",
+        "invalid_argument",
+        "invalid_value",
+        "authentication_error",
+        "permission_error",
+        "insufficient_quota",
+        "model_not_found",
+        "unsupported_parameter",
+        "content_filter",
+        "content_policy_violation",
+    }
+    return any(isinstance(error.get(key), str) and error[key] in codes for key in ("code", "type"))
 
 
 @dataclass
@@ -149,8 +211,10 @@ class ModelSession:
         self.request_count = 0
         self.model_request_count = 0
         self.compaction_request_count = 0
+        self.retry_count = 0
         self._compaction_failed = False
         self.on_context_event: Callable[[JsonObject], None] | None = None
+        self.on_request_event: Callable[[JsonObject], None] | None = None
         self.context_state: JsonObject = {}
         self._background: list[JsonObject] = []
         self._groups: list[ResponseGroup] = []
@@ -239,6 +303,7 @@ class ModelSession:
         self.request_count = 0
         self.model_request_count = 0
         self.compaction_request_count = 0
+        self.retry_count = 0
         self._compaction_failed = False
         self.media_bytes = 0
         self.action_state = {}
@@ -247,6 +312,7 @@ class ModelSession:
             "request_count": 0,
             "model_request_count": 0,
             "compaction_request_count": 0,
+            "retry_count": 0,
         }
 
     def end_turn(self, outcome: str, interrupted_call: str | None = None) -> None:
@@ -276,6 +342,7 @@ class ModelSession:
         self._background.append(boundary)
         self._note(boundary, "boundary")
         self.on_context_event = None
+        self.on_request_event = None
 
     def add_background(self, text: str, kind: ItemKind = "background") -> None:
         item: JsonObject = {"role": "user", "content": text}
@@ -439,6 +506,7 @@ class ModelSession:
             "request_count": self.request_count,
             "model_request_count": self.model_request_count,
             "compaction_request_count": self.compaction_request_count,
+            "retry_count": self.retry_count,
         }
         if self.on_context_event is not None:
             self.on_context_event({"phase": phase, **self.context_state, **extra})
@@ -453,14 +521,71 @@ class ModelSession:
             self.compaction_request_count += 1
         else:
             self.model_request_count += 1
-        self.request_count += 1
-        self.context_state["request_count"] = self.request_count
         self.context_state["model_request_count"] = self.model_request_count
         self.context_state["compaction_request_count"] = self.compaction_request_count
-        return await self._post(self.client, self.settings, body)
+        return await self._send(
+            self.client, self.settings, body, "compaction" if summary else "model"
+        )
 
     async def _summary_request(self, body: JsonObject) -> JsonObject:
         return await self._request(body, summary=True)
+
+    def _request_event(
+        self,
+        kind: RequestKind,
+        phase: str,
+        retry: int,
+        maximum: int,
+        *,
+        error: ModelRequestError | None = None,
+        delay: float = 0,
+    ) -> None:
+        if self.on_request_event is not None:
+            self.on_request_event(
+                {
+                    "phase": phase,
+                    "request_kind": kind,
+                    "attempt": retry + 1,
+                    "retry": retry,
+                    "max_retries": maximum,
+                    "delay_seconds": delay,
+                    "error_type": error.reason if error else "",
+                    "http_status": error.http_status if error else 0,
+                    "reason": str(error) if error else "",
+                }
+            )
+
+    async def _send(
+        self, client: httpx.AsyncClient, config: ModelEndpoint, body: JsonObject, kind: RequestKind
+    ) -> JsonObject:
+        # 一个逻辑请求的重试不消耗模型/压缩轮次；只在得到完整响应后交给执行层。
+        for retry in range(config.max_retries + 1):
+            if kind != "idle_compaction":
+                self.request_count += 1
+                self.retry_count += int(retry > 0)
+                self.context_state["request_count"] = self.request_count
+                self.context_state["retry_count"] = self.retry_count
+            if retry:
+                self._request_event(kind, "attempt", retry, config.max_retries)
+            try:
+                data = await self._post(client, config, body)
+            except ModelRequestError as error:
+                if not error.retryable or retry == config.max_retries:
+                    self._request_event(kind, "failed", retry, config.max_retries, error=error)
+                    if retry:
+                        raise ProviderError(f"{error}；已重试 {retry} 次") from None
+                    raise
+                delay = retry_delay(retry + 1, error.retry_after)
+                self._request_event(
+                    kind, "retry", retry + 1, config.max_retries, error=error, delay=delay
+                )
+                # 取消请求和停止会话都能中断退避等待，不会重新发起请求或重放工具。
+                await asyncio.sleep(delay)
+            else:
+                if retry:
+                    self._request_event(kind, "recovered", retry, config.max_retries)
+                return data
+        raise AssertionError("模型请求循环未返回结果")
 
     @staticmethod
     async def _post(
@@ -468,12 +593,14 @@ class ModelSession:
     ) -> JsonObject:
         endpoint = "/chat/completions" if config.protocol == "chat_completions" else "/responses"
         try:
-            response = await client.post(
-                config.base_url.rstrip("/") + endpoint,
-                headers=config.request_headers(),
-                json=body,
-                timeout=config.timeout,
-            )
+            # HTTPX 的分阶段超时不能限制缓慢持续传输；每次完整请求也受同一时限约束。
+            async with asyncio.timeout(config.timeout):
+                response = await client.post(
+                    config.base_url.rstrip("/") + endpoint,
+                    headers=config.request_headers(),
+                    json=body,
+                    timeout=config.timeout,
+                )
             if response.is_error:
                 error: JsonObject = {}
                 if len(response.content) <= 65_536:
@@ -484,20 +611,69 @@ class ModelSession:
                     if response.status_code in (400, 422) and is_context_overflow(error):
                         raise ContextWindowExceeded("模型接口报告输入上下文超过窗口")
                 details = remote_error_metadata(error)
-                raise ProviderError(
+                raise ModelRequestError(
                     f"模型接口返回 HTTP {response.status_code}"
-                    + (f"；{details}" if details else "")
+                    + (f"；{details}" if details else ""),
+                    reason="http_error",
+                    retryable=(
+                        response.status_code in (408, 409, 429) or response.status_code >= 500
+                    )
+                    and not permanent_request_error(error),
+                    http_status=response.status_code,
+                    retry_after=retry_after_seconds(response.headers.get("retry-after")),
                 )
             data = JSON_OBJECT.validate_json(response.content)
             if data.get("status") == "failed" and is_context_overflow(data):
                 raise ContextWindowExceeded("模型接口报告输入上下文超过窗口")
-            if data.get("status") not in (None, "completed") or data.get("error"):
-                raise ProviderError("模型接口未返回完整成功结果")
+            if data.get("status") == "failed" or data.get("error"):
+                details = remote_error_metadata(data)
+                raise ModelRequestError(
+                    "模型接口返回失败结果" + (f"；{details}" if details else ""),
+                    reason="failed_response",
+                    retryable=not permanent_request_error(data),
+                    http_status=response.status_code,
+                    retry_after=retry_after_seconds(response.headers.get("retry-after")),
+                )
+            if data.get("status") not in (None, "completed"):
+                raise ModelRequestError("模型接口未返回完整成功结果", reason="incomplete_response")
+            if config.protocol == "chat_completions":
+                choices = data.get("choices")
+                if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                    raise ModelRequestError(
+                        "模型未返回 choices", reason="invalid_response", retryable=True
+                    )
+                if not isinstance(choices[0].get("message"), dict):
+                    raise ModelRequestError(
+                        "模型未返回 message", reason="invalid_response", retryable=True
+                    )
+            elif not isinstance(data.get("output"), list):
+                raise ModelRequestError(
+                    "模型未返回 output", reason="invalid_response", retryable=True
+                )
             return data
+        except TimeoutError:
+            raise ModelRequestError(
+                "模型接口请求超时", reason="RequestTimeout", retryable=True
+            ) from None
         except httpx.HTTPError as transport_error:
-            raise ProviderError(f"模型接口连接失败（{type(transport_error).__name__}）") from None
+            reason = type(transport_error).__name__
+            raise ModelRequestError(
+                f"模型接口连接失败（{reason}）",
+                reason=reason,
+                retryable=isinstance(
+                    transport_error,
+                    (
+                        httpx.TimeoutException,
+                        httpx.NetworkError,
+                        httpx.RemoteProtocolError,
+                        httpx.ProxyError,
+                    ),
+                ),
+            ) from None
         except ValueError:
-            raise ProviderError("模型接口响应不是有效 JSON 对象") from None
+            raise ModelRequestError(
+                "模型接口响应不是有效 JSON 对象", reason="invalid_json", retryable=True
+            ) from None
 
     async def step(self, tools: list[JsonObject]) -> ModelReply:
         if any(not group.complete for group in self._groups):
@@ -645,8 +821,8 @@ class ModelSession:
                 data = await send(self._summary_body(config, chunk))
             except ModelRequestLimit:
                 raise
-            except ProviderError:
-                raise CompactionError("上下文摘要请求失败，原上下文已保留") from None
+            except ProviderError as error:
+                raise CompactionError(f"上下文摘要请求失败，原上下文已保留：{error}") from None
             summaries.append(self._summary_text(config, data))
         return "\n\n".join(summaries)
 
@@ -814,7 +990,7 @@ class ModelSession:
             if requests >= request_limit:
                 raise ModelRequestLimit("闲时压缩请求次数已达到上限")
             requests += 1
-            return await self._post(client, config, body)
+            return await self._send(client, config, body, "idle_compaction")
 
         try:
             summary = await self._summarize(

@@ -18,7 +18,6 @@ event_queue_size = 128
 [runtime]
 concurrent_conversations = 4
 max_model_rounds = 20
-turn_timeout = 600.0
 history_count = 60
 max_pending_conversations = 100
 max_pending_messages = 20
@@ -33,6 +32,7 @@ protocol = "responses"
 base_url = "https://api.openai.com/v1"
 api_key = ""
 timeout = 120.0
+max_retries = 10
 store_supported = true
 
 [providers.default.headers]

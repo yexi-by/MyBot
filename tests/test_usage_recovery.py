@@ -89,7 +89,7 @@ async def test_soft_budget_or_summary_failure_does_not_stop_fitting_request(comp
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ModelEndpoint(model="test", max_context_tokens=10_000),
+            ModelEndpoint(model="test", max_context_tokens=10_000, max_retries=0),
             "system",
             "wake" if compressible else "x" * 16_500,
             client=client,

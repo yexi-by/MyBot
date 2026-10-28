@@ -77,6 +77,7 @@ class ProviderSettings(Model):
     api_key: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     timeout: float = Field(default=120, gt=0)
+    max_retries: int = Field(default=10, ge=0)
     proxy: str | None = None
     store_supported: bool = True
 
@@ -110,7 +111,6 @@ class NapCatSettings(Model):
 class RuntimeSettings(Model):
     concurrent_conversations: int = Field(default=4, ge=1)
     max_model_rounds: int = Field(default=20, ge=1)
-    turn_timeout: float = Field(default=600, gt=0)
     history_count: int = Field(default=60, ge=0)
     max_pending_conversations: int = Field(default=100, ge=1)
     max_pending_messages: int = Field(default=20, ge=1)

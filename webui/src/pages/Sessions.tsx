@@ -95,7 +95,7 @@ function rowsOf(data: RuntimeEnvelope | null): Row[] {
 }
 
 const stateTone = (state: string): Tone =>
-  state === "running" ? "accent" : state === "compacting" ? "warning" : "neutral";
+  state === "running" ? "accent" : state === "compacting" || state === "retrying" ? "warning" : "neutral";
 
 function formatElapsed(seconds: number) {
   if (seconds >= 60) return formatDuration(seconds);
@@ -623,7 +623,7 @@ function SessionSummary({ detail, botId, refresh }: { detail: SessionDetail; bot
         </div>
         <div>
           <dt>本轮模型请求</dt>
-          <dd className="num">{context.model_request_count ?? 0} 次；压缩请求 {context.compaction_request_count ?? 0} 次</dd>
+          <dd className="num">{context.model_request_count ?? 0} 次；压缩请求 {context.compaction_request_count ?? 0} 次；重试 {context.retry_count ?? 0} 次</dd>
         </div>
         <div>
           <dt>上下文压缩</dt>

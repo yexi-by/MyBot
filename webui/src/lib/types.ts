@@ -83,6 +83,7 @@ export interface TurnContext {
   request_count?: number;
   model_request_count?: number;
   compaction_request_count?: number;
+  retry_count?: number;
   usage_source?: string;
 }
 export interface Turn {
@@ -96,7 +97,7 @@ export interface Turn {
   /** 闲时压缩：新唤醒到达时中断压缩，保留原文并立即接入。 */
   idle?: boolean;
 }
-export type SessionState = "idle" | "queued" | "running" | "compacting";
+export type SessionState = "idle" | "queued" | "running" | "compacting" | "retrying";
 export interface RetainedSession {
   scope_key: string;
   session_id: string;

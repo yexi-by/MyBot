@@ -152,14 +152,7 @@ export const runtimeSection: SectionDef = {
       type: "number",
       min: 1,
       integer: true,
-      help: "一轮对话的正常模型请求上限；压缩请求独立使用相同数量的额度。",
-    },
-    {
-      key: "turn_timeout",
-      label: "单轮时限",
-      type: "number",
-      ...seconds,
-      help: "超时即结束本轮；已经发出的消息不会撤回。",
+      help: "一轮对话的正常模型请求上限；压缩请求独立使用相同数量的额度。失败重试单独计数，不消耗此额度。",
     },
     {
       key: "history_count",
@@ -250,7 +243,15 @@ export const providerRequestSection: SectionDef = {
       label: "请求超时",
       type: "number",
       ...seconds,
-      help: "单次模型请求的最长等待时间。",
+      help: "每次模型请求的最长等待时间，包含响应正文接收；超时后按重试次数设置重新请求。",
+    },
+    {
+      key: "max_retries",
+      label: "失败重试次数",
+      type: "number",
+      min: 0,
+      integer: true,
+      help: "首次请求失败后最多重试的次数，默认 10 次（合计最多 11 次请求）；0 表示不重试。用于临时服务错误、限流、连接异常和超时。",
     },
     {
       key: "store_supported",
@@ -658,6 +659,7 @@ export function defaultProvider(): ObjectValue {
     api_key: "",
     headers: {},
     timeout: 120,
+    max_retries: 10,
     proxy: null,
     store_supported: true,
   };

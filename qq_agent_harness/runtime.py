@@ -150,6 +150,45 @@ class AgentRuntime:
             "harness_event kind=%s scope=%s status=%s", kind, scope_key, extra.get("status", "")
         )
 
+    def _model_request_event(self, key: str, event: JsonObject) -> None:
+        phase = event.get("phase")
+        kind = event.get("request_kind")
+        label = {
+            "model": "模型请求",
+            "compaction": "压缩请求",
+            "idle_compaction": "闲时压缩请求",
+        }.get(str(kind), "模型请求")
+        level = (
+            logging.ERROR
+            if phase == "failed"
+            else logging.WARNING
+            if phase == "retry"
+            else logging.INFO
+        )
+        logger.log(level, "model_request_%s", phase, extra={**event, "scope_key": key})
+        if turn := self.turns.get(key):
+            turn["state"] = (
+                "retrying" if phase == "retry" else "running" if kind == "model" else "compacting"
+            )
+            retained = self.sessions.get(key)
+            if kind != "idle_compaction" and retained and retained.model:
+                turn["rounds"] = retained.model.request_count
+        if phase == "retry":
+            self.record(
+                key,
+                "model",
+                f"{label}失败：{event.get('reason')}；{event.get('delay_seconds')} 秒后进行第 "
+                f"{event.get('retry')}/{event.get('max_retries')} 次重试",
+                status="retrying",
+            )
+        elif phase == "recovered":
+            self.record(
+                key,
+                "model",
+                f"{label}已恢复，第 {event.get('retry')} 次重试成功",
+                status="completed",
+            )
+
     async def should_wake(self, message: Message) -> bool:
         config = self.store.settings.conversation(message.scope)
         if not config.enabled or message.sender_id == message.scope.bot_id:
@@ -320,6 +359,7 @@ class AgentRuntime:
     async def _compact_idle(self, key: str) -> None:
         """压缩失败、超时都保留原上下文，随后照常处理等待中的唤醒。"""
         retained = self.sessions.get(key)
+        session: ModelSession | None = None
         try:
             if retained is None or (session := retained.model) is None:
                 return
@@ -334,14 +374,11 @@ class AgentRuntime:
                 f"会话已闲置，正在用 {endpoint.model} 压缩上下文",
                 status="running",
             )
+            session.on_request_event = lambda event: self._model_request_event(key, event)
             try:
-                async with asyncio.timeout(config.runtime.turn_timeout):
-                    before, after = await session.compact_idle(
-                        endpoint, request_limit=config.runtime.max_model_rounds
-                    )
-            except TimeoutError:
-                self.record(key, "compaction", "闲时压缩超时，原上下文保留", status="timeout")
-                return
+                before, after = await session.compact_idle(
+                    endpoint, request_limit=config.runtime.max_model_rounds
+                )
             except ProviderError as exc:
                 # 消息由协议层生成固定脱敏文本，不含上游响应正文。
                 self.record(key, "compaction", f"闲时压缩失败，原上下文保留：{exc}", status="error")
@@ -369,6 +406,8 @@ class AgentRuntime:
                 status="completed",
             )
         finally:
+            if session is not None:
+                session.on_request_event = None
             self.compacting.discard(key)
 
     async def _turn(self, batch: list[Message]) -> None:
@@ -471,7 +510,7 @@ class AgentRuntime:
             phase = event.get("phase")
             self.turns[key]["state"] = "compacting" if phase == "compacting" else "running"
             if session is not None:
-                # 请求发出时原地递增计数；共享元数据使等待响应期间的 UI 也能看到真实次数。
+                # 请求及重试发出时原地递增计数；等待响应期间 UI 也能看到真实次数。
                 self.turns[key]["context"] = session.context_state
             if isinstance(count := event.get("request_count"), int):
                 self.turns[key]["rounds"] = count
@@ -492,197 +531,195 @@ class AgentRuntime:
                 )
 
         try:
-            async with asyncio.timeout(config.runtime.turn_timeout):
-                history_error = ""
-                try:
-                    history_tool = self.registry.tools.get("qq__get_history")
-                    history = (
-                        await self.hub.get_history(scope, config.runtime.history_count)
-                        if config.runtime.history_count
-                        and history_tool
-                        and not self.registry.authorize(
-                            scope, history_tool, {"count": config.runtime.history_count}
-                        )
-                        else []
+            history_error = ""
+            try:
+                history_tool = self.registry.tools.get("qq__get_history")
+                history = (
+                    await self.hub.get_history(scope, config.runtime.history_count)
+                    if config.runtime.history_count
+                    and history_tool
+                    and not self.registry.authorize(
+                        scope, history_tool, {"count": config.runtime.history_count}
                     )
-                except TimeoutError, ConnectionError, ValueError, OSError:
-                    history = []
-                    history_error = (
-                        "NapCat 历史暂不可用；仅依据本轮收到的消息，不能假设此前没有对话。"
-                    )
-                conversation = json.dumps(
-                    {
-                        "来源会话": scope.model_dump(),
-                        "历史限制": history_error,
-                        "当前唤醒消息": [m.model_dump(mode="json") for m in batch],
-                    },
-                    ensure_ascii=False,
+                    else []
                 )
-                persona = self.store.resolve_file(config.persona_file).read_text(encoding="utf-8")
-                if retained is None or retained.model is None:
-                    session = self.session_factory(endpoint, compose_prompt(persona), conversation)
-                    if retained is None:
-                        retained = ConversationSession(session, scope)
-                        self.sessions[key] = retained
-                    else:
-                        retained.model = session
-                    context.unknown_effects = retained.unknown_effects
+            except TimeoutError, ConnectionError, ValueError, OSError:
+                history = []
+                history_error = "NapCat 历史暂不可用；仅依据本轮收到的消息，不能假设此前没有对话。"
+            conversation = json.dumps(
+                {
+                    "来源会话": scope.model_dump(),
+                    "历史限制": history_error,
+                    "当前唤醒消息": [m.model_dump(mode="json") for m in batch],
+                },
+                ensure_ascii=False,
+            )
+            persona = self.store.resolve_file(config.persona_file).read_text(encoding="utf-8")
+            if retained is None or retained.model is None:
+                session = self.session_factory(endpoint, compose_prompt(persona), conversation)
+                if retained is None:
+                    retained = ConversationSession(session, scope)
+                    self.sessions[key] = retained
                 else:
-                    session = retained.model
-                    await session.configure(endpoint, compose_prompt(persona))
-                    session.begin_turn(conversation)
-                self.sessions.move_to_end(key)
-                self.turns[key]["session_id"] = retained.session_id
-                session.request_limit = config.runtime.max_model_rounds
-                session.on_context_event = context_event
-                # 资料与当前输入分开：旧历史和知识可以压缩，当前消息及安全规则保持完整。
-                knowledge = [
-                    (path, self.store.resolve_file(path).read_text(encoding="utf-8"))
-                    for path in config.knowledge_files
-                ]
-                if knowledge != retained.knowledge:
-                    session.add_background(
-                        json.dumps(
-                            {
-                                "当前知识库": [
-                                    {"文件": path, "资料": text} for path, text in knowledge
-                                ],
-                                "说明": "当前版本替代此前知识库资料；移除的文件不再作为当前知识依据。",
-                            },
-                            ensure_ascii=False,
-                        ),
-                        "knowledge",
-                    )
-                    retained.knowledge = knowledge
-                current_ids = {message.message_id for message in batch}
-                waiting_ids = {message.message_id for message in self.pending.get(key, [])}
-                known_ids = current_ids | waiting_ids | retained.message_ids.keys()
-                new_history = [
-                    message
-                    for message in {message.message_id: message for message in history}.values()
-                    if message.message_id not in known_ids
-                ]
-                if new_history:
-                    session.add_background(
-                        json.dumps(
-                            {
-                                "来源会话": scope.model_dump(mode="json"),
-                                "历史消息": [
-                                    message.model_dump(mode="json", exclude={"scope"})
-                                    for message in new_history
-                                ],
-                            },
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        "history",
-                    )
-                    retained.remember([message.message_id for message in new_history])
-                retained.remember([message.message_id for message in batch], wake=True)
-                session.media_limit = config.napcat.media_max_bytes
-                media_tool = self.registry.tools.get("qq__read_media")
-                if self.read_media and media_tool and self.registry.permitted(scope, media_tool)[0]:
-                    raw = await self.read_media(
-                        [
-                            s
-                            for message in batch
-                            if not self.registry.authorize(
-                                scope,
-                                media_tool,
-                                JSON_OBJECT.validate_python(
-                                    ReadMedia(
-                                        message_id=message.message_id, include_forwards=False
-                                    ).model_dump(mode="json")
-                                ),
-                            )
-                            for s in message.segments
-                            if s.get("type") in ("image", "record", "video")
-                        ],
-                        context.napcat,
-                    )
-                    media: list[MediaInput] = []
-                    media_items = raw.get("media")
-                    for item in media_items if isinstance(media_items, list) else []:
-                        if isinstance(item, dict) and item.get("type") in (
-                            "image",
-                            "audio",
-                            "video",
-                        ):
-                            kind = item["type"]
-                            if kind in ("image", "audio", "video"):
-                                media.append(
-                                    MediaInput(
-                                        kind,
-                                        str(item.get("mime_type", "")),
-                                        str(item.get("base64", "")),
-                                    )
-                                )
-                    errors = session.add_media(media)
-                    media_errors = raw.get("errors")
-                    if errors or media_errors:
-                        session.add_notice(
-                            json.dumps(
-                                {
-                                    "media_errors": [
-                                        *errors,
-                                        *(media_errors if isinstance(media_errors, list) else []),
-                                    ]
-                                },
-                                ensure_ascii=False,
-                            )
-                        )
-                for round_number in range(config.runtime.max_model_rounds):
-                    definitions = self.registry.definitions(context)
-                    update_actions()
-                    self.turns[key]["rounds"] = round_number + 1
-                    reply = await session.step(definitions)
-                    self.turns[key]["context"] = session.context_state
-                    self.turns[key]["rounds"] = session.request_count
-                    if not reply.calls:
-                        outcome = "completed" if context.sent_messages else "silent"
-                        self.record(
-                            key,
-                            "turn",
-                            "本轮结束" if context.sent_messages else "本轮静默结束；普通输出未发送",
-                            status=outcome,
-                        )
-                        return
-                    # 每个调用完整回填一次，保持协议配对；不把正文补发至QQ。
-                    for call in reply.calls:
-                        if call.id in executed:
-                            old_name, old_args, result = executed[call.id]
-                            if (old_name, old_args) != (call.name, call.arguments):
-                                result = ToolResult.failure(
-                                    "模型复用了工具调用 ID 且参数不同", "DuplicateCall"
-                                )
-                        elif call.invalid:
-                            result = ToolResult.failure(
-                                "工具参数不是有效 JSON 对象", "InvalidArguments"
-                            )
-                        else:
-                            interrupted_call = call.id
-                            result = await self.registry.execute(context, call.name, call.arguments)
-                        session.result(call, result)
-                        interrupted_call = None
-                        executed[call.id] = (
-                            call.name,
-                            call.arguments,
-                            result.model_copy(
-                                update={
-                                    "data": None,
-                                    "message": result.message or "该调用已执行，详细结果见先前回执",
-                                }
+                    retained.model = session
+                context.unknown_effects = retained.unknown_effects
+            else:
+                session = retained.model
+                await session.configure(endpoint, compose_prompt(persona))
+                session.begin_turn(conversation)
+            self.sessions.move_to_end(key)
+            self.turns[key]["session_id"] = retained.session_id
+            session.request_limit = config.runtime.max_model_rounds
+            session.on_context_event = context_event
+            session.on_request_event = lambda event: self._model_request_event(key, event)
+            # 资料与当前输入分开：旧历史和知识可以压缩，当前消息及安全规则保持完整。
+            knowledge = [
+                (path, self.store.resolve_file(path).read_text(encoding="utf-8"))
+                for path in config.knowledge_files
+            ]
+            if knowledge != retained.knowledge:
+                session.add_background(
+                    json.dumps(
+                        {
+                            "当前知识库": [
+                                {"文件": path, "资料": text} for path, text in knowledge
+                            ],
+                            "说明": "当前版本替代此前知识库资料；移除的文件不再作为当前知识依据。",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "knowledge",
+                )
+                retained.knowledge = knowledge
+            current_ids = {message.message_id for message in batch}
+            waiting_ids = {message.message_id for message in self.pending.get(key, [])}
+            known_ids = current_ids | waiting_ids | retained.message_ids.keys()
+            new_history = [
+                message
+                for message in {message.message_id: message for message in history}.values()
+                if message.message_id not in known_ids
+            ]
+            if new_history:
+                session.add_background(
+                    json.dumps(
+                        {
+                            "来源会话": scope.model_dump(mode="json"),
+                            "历史消息": [
+                                message.model_dump(mode="json", exclude={"scope"})
+                                for message in new_history
+                            ],
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    "history",
+                )
+                retained.remember([message.message_id for message in new_history])
+            retained.remember([message.message_id for message in batch], wake=True)
+            session.media_limit = config.napcat.media_max_bytes
+            media_tool = self.registry.tools.get("qq__read_media")
+            if self.read_media and media_tool and self.registry.permitted(scope, media_tool)[0]:
+                raw = await self.read_media(
+                    [
+                        s
+                        for message in batch
+                        if not self.registry.authorize(
+                            scope,
+                            media_tool,
+                            JSON_OBJECT.validate_python(
+                                ReadMedia(
+                                    message_id=message.message_id, include_forwards=False
+                                ).model_dump(mode="json")
                             ),
                         )
-                        self.record(
-                            key,
-                            "tool",
-                            result.message or "工具执行完成",
-                            tool=call.name,
-                            status=result.status,
+                        for s in message.segments
+                        if s.get("type") in ("image", "record", "video")
+                    ],
+                    context.napcat,
+                )
+                media: list[MediaInput] = []
+                media_items = raw.get("media")
+                for item in media_items if isinstance(media_items, list) else []:
+                    if isinstance(item, dict) and item.get("type") in (
+                        "image",
+                        "audio",
+                        "video",
+                    ):
+                        kind = item["type"]
+                        if kind in ("image", "audio", "video"):
+                            media.append(
+                                MediaInput(
+                                    kind,
+                                    str(item.get("mime_type", "")),
+                                    str(item.get("base64", "")),
+                                )
+                            )
+                errors = session.add_media(media)
+                media_errors = raw.get("errors")
+                if errors or media_errors:
+                    session.add_notice(
+                        json.dumps(
+                            {
+                                "media_errors": [
+                                    *errors,
+                                    *(media_errors if isinstance(media_errors, list) else []),
+                                ]
+                            },
+                            ensure_ascii=False,
                         )
-                outcome = "limit"
-                self.record(key, "turn", "达到本轮模型请求上限，已停止", status=outcome)
+                    )
+            for round_number in range(config.runtime.max_model_rounds):
+                definitions = self.registry.definitions(context)
+                update_actions()
+                self.turns[key]["rounds"] = round_number + 1
+                reply = await session.step(definitions)
+                self.turns[key]["context"] = session.context_state
+                self.turns[key]["rounds"] = session.request_count
+                if not reply.calls:
+                    outcome = "completed" if context.sent_messages else "silent"
+                    self.record(
+                        key,
+                        "turn",
+                        "本轮结束" if context.sent_messages else "本轮静默结束；普通输出未发送",
+                        status=outcome,
+                    )
+                    return
+                # 每个调用完整回填一次，保持协议配对；不把正文补发至QQ。
+                for call in reply.calls:
+                    if call.id in executed:
+                        old_name, old_args, result = executed[call.id]
+                        if (old_name, old_args) != (call.name, call.arguments):
+                            result = ToolResult.failure(
+                                "模型复用了工具调用 ID 且参数不同", "DuplicateCall"
+                            )
+                    elif call.invalid:
+                        result = ToolResult.failure(
+                            "工具参数不是有效 JSON 对象", "InvalidArguments"
+                        )
+                    else:
+                        interrupted_call = call.id
+                        result = await self.registry.execute(context, call.name, call.arguments)
+                    session.result(call, result)
+                    interrupted_call = None
+                    executed[call.id] = (
+                        call.name,
+                        call.arguments,
+                        result.model_copy(
+                            update={
+                                "data": None,
+                                "message": result.message or "该调用已执行，详细结果见先前回执",
+                            }
+                        ),
+                    )
+                    self.record(
+                        key,
+                        "tool",
+                        result.message or "工具执行完成",
+                        tool=call.name,
+                        status=result.status,
+                    )
+            outcome = "limit"
+            self.record(key, "turn", "达到本轮模型请求上限，已停止", status=outcome)
         except ModelRequestLimit:
             outcome = "limit"
             self.record(key, "turn", "达到模型或压缩请求上限，已停止", status="limit")
@@ -694,9 +731,6 @@ class AgentRuntime:
         except ProviderError as exc:
             # ProviderError 的消息由协议层生成固定脱敏文本，不携带上游响应正文。
             self.record(key, "error", str(exc), status="error")
-        except TimeoutError:
-            outcome = "timeout"
-            self.record(key, "turn", "本轮超时，已停止；已提交动作状态以回执为准", status="timeout")
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise
