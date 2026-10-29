@@ -1,0 +1,23 @@
+name: qah-qq-upload-relay
+services:
+  qq-upload-relay:
+    container_name: qah-qq-upload-relay
+    image: ${QQ_UPLOAD_IMAGE:?use an explicit complete application image tag}
+    command: ["python", "-m", "qq_agent_harness.napcat.upload_relay"]
+    env_file: ./qq-upload-relay.env
+    network_mode: host
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    restart: unless-stopped
+    stop_grace_period: 15s
+    logging:
+      driver: local
+      options:
+        max-size: 5m
+        max-file: "3"
