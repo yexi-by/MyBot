@@ -564,16 +564,22 @@ export function ChecksInput({
 export function ModelPicker({
   id,
   providerId,
+  imageMode = false,
   value,
   onChange,
   invalid = false,
 }: {
   id: string;
   providerId: string;
+  imageMode?: boolean;
   value: string;
   onChange: (value: Json) => void;
   invalid?: boolean;
 }) {
+  const saved = useConfig().base;
+  const canLoad = imageMode
+    ? Boolean(String(getAt(saved, ["image", "base_url"]) ?? "").trim())
+    : Boolean(providerId);
   const [models, setModels] = useState<string[]>([]);
   const [status, setStatus] = useState<{ tone: "ok" | "error" | "idle"; text: string }>({
     tone: "idle",
@@ -583,15 +589,16 @@ export function ModelPicker({
   const ticket = useRef(0);
   const load = async (refresh = false) => {
     const current = ++ticket.current;
-    if (!providerId) {
+    if (!canLoad) {
       setLoading(false);
       return;
     }
     setLoading(true);
     try {
-      const result = await get<{ models: string[] }>(
-        "/api/providers/" + encodeURIComponent(providerId) + "/models" + (refresh ? "?refresh=true" : ""),
-      );
+      const endpoint = imageMode
+        ? "/api/image/models"
+        : "/api/providers/" + encodeURIComponent(providerId) + "/models";
+      const result = await get<{ models: string[] }>(endpoint + (refresh ? "?refresh=true" : ""));
       if (current !== ticket.current) return;
       const sorted = [...new Set(result.models)].sort((a, b) => a.localeCompare(b));
       setModels(sorted);
@@ -613,25 +620,27 @@ export function ModelPicker({
     }
   };
   // 接口地址、密钥等保存后重新读取（跳过服务端缓存），新建的服务商保存后也会自动读取。
-  const saved = useConfig().base;
   const savedKey = JSON.stringify(
-    ["protocol", "base_url", "api_key", "proxy", "timeout"].map((key) =>
-      getAt(saved, ["providers", providerId, key]),
-    ),
+    imageMode
+      ? ["base_url", "api_key", "proxy", "timeout"].map((key) => getAt(saved, ["image", key]))
+      : ["protocol", "base_url", "api_key", "proxy", "timeout"].map((key) =>
+          getAt(saved, ["providers", providerId, key]),
+        ),
   );
-  const lastProvider = useRef<string | null>(null);
+  const targetKey = imageMode ? "__image__" : providerId;
+  const lastTarget = useRef<string | null>(null);
   useEffect(() => {
-    const sameProvider = lastProvider.current === providerId;
-    lastProvider.current = providerId;
-    if (!sameProvider) {
+    const sameTarget = lastTarget.current === targetKey;
+    lastTarget.current = targetKey;
+    if (!sameTarget) {
       setModels([]);
       setStatus({ tone: "idle", text: "" });
     }
-    void load(sameProvider);
+    void load(sameTarget);
     return () => {
       ticket.current++;
     };
-  }, [providerId, savedKey]);
+  }, [targetKey, savedKey, canLoad]);
   return (
     <>
       <Combobox
@@ -647,11 +656,13 @@ export function ModelPicker({
         loading={loading}
         emptyText="没有可选模型，可直接输入"
         freeTextHint="没有匹配的模型，将使用输入的名称"
-        onRefresh={providerId ? () => void load(true) : undefined}
+        onRefresh={canLoad ? () => void load(true) : undefined}
         refreshLabel="重新读取模型列表"
       />
-      {!providerId ? (
-        <p className="field-status">先选择服务商，再从它的模型列表中选择</p>
+      {!canLoad ? (
+        <p className="field-status">
+          {imageMode ? "保存接口地址后可读取模型列表，也可直接输入" : "先选择服务商，再从它的模型列表中选择"}
+        </p>
       ) : (
         status.text && (
           <p className={"field-status" + (status.tone === "error" ? " is-error" : "")}>{status.text}</p>
@@ -808,12 +819,14 @@ export function ConfigField({
         />,
       );
     case "model": {
-      // 模型列表来自同一组设置里选中的服务商。
+      // 模型列表来自同一组设置里选中的服务商，或独立生图接口。
+      const isImage = base[0] === "image";
       const provider = getAt(state.draft, [...base, "provider"]);
       return shell(
         <ModelPicker
           id={id}
           providerId={typeof provider === "string" ? provider : ""}
+          imageMode={isImage}
           value={typeof value === "string" ? value : ""}
           onChange={update}
           invalid={!!error}

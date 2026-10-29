@@ -18,6 +18,8 @@ from pydantic import Field, ValidationError
 
 from .configuration import ConfigError, ConfigStore, ConflictError
 from .contracts import JSON_OBJECT, ConversationScope, JsonObject, JsonValue, Model
+from .image import CATEGORY_LABELS as IMAGE_CATEGORIES
+from .image import build_tools as image_tools
 from .mcp_tools import MCPManager
 from .napcat import MediaReader, NapCatError, NapCatHub, action_coverage
 from .napcat import build_tools as napcat_tools
@@ -70,6 +72,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     startup = store.settings.model_copy(deep=True)
     registry = ToolRegistry(lambda: store.settings)
     registry.describe_categories(NAPCAT_CATEGORIES)
+    registry.describe_categories(IMAGE_CATEGORIES)
     registry.describe_categories(SANDBOX_CATEGORIES)
     for tool in napcat_tools(startup.napcat):
         registry.add(tool)
@@ -82,6 +85,8 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     runtime.write_workspace = runner.write_bytes
     media = MediaReader(startup.napcat)
     runtime.read_media = media.read_many
+    for tool in image_tools(lambda: store.settings.image, startup.napcat, reader=media):
+        registry.add(tool)
     mcp = MCPManager(startup.mcp, registry)
     sandbox_pending = startup.sandbox.enabled
 
@@ -427,7 +432,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
             timeout=config.timeout, proxy=config.proxy, trust_env=False
         ) as client:
             response = await client.get(
-                config.base_url.rstrip("/") + "/models",
+                config.endpoint_base() + "/models",
                 headers=config.request_headers(),
             )
             if not response.is_success:
@@ -444,6 +449,43 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
                 else []
             )
         model_cache[provider_id] = (time.monotonic() + 30, fingerprint, ids)
+        return {"models": [model for model in ids]}
+
+    @app.get("/api/image/models")
+    async def image_models(refresh: bool = False) -> JsonObject:
+        config = store.settings.image
+        if not config.base_url.strip():
+            raise HTTPException(400, "请先保存生图接口地址")
+        fingerprint = (
+            config.base_url,
+            config.api_key,
+            tuple(sorted(config.headers.items())),
+            config.proxy,
+        )
+        cached = model_cache.get("__image__")
+        if cached and cached[0] > time.monotonic() and cached[1] == fingerprint and not refresh:
+            return {"models": [model for model in cached[2]]}
+        async with httpx.AsyncClient(
+            timeout=config.timeout, proxy=config.proxy, trust_env=False
+        ) as client:
+            response = await client.get(
+                config.endpoint_base() + "/models",
+                headers=config.request_headers(),
+            )
+            if not response.is_success:
+                raise HTTPException(502, f"模型列表接口返回 HTTP {response.status_code}")
+            payload = JSON_OBJECT.validate_json(response.content)
+            entries = payload.get("data")
+            ids = (
+                [
+                    str(entry["id"])
+                    for entry in entries
+                    if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+                ]
+                if isinstance(entries, list)
+                else []
+            )
+        model_cache["__image__"] = (time.monotonic() + 30, fingerprint, ids)
         return {"models": [model for model in ids]}
 
     @app.post("/api/system/{operation}")

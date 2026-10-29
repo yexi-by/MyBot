@@ -985,7 +985,12 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         action = "set_group_portrait" if group else "set_qq_avatar"
 
         async def avatar(context: ToolContext, source: a.ImageSource) -> ToolResult:
-            if source.workspace_path:
+            if source.generated_id:
+                generated = context.generated_images.get(source.generated_id)
+                if generated is None:
+                    raise ValueError("指定的 generated_id 不存在或已过期")
+                content = generated.content
+            elif source.workspace_path:
                 if not context.read_workspace:
                     raise ValueError("共享工作区不可用")
                 content = await context.read_workspace(source.workspace_path)
@@ -1275,7 +1280,12 @@ async def send_message(
                 )
             )
         else:
-            if part.workspace_path:
+            if part.generated_id:
+                generated = context.generated_images.get(part.generated_id)
+                if generated is None:
+                    raise ValueError("指定的 generated_id 不存在或已过期")
+                content = generated.content
+            elif part.workspace_path:
                 if not context.read_workspace:
                     raise ValueError("共享工作区不可用")
                 content = await context.read_workspace(part.workspace_path)

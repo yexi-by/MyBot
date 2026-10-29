@@ -395,12 +395,17 @@ class MediaPart(Model):
     type: Literal["image", "record", "video", "file"]
     workspace_path: str | None = Field(default=None, description="共享沙箱内的相对文件路径")
     url: str | None = Field(default=None, description="待发送媒体的公网 HTTP/HTTPS URL")
+    generated_id: str | None = Field(
+        default=None, min_length=1, description="image__generate 生成的图片 ID"
+    )
     name: str | None = Field(default=None, description="发送普通文件时显示的文件名")
 
     @model_validator(mode="after")
     def one_source(self) -> MediaPart:
-        if bool(self.workspace_path) == bool(self.url):
-            raise ValueError("媒体必须且只能指定 workspace_path 或 url")
+        if sum((bool(self.workspace_path), bool(self.url), bool(self.generated_id))) != 1:
+            raise ValueError("媒体必须且只能指定 workspace_path、url 或 generated_id 一种来源")
+        if self.generated_id and self.type not in ("image", "file"):
+            raise ValueError("generated_id 仅支持作为 image 或 file 发送")
         if self.type == "file" and not self.name:
             raise ValueError("发送文件必须提供 name")
         return self
@@ -409,11 +414,14 @@ class MediaPart(Model):
 class ImageSource(Model):
     workspace_path: str | None = Field(default=None, description="共享工作区中的图片相对路径")
     url: str | None = Field(default=None, description="公网 HTTP/HTTPS 图片 URL")
+    generated_id: str | None = Field(
+        default=None, min_length=1, description="image__generate 生成的图片 ID"
+    )
 
     @model_validator(mode="after")
     def one_source(self) -> ImageSource:
-        if bool(self.workspace_path) == bool(self.url):
-            raise ValueError("图片必须且只能指定 workspace_path 或 url")
+        if sum((bool(self.workspace_path), bool(self.url), bool(self.generated_id))) != 1:
+            raise ValueError("图片必须且只能指定 workspace_path、url 或 generated_id 一种来源")
         return self
 
 

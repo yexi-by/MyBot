@@ -96,3 +96,14 @@ command_timeout = 120.0
 output_limit = 1048576
 transfer_max_bytes = 50000000
 max_pending_operations = 32
+
+[image]
+enabled = false
+base_url = "https://api.openai.com/v1"
+api_key = ""
+model = ""
+timeout = 120.0
+max_retries = 3
+
+[image.headers]
+

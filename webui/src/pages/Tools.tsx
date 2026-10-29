@@ -22,7 +22,14 @@ import { getAt, object } from "../lib/types";
 import type { Tool } from "../lib/types";
 import { confirm, prompt, toast, useMediaQuery } from "../lib/ui";
 import type { Route } from "../routes";
-import { defaultMcp, mcpConnectionSection, mcpSecretsSection, mcpToolsSection } from "../schema/fields";
+import {
+  defaultMcp,
+  imageConnectionSection,
+  imageRequestSection,
+  mcpConnectionSection,
+  mcpSecretsSection,
+  mcpToolsSection,
+} from "../schema/fields";
 
 type ToolsRoute = Extract<Route, { page: "tools" }>;
 const enc = encodeURIComponent;
@@ -489,15 +496,38 @@ function Coverage() {
   );
 }
 
+function ImageGeneration() {
+  const state = useConfig();
+  const image = object(state.draft.image);
+  const enabled = image.enabled === true;
+  const hasEndpoint =
+    typeof image.base_url === "string" &&
+    image.base_url.trim() !== "" &&
+    typeof image.model === "string" &&
+    image.model.trim() !== "";
+  return (
+    <div className="stack">
+      {enabled && !hasEndpoint && (
+        <Banner tone="warning" icon={CircleAlert}>
+          请填写生图接口地址和模型名称，否则 Agent 无法调用生图工具。
+        </Banner>
+      )}
+      <ConfigSection def={imageConnectionSection} base={["image"]} />
+      <ConfigSection def={imageRequestSection} base={["image"]} />
+    </div>
+  );
+}
+
 export function ToolsPage({ route }: { route: ToolsRoute }) {
   const state = useConfig();
   const servers = object(state.draft.mcp);
+  const imageEnabled = object(state.draft.image).enabled === true;
   return (
     <div className="page">
       <PageHeader
         title="工具"
         description="Agent 可以调用的工具；每个会话能用哪些，由会话的能力权限决定"
-        save={route.view === "mcp"}
+        save={route.view === "mcp" || route.view === "image"}
         actions={
           route.view === "mcp" && Object.keys(servers).length > 0 ? (
             <Button icon={Plus} onClick={() => void addServer(servers)}>
@@ -512,12 +542,15 @@ export function ToolsPage({ route }: { route: ToolsRoute }) {
         onChange={(view) => void navigate(view === "catalog" ? "/tools" : "/tools/" + view)}
         items={[
           { id: "catalog", label: "工具目录" },
+          { id: "image", label: "图像生成", count: imageEnabled ? "已启用" : undefined },
           { id: "mcp", label: "MCP 服务", count: Object.keys(servers).length || undefined },
           { id: "napcat", label: "NapCat 覆盖" },
         ]}
       />
       {route.view === "catalog" ? (
         <Catalog selected={route.tool} />
+      ) : route.view === "image" ? (
+        <ImageGeneration />
       ) : route.view === "mcp" ? (
         <McpServers id={route.id} />
       ) : (

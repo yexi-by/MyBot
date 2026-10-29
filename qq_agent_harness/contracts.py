@@ -1,5 +1,6 @@
 """协议边界和共享工具契约。"""
 
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -69,6 +70,13 @@ class NapCatConnection(Protocol):
     ) -> JsonValue: ...
 
 
+@dataclass(frozen=True)
+class GeneratedImage:
+    id: str
+    content: bytes
+    mime_type: str
+
+
 @dataclass
 class UnknownOperation:
     tool: str
@@ -88,6 +96,7 @@ class ToolContext:
     send_attempts: int = 0
     max_sends: int = 5
     unknown_effects: list[UnknownOperation] = field(default_factory=list)
+    generated_images: OrderedDict[str, GeneratedImage] = field(default_factory=OrderedDict)
     effect_submitted: bool = False
     read_workspace: Callable[[str], Awaitable[bytes]] | None = None
     write_workspace: Callable[[str, bytes], Awaitable[None]] | None = None

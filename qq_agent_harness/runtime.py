@@ -16,6 +16,7 @@ from typing import Protocol
 from .configuration import ConfigStore
 from .contracts import (
     ConversationScope,
+    GeneratedImage,
     JsonObject,
     JsonValue,
     Message,
@@ -61,6 +62,7 @@ class ConversationSession:
     message_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     wake_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     unknown_effects: list[UnknownOperation] = field(default_factory=list)
+    generated_images: OrderedDict[str, GeneratedImage] = field(default_factory=OrderedDict)
     knowledge: list[tuple[str, str]] = field(default_factory=list)
     updated_at: float = 0
     outcome: str = ""
@@ -95,6 +97,9 @@ class ConversationSession:
                 },
                 ensure_ascii=False,
             ).encode("utf-8")
+        ) + sum(
+            len(image.content) + len(image.id) + len(image.mime_type)
+            for image in self.generated_images.values()
         )
 
 
@@ -401,6 +406,7 @@ class AgentRuntime:
             if retained.knowledge and not session.contains("knowledge"):
                 # 知识库原文此前已在轮内压缩时并入摘要；下次唤醒重新补入当前原文。
                 retained.knowledge = []
+            retained.generated_images.clear()
             retained.idle_tokens = after
             retained.retained_bytes = retained.measure()
             self.record(
@@ -437,6 +443,7 @@ class AgentRuntime:
         retained = self.sessions.get(key)
         if retained:
             context.unknown_effects = retained.unknown_effects
+            context.generated_images = retained.generated_images
         executed: ExecutedCalls = {}
         outcome = "error"
         interrupted_call: str | None = None
@@ -460,6 +467,7 @@ class AgentRuntime:
                 else:
                     retained.model = session
                 context.unknown_effects = retained.unknown_effects
+                context.generated_images = retained.generated_images
             else:
                 session = retained.model
                 await session.configure(endpoint, compose_prompt(persona))
@@ -800,6 +808,7 @@ class AgentRuntime:
         model, retained.model = retained.model, None
         retained.session_id = uuid.uuid4().hex
         retained.knowledge = []
+        retained.generated_images.clear()
         # 清空已读历史，下次唤醒像新会话一样补入近期 QQ 历史。
         retained.message_ids.clear()
         retained.outcome = "reset"

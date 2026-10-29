@@ -534,6 +534,77 @@ export const mcpToolsSection: SectionDef = {
   ],
 };
 
+export const imageConnectionSection: SectionDef = {
+  id: "image-connection",
+  title: "生图接口与模型",
+  description:
+    "独立于会话服务商的 OpenAI 标准生图接口（自动支持 /images/generations 文生图与 /images/edits 图生图）。保存后立即生效。",
+  fields: [
+    {
+      key: "enabled",
+      label: "启用图像生成",
+      type: "toggle",
+      help: "启用并选好模型后，在会话的「能力权限」中开放「生成图片」即可由 Agent 自主调用生图或改图。",
+    },
+    {
+      key: "base_url",
+      label: "接口地址",
+      type: "text",
+      placeholder: "https://api.openai.com/v1",
+      help: "OpenAI 兼容生图接口的根地址，通常以 /v1 结尾。",
+    },
+    {
+      key: "api_key",
+      label: "API Key",
+      type: "secret",
+      help: "只在服务端用于请求生图接口，不会发给 Agent。",
+    },
+    {
+      key: "model",
+      label: "模型名称",
+      type: "model",
+      help: "列表来自生图接口；读取失败或接口不提供模型列表时可直接输入。",
+    },
+    {
+      key: "proxy",
+      label: "HTTP 代理",
+      type: "text",
+      nullable: true,
+      placeholder: "http://127.0.0.1:7890",
+      help: "留空表示直连。",
+    },
+  ],
+};
+
+export const imageRequestSection: SectionDef = {
+  id: "image-request",
+  title: "请求与重试",
+  fields: [
+    {
+      key: "timeout",
+      label: "请求超时",
+      type: "number",
+      ...seconds,
+      help: "每次生图请求的最长等待时间；超时后按重试次数设置重新请求。",
+    },
+    {
+      key: "max_retries",
+      label: "失败重试次数",
+      type: "number",
+      min: 0,
+      integer: true,
+      help: "首次请求失败后最多重试的次数，默认 3 次；0 表示不重试。",
+    },
+    {
+      key: "headers",
+      label: "自定义请求头",
+      type: "map",
+      placeholder: "请求头名称",
+      help: "调用生图接口和拉取模型列表时附带的 HTTP 请求头。只用于请求接口，不会发给 Agent。",
+    },
+  ],
+};
+
 export const sandboxSection: SectionDef = {
   id: "sandbox",
   title: "资源与连接",
@@ -708,6 +779,8 @@ export function fieldInstances(config: ObjectValue): FieldInstance[] {
   add(runtimeSection, ["runtime"], "/settings/runtime");
   add(serverSection, ["server"], "/settings/server");
   add(sandboxSection, ["sandbox"], "/sandbox/settings");
+  add(imageConnectionSection, ["image"], "/tools/image");
+  add(imageRequestSection, ["image"], "/tools/image");
   for (const id of Object.keys(object(config.providers))) {
     const route = "/providers/" + enc(id);
     add(providerApiSection, ["providers", id], route);
@@ -751,6 +824,7 @@ export function routeForPath(path: Path): string {
     return "/conversations/group/" + enc(String(id)) + conversationTab(path.slice(2));
   if (head === "private") return "/conversations/private" + conversationTab(path.slice(1));
   if (head === "providers" && id !== undefined) return "/providers/" + enc(String(id));
+  if (head === "image") return "/tools/image";
   if (head === "mcp" && id !== undefined) return "/tools/mcp/" + enc(String(id));
   if (head === "persona_file" || head === "knowledge_files") return "/prompts";
   if (head === "sandbox") return "/sandbox/settings";
@@ -796,6 +870,7 @@ export function fieldLabel(config: ObjectValue, path: Path): string {
   if (head === "groups") return scoped("群 " + id, path.slice(2), name);
   if (head === "private") return scoped("私聊", path.slice(1), name);
   if (head === "providers") return scoped("服务商 " + id, path.slice(2), name);
+  if (head === "image") return scoped("图像生成", path.slice(1), name);
   if (head === "mcp") return scoped("MCP " + id, path.slice(2), name);
   if (name) return name;
   if (head === "persona_file") return "人格文件";

@@ -26,6 +26,17 @@ export function evaluate(
   if (conversation.enabled !== true) return { allowed: false, reason: "会话未启用" };
   if (tool.name.startsWith("sandbox__") && object(config.sandbox).enabled !== true)
     return { allowed: false, reason: "共享沙箱未启用" };
+  if (tool.name.startsWith("image__")) {
+    const image = object(config.image);
+    if (image.enabled !== true) return { allowed: false, reason: "尚未启用图像生成" };
+    if (
+      typeof image.base_url !== "string" ||
+      !image.base_url.trim() ||
+      typeof image.model !== "string" ||
+      !image.model.trim()
+    )
+      return { allowed: false, reason: "图像生成尚未配置接口地址或模型名称" };
+  }
   if (tool.scope !== "both" && tool.scope !== "account" && tool.scope !== kind)
     return { allowed: false, reason: kind === "group" ? "不适用于群聊" : "不适用于私聊" };
   const policy = object(conversation.policy);

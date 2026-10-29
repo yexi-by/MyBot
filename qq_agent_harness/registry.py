@@ -82,6 +82,12 @@ class ToolRegistry:
             return False, "当前会话未启用"
         if tool.name.startswith("sandbox__") and not self.settings().sandbox.enabled:
             return False, "此部署尚未启用共享沙箱"
+        if tool.name.startswith("image__"):
+            image = self.settings().image
+            if not image.enabled:
+                return False, "尚未启用图像生成"
+            if not image.base_url.strip() or not image.model.strip():
+                return False, "图像生成尚未配置接口地址或模型名称"
         if tool.scope not in ("both", "account", scope.kind):
             return False, "工具不适用于当前会话类型"
         policy = conversation.policy

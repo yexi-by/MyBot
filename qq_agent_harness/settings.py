@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, JsonValue, model_validator
 
@@ -81,6 +82,15 @@ class ProviderSettings(Model):
     proxy: str | None = None
     store_supported: bool = True
 
+    def endpoint_base(self) -> str:
+        stripped = self.base_url.strip().rstrip("/")
+        if not stripped:
+            return ""
+        parsed = urlsplit(stripped)
+        if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
+            return f"{stripped}/v1"
+        return stripped
+
     def request_headers(self) -> dict[str, str]:
         headers = dict(self.headers)
         if not any(key.lower() == "authorization" for key in headers):
@@ -147,6 +157,34 @@ class SandboxSettings(Model):
     max_pending_operations: int = Field(default=32, ge=1)
 
 
+class ImageSettings(Model):
+    """独立于会话服务商的生图接口配置。"""
+
+    enabled: bool = False
+    base_url: str = "https://api.openai.com/v1"
+    api_key: str = ""
+    model: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    timeout: float = Field(default=120, gt=0)
+    max_retries: int = Field(default=3, ge=0)
+    proxy: str | None = None
+
+    def endpoint_base(self) -> str:
+        stripped = self.base_url.strip().rstrip("/")
+        if not stripped:
+            return ""
+        parsed = urlsplit(stripped)
+        if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
+            return f"{stripped}/v1"
+        return stripped
+
+    def request_headers(self) -> dict[str, str]:
+        headers = dict(self.headers)
+        if not any(key.lower() == "authorization" for key in headers):
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+
 class ServerSettings(Model):
     host: str = "0.0.0.0"
     port: int = Field(default=6055, ge=1, le=65535)
@@ -161,6 +199,7 @@ class HarnessSettings(Model):
     private: ConversationSettings = Field(default_factory=ConversationSettings)
     mcp: dict[str, MCPSettings] = Field(default_factory=dict)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
+    image: ImageSettings = Field(default_factory=ImageSettings)
     persona_file: str = "persona.md"
     knowledge_files: list[str] = Field(default_factory=list)
 
