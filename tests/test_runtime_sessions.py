@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import httpx
@@ -22,7 +23,7 @@ from qq_agent_harness.contracts import (
 from qq_agent_harness.napcat.arguments import ReadMedia
 from qq_agent_harness.napcat.media import MediaBatch
 from qq_agent_harness.prompts import SILENT_RESPONSE
-from qq_agent_harness.providers import ModelSession
+from qq_agent_harness.providers import ModelSession, current_time_text
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime
 from qq_agent_harness.settings import ParameterRule
@@ -97,7 +98,7 @@ def sessions(runtime: AgentRuntime) -> list[JsonObject]:
 
 @pytest.mark.parametrize("protocol", ["chat_completions", "responses"])
 async def test_same_group_reuses_history_and_tool_results_but_resets_turn_limits(
-    tmp_path, protocol
+    tmp_path, protocol, monkeypatch
 ):
     store = make_store(tmp_path)
     store.settings.providers["test"].protocol = protocol
@@ -105,6 +106,17 @@ async def test_same_group_reuses_history_and_tool_results_but_resets_turn_limits
     store.settings.groups["a"].policy.max_sends_per_turn = 1
     registry = ToolRegistry(lambda: store.settings)
     bodies, sent = [], []
+    tz = timezone(timedelta(hours=8))
+    base_time = datetime(2026, 11, 1, 0, 27, 57, tzinfo=tz)
+    assert current_time_text(base_time) == "2026-11-01 00:27:57 UTC+08:00 星期日"
+    tick = 0
+
+    def fake_time():
+        nonlocal tick
+        tick += 1
+        return current_time_text(base_time + timedelta(seconds=tick))
+
+    monkeypatch.setattr("qq_agent_harness.providers.current_time_text", fake_time)
 
     async def send(context, _arguments):
         sent.append(context.turn_id)
@@ -160,6 +172,12 @@ async def test_same_group_reuses_history_and_tool_results_but_resets_turn_limits
             )
             field = "messages" if protocol == "chat_completions" else "input"
             assert '"send_attempts": 0' in bodies[2][field][-1]["content"]
+            # 当前时间只追加在每次请求最末尾的运行器状态项中，不写入固定前缀，保证跨步与跨轮缓存命中。
+            for body in bodies[:4]:
+                assert "当前时间：2026-11-01 00:2" in body[field][-1]["content"]
+                assert "当前时间：" not in json.dumps(body[field][:-1], ensure_ascii=False)
+            assert bodies[1][field][: len(bodies[0][field]) - 1] == bodies[0][field][:-1]
+            assert bodies[2][field][: len(bodies[1][field]) - 1] == bodies[1][field][:-1]
             context = second["context"]
             assert isinstance(context, dict) and context["request_count"] == 2
             # 同一私聊对象不同机器人、同机器人不同私聊、群聊均不能串上下文。
