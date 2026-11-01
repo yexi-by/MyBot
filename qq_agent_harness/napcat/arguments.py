@@ -362,7 +362,10 @@ class GroupTodo(MessageId):
 
 class TextPart(Model):
     type: Literal["text"]
-    text: str = Field(min_length=1, description="正文；不会把正文内的 CQ 字符串再次解析为动作")
+    text: str = Field(
+        min_length=1,
+        description="纯文本正文；QQ 不渲染 Markdown（禁用 **加粗**、# 标题、- 列表、`代码`、表格等语法），也不会解析 CQ 码",
+    )
 
 
 class AtPart(Model):

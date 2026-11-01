@@ -1168,7 +1168,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         (
             "qq__send_message",
             "发送消息",
-            "在 QQ 发言或交付文件的唯一入口，按 parts 顺序发送正文、引用、艾特、媒体；AI 语音直接用 type=ai_voice、character、text。普通模型正文不会发送，结果未知时不得重发。",
+            "在 QQ 发言或交付文件的唯一入口，按 parts 顺序发送纯文本正文（禁止 Markdown 语法）、引用、艾特、媒体；AI 语音直接用 type=ai_voice、character、text。普通模型正文不会发送，结果未知时不得重发。",
             model_binding(a.SendMessage, send),
             "messages.send",
             True,
