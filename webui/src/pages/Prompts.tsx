@@ -194,31 +194,33 @@ export function PromptsPage({ path }: { path: string }) {
       >
         {selected ? (
           <div className="detail detail-editor">
-            <DetailHeader
-              back={{ to: "/prompts", label: "全部文件" }}
-              title={selected}
-              badges={
-                role === "persona" ? (
-                  <Badge tone="accent">人格</Badge>
-                ) : role === "knowledge" ? (
-                  <Badge tone="accent">知识库</Badge>
-                ) : (
-                  <Badge>未使用</Badge>
-                )
-              }
-              actions={
-                role === "unused" && (
-                  <>
-                    <Button size="sm" onClick={() => setKnowledge([...knowledge, selected])}>
-                      加入知识库
-                    </Button>
-                    <Button size="sm" onClick={() => change(["persona_file"], selected)}>
-                      设为人格
-                    </Button>
-                  </>
-                )
-              }
-            />
+            <div className="detail-sticky">
+              <DetailHeader
+                back={{ to: "/prompts", label: "全部文件" }}
+                title={selected}
+                badges={
+                  role === "persona" ? (
+                    <Badge tone="accent">人格</Badge>
+                  ) : role === "knowledge" ? (
+                    <Badge tone="accent">知识库</Badge>
+                  ) : (
+                    <Badge>未使用</Badge>
+                  )
+                }
+                actions={
+                  role === "unused" && (
+                    <>
+                      <Button size="sm" onClick={() => setKnowledge([...knowledge, selected])}>
+                        加入知识库
+                      </Button>
+                      <Button size="sm" onClick={() => change(["persona_file"], selected)}>
+                        设为人格
+                      </Button>
+                    </>
+                  )
+                }
+              />
+            </div>
             <FileEditor
               key={selected}
               path={selected}

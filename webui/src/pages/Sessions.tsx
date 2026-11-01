@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ArrowDown,
+  ChevronDown,
+  ChevronUp,
   CircleAlert,
   CircleStop,
   Hash,
@@ -623,7 +625,14 @@ function SessionSummary({ detail, botId, refresh }: { detail: SessionDetail; bot
         </div>
         <div>
           <dt>本轮模型请求</dt>
-          <dd className="num">{context.model_request_count ?? 0} 次；压缩请求 {context.compaction_request_count ?? 0} 次；重试 {context.retry_count ?? 0} 次</dd>
+          <dd className="num">
+            {context.model_request_count ?? 0} 次
+            {(context.compaction_request_count ?? 0) + (context.retry_count ?? 0) > 0 && (
+              <span className="stat-note">
+                压缩 {context.compaction_request_count ?? 0} · 重试 {context.retry_count ?? 0}
+              </span>
+            )}
+          </dd>
         </div>
         <div>
           <dt>上下文压缩</dt>
@@ -680,19 +689,42 @@ function SessionSummary({ detail, botId, refresh }: { detail: SessionDetail; bot
           <p className="tiny muted">重置上下文保留这些记录；核对实际结果后可解除。处理中请先停止本轮。</p>
         </div>
       )}
-      {available.length > 0 && (
-        <div className="session-block">
-          <h3>当前可用工具</h3>
-          <span className="chips">
-            {available.map((name) => (
-              <span key={name} className="chip" title={name}>
-                {tools.get(name) ?? name}
-              </span>
-            ))}
-          </span>
-        </div>
-      )}
+      {available.length > 0 && <AvailableTools names={available} titles={tools} />}
     </section>
+  );
+}
+
+/** 可用工具常有上百个，默认只露出前几行，避免摘要卡片被一整面标签撑满。 */
+const TOOL_PREVIEW = 18;
+function AvailableTools({ names, titles }: { names: string[]; titles: Map<string, string> }) {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? names : names.slice(0, TOOL_PREVIEW);
+  const rest = names.length - shown.length;
+  return (
+    <div className="session-block">
+      <h3>
+        当前可用工具 <span className="count">{names.length}</span>
+      </h3>
+      <span className="chips">
+        {shown.map((name) => (
+          <span key={name} className="chip" title={name}>
+            {titles.get(name) ?? name}
+          </span>
+        ))}
+        {rest > 0 && (
+          <button type="button" className="chip chip-more" onClick={() => setExpanded(true)}>
+            <ChevronDown size={13} aria-hidden="true" />
+            其余 {rest} 个
+          </button>
+        )}
+        {expanded && names.length > TOOL_PREVIEW && (
+          <button type="button" className="chip chip-more" onClick={() => setExpanded(false)}>
+            <ChevronUp size={13} aria-hidden="true" />
+            收起
+          </button>
+        )}
+      </span>
+    </div>
   );
 }
 
@@ -739,55 +771,57 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
   const busy = isBusy(detail.state);
   return (
     <div className="detail">
-      <DetailHeader
-        back={back}
-        title={title}
-        badges={
-          <>
-            <Badge tone={stateTone(detail.state)}>{turnState(detail.state).text}</Badge>
-            {detail.cleared && <Badge>已重置</Badge>}
-          </>
-        }
-        subtitle={
-          scope && (
-            <span className="row wrap">
-              <span className="mono">{(scope.kind === "group" ? "群 " : "私聊 ") + scope.peer}</span>
-              <CopyButton text={scope.peer} label={scope.kind === "group" ? "复制群号" : "复制 QQ 号"} />
-              <span className="muted">机器人 {scope.bot}</span>
-              {detail.model && <span className="muted">模型 {detail.model}</span>}
-            </span>
-          )
-        }
-        actions={
-          <>
-            {busy && (
+      <div className="detail-sticky">
+        <DetailHeader
+          back={back}
+          title={title}
+          badges={
+            <>
+              <Badge tone={stateTone(detail.state)}>{turnState(detail.state).text}</Badge>
+              {detail.cleared && <Badge>已重置</Badge>}
+            </>
+          }
+          subtitle={
+            scope && (
+              <span className="row wrap">
+                <span className="mono">{(scope.kind === "group" ? "群 " : "私聊 ") + scope.peer}</span>
+                <CopyButton text={scope.peer} label={scope.kind === "group" ? "复制群号" : "复制 QQ 号"} />
+                <span className="muted">机器人 {scope.bot}</span>
+                {detail.model && <span className="muted">模型 {detail.model}</span>}
+              </span>
+            )
+          }
+          actions={
+            <>
+              {busy && (
+                <Button
+                  icon={CircleStop}
+                  onClick={async () => {
+                    await stopTurn(scopeKey);
+                    refresh();
+                  }}
+                >
+                  停止本轮
+                </Button>
+              )}
               <Button
-                icon={CircleStop}
+                variant="danger-ghost"
+                icon={RotateCcw}
+                disabled={detail.cleared && !busy}
                 onClick={async () => {
-                  await stopTurn(scopeKey);
+                  await resetSession(scopeKey, busy);
                   refresh();
                 }}
               >
-                停止本轮
+                {busy ? "停止并重置" : "重置上下文"}
               </Button>
-            )}
-            <Button
-              variant="danger-ghost"
-              icon={RotateCcw}
-              disabled={detail.cleared && !busy}
-              onClick={async () => {
-                await resetSession(scopeKey, busy);
-                refresh();
-              }}
-            >
-              {busy ? "停止并重置" : "重置上下文"}
-            </Button>
-            <Button icon={SlidersHorizontal} onClick={() => void navigate(settings)}>
-              会话设置
-            </Button>
-          </>
-        }
-      />
+              <Button icon={SlidersHorizontal} onClick={() => void navigate(settings)}>
+                会话设置
+              </Button>
+            </>
+          }
+        />
+      </div>
       {detail.cleared && (
         <Banner tone="accent" icon={RotateCcw}>
           上下文已重置，下次唤醒时重新建立。结果未知的动作和已处理消息的防重记录仍然保留。

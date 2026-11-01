@@ -17,11 +17,24 @@
   background: var(--surface);
   box-shadow: var(--shadow-card);
   color: var(--text);
-  transition: border-color var(--dur) var(--ease);
+  transition:
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
 }
 .tile:hover {
   border-color: var(--border-strong);
+  box-shadow: var(--shadow-hover);
   text-decoration: none;
+  transform: translateY(-1px);
+}
+.tile:active {
+  transform: none;
+}
+.tile:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus);
 }
 .tile-head {
   display: flex;
@@ -66,12 +79,17 @@
 .turns > li:first-child {
   border-top: none;
 }
+.turns > li:last-child {
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+}
 .turn {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(200px, 320px) auto;
   align-items: center;
   gap: 12px 20px;
   padding: 12px 20px;
+  transition: background-color var(--dur) var(--ease);
 }
 .turn-main {
   min-width: 0;
@@ -85,6 +103,38 @@
 }
 .turn-title a {
   color: var(--text);
+}
+/* 整行可点：标题链接的伪元素铺满整行，行内按钮浮在其上。 */
+.turn.is-link .turn-title a::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+}
+.turn.is-link .turn-title a:hover {
+  text-decoration: none;
+}
+.turn.is-link .turn-title a:focus-visible {
+  outline: none;
+}
+.turn.is-link:hover {
+  background: var(--surface-hover);
+}
+.turn.is-link:has(.turn-title a:focus-visible) {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.turn.is-link .btn {
+  position: relative;
+  z-index: 1;
+}
+.turn-arrow {
+  color: var(--text-3);
+  transition:
+    color var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+.turn.is-link:hover .turn-arrow {
+  color: var(--text-2);
+  transform: translateX(2px);
 }
 .turn-meta {
   margin-top: 2px;
@@ -102,30 +152,57 @@
 .activity > li:first-child {
   border-top: none;
 }
+.activity-day {
+  padding: 6px 20px;
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
 .activity-row {
   display: grid;
-  grid-template-columns: 64px 76px minmax(0, 1fr) auto;
+  grid-template-columns: 60px 96px minmax(0, 1fr) minmax(0, max-content) auto;
   align-items: start;
-  gap: 4px 12px;
-  padding: 10px 20px;
+  gap: 4px 14px;
+  padding: 9px 20px;
   font-size: var(--fs-sm);
-}
-.activity-row > .badge {
-  justify-self: start;
-  margin-top: 1px;
-}
-.activity-time {
-  padding-top: 1px;
-  font-size: var(--fs-xs);
   line-height: 20px;
 }
-.activity-body {
+.activity-row.is-problem {
+  box-shadow: inset 2px 0 0 var(--warning);
+}
+.activity-row.is-problem.tone-danger {
+  box-shadow: inset 2px 0 0 var(--danger);
+}
+.activity-time {
+  font-size: var(--fs-xs);
+}
+.activity-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.activity-kind svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+.activity-kind.tone-warning,
+.activity-kind.tone-warning svg {
+  color: var(--warning-text);
+}
+.activity-kind.tone-danger,
+.activity-kind.tone-danger svg {
+  color: var(--danger-text);
 }
 .activity-line {
   display: flex;
   flex-wrap: wrap;
-  gap: 2px 8px;
+  gap: 0 8px;
+  min-width: 0;
 }
 .activity-tool {
   font-weight: 500;
@@ -136,13 +213,22 @@
   overflow-wrap: anywhere;
 }
 .activity-scope {
-  display: inline-block;
-  margin-top: 1px;
+  max-width: 180px;
+  overflow: hidden;
   color: var(--text-3);
   font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 a.activity-scope:hover {
   color: var(--accent-text);
+}
+.activity-status {
+  display: flex;
+  justify-content: flex-end;
+}
+.activity-status:empty {
+  display: none;
 }
 
 /* ---------- 会话上下文 ---------- */
@@ -182,6 +268,12 @@ a.activity-scope:hover {
   margin: 2px 0 0;
   font-size: var(--fs-sm);
   font-weight: 500;
+}
+.stat-note {
+  margin-left: 6px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-weight: 400;
 }
 .session-block {
   display: flex;
@@ -404,7 +496,6 @@ a.activity-scope:hover {
   gap: 12px;
 }
 .perm-list {
-  overflow: hidden;
   container-type: inline-size;
 }
 .perm-category {
@@ -807,6 +898,21 @@ a.activity-scope:hover {
 button.file-name:hover {
   color: var(--accent-text);
 }
+.table.files tbody tr td {
+  transition: background-color var(--dur) var(--ease);
+}
+.table.files tbody tr:hover td {
+  background: var(--surface-hover);
+}
+.table.files tbody tr.selected td {
+  background: var(--accent-soft);
+}
+.table.files tbody tr.is-dir {
+  cursor: pointer;
+}
+.table.files tbody tr.is-dir:hover .file-name {
+  color: var(--accent-text);
+}
 
 /* ---------- 设置 ---------- */
 .action-row {
@@ -874,18 +980,39 @@ button.file-name:hover {
   .tile {
     padding: 12px 14px;
   }
+  /* 五张卡片两列排布时，最后一张占满整行，避免落单留白。 */
+  .tile:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+  .activity-day {
+    padding: 6px 16px;
+  }
   .activity-row {
-    grid-template-columns: auto auto minmax(0, 1fr);
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    column-gap: 10px;
     padding: 10px 16px;
   }
-  .activity-row .activity-body {
-    grid-column: 1 / -1;
-    grid-row: 2;
+  .activity-row .activity-time {
+    grid-column: 1;
+    grid-row: 1;
   }
-  .activity-row > .badge:last-child:not(:nth-child(2)) {
+  .activity-row .activity-kind {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .activity-row .activity-scope {
     grid-column: 3;
     grid-row: 1;
     justify-self: end;
+    max-width: 100%;
+  }
+  .activity-row .activity-status {
+    grid-column: 4;
+    grid-row: 1;
+  }
+  .activity-row .activity-line {
+    grid-column: 1 / -1;
+    grid-row: 2;
   }
   .turn {
     padding: 12px 16px;

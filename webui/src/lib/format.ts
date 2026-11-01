@@ -41,6 +41,20 @@ export function formatClock(epochSeconds: number): string {
   });
 }
 
+/** 本地日期键，用于把时间线按自然日分组。 */
+export function dayKey(epochSeconds: number): string {
+  return new Date(epochSeconds * 1000).toDateString();
+}
+
+/** 时间线的日期分隔标题：今天、昨天或具体日期。 */
+export function formatDay(epochSeconds: number, now = Date.now()): string {
+  const date = new Date(epochSeconds * 1000);
+  const start = (value: Date) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const days = Math.round((start(new Date(now)) - start(date)) / 86_400_000);
+  const text = date.toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "short" });
+  return days === 0 ? "今天 · " + text : days === 1 ? "昨天 · " + text : text;
+}
+
 export function formatRelative(epochSeconds: number, now = Date.now()): string {
   const delta = Math.max(0, now / 1000 - epochSeconds);
   if (delta < 10) return "刚刚";

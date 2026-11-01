@@ -1,5 +1,5 @@
 /*
- * 设计变量：中性灰底 + 单一蓝色强调。亮 / 暗主题只改这里，组件不写死颜色。
+ * 设计变量：中性灰底 + 靛蓝强调色。亮 / 暗主题只改这里，组件不写死颜色。
  * 文字三级对比度均不低于 4.5:1（相对各自的面板底色）。
  */
 :root {
@@ -15,10 +15,10 @@
   --text-2: #4b5260;
   --text-3: #687080;
   --on-accent: #ffffff;
-  --accent: #2f6fed;
-  --accent-hover: #2560d8;
-  --accent-soft: #eaf1fe;
-  --accent-text: #1f5bd6;
+  --accent: #4f5bd5;
+  --accent-hover: #424ec3;
+  --accent-soft: #eef0ff;
+  --accent-text: #3d48bd;
   --success: #1a7f4b;
   --success-soft: #e6f4ec;
   --success-text: #146c3f;
@@ -29,21 +29,24 @@
   --danger-hover: #b22828;
   --danger-soft: #fcebea;
   --danger-text: #b42525;
-  --focus: rgba(47, 111, 237, 0.32);
+  --focus: rgba(79, 91, 213, 0.32);
   --scrim: rgba(15, 17, 21, 0.4);
   --shadow-pop:
     0 10px 28px rgba(16, 24, 40, 0.12), 0 2px 6px rgba(16, 24, 40, 0.06);
   --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04);
+  --shadow-hover: 0 4px 14px rgba(16, 24, 40, 0.08), 0 1px 3px rgba(16, 24, 40, 0.05);
+  --surface-hover: #f5f6f8;
   --switch-off: #c5cbd3;
   --thumb: #ffffff;
   --code-bg: #f4f5f7;
   --mark: rgba(255, 196, 0, 0.32);
-  --cm-heading: #1f5bd6;
+  --cm-heading: #3d48bd;
   --cm-strong: #16181d;
   --cm-emphasis: #8a4f00;
-  --cm-link: #1f5bd6;
+  --cm-link: #3d48bd;
   --cm-code: #b42525;
   --cm-meta: #687080;
+  --sticky-top: 0px;
 
   --font-sans:
     "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont,
@@ -83,10 +86,10 @@
   --text-2: #b3b9c4;
   --text-3: #8f97a4;
   --on-accent: #ffffff;
-  --accent: #3b6fe0;
-  --accent-hover: #4a7cec;
-  --accent-soft: rgba(91, 142, 247, 0.16);
-  --accent-text: #93b5fb;
+  --accent: #5865e8;
+  --accent-hover: #6773f0;
+  --accent-soft: rgba(112, 124, 248, 0.16);
+  --accent-text: #a5b0ff;
   --success: #3fb87a;
   --success-soft: rgba(63, 184, 122, 0.15);
   --success-text: #63d39a;
@@ -97,18 +100,20 @@
   --danger-hover: #e65c5c;
   --danger-soft: rgba(240, 106, 106, 0.15);
   --danger-text: #ff8f8f;
-  --focus: rgba(91, 142, 247, 0.45);
+  --focus: rgba(112, 124, 248, 0.45);
   --scrim: rgba(0, 0, 0, 0.58);
   --shadow-pop: 0 14px 36px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
   --shadow-card: none;
+  --shadow-hover: 0 6px 18px rgba(0, 0, 0, 0.35);
+  --surface-hover: #1c2027;
   --switch-off: #444b57;
   --thumb: #f4f6fa;
   --code-bg: #13161b;
   --mark: rgba(240, 187, 104, 0.3);
-  --cm-heading: #93b5fb;
+  --cm-heading: #a5b0ff;
   --cm-strong: #e7e9ee;
   --cm-emphasis: #f0bb68;
-  --cm-link: #93b5fb;
+  --cm-link: #a5b0ff;
   --cm-code: #ff8f8f;
   --cm-meta: #8f97a4;
 }

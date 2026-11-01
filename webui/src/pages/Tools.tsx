@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { CircleAlert, ExternalLink, Plug, Plus, Trash2, Wrench } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleAlert, ExternalLink, Plug, Plus, Trash2, Wrench } from "lucide-react";
 import { Combobox } from "../components/Combobox";
 import { ConfigSection } from "../components/form";
 import { Menu } from "../components/Menu";
@@ -35,6 +35,8 @@ type ToolsRoute = Extract<Route, { page: "tools" }>;
 const enc = encodeURIComponent;
 
 type Kind = "all" | "read" | "effects" | "closed";
+const FIRST_PAGE = 25;
+const NEXT_PAGE = 50;
 
 function Catalog({ selected }: { selected: string }) {
   const state = useConfig();
@@ -44,6 +46,7 @@ function Catalog({ selected }: { selected: string }) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("");
   const [kind, setKind] = useState<Kind>("all");
+  const [limit, setLimit] = useState(FIRST_PAGE);
   // “已开放于”按已保存的配置计算，配置保存后刷新。
   useEffect(() => {
     void accessResource.refresh();
@@ -71,6 +74,17 @@ function Catalog({ selected }: { selected: string }) {
       for (const name of names) index.set(name, [...(index.get(name) ?? []), key]);
     return index;
   }, [access.data]);
+  // 开放给所有已启用会话的工具只显示一枚“全部”标签，避免每行重复同一串群名。
+  const enabledScopes = useMemo(() => {
+    const keys = Object.entries(object(state.draft.groups))
+      .filter(([, group]) => object(group).enabled === true)
+      .map(([id]) => "group:" + id);
+    if (object(state.draft.private).enabled === true) keys.push("private");
+    return keys;
+  }, [state.draft.groups, state.draft.private]);
+  const scopeCount = enabledScopes.length;
+  const openToAll = (scopes: string[]) =>
+    scopeCount > 1 && enabledScopes.every((key) => scopes.includes(key));
   if (!tools.data)
     return tools.error ? (
       <Banner tone="danger" icon={CircleAlert} title="无法读取工具目录">
@@ -91,96 +105,143 @@ function Catalog({ selected }: { selected: string }) {
   const open = (name: string | null) =>
     void navigate(name ? "/tools?tool=" + enc(name) : "/tools", { replace: true, keepScroll: true });
   const current: Tool | null = selected ? (catalog.get(selected) ?? null) : null;
+  const shown = visible.slice(0, limit);
+  const rest = visible.length - shown.length;
   return (
     <div className="stack">
-      <div className="toolbar">
-        <SearchInput value={query} onChange={setQuery} placeholder="搜索工具名称或说明" label="搜索工具" />
-        <Combobox
-          className="toolbar-select"
-          label="分类"
-          value={category}
-          onChange={setCategory}
-          options={[
-            { value: "", label: "全部分类" },
-            ...(tools.data.categories ?? []).map((item) => ({ value: item.id, label: item.label })),
-          ]}
-        />
-        <Segmented
-          size="sm"
-          label="工具类型"
-          value={kind}
-          onChange={setKind}
-          options={[
-            { value: "all", label: "全部" },
-            { value: "read", label: "只读" },
-            { value: "effects", label: "会执行操作" },
-            { value: "closed", label: "未开放" },
-          ]}
-        />
-        <span className="grow" />
-        <span className="muted small num">
-          {visible.length} / {all.length} 个工具
-        </span>
-      </div>
-      {visible.length ? (
-        <div className="card table-wrap">
-          <table className="table table-hover">
-            <thead>
-              <tr>
-                <th>工具</th>
-                <th className="hide-narrow">分类</th>
-                <th className="hide-narrow">适用范围</th>
-                <th>已开放于</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((tool) => {
-                const scopes = openIn.get(tool.name) ?? [];
-                return (
-                  <tr key={tool.name} onClick={() => open(tool.name)}>
-                    <td>
-                      <button
-                        type="button"
-                        className="cell-title"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          open(tool.name);
-                        }}
-                      >
-                        {tool.title}
-                      </button>
-                      <div className="cell-sub">
-                        <span className="mono">{tool.name}</span>
-                        {tool.effects && <Badge tone="warning">会执行操作</Badge>}
-                      </div>
-                    </td>
-                    <td className="hide-narrow secondary">{labels.get(tool.category) ?? tool.category}</td>
-                    <td className="hide-narrow secondary nowrap">{toolScopes[tool.scope]}</td>
-                    <td>
-                      {scopes.length ? (
-                        <span className="chips">
-                          {scopes.slice(0, 3).map((key) => (
-                            <span className="chip" key={key}>
-                              {accessScope(key, groups).label}
-                            </span>
-                          ))}
-                          {scopes.length > 3 && <span className="muted small">等 {scopes.length} 个</span>}
-                        </span>
-                      ) : (
-                        <span className="muted small">未开放</span>
-                      )}
-                    </td>
+      <section className="card">
+        <header className="card-header sticky wrap">
+          <SearchInput
+            value={query}
+            onChange={(next) => {
+              setQuery(next);
+              setLimit(FIRST_PAGE);
+            }}
+            placeholder="搜索工具名称或说明"
+            label="搜索工具"
+          />
+          <Combobox
+            className="toolbar-select"
+            label="分类"
+            value={category}
+            onChange={(next) => {
+              setCategory(next);
+              setLimit(FIRST_PAGE);
+            }}
+            options={[
+              { value: "", label: "全部分类" },
+              ...(tools.data.categories ?? []).map((item) => ({ value: item.id, label: item.label })),
+            ]}
+          />
+          <Segmented
+            size="sm"
+            label="工具类型"
+            value={kind}
+            onChange={(next) => {
+              setKind(next);
+              setLimit(FIRST_PAGE);
+            }}
+            options={[
+              { value: "all", label: "全部" },
+              { value: "read", label: "只读" },
+              { value: "effects", label: "会执行操作" },
+              { value: "closed", label: "未开放" },
+            ]}
+          />
+          <span className="grow" />
+          <span className="muted small num">
+            {visible.length} / {all.length} 个工具
+          </span>
+        </header>
+        {visible.length ? (
+          <>
+            <div className="table-wrap">
+              <table className="table table-hover">
+                <thead>
+                  <tr>
+                    <th>工具</th>
+                    <th className="hide-narrow">分类</th>
+                    <th className="hide-narrow">适用范围</th>
+                    <th>已开放于</th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <EmptyState icon={Wrench} title="没有符合条件的工具" compact>
-          调整搜索词或筛选条件后再试。
-        </EmptyState>
-      )}
+                </thead>
+                <tbody>
+                  {shown.map((tool) => {
+                    const scopes = openIn.get(tool.name) ?? [];
+                    return (
+                      <tr key={tool.name} onClick={() => open(tool.name)}>
+                        <td>
+                          <button
+                            type="button"
+                            className="cell-title"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              open(tool.name);
+                            }}
+                          >
+                            {tool.title}
+                          </button>
+                          <div className="cell-sub">
+                            <span className="mono">{tool.name}</span>
+                            {tool.effects && <Badge tone="warning">会执行操作</Badge>}
+                          </div>
+                        </td>
+                        <td className="hide-narrow secondary">{labels.get(tool.category) ?? tool.category}</td>
+                        <td className="hide-narrow secondary nowrap">{toolScopes[tool.scope]}</td>
+                        <td>
+                          {openToAll(scopes) ? (
+                            <span className="chip chip-all" title={scopes.map((key) => accessScope(key, groups).label).join("、")}>
+                              全部 {scopeCount} 个会话
+                            </span>
+                          ) : scopes.length ? (
+                            <span className="chips">
+                              {scopes.slice(0, 3).map((key) => (
+                                <span className="chip" key={key}>
+                                  {accessScope(key, groups).label}
+                                </span>
+                              ))}
+                              {scopes.length > 3 && <span className="muted small">等 {scopes.length} 个</span>}
+                            </span>
+                          ) : (
+                            <span className="muted small">未开放</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {(rest > 0 || limit > FIRST_PAGE) && (
+              <footer className="card-footer">
+                <span className="muted small num">
+                  已显示 {shown.length} / {visible.length} 个工具
+                </span>
+                <span className="grow" />
+                {limit > FIRST_PAGE && (
+                  <Button size="sm" variant="ghost" icon={ChevronUp} onClick={() => setLimit(FIRST_PAGE)}>
+                    收起
+                  </Button>
+                )}
+                {rest > NEXT_PAGE && (
+                  <Button size="sm" variant="ghost" onClick={() => setLimit(visible.length)}>
+                    显示全部
+                  </Button>
+                )}
+                {rest > 0 && (
+                  <Button size="sm" icon={ChevronDown} onClick={() => setLimit((value) => value + NEXT_PAGE)}>
+                    再显示 {Math.min(rest, NEXT_PAGE)} 个
+                  </Button>
+                )}
+              </footer>
+            )}
+          </>
+        ) : (
+          <EmptyState icon={Wrench} title="没有符合条件的工具" compact>
+            调整搜索词或筛选条件后再试。
+          </EmptyState>
+        )}
+      </section>
       <ToolDrawer
         tool={current}
         categoryLabel={current ? (labels.get(current.category) ?? current.category) : ""}
@@ -242,61 +303,63 @@ function McpDetail({ name }: { name: string }) {
   const label = mcpState(status?.state);
   return (
     <div className="detail">
-      <DetailHeader
-        back={{ to: "/tools/mcp", label: "全部 MCP 服务" }}
-        title={name}
-        badges={<Badge tone={label.tone}>{label.text}</Badge>}
-        subtitle={
-          String(server.transport) === "stdio"
-            ? String(server.command || "未填写启动命令")
-            : String(server.url || "未填写服务地址")
-        }
-        actions={
-          <>
-            <label className="switch-label">
-              <span>{enabled ? "已启用" : "未启用"}</span>
-              <Switch
-                checked={enabled}
-                label={"启用 " + name}
-                onChange={async (next) => {
-                  if (
-                    !next &&
-                    !(await confirm({
-                      title: "停用 " + name + "？",
-                      message: "重启 Harness 后，这个服务提供的工具将不再可用。",
-                      confirmLabel: "停用",
-                      danger: true,
-                    }))
-                  )
-                    return;
-                  change([...base, "enabled"], next);
-                }}
-              />
-            </label>
-            <Menu
-              items={[
-                {
-                  label: "删除",
-                  icon: Trash2,
-                  danger: true,
-                  onSelect: async () => {
-                    const accepted = await confirm({
-                      title: "删除 MCP 服务 " + name + "？",
-                      message: "连接设置、请求头和环境变量会一并删除。会话中针对这些工具的单独设置会保留，但不再生效。",
-                      confirmLabel: "删除",
-                      danger: true,
-                    });
-                    if (!accepted) return;
-                    change(base, undefined);
-                    void navigate("/tools/mcp", { replace: true });
-                    toast("已删除 MCP 服务 " + name);
+      <div className="detail-sticky">
+        <DetailHeader
+          back={{ to: "/tools/mcp", label: "全部 MCP 服务" }}
+          title={name}
+          badges={<Badge tone={label.tone}>{label.text}</Badge>}
+          subtitle={
+            String(server.transport) === "stdio"
+              ? String(server.command || "未填写启动命令")
+              : String(server.url || "未填写服务地址")
+          }
+          actions={
+            <>
+              <label className="switch-label">
+                <span>{enabled ? "已启用" : "未启用"}</span>
+                <Switch
+                  checked={enabled}
+                  label={"启用 " + name}
+                  onChange={async (next) => {
+                    if (
+                      !next &&
+                      !(await confirm({
+                        title: "停用 " + name + "？",
+                        message: "重启 Harness 后，这个服务提供的工具将不再可用。",
+                        confirmLabel: "停用",
+                        danger: true,
+                      }))
+                    )
+                      return;
+                    change([...base, "enabled"], next);
+                  }}
+                />
+              </label>
+              <Menu
+                items={[
+                  {
+                    label: "删除",
+                    icon: Trash2,
+                    danger: true,
+                    onSelect: async () => {
+                      const accepted = await confirm({
+                        title: "删除 MCP 服务 " + name + "？",
+                        message: "连接设置、请求头和环境变量会一并删除。会话中针对这些工具的单独设置会保留，但不再生效。",
+                        confirmLabel: "删除",
+                        danger: true,
+                      });
+                      if (!accepted) return;
+                      change(base, undefined);
+                      void navigate("/tools/mcp", { replace: true });
+                      toast("已删除 MCP 服务 " + name);
+                    },
                   },
-                },
-              ]}
-            />
-          </>
-        }
-      />
+                ]}
+              />
+            </>
+          }
+        />
+      </div>
       {status && (status.message || status.error_type) ? (
         <Banner tone={label.tone === "success" ? "neutral" : "warning"} icon={CircleAlert} title={label.text}>
           {status.message || status.error_type}
@@ -395,6 +458,7 @@ function Coverage() {
   const tools = useResource(toolsResource);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
+  const [limit, setLimit] = useState(FIRST_PAGE);
   const titles = useMemo(() => new Map((tools.data?.tools ?? []).map((tool) => [tool.name, tool.title])), [tools.data]);
   const data = coverage.data;
   if (!data)
@@ -419,6 +483,8 @@ function Coverage() {
           .toLowerCase()
           .includes(text)),
   );
+  const shown = visible.slice(0, limit);
+  const rest = visible.length - shown.length;
   return (
     <div className="stack">
       <p className="secondary small">
@@ -428,70 +494,106 @@ function Coverage() {
         </a>
       </p>
       {data.aliases && <p className="muted small">{data.aliases}</p>}
-      <div className="toolbar">
-        <SearchInput value={query} onChange={setQuery} placeholder="搜索动作或工具" label="搜索覆盖清单" />
-        <Segmented
-          size="sm"
-          label="覆盖状态"
-          value={status}
-          onChange={setStatus}
-          options={[
-            { value: "all", label: "全部", count: data.actions.length },
-            ...statuses.map((value) => ({
-              value,
-              label: coverageState(value).text,
-              count: data.actions.filter((action) => action.status === value).length,
-            })),
-          ]}
-        />
-      </div>
-      <div className="card table-wrap">
-        <table className="table">
-          <thead>
-            <tr>
-              <th>动作</th>
-              <th>状态</th>
-              <th>对应工具</th>
-              <th className="hide-narrow">说明</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visible.map((action) => {
-              const state = coverageState(action.status);
-              const link = sourceLink(data.source_url, action.source);
-              return (
-                <tr key={action.action}>
-                  <td className="nowrap">
-                    {link ? (
-                      <a href={link} target="_blank" rel="noreferrer" className="mono plain-link" title="查看上游源码">
-                        {action.action}
-                      </a>
-                    ) : (
-                      <span className="mono">{action.action}</span>
-                    )}
-                  </td>
-                  <td>
-                    <Badge tone={state.tone}>{state.text}</Badge>
-                  </td>
-                  <td>
-                    {action.tool ? (
-                      <a href={"/tools?tool=" + enc(action.tool)} onClick={linkHandler("/tools?tool=" + enc(action.tool))}>
-                        {titles.get(action.tool) ?? action.tool}
-                      </a>
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                  <td className="hide-narrow secondary">
-                    {action.tool && action.reason === titles.get(action.tool) ? "" : action.reason}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <section className="card">
+        <header className="card-header sticky wrap">
+          <SearchInput
+            value={query}
+            onChange={(next) => {
+              setQuery(next);
+              setLimit(FIRST_PAGE);
+            }}
+            placeholder="搜索动作或工具"
+            label="搜索覆盖清单"
+          />
+          <Segmented
+            size="sm"
+            label="覆盖状态"
+            value={status}
+            onChange={(next) => {
+              setStatus(next);
+              setLimit(FIRST_PAGE);
+            }}
+            options={[
+              { value: "all", label: "全部", count: data.actions.length },
+              ...statuses.map((value) => ({
+                value,
+                label: coverageState(value).text,
+                count: data.actions.filter((action) => action.status === value).length,
+              })),
+            ]}
+          />
+        </header>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>动作</th>
+                <th>状态</th>
+                <th>对应工具</th>
+                <th className="hide-narrow">说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((action) => {
+                const state = coverageState(action.status);
+                const link = sourceLink(data.source_url, action.source);
+                return (
+                  <tr key={action.action}>
+                    <td className="nowrap">
+                      {link ? (
+                        <a href={link} target="_blank" rel="noreferrer" className="mono plain-link" title="查看上游源码">
+                          {action.action}
+                        </a>
+                      ) : (
+                        <span className="mono">{action.action}</span>
+                      )}
+                    </td>
+                    <td>
+                      <Badge tone={state.tone}>{state.text}</Badge>
+                    </td>
+                    <td>
+                      {action.tool ? (
+                        <a href={"/tools?tool=" + enc(action.tool)} onClick={linkHandler("/tools?tool=" + enc(action.tool))}>
+                          {titles.get(action.tool) ?? action.tool}
+                        </a>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                    <td className="hide-narrow secondary">
+                      {action.tool && action.reason === titles.get(action.tool) ? "" : action.reason}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
         {!visible.length && <p className="table-empty muted">没有符合条件的动作</p>}
-      </div>
+        {(rest > 0 || limit > FIRST_PAGE) && (
+          <footer className="card-footer">
+            <span className="muted small num">
+              已显示 {shown.length} / {visible.length} 个动作
+            </span>
+            <span className="grow" />
+            {limit > FIRST_PAGE && (
+              <Button size="sm" variant="ghost" icon={ChevronUp} onClick={() => setLimit(FIRST_PAGE)}>
+                收起
+              </Button>
+            )}
+            {rest > NEXT_PAGE && (
+              <Button size="sm" variant="ghost" onClick={() => setLimit(visible.length)}>
+                显示全部
+              </Button>
+            )}
+            {rest > 0 && (
+              <Button size="sm" icon={ChevronDown} onClick={() => setLimit((value) => value + NEXT_PAGE)}>
+                再显示 {Math.min(rest, NEXT_PAGE)} 个
+              </Button>
+            )}
+          </footer>
+        )}
+      </section>
     </div>
   );
 }
@@ -536,17 +638,19 @@ export function ToolsPage({ route }: { route: ToolsRoute }) {
           ) : undefined
         }
       />
-      <Tabs
-        label="工具页面"
-        value={route.view}
-        onChange={(view) => void navigate(view === "catalog" ? "/tools" : "/tools/" + view)}
-        items={[
-          { id: "catalog", label: "工具目录" },
-          { id: "image", label: "图像生成", count: imageEnabled ? "已启用" : undefined },
-          { id: "mcp", label: "MCP 服务", count: Object.keys(servers).length || undefined },
-          { id: "napcat", label: "NapCat 覆盖" },
-        ]}
-      />
+      <div className="sticky-tabs">
+        <Tabs
+          label="工具页面"
+          value={route.view}
+          onChange={(view) => void navigate(view === "catalog" ? "/tools" : "/tools/" + view)}
+          items={[
+            { id: "catalog", label: "工具目录" },
+            { id: "image", label: "图像生成", count: imageEnabled ? "已启用" : undefined },
+            { id: "mcp", label: "MCP 服务", count: Object.keys(servers).length || undefined },
+            { id: "napcat", label: "NapCat 覆盖" },
+          ]}
+        />
+      </div>
       {route.view === "catalog" ? (
         <Catalog selected={route.tool} />
       ) : route.view === "image" ? (

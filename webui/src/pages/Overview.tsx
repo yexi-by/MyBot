@@ -2,12 +2,25 @@ import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Activity as ActivityIcon,
+  BadgeCheck,
+  Bell,
   Box,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  CircleAlert,
   CircleStop,
+  Gauge,
+  MessageSquare,
   MessagesSquare,
   Plug,
   Radio,
+  Recycle,
+  RotateCcw,
+  Settings2,
+  Shrink,
   Sparkles,
+  Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge, Button, EmptyState, Meter, Segmented, StatusDot } from "../components/primitives";
@@ -15,7 +28,16 @@ import { PageHeader, SearchInput } from "../components/shell";
 import { useConfig } from "../lib/config";
 import { scopeLabel } from "../lib/conversations";
 import { conversationRefs, hasSessionModel } from "../lib/models";
-import { formatBytes, formatClock, formatDuration, formatNumber, formatRelative, parseScopeKey } from "../lib/format";
+import {
+  dayKey,
+  formatBytes,
+  formatClock,
+  formatDay,
+  formatDuration,
+  formatNumber,
+  formatRelative,
+  parseScopeKey,
+} from "../lib/format";
 import { activityKind, mcpState, resultStatus, turnState, usageSources } from "../lib/labels";
 import { linkHandler } from "../lib/navigation";
 import {
@@ -27,7 +49,7 @@ import {
 } from "../lib/resource";
 import { sessionRoute, stopTurn } from "../lib/sessions";
 import { getAt, object } from "../lib/types";
-import type { Activity, RetainedSession, Turn } from "../lib/types";
+import type { Activity, RetainedSession, Turn, TurnContext } from "../lib/types";
 import type { Tone } from "../lib/ui";
 
 function Tile({
@@ -165,16 +187,37 @@ function StatusTiles() {
   );
 }
 
+/** 上下文用量：进度条 + 数字，正在运行和已保留的会话共用同一种呈现。 */
+function ContextMeter({ context, showSource = false }: { context: TurnContext; showSource?: boolean }) {
+  const max = context.max_tokens ?? 0;
+  const used = context.input_tokens ?? 0;
+  if (max <= 0) return null;
+  return (
+    <div className="turn-context">
+      <Meter
+        label="上下文用量"
+        value={used}
+        max={max}
+        marker={context.trigger_tokens}
+        tone={used / max >= 0.8 ? "warning" : "accent"}
+      />
+      <span className="tiny muted num">
+        上下文 {formatNumber(used)} / {formatNumber(max)} token
+        {showSource && context.usage_source
+          ? " · " + (usageSources[context.usage_source] ?? context.usage_source)
+          : ""}
+      </span>
+    </div>
+  );
+}
+
 function TurnRow({ turn }: { turn: Turn }) {
   const groups = useGroupNames();
   const state = turnState(turn.state);
   const context = turn.context;
-  const max = context?.max_tokens ?? 0;
-  const used = context?.input_tokens ?? 0;
-  const ratio = max ? used / max : 0;
   const route = sessionRoute(turn.scope_key);
   return (
-    <li className="turn">
+    <li className="turn is-link">
       <div className="turn-main">
         <div className="turn-title">
           <a href={route} onClick={linkHandler(route)}>
@@ -188,21 +231,7 @@ function TurnRow({ turn }: { turn: Turn }) {
           {context?.compactions ? " · 已压缩 " + context.compactions + " 次" : ""}
         </div>
       </div>
-      {context && max > 0 && (
-        <div className="turn-context">
-          <Meter
-            label="上下文用量"
-            value={used}
-            max={max}
-            marker={context.trigger_tokens}
-            tone={ratio >= 0.8 ? "warning" : "accent"}
-          />
-          <span className="tiny muted num">
-            上下文 {formatNumber(used)} / {formatNumber(max)} token
-            {context.usage_source ? " · " + (usageSources[context.usage_source] ?? context.usage_source) : ""}
-          </span>
-        </div>
-      )}
+      {context ? <ContextMeter context={context} showSource /> : <span />}
       <Button size="sm" icon={CircleStop} onClick={() => void stopTurn(turn.scope_key)}>
         停止
       </Button>
@@ -215,22 +244,23 @@ function RetainedSessions({ sessions }: { sessions: RetainedSession[] }) {
   return (
     <section className="card">
       <header className="card-header">
-        <h2 className="grow">已保留会话</h2>
-        <span className="muted small">{sessions.length} 个</span>
+        <div className="grow">
+          <h2>已保留会话</h2>
+          <p className="card-subtitle">
+            再次唤醒会沿用原有上下文；重启会清空，容量达到上限时回收最久未使用的空闲会话。
+          </p>
+        </div>
         <a className="small" href="/sessions" onClick={linkHandler("/sessions")}>
           查看上下文
         </a>
       </header>
-      <p className="card-body muted small">
-        再次唤醒会继续使用原有上下文。停止当前轮次会保留会话；重启会清空，容量达到上限时回收最久未使用的空闲会话。
-      </p>
       {sessions.length ? (
         <ul className="turns">
           {[...sessions].reverse().map((session) => {
             const state = turnState(session.state);
             const route = sessionRoute(session.scope_key);
             return (
-              <li className="turn" key={session.session_id}>
+              <li className="turn is-link" key={session.session_id}>
                 <div className="turn-main">
                   <div className="turn-title">
                     <a href={route} onClick={linkHandler(route)}>
@@ -245,17 +275,14 @@ function RetainedSessions({ sessions }: { sessions: RetainedSession[] }) {
                     {session.context.compactions ? " · 已压缩 " + session.context.compactions + " 次" : ""}
                   </div>
                 </div>
-                {!session.cleared && (
-                  <span className="turn-context small muted num">
-                    上下文 {formatNumber(session.context.input_tokens ?? 0)} / {formatNumber(session.context.max_tokens ?? 0)} token
-                  </span>
-                )}
+                {!session.cleared ? <ContextMeter context={session.context} /> : <span />}
+                <ChevronRight size={16} className="turn-arrow" aria-hidden="true" />
               </li>
             );
           })}
         </ul>
       ) : (
-        <EmptyState title="尚无保留的会话" compact>首次唤醒后建立，会话内容只保留在内存中。</EmptyState>
+        <p className="card-empty">尚无保留的会话。首次唤醒后建立，内容只保留在内存中。</p>
       )}
     </section>
   );
@@ -267,16 +294,47 @@ const isProblem = (item: Activity) =>
   item.kind === "overload" ||
   ["error", "unknown", "limit", "timeout"].includes(item.status ?? "");
 
+/** 首屏只放最近的若干条，避免概览页被几百条活动拉得很长；需要时再逐页展开。 */
+const FIRST_PAGE = 20;
+const NEXT_PAGE = 50;
+const kindIcons: Record<string, LucideIcon> = {
+  turn: MessageSquare,
+  tool: Wrench,
+  model: Sparkles,
+  compaction: Shrink,
+  session: Recycle,
+  reset: RotateCcw,
+  resolution: BadgeCheck,
+  config: Settings2,
+  error: CircleAlert,
+  overload: Gauge,
+  wake: Bell,
+};
+/** 成功是常态，不再逐行打绿色徽标；只把需要注意的结果标出来。 */
+const quietStatuses = new Set(["ok", "completed"]);
+
 function ActivityFeed({ activity }: { activity: Activity[] }) {
   const groups = useGroupNames();
   const tools = useResource(toolsResource).data;
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
+  const [limit, setLimit] = useState(FIRST_PAGE);
   const titles = useMemo(
     () => new Map((tools?.tools ?? []).map((tool) => [tool.name, tool.title])),
     [tools],
   );
   const ordered = useMemo(() => [...activity].reverse(), [activity]);
+  // “进行中”只对同一会话、同一类型的最新一条成立；之后已有新事件的开始记录不再显示为进行中。
+  const settled = useMemo(() => {
+    const seen = new Set<string>();
+    const result = new Set<string>();
+    for (const item of ordered) {
+      const key = item.scope_key + "\u0000" + item.kind;
+      if (item.status === "running" && seen.has(key)) result.add(item.id);
+      seen.add(key);
+    }
+    return result;
+  }, [ordered]);
   const counts = {
     all: ordered.length,
     turn: ordered.filter((item) => item.kind === "turn" || item.kind === "compaction").length,
@@ -292,15 +350,68 @@ function ActivityFeed({ activity }: { activity: Activity[] }) {
     const tool = item.tool ? (titles.get(item.tool) ?? item.tool) + " " + item.tool : "";
     return (item.message + " " + tool + " " + scopeLabel(item.scope_key, groups)).toLowerCase().includes(text);
   });
+  const shown = visible.slice(0, limit);
+  const rest = visible.length - shown.length;
+  const rows: ReactNode[] = [];
+  let lastDay = "";
+  for (const item of shown) {
+    const day = dayKey(item.time);
+    if (day !== lastDay) {
+      lastDay = day;
+      rows.push(
+        <li key={"day:" + day} className="activity-day">
+          {formatDay(item.time)}
+        </li>,
+      );
+    }
+    const kind = activityKind(item.kind);
+    const KindIcon = kindIcons[item.kind] ?? ActivityIcon;
+    const status =
+      item.status && !quietStatuses.has(item.status) && !settled.has(item.id) ? resultStatus(item.status) : null;
+    const route = parseScopeKey(item.scope_key) ? sessionRoute(item.scope_key) : "";
+    const problem = isProblem(item)
+      ? " is-problem tone-" + (kind.tone === "danger" || status?.tone === "danger" ? "danger" : "warning")
+      : "";
+    rows.push(
+      <li key={item.id} className={"activity-row" + problem}>
+        <time className="activity-time num muted" title={new Date(item.time * 1000).toLocaleString("zh-CN")}>
+          {formatClock(item.time)}
+        </time>
+        <span className={"activity-kind tone-" + kind.tone}>
+          <KindIcon size={14} aria-hidden="true" />
+          {kind.text}
+        </span>
+        <div className="activity-line">
+          {item.tool && (
+            <span className="activity-tool" title={item.tool}>
+              {titles.get(item.tool) ?? item.tool}
+            </span>
+          )}
+          <span className="activity-message">{item.message}</span>
+        </div>
+        {route ? (
+          <a className="activity-scope" href={route} onClick={linkHandler(route)}>
+            {scopeLabel(item.scope_key, groups)}
+          </a>
+        ) : (
+          <span className="activity-scope">{item.scope_key}</span>
+        )}
+        <span className="activity-status">{status && <Badge tone={status.tone}>{status.text}</Badge>}</span>
+      </li>,
+    );
+  }
   return (
     <section className="card">
-      <header className="card-header wrap">
+      <header className="card-header sticky wrap">
         <h2 className="grow">最近活动</h2>
         <Segmented
           size="sm"
           label="活动类型"
           value={filter}
-          onChange={setFilter}
+          onChange={(next) => {
+            setFilter(next);
+            setLimit(FIRST_PAGE);
+          }}
           options={[
             { value: "all", label: "全部", count: counts.all },
             { value: "turn", label: "对话", count: counts.turn },
@@ -308,42 +419,38 @@ function ActivityFeed({ activity }: { activity: Activity[] }) {
             { value: "problem", label: "异常", count: counts.problem },
           ]}
         />
-        <SearchInput value={query} onChange={setQuery} placeholder="搜索活动" label="搜索最近活动" />
+        <SearchInput
+          value={query}
+          onChange={(next) => {
+            setQuery(next);
+            setLimit(FIRST_PAGE);
+          }}
+          placeholder="搜索活动"
+          label="搜索最近活动"
+        />
       </header>
       {visible.length ? (
-        <ol className="activity">
-          {visible.map((item) => {
-            const kind = activityKind(item.kind);
-            const status = item.status ? resultStatus(item.status) : null;
-            const route = parseScopeKey(item.scope_key) ? sessionRoute(item.scope_key) : "";
-            return (
-              <li key={item.id} className="activity-row">
-                <time className="activity-time num muted" title={new Date(item.time * 1000).toLocaleString("zh-CN")}>
-                  {formatClock(item.time)}
-                </time>
-                <Badge tone={kind.tone}>{kind.text}</Badge>
-                <div className="activity-body">
-                  <div className="activity-line">
-                    {item.tool && (
-                      <span className="activity-tool" title={item.tool}>
-                        {titles.get(item.tool) ?? item.tool}
-                      </span>
-                    )}
-                    <span className="activity-message">{item.message}</span>
-                  </div>
-                  {route ? (
-                    <a className="activity-scope" href={route} onClick={linkHandler(route)}>
-                      {scopeLabel(item.scope_key, groups)}
-                    </a>
-                  ) : (
-                    item.scope_key && <span className="activity-scope">{item.scope_key}</span>
-                  )}
-                </div>
-                {status && <Badge tone={status.tone}>{status.text}</Badge>}
-              </li>
-            );
-          })}
-        </ol>
+        <>
+          <ol className="activity">{rows}</ol>
+          {(rest > 0 || limit > FIRST_PAGE) && (
+            <footer className="card-footer">
+              <span className="muted small num">
+                已显示 {shown.length} / {visible.length} 条
+              </span>
+              <span className="grow" />
+              {limit > FIRST_PAGE && (
+                <Button size="sm" variant="ghost" icon={ChevronUp} onClick={() => setLimit(FIRST_PAGE)}>
+                  收起
+                </Button>
+              )}
+              {rest > 0 && (
+                <Button size="sm" icon={ChevronDown} onClick={() => setLimit((value) => value + NEXT_PAGE)}>
+                  再显示 {Math.min(rest, NEXT_PAGE)} 条
+                </Button>
+              )}
+            </footer>
+          )}
+        </>
       ) : (
         <EmptyState icon={ActivityIcon} title={ordered.length ? "没有符合条件的活动" : "还没有活动"} compact>
           {ordered.length ? "调整筛选条件或搜索词后再试。" : "Agent 被唤醒、调用工具或出错时会记录在这里，只保存在内存中。"}
@@ -378,7 +485,7 @@ export function OverviewPage() {
       <section className="card">
         <header className="card-header">
           <h2 className="grow">正在运行</h2>
-          <span className="muted small">{data ? data.turns.length + " 个会话" : ""}</span>
+          <span className="muted small">{data?.turns.length ? data.turns.length + " 个会话" : ""}</span>
         </header>
         {data?.turns.length ? (
           <ul className="turns">
@@ -387,9 +494,7 @@ export function OverviewPage() {
             ))}
           </ul>
         ) : (
-          <EmptyState title="当前没有进行中的对话" compact>
-            被唤醒的会话会在这里显示进度和上下文用量。
-          </EmptyState>
+          <p className="card-empty">当前没有进行中的对话。被唤醒的会话会在这里显示进度和上下文用量。</p>
         )}
       </section>
       <RetainedSessions sessions={data?.sessions ?? []} />

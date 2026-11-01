@@ -669,60 +669,74 @@ function ConversationDetail({ route }: { route: ConversationRoute }) {
   };
   return (
     <div className="detail">
-      <DetailHeader
-        back={back}
-        title={title}
-        subtitle={
-          kind === "group" ? (
-            <span className="row">
-              <span className="mono">{route.id}</span>
-              <CopyButton text={route.id} label="复制群号" />
-              {info?.member_count != null && (
-                <span className="muted">
-                  {formatNumber(info.member_count)}
-                  {info.max_member_count ? " / " + formatNumber(info.max_member_count) : ""} 人
-                </span>
-              )}
-            </span>
-          ) : (
-            "所有私聊对象共用这一套设置"
-          )
-        }
-        actions={
-          <>
-            <label className="switch-label">
-              <span>{enabled ? "已启用" : "未启用"}</span>
-              <Switch checked={enabled} label={"启用" + label} onChange={(next) => void setEnabled(next)} />
-            </label>
-            <Menu
-              items={[
-                { label: "从其他会话复制权限", icon: Copy, onSelect: () => setCopyOpen(true) },
-                ...(kind === "group"
-                  ? [
-                      {
-                        label: "删除群",
-                        icon: Trash2,
-                        danger: true,
-                        onSelect: async () => {
-                          const accepted = await confirm({
-                            title: "删除群 " + route.id + "？",
-                            message: "Agent 将不再响应这个群，它的唤醒词、模型设置、能力权限和参数限制会一并删除。",
-                            confirmLabel: "删除",
-                            danger: true,
-                          });
-                          if (!accepted) return;
-                          change(base, undefined);
-                          void navigate("/conversations", { replace: true });
-                          toast("已删除群 " + route.id);
+      <div className="detail-sticky">
+        <DetailHeader
+          back={back}
+          title={title}
+          subtitle={
+            kind === "group" ? (
+              <span className="row">
+                <span className="mono">{route.id}</span>
+                <CopyButton text={route.id} label="复制群号" />
+                {info?.member_count != null && (
+                  <span className="muted">
+                    {formatNumber(info.member_count)}
+                    {info.max_member_count ? " / " + formatNumber(info.max_member_count) : ""} 人
+                  </span>
+                )}
+              </span>
+            ) : (
+              "所有私聊对象共用这一套设置"
+            )
+          }
+          actions={
+            <>
+              <label className="switch-label">
+                <span>{enabled ? "已启用" : "未启用"}</span>
+                <Switch checked={enabled} label={"启用" + label} onChange={(next) => void setEnabled(next)} />
+              </label>
+              <Menu
+                items={[
+                  { label: "从其他会话复制权限", icon: Copy, onSelect: () => setCopyOpen(true) },
+                  ...(kind === "group"
+                    ? [
+                        {
+                          label: "删除群",
+                          icon: Trash2,
+                          danger: true,
+                          onSelect: async () => {
+                            const accepted = await confirm({
+                              title: "删除群 " + route.id + "？",
+                              message: "Agent 将不再响应这个群，它的唤醒词、模型设置、能力权限和参数限制会一并删除。",
+                              confirmLabel: "删除",
+                              danger: true,
+                            });
+                            if (!accepted) return;
+                            change(base, undefined);
+                            void navigate("/conversations", { replace: true });
+                            toast("已删除群 " + route.id);
+                          },
                         },
-                      },
-                    ]
-                  : []),
-              ]}
-            />
-          </>
-        }
-      />
+                      ]
+                    : []),
+                ]}
+              />
+            </>
+          }
+        />
+        <Tabs
+          label="会话设置"
+          value={route.tab}
+          onChange={(tab: ConversationTab) =>
+            void navigate(conversationRoute(kind, route.id, tab), { replace: true, keepScroll: true })
+          }
+          items={[
+            { id: "general", label: "常规" },
+            { id: "model", label: "模型" },
+            { id: "permissions", label: "能力权限" },
+          ]}
+        />
+      </div>
       {!enabled && (
         <Banner
           tone="warning"
@@ -755,18 +769,6 @@ function ConversationDetail({ route }: { route: ConversationRoute }) {
           还没有选好会话模型，Agent 不会回复这个会话。
         </Banner>
       )}
-      <Tabs
-        label="会话设置"
-        value={route.tab}
-        onChange={(tab: ConversationTab) =>
-          void navigate(conversationRoute(kind, route.id, tab), { replace: true, keepScroll: true })
-        }
-        items={[
-          { id: "general", label: "常规" },
-          { id: "model", label: "模型" },
-          { id: "permissions", label: "能力权限" },
-        ]}
-      />
       {route.tab === "model" ? (
         <ModelTab self={self} />
       ) : route.tab === "general" ? (

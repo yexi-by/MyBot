@@ -232,7 +232,7 @@ export function FileEditor({
           ? { icon: CircleAlert, text: "保存失败", tone: "danger" }
           : dirty
             ? { icon: PencilLine, text: "未保存", tone: "neutral" }
-            : { icon: Check, text: savedAt ? "已保存 " + formatClock(savedAt / 1000) : "已保存", tone: "success" };
+            : { icon: Check, text: savedAt ? "文件已保存 " + formatClock(savedAt / 1000) : "文件已保存", tone: "success" };
   const StatusIcon = status.icon;
   const markdownMode = kind === "markdown";
   const view: Mode = markdownMode ? mode : "edit";

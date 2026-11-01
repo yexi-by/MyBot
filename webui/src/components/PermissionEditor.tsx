@@ -106,40 +106,40 @@ export function PermissionEditor({ base, kind }: { base: Path; kind: "group" | "
           会话未启用，以下权限在启用后才会生效。
         </Banner>
       )}
-      <div className="toolbar">
-        <SearchInput value={query} onChange={setQuery} placeholder="搜索工具名称" label="搜索工具" />
-        <Segmented
-          size="sm"
-          label="筛选工具"
-          value={filter}
-          onChange={setFilter}
-          options={[
-            { value: "all", label: "全部" },
-            { value: "allowed", label: "可调用" },
-            { value: "effects", label: "会执行操作" },
-          ]}
-        />
-        <span className="grow" />
-        <span className="muted small num">
-          可调用 {allowedCount} / {usable.length}
-        </span>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() =>
-            setExpanded(expanded.size ? new Set() : new Set(groupsToShow.map((group) => group.id)))
-          }
-        >
-          {expanded.size ? "全部收起" : "全部展开"}
-        </Button>
-      </div>
-      {groupsToShow.length === 0 ? (
-        <EmptyState icon={ListChecks} title="没有符合条件的工具" compact>
-          调整搜索词或筛选条件后再试。
-        </EmptyState>
-      ) : (
-        <div className="perm-list card">
-          {groupsToShow.map(({ id, members, visible }) => {
+      <div className="perm-list card">
+        <header className="card-header wrap">
+          <SearchInput value={query} onChange={setQuery} placeholder="搜索工具名称" label="搜索工具" />
+          <Segmented
+            size="sm"
+            label="筛选工具"
+            value={filter}
+            onChange={setFilter}
+            options={[
+              { value: "all", label: "全部" },
+              { value: "allowed", label: "可调用" },
+              { value: "effects", label: "会执行操作" },
+            ]}
+          />
+          <span className="grow" />
+          <span className="muted small num">
+            可调用 {allowedCount} / {usable.length}
+          </span>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() =>
+              setExpanded(expanded.size ? new Set() : new Set(groupsToShow.map((group) => group.id)))
+            }
+          >
+            {expanded.size ? "全部收起" : "全部展开"}
+          </Button>
+        </header>
+        {groupsToShow.length === 0 ? (
+          <EmptyState icon={ListChecks} title="没有符合条件的工具" compact>
+            调整搜索词或筛选条件后再试。
+          </EmptyState>
+        ) : (
+          groupsToShow.map(({ id, members, visible }) => {
             const label = labels.get(id) ?? id;
             const open = narrowed || expanded.has(id);
             const enabled = object(policy.categories)[id] === true;
@@ -221,9 +221,9 @@ export function PermissionEditor({ base, kind }: { base: Path; kind: "group" | "
                 )}
               </section>
             );
-          })}
-        </div>
-      )}
+          })
+        )}
+      </div>
       {hidden > 0 && (
         <p className="muted small">
           另有 {hidden} 个工具只适用于{kind === "private" ? "群聊" : "私聊"}，未在这里列出。

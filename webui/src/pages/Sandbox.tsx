@@ -109,8 +109,8 @@ function Files({ busy }: { busy: boolean }) {
       return next;
     });
   return (
-    <section className="card">
-      <header className="card-header wrap">
+    <section className="card files-card">
+      <header className="card-header sticky wrap">
         <nav className="breadcrumb grow" aria-label="当前目录">
           <button type="button" onClick={() => setPath("")} aria-current={!path ? "location" : undefined}>
             工作区
@@ -145,7 +145,16 @@ function Files({ busy }: { busy: boolean }) {
             删除所选（{selected.size}）
           </Button>
         )}
-        <Button size="sm" variant="ghost" icon={RefreshCw} loading={loading} onClick={() => void load()}>
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={RefreshCw}
+          loading={loading}
+          onClick={() => {
+            void load();
+            void sandboxResource.refresh();
+          }}
+        >
           刷新
         </Button>
       </header>
@@ -180,7 +189,18 @@ function Files({ busy }: { busy: boolean }) {
             </thead>
             <tbody>
               {all.map((file) => (
-                <tr key={file.path} className={selected.has(file.path) ? "selected" : undefined}>
+                <tr
+                  key={file.path}
+                  className={
+                    [selected.has(file.path) ? "selected" : "", file.is_dir ? "is-dir" : ""].filter(Boolean).join(" ") ||
+                    undefined
+                  }
+                  onClick={(event) => {
+                    // 点目录所在行的空白处也能进入目录；勾选框和按钮保持各自行为。
+                    if (!file.is_dir || (event.target as HTMLElement).closest("input, button")) return;
+                    setPath(file.path);
+                  }}
+                >
                   <td className="check-cell">
                     <input
                       type="checkbox"
@@ -209,10 +229,19 @@ function Files({ busy }: { busy: boolean }) {
           </table>
         </div>
       )}
-      {!error && all.length > 0 && <div className="card-body row wrap">
-        <span className="muted small">已显示 {all.length} / {total} 项</span>
-        {nextOffset !== null && <Button size="sm" loading={loading} onClick={() => void load(nextOffset)}>加载下一页</Button>}
-      </div>}
+      {!error && all.length > 0 && (
+        <footer className="card-footer">
+          <span className="muted small num">
+            已显示 {all.length} / {total} 项
+          </span>
+          <span className="grow" />
+          {nextOffset !== null && (
+            <Button size="sm" loading={loading} onClick={() => void load(nextOffset)}>
+              加载下一页
+            </Button>
+          )}
+        </footer>
+      )}
     </section>
   );
 }
@@ -301,15 +330,6 @@ function SandboxOverview() {
             >
               清空工作区
             </Button>
-            <span className="grow" />
-            <Button
-              variant="ghost"
-              icon={RefreshCw}
-              loading={status.loading}
-              onClick={() => void sandboxResource.refresh()}
-            >
-              刷新
-            </Button>
           </div>
           {data.busy && <p className="muted small">执行期间不能清理或删除文件。</p>}
           {!!data.queued && <p className="muted small">另有 {data.queued} 项操作正在等待工作区。</p>}
@@ -370,15 +390,17 @@ export function SandboxPage({ view }: { view: "overview" | "settings" }) {
         description="获准的会话共用一个持久工作区来执行代码；代码只能访问公网 HTTP 和 HTTPS"
         save={view === "settings"}
       />
-      <Tabs
-        label="沙箱页面"
-        value={view}
-        onChange={(next) => void navigate(next === "settings" ? "/sandbox/settings" : "/sandbox")}
-        items={[
-          { id: "overview", label: "工作区" },
-          { id: "settings", label: "设置" },
-        ]}
-      />
+      <div className="sticky-tabs">
+        <Tabs
+          label="沙箱页面"
+          value={view}
+          onChange={(next) => void navigate(next === "settings" ? "/sandbox/settings" : "/sandbox")}
+          items={[
+            { id: "overview", label: "工作区" },
+            { id: "settings", label: "设置" },
+          ]}
+        />
+      </div>
       {view === "settings" ? (
         <SandboxSettings />
       ) : enabled ? (

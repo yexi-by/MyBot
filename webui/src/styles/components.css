@@ -44,7 +44,8 @@
   transition:
     background-color var(--dur) var(--ease),
     border-color var(--dur) var(--ease),
-    color var(--dur) var(--ease);
+    color var(--dur) var(--ease),
+    transform 80ms var(--ease);
 }
 .btn svg {
   flex-shrink: 0;
@@ -97,6 +98,11 @@
 .btn:disabled {
   opacity: 0.5;
 }
+/* 按下时轻微收缩，给点击一个即时的触感反馈。 */
+.btn:active:not(:disabled),
+.icon-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
 .btn:focus-visible,
 .icon-btn:focus-visible {
   outline: none;
@@ -116,7 +122,8 @@
   color: var(--text-2);
   transition:
     background-color var(--dur) var(--ease),
-    color var(--dur) var(--ease);
+    color var(--dur) var(--ease),
+    transform 80ms var(--ease);
 }
 .icon-btn:hover:not(:disabled) {
   background: var(--surface-2);
@@ -242,6 +249,12 @@
 }
 .switch[aria-checked="true"] {
   background: var(--accent);
+}
+.switch:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--switch-off) 82%, var(--text));
+}
+.switch[aria-checked="true"]:hover:not(:disabled) {
+  background: var(--accent-hover);
 }
 .switch[aria-checked="true"] .switch-thumb {
   transform: translateX(16px);
@@ -514,6 +527,15 @@
 .card-header.wrap {
   flex-wrap: wrap;
 }
+/* 卡片内粘性筛选/操作栏：向上投一层画布底色遮住圆角外侧滚过的行。 */
+.card-header.sticky {
+  position: sticky;
+  z-index: 10;
+  top: calc(var(--sticky-top) + var(--sticky-offset, 0px));
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  background: var(--surface);
+  box-shadow: 0 -8px 0 1px var(--canvas);
+}
 .card-header h2,
 .section-header h2 {
   font-size: var(--fs-md);
@@ -531,6 +553,25 @@
 }
 .card-body {
   padding: 16px 20px;
+}
+.card-subtitle {
+  margin-top: 1px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+/* 卡片内的轻量空状态：一行说明，不占用整块留白。 */
+.card-empty {
+  padding: 14px 20px;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}
+.card-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-top: 1px solid var(--border);
 }
 
 .table-wrap {
@@ -635,6 +676,33 @@ a.chip:hover {
   border-color: var(--accent);
   color: var(--accent-text);
   text-decoration: none;
+}
+/* 全部开放是常态，用平静的文字呈现，把颜色留给部分开放等例外。 */
+.chip-all {
+  padding: 0;
+  border-color: transparent;
+  background: none;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+.chip-more {
+  gap: 3px;
+  border-style: dashed;
+  background: var(--surface);
+  color: var(--accent-text);
+  cursor: pointer;
+  transition:
+    border-color var(--dur) var(--ease),
+    background-color var(--dur) var(--ease);
+}
+.chip-more:hover {
+  border-style: solid;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.chip-more:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus);
 }
 
 .info-list {

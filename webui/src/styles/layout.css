@@ -353,6 +353,13 @@
 .md-detail {
   min-width: 0;
 }
+/* 未选中条目时，详情区显示为一块虚线占位，与左侧列表对齐，而不是悬在空白里。 */
+.md-detail > .empty {
+  justify-content: center;
+  min-height: 280px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-lg);
+}
 .md-back {
   display: none;
 }
@@ -394,6 +401,35 @@
   gap: 8px;
 }
 
+/* 顶部冻结：页面级标签栏与主从详情页头部在滚动时停留在视口顶部，方便随时切换。 */
+.sticky-tabs {
+  position: sticky;
+  z-index: 15;
+  top: var(--sticky-top);
+  margin: -8px 0 -4px;
+  padding-top: 8px;
+  background: var(--canvas);
+}
+.page:has(> .sticky-tabs) {
+  --sticky-offset: 49px;
+}
+.detail-sticky {
+  position: sticky;
+  z-index: 15;
+  top: var(--sticky-top);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: -8px 0 -4px;
+  padding: 8px 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
+}
+.detail-sticky:has(> .tabs) {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
 /* ---------- 设置页 ---------- */
 .settings-layout {
   display: grid;
@@ -420,8 +456,8 @@
   text-decoration: none;
 }
 .settings-link.active {
-  background: var(--surface-3);
-  color: var(--text);
+  background: var(--accent-soft);
+  color: var(--accent-text);
 }
 .settings-body {
   min-width: 0;
@@ -509,6 +545,9 @@
 
 /* ---------- 窄屏（<768px） ---------- */
 @media (max-width: 767px) {
+  :root {
+    --sticky-top: 52px;
+  }
   .sidebar {
     position: fixed;
     z-index: 70;
@@ -609,9 +648,15 @@
     gap: 16px;
   }
   .settings-nav {
-    position: static;
+    position: sticky;
+    z-index: 15;
+    top: var(--sticky-top);
     flex-direction: row;
+    margin: -8px 0 -4px;
+    padding: 8px 0;
     overflow-x: auto;
+    border-bottom: 1px solid var(--border);
+    background: var(--canvas);
     scrollbar-width: none;
   }
   .settings-link {

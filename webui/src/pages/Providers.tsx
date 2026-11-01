@@ -175,56 +175,58 @@ function ProviderDetail({ id }: { id: string }) {
   const uses = providerUsage(state.draft, id, groups);
   return (
     <div className="detail">
-      <DetailHeader
-        back={{ to: "/providers", label: "全部服务商" }}
-        title={id}
-        badges={uses.length > 0 && <Badge tone="accent">{uses.length} 个会话在用</Badge>}
-        subtitle={host(provider.base_url) || "未填写接口地址"}
-        actions={
-          <Menu
-            items={[
-              {
-                label: "复制为新服务商",
-                icon: CopyPlus,
-                onSelect: async () => {
-                  const next = await prompt({
-                    title: "复制服务商",
-                    message: "复制当前服务商的全部设置，包括 API Key。",
-                    label: "新服务商名称",
-                    initial: id + "-copy",
-                    confirmLabel: "复制",
-                    validate: validateId(providers),
-                  });
-                  if (!next) return;
-                  change(["providers", next], structuredClone(provider));
-                  void navigate("/providers/" + enc(next));
+      <div className="detail-sticky">
+        <DetailHeader
+          back={{ to: "/providers", label: "全部服务商" }}
+          title={id}
+          badges={uses.length > 0 && <Badge tone="accent">{uses.length} 个会话在用</Badge>}
+          subtitle={host(provider.base_url) || "未填写接口地址"}
+          actions={
+            <Menu
+              items={[
+                {
+                  label: "复制为新服务商",
+                  icon: CopyPlus,
+                  onSelect: async () => {
+                    const next = await prompt({
+                      title: "复制服务商",
+                      message: "复制当前服务商的全部设置，包括 API Key。",
+                      label: "新服务商名称",
+                      initial: id + "-copy",
+                      confirmLabel: "复制",
+                      validate: validateId(providers),
+                    });
+                    if (!next) return;
+                    change(["providers", next], structuredClone(provider));
+                    void navigate("/providers/" + enc(next));
+                  },
                 },
-              },
-              {
-                label: "删除",
-                icon: Trash2,
-                danger: true,
-                onSelect: async () => {
-                  if (uses.length) {
-                    toast("还有 " + uses.length + " 个会话在用这个服务商，请先在这些会话中改选其他服务商", "danger");
-                    return;
-                  }
-                  const accepted = await confirm({
-                    title: "删除服务商 " + id + "？",
-                    message: "服务商的地址、密钥和请求设置会一并删除。",
-                    confirmLabel: "删除",
-                    danger: true,
-                  });
-                  if (!accepted) return;
-                  change(base, undefined);
-                  void navigate("/providers", { replace: true });
-                  toast("已删除服务商 " + id);
+                {
+                  label: "删除",
+                  icon: Trash2,
+                  danger: true,
+                  onSelect: async () => {
+                    if (uses.length) {
+                      toast("还有 " + uses.length + " 个会话在用这个服务商，请先在这些会话中改选其他服务商", "danger");
+                      return;
+                    }
+                    const accepted = await confirm({
+                      title: "删除服务商 " + id + "？",
+                      message: "服务商的地址、密钥和请求设置会一并删除。",
+                      confirmLabel: "删除",
+                      danger: true,
+                    });
+                    if (!accepted) return;
+                    change(base, undefined);
+                    void navigate("/providers", { replace: true });
+                    toast("已删除服务商 " + id);
+                  },
                 },
-              },
-            ]}
-          />
-        }
-      />
+              ]}
+            />
+          }
+        />
+      </div>
       <ConfigSection def={providerApiSection} base={base} />
       <ConfigSection def={providerRequestSection} base={base} />
       <ModelCatalog id={id} />
