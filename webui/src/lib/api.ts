@@ -45,7 +45,6 @@ const shapes: [RegExp, (value: Data) => boolean][] = [
           text(t.description) &&
           text(t.category) &&
           record(t.parameters) &&
-          typeof t.effects === "boolean" &&
           text(t.scope),
       ),
   ],

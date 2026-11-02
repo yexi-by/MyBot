@@ -257,10 +257,10 @@
 }
 .md-list {
   position: sticky;
-  top: 16px;
+  top: calc(var(--sticky-top) + var(--sticky-offset, 0px) + 16px);
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 32px);
+  max-height: calc(100vh - var(--sticky-top) - var(--sticky-offset, 0px) - 32px);
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
@@ -411,12 +411,12 @@
   background: var(--canvas);
 }
 .page:has(> .sticky-tabs) {
-  --sticky-offset: 49px;
+  --sticky-offset: 50px;
 }
 .detail-sticky {
   position: sticky;
   z-index: 15;
-  top: var(--sticky-top);
+  top: calc(var(--sticky-top) + var(--sticky-offset, 0px));
   display: flex;
   flex-direction: column;
   gap: 12px;
