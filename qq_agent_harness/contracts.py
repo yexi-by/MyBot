@@ -70,10 +70,26 @@ class NapCatConnection(Protocol):
 
 
 @dataclass(frozen=True)
-class GeneratedImage:
+class GeneratedMedia:
+    """工具在会话内生成的图片或音频；发送时按 MIME 类型检查用途。"""
+
     id: str
     content: bytes
     mime_type: str
+
+
+# 每个会话只保留最近的生成物，数量和总字节任一超限时回收最早的项目。
+MAX_GENERATED_MEDIA = 16
+MAX_GENERATED_BYTES = 64 * 1024 * 1024
+
+
+def remember_generated(store: OrderedDict[str, GeneratedMedia], item: GeneratedMedia) -> None:
+    store[item.id] = item
+    store.move_to_end(item.id)
+    total = sum(len(entry.content) for entry in store.values())
+    while len(store) > 1 and (len(store) > MAX_GENERATED_MEDIA or total > MAX_GENERATED_BYTES):
+        _, oldest = store.popitem(last=False)
+        total -= len(oldest.content)
 
 
 @dataclass
@@ -86,7 +102,7 @@ class ToolContext:
     sent_messages: list[JsonObject] = field(default_factory=list)
     send_attempts: int = 0
     max_sends: int = 5
-    generated_images: OrderedDict[str, GeneratedImage] = field(default_factory=OrderedDict)
+    generated_media: OrderedDict[str, GeneratedMedia] = field(default_factory=OrderedDict)
     discovered_tools: set[str] = field(default_factory=set)
     read_workspace: Callable[[str], Awaitable[bytes]] | None = None
     write_workspace: Callable[[str, bytes], Awaitable[None]] | None = None

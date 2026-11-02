@@ -902,6 +902,38 @@ a.chip:hover {
   flex-direction: column;
   gap: 6px;
 }
+.credential {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.credential-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.credential-summary strong {
+  color: var(--text);
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+.credential-summary.is-empty {
+  color: var(--text-3);
+}
+.credential-actions {
+  flex-wrap: wrap;
+}
+.preview-audio {
+  width: 100%;
+  max-width: 520px;
+}
 .check-row {
   display: inline-flex;
   align-items: center;

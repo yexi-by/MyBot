@@ -126,6 +126,8 @@ class ToolRegistry:
                 return False, "尚未启用图像生成"
             if not image.base_url.strip() or not image.model.strip():
                 return False, "图像生成尚未配置接口地址或模型名称"
+        if tool.name.startswith("tts__") and (reason := self.settings().tts.unavailable_reason()):
+            return False, reason
         if tool.scope not in ("both", "account", scope.kind):
             return False, "工具不适用于当前会话类型"
         policy = conversation.policy

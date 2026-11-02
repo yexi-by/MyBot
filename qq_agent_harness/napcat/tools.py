@@ -1089,9 +1089,11 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
 
         async def avatar(context: ToolContext, source: a.ImageSource) -> ToolResult:
             if source.generated_id:
-                generated = context.generated_images.get(source.generated_id)
+                generated = context.generated_media.get(source.generated_id)
                 if generated is None:
                     raise ValueError("指定的 generated_id 不存在或已过期")
+                if not generated.mime_type.startswith("image/"):
+                    raise ValueError("指定的 generated_id 不是图片")
                 content = generated.content
             elif source.workspace_path:
                 if not context.read_workspace:
@@ -1267,7 +1269,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         (
             "qq__send_message",
             "发送消息",
-            "向 QQ 发送消息或文件的唯一入口。按 parts 顺序组合纯文本（不支持 Markdown 语法）、引用回复、@成员、表情、图片/语音/视频/文件、戳一戳、AI 语音（type=ai_voice）或合并转发。",
+            "向 QQ 发送消息或文件的唯一入口。按 parts 顺序组合纯文本（不支持 Markdown 语法）、引用回复、@成员、表情、图片/语音/视频/文件、戳一戳、AI 语音（type=ai_voice）或合并转发；语音（record）单独成条。",
             model_binding(a.SendMessage, send),
             "messages",
         ),
@@ -1381,9 +1383,12 @@ async def send_message(
             )
         else:
             if part.generated_id:
-                generated = context.generated_images.get(part.generated_id)
+                generated = context.generated_media.get(part.generated_id)
                 if generated is None:
                     raise ValueError("指定的 generated_id 不存在或已过期")
+                expected = {"image": "image/", "record": "audio/"}.get(part.type)
+                if expected and not generated.mime_type.startswith(expected):
+                    raise ValueError(f"generated_id 的内容不能作为 {part.type} 发送")
                 content = generated.content
             elif part.workspace_path:
                 if not context.read_workspace:
@@ -1401,6 +1406,17 @@ async def send_message(
                     (
                         "upload_group_file" if target.kind == "group" else "upload_private_file",
                         {**destination, "file": encoded, "name": part.name or "file"},
+                    )
+                )
+            elif part.type == "record":
+                # QQ 语音只能独占一条消息；引用不能单独成条，在提交前拒绝而不是发出空引用。
+                if segments and all(segment.get("type") == "reply" for segment in segments):
+                    raise ValueError("QQ 语音不能附带引用回复；请去掉 reply，或在语音前补充文字")
+                flush()
+                actions.append(
+                    (
+                        "send_group_msg" if target.kind == "group" else "send_private_msg",
+                        {**destination, "message": [{"type": "record", "data": {"file": encoded}}]},
                     )
                 )
             else:

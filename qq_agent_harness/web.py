@@ -12,12 +12,12 @@ from typing import Literal
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field, ValidationError
 
 from .configuration import ConfigError, ConfigStore, ConflictError
-from .contracts import JSON_OBJECT, ConversationScope, JsonObject, JsonValue, Model
+from .contracts import JSON_OBJECT, ConversationScope, JsonObject, JsonValue, Model, ToolResult
 from .image import CATEGORY_LABELS as IMAGE_CATEGORIES
 from .image import build_tools as image_tools
 from .mcp_tools import MCPManager
@@ -29,6 +29,9 @@ from .runtime import AgentRuntime, SessionBusy
 from .sandbox.client import RunnerClient
 from .sandbox.tools import CATEGORY_LABELS as SANDBOX_CATEGORIES
 from .sandbox.tools import build_tools as sandbox_tools
+from .tts import CATEGORY_LABELS as TTS_CATEGORIES
+from .tts import VOICE_PATTERN, AccessTokens, synthesize_speech
+from .tts import build_tools as tts_tools
 
 
 class SaveConfig(Model):
@@ -59,6 +62,12 @@ class Cleanup(Model):
     confirmed: bool = False
 
 
+class PreviewSpeech(Model):
+    text: str = Field(min_length=1, max_length=200)
+    style: str | None = Field(default=None, min_length=1, max_length=200)
+    voice: str | None = Field(default=None, pattern=VOICE_PATTERN)
+
+
 def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     store = ConfigStore(config_path, allow_invalid=True)
     boot_id = uuid.uuid4().hex
@@ -67,6 +76,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     registry = ToolRegistry(lambda: store.settings)
     registry.describe_categories(NAPCAT_CATEGORIES)
     registry.describe_categories(IMAGE_CATEGORIES)
+    registry.describe_categories(TTS_CATEGORIES)
     registry.describe_categories(SANDBOX_CATEGORIES)
     for tool in napcat_tools(startup.napcat):
         registry.add(tool)
@@ -80,6 +90,10 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     media = MediaReader(startup.napcat)
     runtime.read_media = media.read_many
     for tool in image_tools(lambda: store.settings.image, startup.napcat, reader=media):
+        registry.add(tool)
+    # 工具与控制台试听共用一份访问令牌缓存。
+    speech_tokens = AccessTokens()
+    for tool in tts_tools(lambda: store.settings.tts, startup.napcat, tokens=speech_tokens):
         registry.add(tool)
     mcp = MCPManager(startup.mcp, registry)
     sandbox_pending = startup.sandbox.enabled
@@ -469,6 +483,28 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
             )
         model_cache["__image__"] = (time.monotonic() + 30, fingerprint, ids)
         return {"models": [model for model in ids]}
+
+    @app.post("/api/tts/preview", response_model=None)
+    async def tts_preview(request: PreviewSpeech) -> Response:
+        # 按已保存的配置合成一小段，不经过 QQ；只返回音频，不写日志或文件。
+        config = store.settings.tts
+        if not config.vertex.credentials.strip():
+            raise HTTPException(400, "请先导入服务账号")
+        if not config.model:
+            raise HTTPException(400, "请先选择模型")
+        result = await synthesize_speech(
+            config,
+            request.text,
+            request.style,
+            request.voice or config.voice or None,
+            tokens=speech_tokens,
+            max_bytes=startup.napcat.media_max_bytes,
+        )
+        if isinstance(result, ToolResult):
+            raise HTTPException(502, result.message)
+        return Response(
+            result.content, media_type="audio/wav", headers={"Cache-Control": "no-store"}
+        )
 
     @app.post("/api/system/{operation}")
     async def power(operation: Literal["restart", "shutdown"]) -> JsonObject:

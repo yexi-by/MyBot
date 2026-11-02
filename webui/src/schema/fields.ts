@@ -14,7 +14,8 @@ export type FieldType =
   | "checks"
   | "map"
   | "provider"
-  | "model";
+  | "model"
+  | "credentials";
 export interface Option {
   value: string;
   label: string;
@@ -34,6 +35,8 @@ export interface FieldDef {
   unit?: string;
   bytes?: "decimal" | "binary";
   options?: Option[];
+  /** select：除了候选项，也允许直接输入其他值。 */
+  editable?: boolean;
   nullable?: boolean;
   restart?: boolean;
   /** tags：输入内容按 JSON 解析为数字或布尔值。 */
@@ -589,6 +592,151 @@ export const imageRequestSection: SectionDef = {
   ],
 };
 
+export const ttsModelOptions: Option[] = [
+  { value: "gemini-3.8-flash-tts", label: "gemini-3.8-flash-tts · 音质优先" },
+  { value: "gemini-3.8-flash-lite-tts", label: "gemini-3.8-flash-lite-tts · 低成本" },
+];
+// Gemini TTS 的 30 个预置音色：名称、性别与官方描述的音色特点。
+const ttsVoices: [string, string, string][] = [
+  ["Achernar", "女", "柔和"],
+  ["Achird", "男", "友好"],
+  ["Algenib", "男", "沙哑"],
+  ["Algieba", "男", "顺滑"],
+  ["Alnilam", "男", "坚定"],
+  ["Aoede", "女", "轻快"],
+  ["Autonoe", "女", "明亮"],
+  ["Callirrhoe", "女", "随和"],
+  ["Charon", "男", "清晰播报"],
+  ["Despina", "女", "顺滑"],
+  ["Enceladus", "男", "气声"],
+  ["Erinome", "女", "清澈"],
+  ["Fenrir", "男", "兴奋"],
+  ["Gacrux", "女", "成熟"],
+  ["Iapetus", "男", "清澈"],
+  ["Kore", "女", "坚定"],
+  ["Laomedeia", "女", "欢快"],
+  ["Leda", "女", "年轻"],
+  ["Orus", "男", "坚定"],
+  ["Puck", "男", "欢快"],
+  ["Pulcherrima", "女", "直率"],
+  ["Rasalgethi", "男", "清晰播报"],
+  ["Sadachbia", "男", "活泼"],
+  ["Sadaltager", "男", "博学"],
+  ["Schedar", "男", "平稳"],
+  ["Sulafat", "女", "温暖"],
+  ["Umbriel", "男", "随和"],
+  ["Vindemiatrix", "女", "温柔"],
+  ["Zephyr", "女", "明亮"],
+  ["Zubenelgenubi", "男", "随意"],
+];
+export const ttsVoiceOptions: Option[] = ttsVoices.map(([name, gender, trait]) => ({
+  value: name,
+  label: name + " · " + gender + " · " + trait,
+}));
+
+export const ttsVoiceSection: SectionDef = {
+  id: "tts-voice",
+  title: "模型与音色",
+  description:
+    "通过 Vertex（现名 Gemini Enterprise Agent Platform）调用 Gemini TTS，保存后立即生效。",
+  fields: [
+    {
+      key: "enabled",
+      label: "启用语音合成",
+      type: "toggle",
+      help: "启用、导入服务账号并选好模型后，在会话的「能力权限」中开放「语音合成」即可使用。",
+    },
+    {
+      key: "model",
+      label: "模型",
+      type: "select",
+      editable: true,
+      options: ttsModelOptions,
+      placeholder: "选择或输入模型名称",
+      help: "目前支持 Gemini 3.8 系列 TTS；新模型可直接输入名称。",
+    },
+    {
+      key: "voice",
+      label: "默认音色",
+      type: "select",
+      editable: true,
+      options: [{ value: "", label: "接口默认" }, ...ttsVoiceOptions],
+      placeholder: "接口默认",
+      help: "Agent 没有指定音色时使用；也可输入自定义音色 ID。",
+    },
+    {
+      key: "language_code",
+      label: "语言代码",
+      type: "text",
+      placeholder: "留空自动识别，例如 cmn-CN",
+      help: "BCP-47 语言代码；留空时由模型根据文本识别。",
+    },
+  ],
+};
+
+export const ttsAccountSection: SectionDef = {
+  id: "tts-account",
+  title: "服务账号",
+  description:
+    "导入 Google Cloud 服务账号密钥 JSON。服务账号需要 Vertex AI User 角色，项目需启用 Vertex AI API。",
+  fields: [
+    {
+      key: "credentials",
+      label: "服务账号密钥",
+      type: "credentials",
+      help: "私钥只保存在配置文件中，页面不显示。",
+    },
+    {
+      key: "project_id",
+      label: "项目 ID",
+      type: "text",
+      placeholder: "留空使用服务账号所属项目",
+      help: "调用和计费所在的 Google Cloud 项目。",
+    },
+    {
+      key: "location",
+      label: "区域",
+      type: "segmented",
+      options: [
+        { value: "global", label: "全球" },
+        { value: "us", label: "美国" },
+        { value: "eu", label: "欧盟" },
+      ],
+      help: "全球区域可用的模型最多；美国、欧盟只在对应区域内处理。",
+    },
+  ],
+};
+
+export const ttsRequestSection: SectionDef = {
+  id: "tts-request",
+  title: "请求与重试",
+  fields: [
+    {
+      key: "timeout",
+      label: "请求超时",
+      type: "number",
+      ...seconds,
+      help: "每次合成请求的最长等待时间；超时后按重试次数设置重新请求。",
+    },
+    {
+      key: "max_retries",
+      label: "失败重试次数",
+      type: "number",
+      min: 0,
+      integer: true,
+      help: "首次请求失败后最多重试的次数，默认 3 次；0 表示不重试。",
+    },
+    {
+      key: "proxy",
+      label: "HTTP 代理",
+      type: "text",
+      nullable: true,
+      placeholder: "http://127.0.0.1:7890",
+      help: "换取令牌和合成请求都经过这个代理；留空表示直连。",
+    },
+  ],
+};
+
 export const sandboxSection: SectionDef = {
   id: "sandbox",
   title: "资源与连接",
@@ -762,6 +910,9 @@ export function fieldInstances(config: ObjectValue): FieldInstance[] {
   add(sandboxSection, ["sandbox"], "/sandbox/settings");
   add(imageConnectionSection, ["image"], "/tools/image");
   add(imageRequestSection, ["image"], "/tools/image");
+  add(ttsVoiceSection, ["tts"], "/tools/tts");
+  add(ttsAccountSection, ["tts", "vertex"], "/tools/tts");
+  add(ttsRequestSection, ["tts"], "/tools/tts");
   for (const id of Object.keys(object(config.providers))) {
     const route = "/providers/" + enc(id);
     add(providerApiSection, ["providers", id], route);
@@ -805,6 +956,7 @@ export function routeForPath(path: Path): string {
   if (head === "private") return "/conversations/private" + conversationTab(path.slice(1));
   if (head === "providers" && id !== undefined) return "/providers/" + enc(String(id));
   if (head === "image") return "/tools/image";
+  if (head === "tts") return "/tools/tts";
   if (head === "mcp" && id !== undefined) return "/tools/mcp/" + enc(String(id));
   if (head === "persona_file" || head === "knowledge_files") return "/prompts";
   if (head === "sandbox") return "/sandbox/settings";
@@ -851,6 +1003,7 @@ export function fieldLabel(config: ObjectValue, path: Path): string {
   if (head === "private") return scoped("私聊", path.slice(1), name);
   if (head === "providers") return scoped("服务商 " + id, path.slice(2), name);
   if (head === "image") return scoped("图像生成", path.slice(1), name);
+  if (head === "tts") return name ? "语音合成 · " + name : "语音合成";
   if (head === "mcp") return scoped("MCP " + id, path.slice(2), name);
   if (name) return name;
   if (head === "persona_file") return "人格文件";

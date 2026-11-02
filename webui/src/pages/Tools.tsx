@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronUp, CircleAlert, ExternalLink, Plug, Plus, Trash2, Wrench } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleAlert, ExternalLink, Play, Plug, Plus, Trash2, Wrench } from "lucide-react";
 import { Combobox } from "../components/Combobox";
-import { ConfigSection } from "../components/form";
+import { ConfigSection, FieldShell } from "../components/form";
 import { Menu } from "../components/Menu";
 import { Badge, Banner, Button, EmptyState, Segmented, Spinner, StatusDot, Switch, Tabs } from "../components/primitives";
 import { DetailHeader, MasterDetail, PageHeader, SearchInput } from "../components/shell";
 import { ToolDrawer } from "../components/ToolDrawer";
-import { change, useConfig } from "../lib/config";
+import { change, save, useConfig } from "../lib/config";
+import { parseServiceAccount } from "../lib/credentials";
 import { accessScope } from "../lib/conversations";
 import { coverageState, mcpState, toolScopes } from "../lib/labels";
 import { linkHandler, navigate } from "../lib/navigation";
@@ -28,6 +29,10 @@ import {
   imageRequestSection,
   mcpConnectionSection,
   mcpSecretsSection,
+  ttsAccountSection,
+  ttsRequestSection,
+  ttsVoiceOptions,
+  ttsVoiceSection,
 } from "../schema/fields";
 
 type ToolsRoute = Extract<Route, { page: "tools" }>;
@@ -607,16 +612,162 @@ function ImageGeneration() {
   );
 }
 
+/** 按已保存的设置合成一小段语音，不经过 QQ；用来确认凭据、模型和音色可用。 */
+function SpeechPreview({ ready }: { ready: boolean }) {
+  const state = useConfig();
+  const [text, setText] = useState("你好，这是一段语音合成试听。");
+  const [style, setStyle] = useState("");
+  const [voice, setVoice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [audio, setAudio] = useState<string | null>(null);
+  // 换新录音或离开页面时释放上一段音频占用的内存。
+  useEffect(
+    () => () => {
+      if (audio) URL.revokeObjectURL(audio);
+    },
+    [audio],
+  );
+  const run = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      if (state.changed.some((path) => path[0] === "tts") && !(await save())) {
+        setError("请先修正并保存语音合成设置");
+        return;
+      }
+      const body = {
+        text: text.trim(),
+        ...(style.trim() ? { style: style.trim() } : {}),
+        ...(voice ? { voice } : {}),
+      };
+      const response = await fetch("/api/tts/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const payload: unknown = await response.json().catch(() => ({}));
+        const detail =
+          payload && typeof payload === "object" && "detail" in payload ? payload.detail : null;
+        setError(typeof detail === "string" ? detail : "试听失败（HTTP " + response.status + "）");
+        return;
+      }
+      setAudio(URL.createObjectURL(await response.blob()));
+    } catch {
+      setError("无法连接控制台服务，请确认服务正在运行");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="card form-section" id="section-tts-preview">
+      <header className="section-header">
+        <div className="grow">
+          <h2>试听</h2>
+          <p>按已保存的设置合成一小段语音，不经过 QQ；每次试听都会产生少量费用。</p>
+        </div>
+      </header>
+      <div className="form-grid">
+        <FieldShell id="tts-preview-text" label="试听文本" help="最多 200 字，可插入 <sigh>、<short pause> 等标签。">
+          <input
+            id="tts-preview-text"
+            className="input"
+            value={text}
+            maxLength={200}
+            onChange={(event) => setText(event.target.value)}
+          />
+        </FieldShell>
+        <FieldShell id="tts-preview-style" label="语气" help="可选，例如“开心、轻快”。">
+          <input
+            id="tts-preview-style"
+            className="input"
+            value={style}
+            maxLength={200}
+            placeholder="自然朗读"
+            onChange={(event) => setStyle(event.target.value)}
+          />
+        </FieldShell>
+        <FieldShell id="tts-preview-voice" label="试听音色" help="只用于这次试听，不修改默认音色。">
+          <Combobox
+            id="tts-preview-voice"
+            label="试听音色"
+            value={voice}
+            editable
+            options={[{ value: "", label: "使用默认音色" }, ...ttsVoiceOptions]}
+            placeholder="使用默认音色"
+            onChange={setVoice}
+          />
+        </FieldShell>
+        <FieldShell
+          id="tts-preview-result"
+          label="合成结果"
+          help={ready ? undefined : "导入服务账号并选择模型后可以试听。"}
+        >
+          {/* 标签指向容器而不是按钮，按钮名称保持为自身文字。 */}
+          <div id="tts-preview-result" className="row">
+            <Button
+              variant="primary"
+              icon={Play}
+              loading={busy}
+              disabled={!ready || busy || !text.trim()}
+              onClick={() => void run()}
+            >
+              合成试听
+            </Button>
+          </div>
+          {error && (
+            <p className="field-error" role="alert">
+              {error}
+            </p>
+          )}
+          {audio && <audio className="preview-audio" controls src={audio} />}
+        </FieldShell>
+      </div>
+    </section>
+  );
+}
+
+function SpeechSynthesis() {
+  const state = useConfig();
+  const tts = object(state.draft.tts);
+  const credentials = object(tts.vertex).credentials;
+  const imported = typeof credentials === "string" && credentials.trim() !== "";
+  const hasModel = typeof tts.model === "string" && tts.model !== "";
+  const account = imported ? parseServiceAccount(credentials) : null;
+  const project = account && typeof account !== "string" ? account.project : "";
+  return (
+    <div className="stack">
+      {tts.enabled === true && (!imported || !hasModel) && (
+        <Banner tone="warning" icon={CircleAlert}>
+          请导入服务账号并选择模型，否则 Agent 无法调用语音合成工具。
+        </Banner>
+      )}
+      <ConfigSection def={ttsVoiceSection} base={["tts"]} />
+      <ConfigSection
+        def={ttsAccountSection}
+        base={["tts", "vertex"]}
+        helpFor={
+          project ? { project_id: "调用和计费所在的项目；留空时使用服务账号所属的 " + project + "。" } : undefined
+        }
+      />
+      <ConfigSection def={ttsRequestSection} base={["tts"]} />
+      <SpeechPreview ready={imported && hasModel} />
+    </div>
+  );
+}
+
 export function ToolsPage({ route }: { route: ToolsRoute }) {
   const state = useConfig();
   const servers = object(state.draft.mcp);
   const imageEnabled = object(state.draft.image).enabled === true;
+  const ttsEnabled = object(state.draft.tts).enabled === true;
   return (
     <div className="page">
       <PageHeader
         title="工具"
         description="Agent 可以调用的工具；每个会话能用哪些，由会话的能力权限决定"
-        save={route.view === "mcp" || route.view === "image"}
+        save={route.view === "mcp" || route.view === "image" || route.view === "tts"}
         actions={
           route.view === "mcp" && Object.keys(servers).length > 0 ? (
             <Button icon={Plus} onClick={() => void addServer(servers)}>
@@ -633,6 +784,7 @@ export function ToolsPage({ route }: { route: ToolsRoute }) {
           items={[
             { id: "catalog", label: "工具目录" },
             { id: "image", label: "图像生成", count: imageEnabled ? "已启用" : undefined },
+            { id: "tts", label: "语音合成", count: ttsEnabled ? "已启用" : undefined },
             { id: "mcp", label: "MCP 服务", count: Object.keys(servers).length || undefined },
             { id: "napcat", label: "NapCat 覆盖" },
           ]}
@@ -642,6 +794,8 @@ export function ToolsPage({ route }: { route: ToolsRoute }) {
         <Catalog selected={route.tool} />
       ) : route.view === "image" ? (
         <ImageGeneration />
+      ) : route.view === "tts" ? (
+        <SpeechSynthesis />
       ) : route.view === "mcp" ? (
         <McpServers id={route.id} />
       ) : (

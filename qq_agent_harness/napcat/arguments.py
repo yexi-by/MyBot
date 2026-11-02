@@ -391,7 +391,9 @@ class MediaPart(Model):
     workspace_path: str | None = Field(default=None, description="共享沙箱内的相对文件路径")
     url: str | None = Field(default=None, description="待发送媒体的公网 HTTP/HTTPS URL")
     generated_id: str | None = Field(
-        default=None, min_length=1, description="image__generate 生成的图片 ID"
+        default=None,
+        min_length=1,
+        description="image__generate 生成的图片 ID 或 tts__synthesize 生成的语音 ID",
     )
     name: str | None = Field(default=None, description="发送普通文件时显示的文件名")
 
@@ -399,8 +401,8 @@ class MediaPart(Model):
     def one_source(self) -> MediaPart:
         if sum((bool(self.workspace_path), bool(self.url), bool(self.generated_id))) != 1:
             raise ValueError("媒体必须且只能指定 workspace_path、url 或 generated_id 一种来源")
-        if self.generated_id and self.type not in ("image", "file"):
-            raise ValueError("generated_id 仅支持作为 image 或 file 发送")
+        if self.generated_id and self.type == "video":
+            raise ValueError("generated_id 仅支持作为 image、record 或 file 发送")
         if self.type == "file" and not self.name:
             raise ValueError("发送文件必须提供 name")
         return self

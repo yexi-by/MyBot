@@ -12,7 +12,7 @@ from pydantic import Field, model_validator
 
 from .contracts import (
     JSON_OBJECT,
-    GeneratedImage,
+    GeneratedMedia,
     JsonObject,
     JsonValue,
     Model,
@@ -20,6 +20,7 @@ from .contracts import (
     ToolDefinition,
     ToolResult,
     model_binding,
+    remember_generated,
 )
 from .diagnostics import remote_error_metadata
 from .napcat.arguments import ReadMedia
@@ -29,7 +30,6 @@ from .providers import permanent_request_error, retry_after_seconds, retry_delay
 from .settings import ImageSettings, NapCatSettings
 
 CATEGORY_LABELS = {"image": "生成图片"}
-MAX_GENERATED_IMAGES = 16
 
 
 def detect_image_format(content: bytes) -> tuple[str, str]:
@@ -176,9 +176,11 @@ async def _load_reference(
     context: ToolContext, ref: ReferenceImage, reader: MediaReader
 ) -> tuple[bytes, str, str]:
     if ref.generated_id is not None:
-        generated = context.generated_images.get(ref.generated_id)
+        generated = context.generated_media.get(ref.generated_id)
         if generated is None:
             raise ValueError(f"参考图 generated_id ({ref.generated_id}) 不存在或已过期")
+        if not generated.mime_type.startswith("image/"):
+            raise ValueError(f"参考图 generated_id ({ref.generated_id}) 不是图片")
         mime, ext = detect_image_format(generated.content)
         return generated.content, mime, ext
     if ref.workspace_path is not None:
@@ -465,10 +467,7 @@ def build_tools(
             media_out: list[JsonValue] = []
             for idx, (content, mime, _ext, revised) in enumerate(decoded):
                 gen_id = f"gen_{uuid4().hex[:12]}"
-                context.generated_images[gen_id] = GeneratedImage(gen_id, content, mime)
-                context.generated_images.move_to_end(gen_id)
-                while len(context.generated_images) > MAX_GENERATED_IMAGES:
-                    context.generated_images.popitem(last=False)
+                remember_generated(context.generated_media, GeneratedMedia(gen_id, content, mime))
                 info: JsonObject = {
                     "generated_id": gen_id,
                     "mime_type": mime,

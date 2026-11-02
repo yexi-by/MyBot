@@ -155,7 +155,7 @@ async def test_text_to_image_forwards_parameters_attaches_multimodal_and_sends_t
     images = result.data["images"]
     assert isinstance(images, list) and len(images) == 1 and isinstance(images[0], dict)
     generated_id = str(images[0]["generated_id"])
-    assert generated_id in context.generated_images
+    assert generated_id in context.generated_media
     assert images[0]["mime_type"] == "image/png"
     assert images[0]["revised_prompt"] == "一只戴宇航头盔的橘猫"
 
@@ -204,7 +204,7 @@ async def test_text_to_image_forwards_parameters_attaches_multimodal_and_sends_t
     assert bot.calls[-1] == ("set_group_portrait", {"group_id": "10", "file": expected_uri})
 
     # 会话容量统计包含生图缓存
-    conv = ConversationSession(model=None, scope=GROUP, generated_images=context.generated_images)
+    conv = ConversationSession(model=None, scope=GROUP, generated_media=context.generated_media)
     assert conv.measure() > len(PNG)
 
 

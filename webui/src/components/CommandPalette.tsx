@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AudioLines,
   CornerDownLeft,
   FileText,
   Hash,
@@ -63,6 +64,7 @@ function useCommands(): Command[] {
       list.push({ id: "page:" + item.path, group: "页面", title: item.label, icon: item.icon, run: go(item.path) });
     list.push(
       { id: "page:image", group: "页面", title: "图像生成设置", detail: "工具", icon: Sparkles, run: go("/tools/image") },
+      { id: "page:tts", group: "页面", title: "语音合成设置", detail: "工具", icon: AudioLines, run: go("/tools/tts") },
       { id: "page:mcp", group: "页面", title: "MCP 服务", detail: "工具", icon: Plug, run: go("/tools/mcp") },
       { id: "page:napcat", group: "页面", title: "NapCat 覆盖清单", detail: "工具", icon: Wrench, run: go("/tools/napcat") },
       { id: "page:sandbox-settings", group: "页面", title: "沙箱设置", detail: "沙箱", icon: SlidersHorizontal, run: go("/sandbox/settings") },

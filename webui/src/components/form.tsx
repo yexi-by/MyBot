@@ -1,12 +1,13 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Check, Dices, Eye, EyeOff, Plus, X } from "lucide-react";
+import { Check, ClipboardPaste, Dices, Eye, EyeOff, Plus, Trash2, Upload, X } from "lucide-react";
 import { ApiError, errorMessage, get } from "../lib/api";
 import { change, useConfig } from "../lib/config";
+import { parseServiceAccount } from "../lib/credentials";
 import { formatNumber } from "../lib/format";
 import { getAt, object } from "../lib/types";
 import type { Json, Path } from "../lib/types";
-import { confirm } from "../lib/ui";
+import { confirm, prompt, toast } from "../lib/ui";
 import { fieldId } from "../schema/fields";
 import type { FieldDef, Option, SectionDef } from "../schema/fields";
 import { Combobox } from "./Combobox";
@@ -155,6 +156,111 @@ export function SecretInput({
           }}
         />
       )}
+    </div>
+  );
+}
+
+/** 服务账号凭据：只显示账号、项目和密钥编号末几位，私钥不在页面展示。 */
+export function ServiceAccountInput({
+  id,
+  value,
+  onChange,
+}: {
+  id: string;
+  value: Json | undefined;
+  onChange: (value: Json) => void;
+}) {
+  const text = typeof value === "string" ? value : "";
+  const summary = useMemo(() => (text.trim() ? parseServiceAccount(text) : null), [text]);
+  const file = useRef<HTMLInputElement>(null);
+  const apply = (raw: string) => {
+    const parsed = parseServiceAccount(raw.trim());
+    if (typeof parsed === "string") {
+      toast("无法导入：" + parsed, "danger");
+      return;
+    }
+    onChange(parsed.compact);
+    toast("已导入服务账号 " + parsed.email, "success");
+  };
+  const pick = async (selected: File | undefined) => {
+    if (!selected) return;
+    // 服务账号密钥只有几 KB；过大的文件直接拒绝，不读入页面。
+    if (selected.size > 65_536) {
+      toast("无法导入：文件过大，不是服务账号密钥", "danger");
+      return;
+    }
+    apply(await selected.text());
+  };
+  const paste = async () => {
+    const raw = await prompt({
+      title: "粘贴服务账号 JSON",
+      message: "粘贴从 Google Cloud 下载的服务账号密钥 JSON 全文。",
+      label: "服务账号密钥 JSON",
+      placeholder: '{"type": "service_account", ...}',
+      confirmLabel: "导入",
+      validate: (input) => {
+        const parsed = parseServiceAccount(input);
+        return typeof parsed === "string" ? parsed : "";
+      },
+    });
+    if (raw) apply(raw);
+  };
+  const remove = async () => {
+    if (
+      await confirm({
+        title: "移除服务账号",
+        message: "移除后语音合成无法调用，需要重新导入才能恢复。",
+        confirmLabel: "移除",
+        danger: true,
+      })
+    )
+      onChange("");
+  };
+  return (
+    <div className="credential">
+      {/* 字段 id 放在摘要上供搜索定位；放在按钮上会让字段名盖过按钮自身的文字。 */}
+      <div
+        id={id}
+        tabIndex={-1}
+        className={"credential-summary" + (summary && typeof summary !== "string" ? "" : " is-empty")}
+      >
+        {summary === null ? (
+          "尚未导入服务账号"
+        ) : typeof summary === "string" ? (
+          "已保存的凭据无法解析：" + summary
+        ) : (
+          <>
+            <strong>{summary.email}</strong>
+            <span>
+              项目 {summary.project || "未写明"}
+              {summary.keyId && " · 密钥 …" + summary.keyId.slice(-6)}
+            </span>
+          </>
+        )}
+      </div>
+      <div className="row credential-actions">
+        <Button icon={Upload} onClick={() => file.current?.click()}>
+          {text ? "重新导入" : "导入 JSON 文件"}
+        </Button>
+        <Button variant="ghost" icon={ClipboardPaste} onClick={() => void paste()}>
+          粘贴 JSON
+        </Button>
+        {text && (
+          <Button variant="danger-ghost" icon={Trash2} onClick={() => void remove()}>
+            移除
+          </Button>
+        )}
+      </div>
+      <input
+        ref={file}
+        type="file"
+        accept=".json,application/json"
+        hidden
+        onChange={(event) => {
+          void pick(event.target.files?.[0]);
+          event.target.value = "";
+        }}
+      />
     </div>
   );
 }
@@ -775,12 +881,15 @@ export function ConfigField({
           label={def.label}
           value={typeof value === "string" ? value : ""}
           invalid={!!error}
+          editable={def.editable}
           placeholder={def.placeholder}
           options={def.nullable ? [{ value: "", label: def.placeholder ?? "不设置" }, ...options] : options}
           onChange={(next) => update(def.nullable && next === "" ? null : next)}
         />,
       );
     }
+    case "credentials":
+      return shell(<ServiceAccountInput id={id} value={value} onChange={update} />);
     case "segmented":
       return shell(
         <Segmented
