@@ -37,7 +37,6 @@ export interface Tool {
   description: string;
   category: string;
   parameters: ObjectValue;
-  effects: boolean;
   scope: ToolScope;
   requires?: string[];
 }
@@ -165,21 +164,13 @@ export type SessionEntry = EntryBase &
         outcome: string;
         sent_receipts?: ObjectValue[];
         send_attempts?: number;
-        unknown_operations?: ObjectValue[];
       }
     | { kind: "other"; label: string; text: string }
   );
-export interface UnknownOperation {
-  id: string;
-  tool: string;
-  arguments: Json;
-  target: { bot_id: string; kind: string; peer_id: string };
-}
 export interface SessionDetail extends RetainedSession {
   version: number;
   pending_messages: QQMessage[];
   available_tools: string[];
-  unknown_operations: UnknownOperation[];
   /** 与上次读取的会话和版本相同时为 null，沿用已有条目。 */
   entries: SessionEntry[] | null;
 }

@@ -23,7 +23,6 @@ from .contracts import (
     NapCatConnection,
     ToolContext,
     ToolResult,
-    UnknownOperation,
 )
 from .napcat.arguments import ReadMedia
 from .napcat.media import MediaBatch
@@ -61,7 +60,7 @@ class ConversationSession:
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     message_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     wake_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
-    unknown_effects: list[UnknownOperation] = field(default_factory=list)
+    discovered_tools: set[str] = field(default_factory=set)
     generated_images: OrderedDict[str, GeneratedImage] = field(default_factory=OrderedDict)
     knowledge: list[tuple[str, str]] = field(default_factory=list)
     updated_at: float = 0
@@ -85,15 +84,6 @@ class ConversationSession:
                 {
                     "items": self.model.items if self.model else [],
                     "knowledge": self.knowledge,
-                    "unknown": [
-                        [
-                            operation.id,
-                            operation.tool,
-                            operation.arguments,
-                            operation.target.model_dump(mode="json"),
-                        ]
-                        for operation in self.unknown_effects
-                    ],
                 },
                 ensure_ascii=False,
             ).encode("utf-8")
@@ -293,9 +283,7 @@ class AgentRuntime:
             if compacting:
                 self.record(key, "compaction", "闲时压缩已停止，原上下文保留", status="cancelled")
             else:
-                self.record(
-                    key, "turn", "本轮已停止；已提交的外部操作不会被自动撤销", status="cancelled"
-                )
+                self.record(key, "turn", "本轮已手动停止", status="cancelled")
         except Exception as exc:
             self.record(key, "error", f"会话连接或运行失败：{type(exc).__name__}", status="error")
             logger.error(
@@ -442,7 +430,7 @@ class AgentRuntime:
         session: ModelSession | None = None
         retained = self.sessions.get(key)
         if retained:
-            context.unknown_effects = retained.unknown_effects
+            context.discovered_tools = retained.discovered_tools
             context.generated_images = retained.generated_images
         executed: ExecutedCalls = {}
         outcome = "error"
@@ -466,7 +454,7 @@ class AgentRuntime:
                     self.sessions[key] = retained
                 else:
                     retained.model = session
-                context.unknown_effects = retained.unknown_effects
+                context.discovered_tools = retained.discovered_tools
                 context.generated_images = retained.generated_images
             else:
                 session = retained.model
@@ -493,7 +481,7 @@ class AgentRuntime:
                         if context.sent_messages
                         else "模型明确选择本轮不发言"
                         if reply.text.strip() == SILENT_RESPONSE
-                        else "本轮结束，未调用发送工具；普通输出未发送"
+                        else "本轮结束（未发送消息）"
                     )
                     self.record(
                         key,
@@ -633,14 +621,6 @@ class AgentRuntime:
                 {"call_id": call_id, "tool": name, "status": result.status}
                 for call_id, (name, _arguments, result) in executed.items()
             ],
-            "unknown_operations": [
-                {
-                    "id": operation.id,
-                    "tool": operation.tool,
-                    "target": operation.target.model_dump(mode="json"),
-                }
-                for operation in context.unknown_effects
-            ],
         }
 
     def _context_event(self, key: str, session: ModelSession, event: JsonObject) -> None:
@@ -651,12 +631,12 @@ class AgentRuntime:
         if isinstance(count := event.get("request_count"), int):
             self.turns[key]["rounds"] = count
         if phase == "compacting":
-            self.record(key, "compaction", "上下文达到预算，正在强制压缩旧资料", status="running")
+            self.record(key, "compaction", "上下文达到阈值，正在压缩历史内容", status="running")
         elif phase == "compacted":
             self.record(
                 key,
                 "compaction",
-                f"上下文已压缩：{event.get('before_tokens')} → {event.get('after_tokens')} token；继续本轮",
+                f"上下文已压缩：{event.get('before_tokens')} → {event.get('after_tokens')} token",
                 status="completed",
             )
         elif phase == "compaction_skipped":
@@ -681,7 +661,7 @@ class AgentRuntime:
             )
         except TimeoutError, ConnectionError, ValueError, OSError:
             history = []
-            history_error = "NapCat 历史暂不可用；仅依据本轮收到的消息，不能假设此前没有对话。"
+            history_error = "历史消息读取失败，本轮仅包含当前收到的消息。"
         return history, history_error
 
     def _add_background(
@@ -704,7 +684,7 @@ class AgentRuntime:
                 json.dumps(
                     {
                         "当前知识库": [{"文件": path, "资料": text} for path, text in knowledge],
-                        "说明": "当前版本替代此前知识库资料；移除的文件不再作为当前知识依据。",
+                        "说明": "以当前版本为准。",
                     },
                     ensure_ascii=False,
                 ),
@@ -793,7 +773,7 @@ class AgentRuntime:
         return True
 
     async def reset(self, key: str, *, stop: bool) -> str:
-        """清空会话的模型上下文；结果未知动作和已处理唤醒的防重记录保留。"""
+        """清空会话的模型上下文；已处理唤醒的防重记录保留。"""
         retained = self.sessions.get(key)
         if retained is None:
             raise KeyError(key)
@@ -808,13 +788,14 @@ class AgentRuntime:
         model, retained.model = retained.model, None
         retained.session_id = uuid.uuid4().hex
         retained.knowledge = []
+        retained.discovered_tools.clear()
         retained.generated_images.clear()
         # 清空已读历史，下次唤醒像新会话一样补入近期 QQ 历史。
         retained.message_ids.clear()
         retained.outcome = "reset"
         retained.updated_at = time.time()
         retained.retained_bytes = retained.measure()
-        self.record(key, "reset", "会话上下文已在控制台重置；防重记录保留", status="completed")
+        self.record(key, "reset", "会话上下文已重置", status="completed")
         if model is not None:
             await model.close()
         return retained.session_id
@@ -829,42 +810,6 @@ class AgentRuntime:
         sessions, self.sessions = self.sessions, OrderedDict()
         await asyncio.gather(
             *(retained.model.close() for retained in sessions.values() if retained.model)
-        )
-
-    def resolve_operation(self, key: str, operation_id: str, executed: bool) -> None:
-        retained = self.sessions.get(key)
-        if retained is None:
-            raise KeyError(key)
-        if key in self.workers:
-            raise SessionBusy("请先停止当前轮次，再核实未知动作")
-        operation = next(
-            (item for item in retained.unknown_effects if item.id == operation_id), None
-        )
-        if operation is None:
-            raise KeyError(operation_id)
-        retained.unknown_effects.remove(operation)
-        if retained.model is not None:
-            retained.model.add_notice(
-                json.dumps(
-                    {
-                        "控制台核实动作": {
-                            "id": operation.id,
-                            "tool": operation.tool,
-                            "arguments": operation.arguments,
-                            "target": operation.target.model_dump(mode="json"),
-                            "executed": executed,
-                        },
-                        "说明": "操作者已核实该动作，未知状态已解除；不会自动重放。",
-                    },
-                    ensure_ascii=False,
-                )
-            )
-        retained.retained_bytes = retained.measure()
-        self.record(
-            key,
-            "resolution",
-            "未知动作已核实为已执行" if executed else "未知动作已核实为未执行，可重新调用",
-            status="completed",
         )
 
     def _state(self, key: str) -> str:
@@ -909,17 +854,6 @@ class AgentRuntime:
                 for message in self.pending.get(key, [])
             ],
             "available_tools": [name for name in self.registry.available(retained.scope)],
-            "unknown_operations": [
-                scrub(
-                    {
-                        "id": operation.id,
-                        "tool": operation.tool,
-                        "arguments": operation.arguments,
-                        "target": operation.target.model_dump(mode="json"),
-                    }
-                )
-                for operation in retained.unknown_effects
-            ],
             "entries": entries,
         }
         return detail

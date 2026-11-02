@@ -487,7 +487,7 @@ async def test_knowledge_folded_by_turn_compaction_returns_after_idle_compaction
         ToolDefinition(
             "qq__send_message",
             "读取大量资料",
-            "messages.send",
+            "messages",
             model_binding(Empty, large),
         )
     )

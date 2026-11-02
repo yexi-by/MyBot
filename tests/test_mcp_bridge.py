@@ -34,7 +34,6 @@ if __name__ == '__main__':
         transport="stdio",
         command=sys.executable,
         args=[str(server)],
-        read_only_tools=["echo"],
     )
     settings = HarnessSettings(
         groups={
@@ -128,7 +127,6 @@ for line in sys.stdin:
         command=sys.executable,
         args=[str(server), str(starts), str(effects), mode],
         timeout=3,
-        read_only_tools=["echo"],
     )
     settings = HarnessSettings(
         groups={
@@ -194,8 +192,8 @@ async def test_stdio_recovery_never_replays_unknown_effect(tmp_path, monkeypatch
             "mcp__fixture__echo",
             "mcp__fixture__touch",
         ]
-        unknown = await registry.execute(context, "mcp__fixture__touch", {})
-        assert unknown.status == "unknown"
+        failed = await registry.execute(context, "mcp__fixture__touch", {})
+        assert failed.status == "error"
         assert "mcp__fixture__touch" not in registry.tools
         assert effects.read_text() == "1"
         await wait_until(lambda: manager.statuses["fixture"]["state"] == "connected")

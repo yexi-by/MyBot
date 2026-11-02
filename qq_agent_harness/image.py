@@ -28,7 +28,7 @@ from .napcat.tools import media_segments
 from .providers import permanent_request_error, retry_after_seconds, retry_delay
 from .settings import ImageSettings, NapCatSettings
 
-CATEGORY_LABELS = {"media.generate": "生成图片"}
+CATEGORY_LABELS = {"image": "生成图片"}
 MAX_GENERATED_IMAGES = 16
 
 
@@ -503,13 +503,11 @@ def build_tools(
         ToolDefinition(
             "image__generate",
             (
-                "生成或编辑图片（OpenAI 标准格式）。不传 images 时调用 /images/generations 文生图；"
-                "传入 images 时调用 /images/edits 图生图或改图（支持直接引用当前会话消息图片、QQ 头像、"
-                "群头像、QQ 官方图床、共享工作区图片或此前生成的 generated_id）。"
-                "生成的图片返回 generated_id，可在 qq__send_message 的 image/file 段或头像工具中直接通过 "
-                "generated_id 发送，无需依赖共享沙箱。"
+                "生成或编辑图片。不传 images 时按描述生成新图；传入 images 时结合参考图改图或图生图"
+                "（可引用当前会话消息图片、QQ 头像、群头像、官方图床链接、工作区图片或此前生成的 generated_id）。"
+                "返回的 generated_id 可直接传给 qq__send_message 或头像修改工具发送。"
             ),
-            "media.generate",
+            "image",
             model_binding(GenerateImageInput, generate),
             title="生成或编辑图片",
         )

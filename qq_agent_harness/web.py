@@ -53,12 +53,6 @@ class ResetSession(Model):
     stop: bool = False
 
 
-class ResolveOperation(Model):
-    scope_key: str
-    operation_id: str
-    executed: bool
-
-
 class Cleanup(Model):
     mode: Literal["cache", "selected", "all"]
     paths: list[str] = Field(default_factory=list)
@@ -97,12 +91,12 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
             try:
                 changed = store.reload()
                 if changed:
-                    runtime.record("", "config", "已加载有效配置；群策略立即用于后续工具调用")
+                    runtime.record("", "config", "配置已更新并生效")
                 invalid = False
             except ConfigError, OSError, ValueError:
                 if not invalid:
                     runtime.record(
-                        "", "config", "配置文件无效；保留最后有效设置，等待原文修复", status="error"
+                        "", "config", "配置文件格式有误，暂用上次有效配置", status="error"
                     )
                     invalid = True
 
@@ -372,31 +366,19 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
             result["enabled"] = settings.enabled
             result["restart_required"] = sandbox_pending
             if sandbox_pending:
-                result["configuration_notice"] = (
-                    "沙箱配置尚未全部应用；请重新创建 runner，应用重启不会重建沙箱控制器"
-                )
+                result["configuration_notice"] = "沙箱配置已改动，需重建沙箱容器后生效"
             return result
         except httpx.HTTPError, ValueError:
             sandbox_pending = settings.enabled
             return {
                 "enabled": settings.enabled,
                 "available": False,
-                "reason": "沙箱控制器不可用或尚未完成配额/网络初始化",
+                "reason": "无法连接沙箱服务或沙箱尚未就绪",
                 "quota_bytes": settings.quota_bytes,
                 "used_bytes": None,
                 "busy": False,
                 "restart_required": sandbox_pending,
             }
-
-    @app.post("/api/sessions/operations/resolve")
-    async def resolve_operation(request: ResolveOperation) -> JsonObject:
-        try:
-            runtime.resolve_operation(request.scope_key, request.operation_id, request.executed)
-        except KeyError:
-            raise HTTPException(404, "会话或未知动作已不存在") from None
-        except SessionBusy as error:
-            raise HTTPException(409, str(error)) from None
-        return {"resolved": True}
 
     @app.get("/api/sandbox/files")
     async def sandbox_files(

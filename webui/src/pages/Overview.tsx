@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Activity as ActivityIcon,
-  BadgeCheck,
   Bell,
   Box,
   ChevronDown,
@@ -247,7 +246,7 @@ function RetainedSessions({ sessions }: { sessions: RetainedSession[] }) {
         <div className="grow">
           <h2>已保留会话</h2>
           <p className="card-subtitle">
-            再次唤醒会沿用原有上下文；重启会清空，容量达到上限时回收最久未使用的空闲会话。
+            再次唤醒会继续使用当前上下文；达到保留上限时会回收最久未活动的会话。
           </p>
         </div>
         <a className="small" href="/sessions" onClick={linkHandler("/sessions")}>
@@ -282,7 +281,7 @@ function RetainedSessions({ sessions }: { sessions: RetainedSession[] }) {
           })}
         </ul>
       ) : (
-        <p className="card-empty">尚无保留的会话。首次唤醒后建立，内容只保留在内存中。</p>
+        <p className="card-empty">暂无已保留的会话。</p>
       )}
     </section>
   );
@@ -304,7 +303,6 @@ const kindIcons: Record<string, LucideIcon> = {
   compaction: Shrink,
   session: Recycle,
   reset: RotateCcw,
-  resolution: BadgeCheck,
   config: Settings2,
   error: CircleAlert,
   overload: Gauge,
@@ -453,7 +451,7 @@ function ActivityFeed({ activity }: { activity: Activity[] }) {
         </>
       ) : (
         <EmptyState icon={ActivityIcon} title={ordered.length ? "没有符合条件的活动" : "还没有活动"} compact>
-          {ordered.length ? "调整筛选条件或搜索词后再试。" : "Agent 被唤醒、调用工具或出错时会记录在这里，只保存在内存中。"}
+          {ordered.length ? "调整筛选条件或搜索词后再试。" : "对话唤醒、工具调用与异常事件会显示在这里。"}
         </EmptyState>
       )}
     </section>

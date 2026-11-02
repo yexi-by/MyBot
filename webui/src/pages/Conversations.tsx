@@ -101,7 +101,7 @@ function AddGroupDialog({ open, onClose }: { open: boolean; onClose: () => void 
     <Dialog
       open={open}
       title="添加群"
-      description="新群默认开放读取消息、发送消息和成员资料，可在添加后调整。"
+      description="新群默认开放消息和群成员能力，可在添加后调整。"
       onClose={onClose}
       footer={
         <>

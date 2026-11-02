@@ -207,7 +207,7 @@ export async function resetSession(key: string, busy: boolean): Promise<boolean>
     title: busy ? "停止并重置这个会话？" : "重置这个会话的上下文？",
     message:
       (busy ? "正在处理的一轮会先停止。" : "") +
-      "模型会忘记此前的对话、工具结果和压缩摘要，下次唤醒时从近期 QQ 历史重新开始。结果未知的动作和已处理消息的防重记录会保留，已发出的消息不会撤回。",
+      "清空当前会话的对话上下文、工具调用记录和摘要，下次唤醒时从近期 QQ 历史重新开始。已发出的消息不会撤回。",
     confirmLabel: busy ? "停止并重置" : "重置",
     danger: true,
   });
@@ -221,22 +221,5 @@ export async function resetSession(key: string, busy: boolean): Promise<boolean>
     return false;
   } finally {
     void runtimeResource.refresh();
-  }
-}
-
-export async function resolveOperation(key: string, operationId: string, executed: boolean): Promise<boolean> {
-  if (!(await confirm({
-    title: executed ? "确认这项动作已经执行？" : "确认这项动作没有执行？",
-    message: "请先核对 QQ 回执或实际结果。确认后解除这项动作的未知状态，不会自动执行或重发。",
-    confirmLabel: executed ? "已核实，确实执行了" : "已核实，没有执行",
-    danger: true,
-  }))) return false;
-  try {
-    await post("/api/sessions/operations/resolve", { scope_key: key, operation_id: operationId, executed });
-    toast("已记录核实结果", "success");
-    return true;
-  } catch (error) {
-    toast(errorMessage(error), "danger");
-    return false;
   }
 }

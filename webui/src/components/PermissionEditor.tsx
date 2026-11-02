@@ -11,7 +11,7 @@ import { Badge, Banner, Button, EmptyState, Segmented, Spinner, StatusDot, Switc
 import { SearchInput } from "./shell";
 import { ToolDrawer } from "./ToolDrawer";
 
-type Filter = "all" | "allowed" | "effects";
+type Filter = "all" | "allowed";
 const overrides: { value: Override; label: string }[] = [
   { value: "inherit", label: "跟随" },
   { value: "allow", label: "允许" },
@@ -90,8 +90,7 @@ export function PermissionEditor({ base, kind }: { base: Path; kind: "group" | "
       const visible = members.filter(
         (tool) =>
           matches(tool, text) &&
-          (filter !== "allowed" || access.get(tool.name)?.allowed) &&
-          (filter !== "effects" || tool.effects),
+          (filter !== "allowed" || access.get(tool.name)?.allowed),
       );
       return { id, members, visible };
     })
@@ -117,7 +116,6 @@ export function PermissionEditor({ base, kind }: { base: Path; kind: "group" | "
             options={[
               { value: "all", label: "全部" },
               { value: "allowed", label: "可调用" },
-              { value: "effects", label: "会执行操作" },
             ]}
           />
           <span className="grow" />
@@ -146,8 +144,6 @@ export function PermissionEditor({ base, kind }: { base: Path; kind: "group" | "
             const allowed = members.filter((tool) => access.get(tool.name)?.allowed).length;
             const custom = members.filter((tool) => Object.hasOwn(toolOverrides, tool.name)).length;
             const names = members.map((tool) => tool.name);
-            const effects = members.filter((tool) => tool.effects).length;
-            const mixed = effects > 0 && effects < members.length;
             return (
               <section className="perm-category" key={id}>
                 <div className="perm-category-row">
@@ -164,7 +160,6 @@ export function PermissionEditor({ base, kind }: { base: Path; kind: "group" | "
                       {members.length} 个工具 · 可调用 {allowed}
                       {custom ? " · " + custom + " 项单独设置" : ""}
                     </span>
-                    {effects > 0 && <Badge tone="warning">{mixed ? "含操作类工具" : "会执行操作"}</Badge>}
                   </button>
                   <Menu
                     label={label + "的批量操作"}
@@ -197,7 +192,6 @@ export function PermissionEditor({ base, kind }: { base: Path; kind: "group" | "
                             <span className="perm-tool-name mono">{tool.name}</span>
                           </button>
                           <span className="perm-tool-badges">
-                            {mixed && tool.effects && <Badge tone="warning">会执行操作</Badge>}
                             {rules > 0 && <Badge tone="accent">参数限制 {rules}</Badge>}
                           </span>
                           <Segmented

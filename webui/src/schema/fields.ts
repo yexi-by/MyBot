@@ -79,14 +79,14 @@ export const napcatSection: SectionDef = {
       label: "动作超时",
       type: "number",
       ...seconds,
-      help: "等待 NapCat 回执的最长时间。超时的发送等操作结果未知，不会自动重试。",
+      help: "单次 NapCat 接口调用的最长等待时间。",
     },
     {
       key: "media_timeout",
       label: "媒体读取超时",
       type: "number",
       ...seconds,
-      help: "每次媒体下载或 NapCat 刷新的等待时间；一种来源失败后仍可尝试其他来源。",
+      help: "单个媒体下载或刷新的最长等待时间。",
     },
     {
       key: "media_max_bytes",
@@ -188,11 +188,11 @@ export const runtimeSection: SectionDef = {
       help: "概览页保留的最近活动数量，只保存在内存中。",
     },
     { key: "max_retained_sessions", label: "保留会话数", type: "number", min: 1, integer: true,
-      help: "超过容量后回收最久未使用的空闲会话，并记录事件。" },
+      help: "超过上限时自动回收最久未活动的空闲会话。" },
     { key: "max_retained_bytes", label: "会话内存预算", type: "bytes", bytes: "binary", min: 1, integer: true,
-      help: "上下文、知识资料和未知动作参数的合计保留预算。" },
+      help: "所有保留会话在内存中占用的总大小上限。" },
     { key: "config_text_max_bytes", label: "配置文本编辑预算", type: "bytes", bytes: "decimal", min: 1, integer: true,
-      help: "人格、知识库和 TOML 编辑器的单文件读写预算；需要编辑大文件时可提高。" },
+      help: "人格、知识库和 TOML 编辑器的单文件大小上限。" },
   ],
 };
 
@@ -221,7 +221,7 @@ export const providerApiSection: SectionDef = {
       key: "api_key",
       label: "API Key",
       type: "secret",
-      help: "只在服务端用于请求模型，不会发给 Agent。",
+      help: "服务商接口密钥。",
     },
     {
       key: "proxy",
@@ -264,7 +264,7 @@ export const providerRequestSection: SectionDef = {
       label: "自定义请求头",
       type: "map",
       placeholder: "请求头名称",
-      help: "调用模型和拉取模型列表时附带的 HTTP 请求头。只用于请求接口，不会发给 Agent。",
+      help: "请求模型和拉取模型列表时附带的额外 HTTP 请求头。",
     },
   ],
 };
@@ -476,7 +476,7 @@ export const mcpConnectionSection: SectionDef = {
       label: "启动命令",
       type: "text",
       placeholder: "npx",
-      help: "由服务端启动的本地程序，Agent 无法修改。",
+      help: "本地 MCP 进程的启动命令（如 npx、uvx、node）。",
       hidden: (config, base) => transport(config, base) !== "stdio",
     },
     {
@@ -492,7 +492,7 @@ export const mcpConnectionSection: SectionDef = {
       label: "调用超时",
       type: "number",
       ...seconds,
-      help: "单次工具调用的最长等待时间；超时不会自动重试。",
+      help: "单次工具调用的最长等待时间。",
     },
   ],
 };
@@ -505,32 +505,16 @@ export const mcpSecretsSection: SectionDef = {
       key: "headers",
       label: "HTTP 请求头",
       type: "map",
-      help: "例如认证信息。只用于连接，不会发给 Agent。",
+      help: "连接远端 MCP 服务时附带的 HTTP 请求头（如 Authorization）。",
       hidden: (config, base) => transport(config, base) !== "streamable_http",
     },
     {
       key: "env",
       label: "环境变量",
       type: "map",
-      help: "只传给这个 MCP 进程，不会发给 Agent。",
+      help: "传给本地 MCP 子进程的环境变量。",
       hidden: (config, base) => transport(config, base) !== "stdio",
     },
-  ],
-};
-
-export const mcpToolsSection: SectionDef = {
-  id: "mcp-tools",
-  title: "工具",
-  fields: [
-    {
-      key: "read_only_tools",
-      label: "只读工具",
-      type: "tags",
-      placeholder: "输入远端工具名后按回车",
-      help: "明确声明只读工具；未声明时参考服务的只读注解。调用权限仍由会话策略决定。",
-    },
-    { key: "effect_tools", label: "有副作用的工具", type: "tags",
-      help: "强制按副作用处理，优先于服务的只读注解和只读名单。" },
   ],
 };
 
@@ -538,13 +522,13 @@ export const imageConnectionSection: SectionDef = {
   id: "image-connection",
   title: "生图接口与模型",
   description:
-    "独立于会话服务商的 OpenAI 标准生图接口（自动支持 /images/generations 文生图与 /images/edits 图生图）。保存后立即生效。",
+    "配置 OpenAI 兼容的图像生成接口（支持文生图与图生图），保存后立即生效。",
   fields: [
     {
       key: "enabled",
       label: "启用图像生成",
       type: "toggle",
-      help: "启用并选好模型后，在会话的「能力权限」中开放「生成图片」即可由 Agent 自主调用生图或改图。",
+      help: "启用并选好模型后，在会话的「能力权限」中开放「生成图片」即可使用。",
     },
     {
       key: "base_url",
@@ -557,7 +541,7 @@ export const imageConnectionSection: SectionDef = {
       key: "api_key",
       label: "API Key",
       type: "secret",
-      help: "只在服务端用于请求生图接口，不会发给 Agent。",
+      help: "生图服务商接口密钥。",
     },
     {
       key: "model",
@@ -600,7 +584,7 @@ export const imageRequestSection: SectionDef = {
       label: "自定义请求头",
       type: "map",
       placeholder: "请求头名称",
-      help: "调用生图接口和拉取模型列表时附带的 HTTP 请求头。只用于请求接口，不会发给 Agent。",
+      help: "请求生图接口时附带的额外 HTTP 请求头。",
     },
   ],
 };
@@ -608,20 +592,20 @@ export const imageRequestSection: SectionDef = {
 export const sandboxSection: SectionDef = {
   id: "sandbox",
   title: "资源与连接",
-  description: "修改后需要重新创建 Runner 并重启 Harness 才会生效。",
+  description: "修改后需重建沙箱 Runner 容器并重启服务。",
   fields: [
     {
       key: "runner_url",
       label: "Runner 地址",
       type: "text",
-      help: "沙箱控制器的内部地址，执行代码的容器无法访问。",
+      help: "沙箱 Runner 服务的连接地址。",
     },
     {
       key: "runner_token",
       label: "Runner 密钥",
       type: "secret",
       generate: true,
-      help: "Harness 与 Runner 之间的认证密钥，不会注入执行容器。",
+      help: "连接沙箱 Runner 的认证密钥。",
     },
     {
       key: "quota_bytes",
@@ -630,7 +614,7 @@ export const sandboxSection: SectionDef = {
       bytes: "decimal",
       min: 1_000_000,
       integer: true,
-      help: "须与工作区 Btrfs 子卷的硬配额一致，否则沙箱拒绝运行。",
+      help: "工作区磁盘容量上限（需与底层卷配额一致）。",
     },
     {
       key: "memory_bytes",
@@ -648,7 +632,7 @@ export const sandboxSection: SectionDef = {
       gt: 0,
       step: 0.1,
       unit: "核",
-      help: "所有代码执行共享。",
+      help: "沙箱容器可用的 CPU 核数。",
     },
     {
       key: "pids_limit",
@@ -672,21 +656,20 @@ export const sandboxSection: SectionDef = {
       bytes: "binary",
       min: 1,
       integer: true,
-      help: "返回到模型的输出预览预算；超出时完整输出保存在工作区，可继续分段读取。",
+      help: "单次命令返回的输出预览上限；超出部分保存在工作区。",
     },
     { key: "transfer_max_bytes", label: "单次文件传输预算", type: "bytes", bytes: "decimal", min: 1, integer: true,
-      help: "二进制文件传输与文本写入共用此预算；文本可分段读取或追加。" },
+      help: "单次读写或传输文件的大小上限。" },
     { key: "max_pending_operations", label: "工作区等待操作上限", type: "number", min: 1, integer: true,
-      help: "执行与文件操作在有界内存中等待；队列满时明确告知未执行，可稍后重试。" },
+      help: "沙箱并发排队操作的最大数量。" },
   ],
 };
 
 export function defaultPolicy(): ObjectValue {
   return {
     categories: {
-      "messages.read": true,
-      "messages.send": true,
-      "members.read": true,
+      messages: true,
+      members: true,
     },
     tools: {},
     parameters: {},
@@ -745,8 +728,6 @@ export function defaultMcp(): ObjectValue {
     env: {},
     headers: {},
     timeout: 60,
-    read_only_tools: [],
-    effect_tools: [],
   };
 }
 
@@ -790,7 +771,6 @@ export function fieldInstances(config: ObjectValue): FieldInstance[] {
     const route = "/tools/mcp/" + enc(id);
     add(mcpConnectionSection, ["mcp", id], route);
     add(mcpSecretsSection, ["mcp", id], route);
-    add(mcpToolsSection, ["mcp", id], route);
   }
   const conversations: [Path, string][] = [
     [["private"], "/conversations/private"],

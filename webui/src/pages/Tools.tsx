@@ -28,13 +28,12 @@ import {
   imageRequestSection,
   mcpConnectionSection,
   mcpSecretsSection,
-  mcpToolsSection,
 } from "../schema/fields";
 
 type ToolsRoute = Extract<Route, { page: "tools" }>;
 const enc = encodeURIComponent;
 
-type Kind = "all" | "read" | "effects" | "closed";
+type Kind = "all" | "open" | "closed";
 const FIRST_PAGE = 25;
 const NEXT_PAGE = 50;
 
@@ -97,8 +96,7 @@ function Catalog({ selected }: { selected: string }) {
   const visible = all.filter(
     (tool) =>
       (!category || tool.category === category) &&
-      (kind !== "read" || !tool.effects) &&
-      (kind !== "effects" || tool.effects) &&
+      (kind !== "open" || (openIn.get(tool.name)?.length ?? 0) > 0) &&
       (kind !== "closed" || !(openIn.get(tool.name)?.length ?? 0)) &&
       (!text || (tool.title + " " + tool.name + " " + tool.description).toLowerCase().includes(text)),
   );
@@ -135,7 +133,7 @@ function Catalog({ selected }: { selected: string }) {
           />
           <Segmented
             size="sm"
-            label="工具类型"
+            label="开放状态"
             value={kind}
             onChange={(next) => {
               setKind(next);
@@ -143,8 +141,7 @@ function Catalog({ selected }: { selected: string }) {
             }}
             options={[
               { value: "all", label: "全部" },
-              { value: "read", label: "只读" },
-              { value: "effects", label: "会执行操作" },
+              { value: "open", label: "已开放" },
               { value: "closed", label: "未开放" },
             ]}
           />
@@ -183,7 +180,6 @@ function Catalog({ selected }: { selected: string }) {
                           </button>
                           <div className="cell-sub">
                             <span className="mono">{tool.name}</span>
-                            {tool.effects && <Badge tone="warning">会执行操作</Badge>}
                           </div>
                         </td>
                         <td className="hide-narrow secondary">{labels.get(tool.category) ?? tool.category}</td>
@@ -373,15 +369,6 @@ function McpDetail({ name }: { name: string }) {
       {!!status?.excluded_tools?.length && <Banner tone="warning" title="部分工具未加载">
         {status.excluded_tools.map((item) => <p key={item.name}>{item.name}：{item.reason}</p>)}
       </Banner>}
-      <ConfigSection
-        def={mcpToolsSection}
-        base={base}
-        suggestions={{ read_only_tools: discovered, effect_tools: discovered }}
-        describe={{
-          read_only_tools: (item) => discovered.find((tool) => tool.value === item)?.label,
-          effect_tools: (item) => discovered.find((tool) => tool.value === item)?.label,
-        }}
-      />
     </div>
   );
 }

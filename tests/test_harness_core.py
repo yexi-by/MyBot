@@ -92,15 +92,20 @@ async def test_disclosure_permissions_revocation_and_unknown_are_enforced(tmp_pa
     dispatched = []
 
     async def side_effect(context, arguments):
+        if any(
+            isinstance(item, dict) and item.get("status") == "unknown"
+            for item in context.sent_messages
+        ):
+            return ToolResult(status="unknown", message="本轮已有发送结果未确认")
         dispatched.append(context.target.key)
+        context.sent_messages.append({"action": "send_msg", "status": "unknown", "data": None})
         return ToolResult(status="unknown", message="响应丢失")
 
     tool = ToolDefinition(
         "qq__send_message",
         "发送",
-        "messages.send",
+        "messages",
         model_binding(Empty, side_effect),
-        effects=True,
         cross_scope=True,
     )
     registry.add(tool)
@@ -136,7 +141,7 @@ async def test_known_tool_direct_call_still_checks_target_and_authorization(tmp_
     tool = ToolDefinition(
         "qq__group_info",
         "群资料",
-        "messages.read",
+        "messages",
         model_binding(Empty, permitted),
         scope="group",
         cross_scope=True,
@@ -728,6 +733,11 @@ async def test_compaction_keeps_action_receipts_and_does_not_replay_unknown_send
     summary_requests = []
 
     async def send(context, _arguments):
+        if any(
+            isinstance(item, dict) and item.get("status") == "unknown"
+            for item in context.sent_messages
+        ):
+            return ToolResult.failure("本轮已有发送结果未确认，请勿重复发送")
         sends.append(context.scope.key)
         context.sent_messages.append({"action": "send_msg", "status": "unknown", "data": None})
         return ToolResult(status="unknown", message="平台未返回回执，不确定是否已发送")
@@ -739,16 +749,15 @@ async def test_compaction_keeps_action_receipts_and_does_not_replay_unknown_send
         ToolDefinition(
             "qq__send_message",
             "发送当前会话消息",
-            "messages.send",
+            "messages",
             model_binding(Empty, send),
-            effects=True,
         )
     )
     registry.add(
         ToolDefinition(
             "qq__large_info",
             "读取测试资料",
-            "messages.read",
+            "messages",
             model_binding(Empty, large_info),
         )
     )
@@ -791,7 +800,7 @@ async def test_compaction_keeps_action_receipts_and_does_not_replay_unknown_send
         elif len(normal_requests) == 3:
             content = json.dumps(body, ensure_ascii=False)
             assert "CURRENT_TRIGGER_SENTINEL" in content
-            assert "sent_receipts" in content and "unknown_operations" in content
+            assert "sent_receipts" in content
             assert "send-1" in content and "unknown" in content
             calls = [
                 call("send-1", "qq__send_message", {}),

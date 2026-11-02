@@ -10,8 +10,7 @@ import pytest
 from mcp import ClientSession
 from mcp.shared.exceptions import McpError
 from mcp.types import CallToolResult, ErrorData, ListToolsResult, Tool, ToolAnnotations
-from test_harness_core import make_store
-from test_napcat import GROUP, Bot, message, registry
+from test_napcat import Bot, message, registry
 from test_provider_context import answer, call_answer
 from test_sandbox import FakeEngine, FakeQuota, make_runner
 
@@ -28,7 +27,6 @@ from qq_agent_harness.contracts import (
 from qq_agent_harness.mcp_tools import MCPManager
 from qq_agent_harness.napcat.media import MediaReader
 from qq_agent_harness.providers import ModelSession
-from qq_agent_harness.runtime import ConversationSession
 from qq_agent_harness.sandbox.client import RunnerClient
 from qq_agent_harness.sandbox.egress import PublicProxy
 from qq_agent_harness.sandbox.runner import ExecuteRequest
@@ -41,7 +39,6 @@ from qq_agent_harness.settings import (
     ParameterRule,
     SandboxSettings,
 )
-from qq_agent_harness.web import create_app
 
 
 @pytest.mark.parametrize("protocol", ["responses", "chat_completions"])
@@ -132,13 +129,14 @@ async def test_preflight_send_failure_preserves_budget_and_other_messages_can_fo
     first: JsonObject = {"parts": [{"type": "text", "text": "first"}]}
     assert (await tools.execute(context, "qq__send_message", first)).status == "unknown"
     bot.handler = None
-    assert (await tools.execute(context, "qq__send_message", first)).status == "unknown"
+    assert (await tools.execute(context, "qq__send_message", first)).status == "error"
+    next_turn = ToolContext(context.scope, "next-turn", bot)
     assert (
         await tools.execute(
-            context, "qq__send_message", {"parts": [{"type": "text", "text": "new" * 5000}]}
+            next_turn, "qq__send_message", {"parts": [{"type": "text", "text": "new" * 5000}]}
         )
     ).status == "ok"
-    assert context.send_attempts == 2
+    assert context.send_attempts == 1 and next_turn.send_attempts == 1
     assert len([name for name, _ in bot.calls if name == "send_group_msg"]) == 2
 
 
@@ -152,59 +150,12 @@ async def test_non_qq_data_and_more_than_twelve_tools_remain_usable():
     names = [f"inspect_{index}" for index in range(15)]
     for name in names:
         tools.add(
-            ToolDefinition(
-                name, "检查数据", "messages.read", json_binding({"type": "object"}, inspect)
-            )
+            ToolDefinition(name, "检查数据", "messages", json_binding({"type": "object"}, inspect))
         )
     exposed = {str(item["name"]) for item in tools.definitions(context)}
     assert set(names) <= exposed and "qq__send_message" in exposed
     result = await tools.execute(context, names[0], {"sample": {"type": "at", "qq": "all"}})
     assert result.status == "ok"
-
-
-async def test_unknown_operation_console_resolution_does_not_replay_or_bypass_permission(tmp_path):
-    store = make_store(tmp_path)
-    app = create_app(store.path, connect_mcp=False)
-    calls = []
-
-    async def effect(context: ToolContext, arguments: JsonObject) -> ToolResult:
-        context.effect_submitted = True
-        calls.append(arguments)
-        return ToolResult(status="unknown") if len(calls) == 1 else ToolResult.success()
-
-    tool = ToolDefinition(
-        "example_effect",
-        "测试动作",
-        "messages.send",
-        json_binding({"type": "object"}, effect),
-        effects=True,
-    )
-    app.state.registry.add(tool)
-    scope = GROUP.model_copy(update={"peer_id": "a"})
-    context = ToolContext(scope, "turn", Bot())
-    assert (await app.state.registry.execute(context, tool.name, {})).status == "unknown"
-    retained = ConversationSession(None, scope, unknown_effects=context.unknown_effects)
-    app.state.runtime.sessions[scope.key] = retained
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        before = (await client.get("/api/sessions/detail", params={"key": scope.key})).json()
-        identifier = before["unknown_operations"][0]["id"]
-        assert (await app.state.registry.execute(context, tool.name, {})).status == "unknown"
-        resolved = await client.post(
-            "/api/sessions/operations/resolve",
-            json={"scope_key": scope.key, "operation_id": identifier, "executed": False},
-        )
-        assert resolved.status_code == 200 and len(calls) == 1
-        app.state.store.settings.groups["a"].policy.tools[tool.name] = False
-        assert (
-            await app.state.registry.execute(context, tool.name, {})
-        ).error_type == "PermissionDenied"
-        app.state.store.settings.groups["a"].policy.tools[tool.name] = True
-        assert (await app.state.registry.execute(context, tool.name, {})).status == "ok"
-        assert len(calls) == 2
-    await app.state.runtime.close()
-    await app.state.runner.close()
 
 
 async def test_mcp_bad_tool_and_individual_errors_leave_other_tools_available():
@@ -252,7 +203,7 @@ async def test_mcp_bad_tool_and_individual_errors_leave_other_tools_available():
     for mode in ("reject", "timeout", "server", "read_timeout"):
         result = await tools.execute(context, "mcp__fixture__read", {"mode": mode})
         assert result.status == "error" and "PRIVATE_ERROR" not in result.message
-        assert not disconnected.is_set() and not context.unknown_effects
+        assert not disconnected.is_set()
     assert (await tools.execute(context, "mcp__fixture__read", {})).status == "ok"
 
 
@@ -467,7 +418,7 @@ async def test_append_respects_existing_file_modification_policy(tmp_path):
     settings.sandbox.enabled = True
     settings.sandbox.runner_token = "t" * 24
     policy = settings.groups["10"].policy
-    policy.categories["sandbox.files"] = True
+    policy.categories["sandbox"] = True
     rule = ParameterRule(allowed=[False])
     policy.parameters["sandbox__write_file"] = {"overwrite": rule}
     client = RunnerClient(

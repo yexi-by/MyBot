@@ -308,7 +308,6 @@ export function ToolDrawer({
           <div className="row wrap">
             <Badge>{categoryLabel}</Badge>
             <Badge>{toolScopes[tool.scope]}</Badge>
-            {tool.effects ? <Badge tone="warning">会执行操作</Badge> : <Badge tone="success">只读</Badge>}
           </div>
           {context && access && (
             <section className="drawer-section">

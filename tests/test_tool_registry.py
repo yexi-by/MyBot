@@ -209,3 +209,68 @@ async def test_aggregate_check_enforces_child_parameters_parent_revocation_and_c
         await registry.execute(context, "fixture__parent", {"user_id": "30"})
     ).status == "cancelled"
     assert reached == ["30"]
+
+
+async def test_deferred_tools_discovery_and_direct_execution_respect_policy() -> None:
+    registry, context, policy = setup_registry()
+    registry.describe_categories({"fixture": "测试分类"})
+    registry.add(
+        ToolDefinition(
+            "qq__common_action",
+            "常用动作",
+            "fixture",
+            json_binding(schema(Empty), echo),
+            title="常用动作",
+        )
+    )
+    registry.add(
+        ToolDefinition(
+            "qq__rare_ban",
+            "禁言指定群成员",
+            "fixture",
+            json_binding(schema(UserInput), echo),
+            title="禁言群成员",
+            deferred=True,
+        )
+    )
+    registry.add(
+        ToolDefinition(
+            "qq__forbidden_kick",
+            "踢出群成员",
+            "fixture",
+            json_binding(schema(UserInput), echo),
+            title="踢出群成员",
+            deferred=True,
+        )
+    )
+    policy.tools["qq__forbidden_kick"] = False
+
+    # 初始上下文只暴露常驻工具与发现工具 qq__search_tools，但 available() 仍列出全部已开放工具。
+    initial_names = [item["name"] for item in registry.definitions(context)]
+    assert initial_names == ["qq__common_action", "qq__search_tools"]
+    assert registry.available(context.scope) == ["qq__common_action", "qq__rare_ban"]
+
+    # 即使尚未搜索，只要权限开放即可直接调用按需工具；未开放工具仍被拒绝且不可被搜出。
+    direct = await registry.execute(context, "qq__rare_ban", {"user_id": "20"})
+    assert direct.status == "ok"
+    denied = await registry.execute(context, "qq__forbidden_kick", {"user_id": "20"})
+    assert denied.error_type == "PermissionDenied"
+
+    # 通过 qq__search_tools 按关键词检索后，匹配工具加入本会话可见工具定义列表。
+    searched = await registry.execute(context, "qq__search_tools", {"query": "禁言"})
+    assert (
+        searched.status == "ok"
+        and isinstance(searched.data, dict)
+        and isinstance(matched := searched.data.get("matched"), list)
+    )
+    assert [item["name"] for item in matched if isinstance(item, dict)] == ["qq__rare_ban"]
+    after_names = [item["name"] for item in registry.definitions(context)]
+    assert after_names == ["qq__common_action", "qq__rare_ban", "qq__search_tools"]
+
+    # 搜索未开放工具不会泄露，撤权后已发现的工具也会立即从 definitions 中移除。
+    forbidden_search = await registry.execute(context, "qq__search_tools", {"query": "踢出"})
+    assert forbidden_search.status == "ok" and isinstance(forbidden_search.data, dict)
+    assert forbidden_search.data["matched"] == []
+
+    policy.tools["qq__rare_ban"] = False
+    assert [item["name"] for item in registry.definitions(context)] == ["qq__common_action"]

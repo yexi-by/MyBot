@@ -15,10 +15,48 @@ from .contracts import (
     ToolContext,
     ToolDefinition,
     ToolResult,
-    UnknownOperation,
     compact_schema,
 )
 from .settings import HarnessSettings, Policy
+
+_SEARCH_TOOL_NAME = "qq__search_tools"
+_SEARCH_TOOL_DEFINITION: JsonObject = {
+    "name": _SEARCH_TOOL_NAME,
+    "description": (
+        "搜索并加载未默认展示的 QQ 扩展工具（如群管禁言、踢人、头衔名片、发公告、群待办、"
+        "群相册、群文件管理、加群审批、AI 语音、收藏表情、修改资料或头像等）。"
+        "可传入关键词或分类名称查找对应工具并获取完整参数定义；留空则列出当前会话可用的全部扩展工具。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "搜索关键词（如“禁言”“公告”“头衔”“相册”“文件”）；留空列出全部可用扩展工具",
+            },
+            "category": {
+                "type": "string",
+                "description": "按分类筛选（可选，如 members、groups、notices、files、albums、contacts、account、utilities、system）",
+            },
+        },
+        "additionalProperties": False,
+    },
+}
+
+
+def _match_score(haystack: str, raw_query: str, terms: list[str]) -> int:
+    score = 0
+    if raw_query in haystack:
+        score += 100
+    for term in terms:
+        if term in haystack:
+            score += 25
+        elif len(term) >= 3:
+            for index in range(len(term) - 1):
+                piece = term[index : index + 2]
+                if not piece.isascii() and piece in haystack:
+                    score += 5
+    return score
 
 
 def values_at(value: JsonValue, parts: list[str]) -> list[JsonValue]:
@@ -99,11 +137,122 @@ class ToolRegistry:
         return allowed, "" if allowed else "当前会话未开放此能力"
 
     def definitions(self, context: ToolContext) -> list[JsonObject]:
-        return [
-            self.definition(self.tools[name], context.scope)
+        result: list[JsonObject] = []
+        has_deferred = False
+        for name in sorted(self.tools):
+            tool = self.tools[name]
+            if not self.permitted(context.scope, tool)[0]:
+                continue
+            if tool.deferred:
+                has_deferred = True
+                if name not in context.discovered_tools:
+                    continue
+            result.append(self.definition(tool, context.scope))
+        if has_deferred and _SEARCH_TOOL_NAME not in self.tools:
+            result.append(copy.deepcopy(_SEARCH_TOOL_DEFINITION))
+        return result
+
+    def _search_tools(self, context: ToolContext, arguments: JsonObject) -> ToolResult:
+        if context.cancelled():
+            return ToolResult(status="cancelled", message="本轮已停止")
+        unknown_keys = set(arguments) - {"query", "category"}
+        raw_query = arguments.get("query", "")
+        raw_category = arguments.get("category", "")
+        if (
+            unknown_keys
+            or (raw_query is not None and not isinstance(raw_query, str))
+            or (raw_category is not None and not isinstance(raw_category, str))
+        ):
+            return ToolResult(
+                status="error",
+                error_type="InvalidArguments",
+                message="参数格式无效，仅支持字符串类型的 query 和 category",
+                data={"tool": _SEARCH_TOOL_NAME, "schema": _SEARCH_TOOL_DEFINITION["parameters"]},
+            )
+        query = (raw_query or "").strip().casefold()
+        category = (raw_category or "").strip().casefold()
+        terms = [
+            part
+            for part in query.replace("，", " ").replace(",", " ").replace("、", " ").split()
+            if part
+        ]
+        permitted_tools = [
+            self.tools[name]
             for name in sorted(self.tools)
             if self.permitted(context.scope, self.tools[name])[0]
         ]
+        deferred_tools = [tool for tool in permitted_tools if tool.deferred]
+        if not query and not category:
+            if len(deferred_tools) <= 15:
+                for tool in deferred_tools:
+                    context.discovered_tools.add(tool.name)
+                return ToolResult.success(
+                    {
+                        "matched": [
+                            {
+                                **self.definition(tool, context.scope),
+                                "title": tool.title or tool.name,
+                                "category": tool.category,
+                            }
+                            for tool in deferred_tools
+                        ],
+                        "total_matched": len(deferred_tools),
+                    }
+                )
+            return ToolResult.success(
+                {
+                    "available_tools": [
+                        {
+                            "name": tool.name,
+                            "title": tool.title or tool.name,
+                            "category": tool.category,
+                            "description": tool.description,
+                        }
+                        for tool in deferred_tools
+                    ],
+                    "total_available": len(deferred_tools),
+                }
+            )
+        scored: list[tuple[int, ToolDefinition]] = []
+        for tool in permitted_tools:
+            cat_label = self.category_label(tool.category).casefold()
+            if category and category not in tool.category.casefold() and category not in cat_label:
+                continue
+            if not terms:
+                scored.append((10, tool))
+                continue
+            haystack = (
+                f"{tool.name} {tool.title} {tool.description} {tool.category} {cat_label}"
+            ).casefold()
+            score = _match_score(haystack, query, terms)
+            if score > 0:
+                scored.append((score, tool))
+        scored.sort(key=lambda item: (-item[0], not item[1].deferred, item[1].name))
+        matched = [tool for _, tool in scored[:15]]
+        for tool in matched:
+            if tool.deferred:
+                context.discovered_tools.add(tool.name)
+        payload: JsonObject = {
+            "matched": [
+                {
+                    **self.definition(tool, context.scope),
+                    "title": tool.title or tool.name,
+                    "category": tool.category,
+                }
+                for tool in matched
+            ],
+            "total_matched": len(scored),
+        }
+        if not matched:
+            payload["available_tools"] = [
+                {
+                    "name": tool.name,
+                    "title": tool.title or tool.name,
+                    "category": tool.category,
+                }
+                for tool in deferred_tools
+            ]
+        return ToolResult.success(payload)
 
     def definition(self, tool: ToolDefinition, scope: ConversationScope) -> JsonObject:
         parameters = compact_schema(tool.parameters)
@@ -194,6 +343,8 @@ class ToolRegistry:
         )
 
     async def execute(self, context: ToolContext, name: str, arguments: JsonObject) -> ToolResult:
+        if name == _SEARCH_TOOL_NAME and name not in self.tools:
+            return self._search_tools(context, arguments)
         tool = self.tools.get(name)
         if not tool:
             return ToolResult.failure("工具不存在，请使用当前提供的工具", "ToolNotFound")
@@ -202,6 +353,8 @@ class ToolRegistry:
             return ToolResult.failure(reason, "PermissionDenied")
         if context.cancelled():
             return ToolResult(status="cancelled", message="本轮已停止")
+        if tool.deferred:
+            context.discovered_tools.add(name)
         policy = self.policy(context.scope)
         context.max_sends = policy.max_sends_per_turn
         args = copy.deepcopy(arguments)
@@ -254,13 +407,6 @@ class ToolRegistry:
         denied = self.authorize(context.scope, tool, args, target)
         if denied:
             return denied
-        if tool.effects and any(
-            operation.tool == name and operation.arguments == args and operation.target == target
-            for operation in context.unknown_effects
-        ):
-            return ToolResult(
-                status="unknown", message="此前相同操作结果未知；请在控制台核实并解除该记录后重试"
-            )
 
         def recheck() -> ToolResult | None:
             if context.cancelled():
@@ -279,40 +425,34 @@ class ToolRegistry:
                 return denied
             child = self.tools.get(child_name)
             if child is None or not self.permitted(context.scope, child)[0]:
-                return ToolResult.failure("聚合查询所需能力未获授权", "PermissionDenied")
+                return ToolResult.failure("子查询所需工具未开放", "PermissionDenied")
             child_args = copy.deepcopy(child_arguments)
             try:
                 child_args = child.binding.prepare(child_args).arguments
             except SchemaError, ValueError:
-                return ToolResult.failure("聚合查询参数无效", "InvalidArguments")
+                return ToolResult.failure("子查询参数无效", "InvalidArguments")
             return self.authorize(context.scope, child, child_args, target)
 
         context.target_scope = target
         context.recheck = recheck
         previous_check_tool = context.check_tool
         context.check_tool = check_tool
-        context.effect_submitted = False
         try:
             result = await prepared.invoke(context)
         except asyncio.CancelledError:
-            if tool.effects and context.effect_submitted:
-                # 取消等待不能证明外部动作未生效；随会话保留，下一次唤醒也不得盲目重试。
-                context.unknown_effects.append(UnknownOperation(name, args, target))
             raise
         except ValueError as exc:
             result = ToolResult.failure(str(exc), "InvalidArguments")
         except TimeoutError, ConnectionError, OSError:
             result = ToolResult(
-                status="unknown" if tool.effects and context.effect_submitted else "error",
-                message="工具连接中断或超时；有副作用的操作可能已经生效",
+                status="error",
+                message="工具连接中断或请求超时",
                 error_type="TransportError",
             )
         finally:
             context.target_scope = None
             context.recheck = lambda: None
             context.check_tool = previous_check_tool
-        if result.status == "unknown" and tool.effects:
-            context.unknown_effects.append(UnknownOperation(name, args, target))
         return result
 
     def catalog(self, scope: ConversationScope) -> JsonObject:

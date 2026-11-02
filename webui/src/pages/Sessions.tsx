@@ -10,7 +10,6 @@ import {
   RotateCcw,
   ScrollText,
   SlidersHorizontal,
-  TriangleAlert,
   User,
 } from "lucide-react";
 import { Badge, Banner, Button, EmptyState, Meter, Spinner, StatusDot } from "../components/primitives";
@@ -33,7 +32,6 @@ import {
   messageText,
   pretty,
   resetSession,
-  resolveOperation,
   sendPreview,
   senderLabel,
   sessionRoute,
@@ -595,7 +593,7 @@ function Timeline({ detail, botId }: { detail: SessionDetail; botId: string }) {
   );
 }
 
-function SessionSummary({ detail, botId, refresh }: { detail: SessionDetail; botId: string; refresh: () => void }) {
+function SessionSummary({ detail, botId }: { detail: SessionDetail; botId: string }) {
   const tools = useToolTitles();
   const context = detail.context;
   const max = context.max_tokens ?? 0;
@@ -659,34 +657,6 @@ function SessionSummary({ detail, botId, refresh }: { detail: SessionDetail; bot
               <MessageLine key={message.message_id} message={message} botId={botId} />
             ))}
           </ul>
-        </div>
-      )}
-      {detail.unknown_operations.length > 0 && (
-        <div className="session-block session-unknown">
-          <h3>
-            <TriangleAlert size={15} aria-hidden="true" />
-            结果未知的动作 · 已禁止原样重试
-          </h3>
-          <ul className="session-unknown-list">
-            {detail.unknown_operations.map((operation) => (
-              <li key={operation.id}>
-                <span className="session-tool">{tools.get(operation.tool) ?? operation.tool}</span>
-                <span className="small muted">
-                  {" → " + (operation.target.kind === "group" ? "群 " : "私聊 ") + operation.target.peer_id}
-                </span>
-                <JsonBlock label="参数" value={operation.arguments} />
-                <div className="row wrap">
-                  <Button size="sm" disabled={isBusy(detail.state)} onClick={async () => {
-                    if (await resolveOperation(detail.scope_key, operation.id, true)) refresh();
-                  }}>核实为已执行</Button>
-                  <Button size="sm" disabled={isBusy(detail.state)} onClick={async () => {
-                    if (await resolveOperation(detail.scope_key, operation.id, false)) refresh();
-                  }}>核实为未执行</Button>
-                </div>
-              </li>
-            ))}
-          </ul>
-          <p className="tiny muted">重置上下文保留这些记录；核对实际结果后可解除。处理中请先停止本轮。</p>
         </div>
       )}
       {available.length > 0 && <AvailableTools names={available} titles={tools} />}
@@ -824,7 +794,7 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
       </div>
       {detail.cleared && (
         <Banner tone="accent" icon={RotateCcw}>
-          上下文已重置，下次唤醒时重新建立。结果未知的动作和已处理消息的防重记录仍然保留。
+          上下文已重置，下次唤醒时将重新建立。
         </Banner>
       )}
       {error && (
@@ -832,7 +802,7 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
           刷新失败：{error}。下面是上次读取的内容。
         </p>
       )}
-      <SessionSummary detail={detail} botId={botId} refresh={refresh} />
+      <SessionSummary detail={detail} botId={botId} />
       <Timeline detail={detail} botId={botId} />
     </div>
   );
@@ -846,7 +816,7 @@ export function SessionsPage({ route }: { route: SessionsRoute }) {
       <PageHeader
         title="会话上下文"
         save={false}
-        description="各会话保留在内存中的上下文。推理内容和媒体原始数据不在这里显示；重启后全部清空。"
+        description="查看各会话当前保留在内存中的对话上下文与工具调用记录"
       />
       <CapacityBar capacity={runtime.data?.capacity} />
       {runtime.error && !runtime.data && (

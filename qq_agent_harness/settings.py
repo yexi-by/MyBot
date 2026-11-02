@@ -23,9 +23,7 @@ class ParameterRule(Model):
 
 
 class Policy(Model):
-    categories: dict[str, bool] = Field(
-        default_factory=lambda: {"messages.read": True, "messages.send": True, "members.read": True}
-    )
+    categories: dict[str, bool] = Field(default_factory=lambda: {"messages": True, "members": True})
     tools: dict[str, bool] = Field(default_factory=dict)
     parameters: dict[str, dict[str, ParameterRule]] = Field(default_factory=dict)
     allow_at_all: bool = False
@@ -139,8 +137,6 @@ class MCPSettings(Model):
     env: dict[str, str] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
     timeout: float = Field(default=60, gt=0)
-    read_only_tools: list[str] = Field(default_factory=list)
-    effect_tools: list[str] = Field(default_factory=list)
 
 
 class SandboxSettings(Model):

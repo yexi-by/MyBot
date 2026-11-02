@@ -46,9 +46,8 @@ def send_tool(handler: Callable[[ToolContext, SendText], Awaitable[ToolResult]])
     return ToolDefinition(
         "qq__send_message",
         "发送",
-        "messages.send",
+        "messages",
         model_binding(SendText, handler),
-        effects=True,
     )
 
 
@@ -114,9 +113,7 @@ async def test_view_follows_turns_without_reasoning_or_raw_media(tmp_path, proto
 
     registry.add(send_tool(send))
     registry.add(
-        ToolDefinition(
-            "qq__read_media", "媒体", "messages.read", json_binding(schema(Empty), unused)
-        )
+        ToolDefinition("qq__read_media", "媒体", "messages", json_binding(schema(Empty), unused))
     )
 
     def respond(request):
@@ -269,7 +266,6 @@ async def test_reset_forgets_context_but_keeps_duplicate_guards(tmp_path):
     dispatched, bodies = [], []
 
     async def send(context, _arguments):
-        context.effect_submitted = True
         dispatched.append(context.turn_id)
         entered.set()
         await asyncio.Event().wait()
@@ -277,9 +273,7 @@ async def test_reset_forgets_context_but_keeps_duplicate_guards(tmp_path):
 
     registry.add(send_tool(send))
     registry.add(
-        ToolDefinition(
-            "qq__get_history", "历史", "messages.read", json_binding(schema(Empty), unused)
-        )
+        ToolDefinition("qq__get_history", "历史", "messages", json_binding(schema(Empty), unused))
     )
 
     class HistoryHub(FakeHub):
@@ -297,7 +291,7 @@ async def test_reset_forgets_context_but_keeps_duplicate_guards(tmp_path):
         bodies.append(json.loads(request.content))
         index = len(bodies)
         payload = (
-            send_call("responses", f"call-{index}", "SAME") if index <= 2 else answer("responses")
+            send_call("responses", f"call-{index}", "SAME") if index == 1 else answer("responses")
         )
         return httpx.Response(200, json=payload)
 
@@ -319,8 +313,6 @@ async def test_reset_forgets_context_but_keeps_duplicate_guards(tmp_path):
             assert renewed != previous
             detail, entries = view(runtime, key)
             assert detail["cleared"] is True and detail["turns"] == 0 and entries == []
-            unknown = detail["unknown_operations"]
-            assert isinstance(unknown, list) and len(unknown) == 1
             # 越过入口去重窗口后重投已处理的唤醒消息，重置后仍不会再处理。
             runtime.seen.clear()
             await wake(runtime, first)
@@ -329,9 +321,7 @@ async def test_reset_forgets_context_but_keeps_duplicate_guards(tmp_path):
             resumed = json.dumps(bodies[1], ensure_ascii=False)
             assert "HISTORY_ONE" in resumed and "INPUT_second" in resumed
             assert "INPUT_first" not in resumed
-            # 新上下文里模型原样重发结果未知的动作，执行层仍然拦截。
             assert len(dispatched) == 1
-            assert "此前相同操作结果未知" in json.dumps(bodies[2], ensure_ascii=False)
             detail, entries = view(runtime, key)
             assert detail["session_id"] == renewed and detail["turns"] == 1
             assert [entry["kind"] for entry in entries].count("history") == 1

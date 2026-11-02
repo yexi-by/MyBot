@@ -96,7 +96,7 @@ async def test_image_tool_visibility_requires_enabled_service_and_policy() -> No
     settings.image.model = "gpt-image-1"
     assert "image__generate" in reg.available(context.scope)
 
-    settings.groups["10"].policy.categories["media.generate"] = False
+    settings.groups["10"].policy.categories["image"] = False
     assert "image__generate" not in reg.available(context.scope)
 
 
@@ -409,7 +409,7 @@ model = "gpt-image-1"
         catalog_resp = client.get("/api/tools")
         assert catalog_resp.status_code == 200
         catalog = catalog_resp.json()
-        assert any(item["id"] == "media.generate" for item in catalog["categories"])
+        assert any(item["id"] == "image" for item in catalog["categories"])
         assert any(item["name"] == "image__generate" for item in catalog["tools"])
 
         models = client.get("/api/image/models")

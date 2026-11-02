@@ -6,7 +6,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 from urllib.parse import unquote
-from uuid import uuid4
 
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
@@ -78,14 +77,6 @@ class GeneratedImage:
 
 
 @dataclass
-class UnknownOperation:
-    tool: str
-    arguments: JsonObject
-    target: ConversationScope
-    id: str = field(default_factory=lambda: uuid4().hex)
-
-
-@dataclass
 class ToolContext:
     scope: ConversationScope
     turn_id: str
@@ -95,14 +86,13 @@ class ToolContext:
     sent_messages: list[JsonObject] = field(default_factory=list)
     send_attempts: int = 0
     max_sends: int = 5
-    unknown_effects: list[UnknownOperation] = field(default_factory=list)
     generated_images: OrderedDict[str, GeneratedImage] = field(default_factory=OrderedDict)
-    effect_submitted: bool = False
+    discovered_tools: set[str] = field(default_factory=set)
     read_workspace: Callable[[str], Awaitable[bytes]] | None = None
     write_workspace: Callable[[str, bytes], Awaitable[None]] | None = None
     recheck: Callable[[], ToolResult | None] = lambda: None
     check_tool: Callable[[str, JsonObject], ToolResult | None] = lambda _name, _args: (
-        ToolResult.failure("聚合查询尚未建立授权上下文", "PermissionDenied")
+        ToolResult.failure("当前会话未开放该工具", "PermissionDenied")
     )
 
     @property
@@ -131,9 +121,9 @@ class ToolDefinition:
     description: str
     category: str
     binding: ToolBinding
-    effects: bool = False
     scope: Literal["both", "group", "private", "account"] = "both"
     cross_scope: bool = False
+    deferred: bool = False
     requires: tuple[str, ...] = ()
     # 面向控制台的简短名称；模型看到的仍是 description。
     title: str = ""
@@ -149,7 +139,6 @@ class ToolDefinition:
             "description": self.description,
             "category": self.category,
             "parameters": self.parameters,
-            "effects": self.effects,
             "scope": self.scope,
             "requires": [name for name in self.requires],
         }

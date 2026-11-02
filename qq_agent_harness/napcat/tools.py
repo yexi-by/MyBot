@@ -35,25 +35,17 @@ BEIJING = timezone(timedelta(hours=8))
 
 # 控制台展示的能力分类名称，按展示顺序排列；权限配置和模型侧仍使用分类 ID。
 CATEGORY_LABELS = {
-    "messages.read": "读取消息",
-    "messages.send": "发送消息",
-    "messages.manage": "管理消息",
-    "media.read": "读取媒体",
-    "members.read": "成员资料",
-    "groups.read": "群资料",
-    "groups.manage": "群管理",
-    "notices.read": "读取群公告",
-    "notices.manage": "管理群公告",
-    "files.read": "读取群文件",
-    "files.manage": "管理群文件",
-    "albums.read": "浏览群相册",
-    "albums.manage": "管理群相册",
-    "contacts.read": "联系人资料",
-    "contacts.manage": "管理联系人",
-    "account.read": "机器人账号信息",
-    "account.manage": "机器人账号设置",
-    "utilities.read": "辅助查询",
-    "system.manage": "NapCat 系统操作",
+    "messages": "消息",
+    "media": "媒体",
+    "members": "群成员",
+    "groups": "群聊",
+    "notices": "群公告与待办",
+    "files": "群文件",
+    "albums": "群相册",
+    "contacts": "好友与资料",
+    "account": "机器人账号",
+    "utilities": "实用工具",
+    "system": "系统控制",
 }
 
 
@@ -64,7 +56,7 @@ class ActionSpec:
     model: type[BaseModel]
     category: str
     scope: Literal["both", "group", "private", "account"] = "group"
-    effects: bool = False
+    deferred: bool = False
     message_bound: bool = False
     inject_peer: bool = True
     filter_groups: bool = False
@@ -76,151 +68,190 @@ class ActionSpec:
 
 # 只有明确列在目录中的业务动作可被调用；不能从模型输入选择原始 action。
 ACTION_SPECS = (
-    ActionSpec("get_login_info", "了解机器人账号身份", a.Empty, "account.read", "account"),
-    ActionSpec("get_status", "确认 QQ 在线状态", a.Empty, "account.read", "account"),
-    ActionSpec("get_robot_uin_range", "核实 QQ 机器人账号范围", a.Empty, "account.read", "account"),
+    ActionSpec("get_login_info", "查询机器人账号的 QQ 号与昵称", a.Empty, "account", "account"),
+    ActionSpec("get_status", "查询 QQ 在线状态", a.Empty, "account", "account", deferred=True),
     ActionSpec(
-        "nc_get_packet_status", "核实扩展协议能力是否可用", a.Empty, "account.read", "account"
+        "get_robot_uin_range",
+        "查询官方机器人账号号段范围",
+        a.Empty,
+        "account",
+        "account",
+        deferred=True,
     ),
     ActionSpec(
-        "get_version_info", "确认 NapCat 版本与接口可用性", a.Empty, "account.read", "account"
+        "nc_get_packet_status",
+        "查询 NapCat 扩展协议连接状态",
+        a.Empty,
+        "account",
+        "account",
+        deferred=True,
     ),
-    ActionSpec("can_send_image", "检查图片发送能力", a.Empty, "account.read", "account"),
-    ActionSpec("can_send_record", "检查语音发送能力", a.Empty, "account.read", "account"),
-    ActionSpec("get_friend_list", "查看机器人好友列表", a.Fresh, "contacts.read", "account"),
     ActionSpec(
-        "get_friends_with_category", "查看分组后的好友列表", a.Empty, "contacts.read", "account"
+        "get_version_info",
+        "查询 NapCat 版本信息",
+        a.Empty,
+        "account",
+        "account",
+        deferred=True,
     ),
     ActionSpec(
-        "get_unidirectional_friend_list", "查看单向好友信息", a.Empty, "contacts.read", "account"
+        "can_send_image", "检查当前是否支持发送图片", a.Empty, "account", "account", deferred=True
     ),
-    ActionSpec("get_recent_contact", "了解近期联系对象", a.Count, "contacts.read", "account"),
-    ActionSpec("get_group_list", "了解机器人加入的群", a.Fresh, "account.read", "account"),
+    ActionSpec(
+        "can_send_record", "检查当前是否支持发送语音", a.Empty, "account", "account", deferred=True
+    ),
+    ActionSpec("get_friend_list", "获取好友列表", a.Fresh, "contacts", "account"),
+    ActionSpec(
+        "get_friends_with_category",
+        "获取按分组整理的好友列表",
+        a.Empty,
+        "contacts",
+        "account",
+        deferred=True,
+    ),
+    ActionSpec(
+        "get_unidirectional_friend_list",
+        "获取单向好友列表",
+        a.Empty,
+        "contacts",
+        "account",
+        deferred=True,
+    ),
+    ActionSpec(
+        "get_recent_contact",
+        "获取最近联系人列表",
+        a.Count,
+        "contacts",
+        "account",
+        deferred=True,
+    ),
+    ActionSpec("get_group_list", "获取机器人加入的群列表", a.Fresh, "account", "account"),
     ActionSpec(
         "get_group_info",
-        "查询群名称、人数、容量和群主 QQ 号；群主缺失时按授权从成员列表补齐",
+        "查询群名称、人数、容量和群主 QQ 号",
         a.Empty,
-        "groups.read",
+        "groups",
     ),
     ActionSpec(
         "get_group_info_ex",
-        "读取群扩展协议标识；查群主或群介绍用 get_group_detail_info",
+        "读取群扩展协议字段（查群主或群介绍请用 get_group_detail_info）",
         a.Empty,
-        "groups.read",
+        "groups",
+        deferred=True,
     ),
     ActionSpec(
         "get_group_detail_info",
-        "查询群主 QQ 号、群介绍、加群问题和群规模，返回整理后的资料",
+        "查询群主 QQ 号、群介绍、加群问题和群规模",
         a.Empty,
-        "groups.read",
+        "groups",
     ),
-    ActionSpec("get_group_share_link", "取得当前群的分享链接", a.Empty, "groups.read"),
+    ActionSpec("get_group_share_link", "获取当前群的分享链接", a.Empty, "groups", deferred=True),
     ActionSpec(
         "get_group_member_list",
-        "按身份、昵称、群名片、QQ 号或头衔查找成员，返回分页列表；已知 QQ 号用 get_group_member_info",
+        "按身份、昵称、群名片、QQ 号或头衔查找群成员（已知 QQ 号时可用 get_group_member_info）",
         a.GroupMemberList,
-        "members.read",
+        "members",
     ),
     ActionSpec(
         "get_group_member_info",
-        "查询指定成员的群名片、头衔、群主/管理员身份、入群与最后发言时间；可按授权附带 QQ 公开资料和在线状态",
+        "查询指定群成员的群名片、头衔、身份、入群与最后发言时间，可选附带 QQ 公开资料和在线状态",
         a.MemberInfo,
-        "members.read",
+        "members",
     ),
     ActionSpec(
         "get_stranger_info",
-        "查询 QQ 账号全局公开资料：昵称、签名 longNick、注册时间 regTime、等级 qqLevel、性别与地区；群名片和群身份用 get_group_member_info",
+        "查询指定 QQ 号的公开资料（昵称、个性签名、注册时间、等级、性别与地区）",
         a.UserFresh,
-        "members.read",
+        "members",
         "account",
     ),
-    ActionSpec("nc_get_user_status", "确认指定 QQ 账号在线状态", a.User, "members.read", "account"),
-    ActionSpec("get_group_honor_info", "查看当前群荣誉信息", a.Honor, "groups.read"),
-    ActionSpec("get_essence_msg_list", "查看当前群精华消息", a.Empty, "messages.read"),
-    ActionSpec("get_group_at_all_remain", "检查当前群艾特全体的剩余次数", a.Empty, "groups.read"),
-    ActionSpec("get_group_shut_list", "查看当前群禁言情况", a.Empty, "groups.read"),
-    ActionSpec("get_group_signed_list", "查看当前群今日打卡成员", a.Empty, "groups.read"),
-    ActionSpec("_get_group_notice", "查看当前群公告", a.Empty, "notices.read"),
+    ActionSpec("nc_get_user_status", "查询指定 QQ 号的在线状态", a.User, "members", "account"),
+    ActionSpec("get_group_honor_info", "查看群荣誉榜单（龙王、群聊之火等）", a.Honor, "groups"),
+    ActionSpec("get_essence_msg_list", "查看群精华消息列表", a.Empty, "messages"),
+    ActionSpec(
+        "get_group_at_all_remain",
+        "查看今日剩余 @全体成员 次数",
+        a.Empty,
+        "groups",
+        deferred=True,
+    ),
+    ActionSpec("get_group_shut_list", "查看当前群被禁言成员列表", a.Empty, "groups", deferred=True),
+    ActionSpec(
+        "get_group_signed_list", "查看当前群今日已打卡成员", a.Empty, "groups", deferred=True
+    ),
+    ActionSpec("_get_group_notice", "查看群公告列表", a.Empty, "notices"),
     ActionSpec(
         "get_group_system_msg",
-        "查看当前群的入群请求与邀请",
+        "查看当前群的加群申请与邀请通知",
         a.Empty,
-        "groups.read",
+        "groups",
+        deferred=True,
         inject_peer=False,
         filter_groups=True,
     ),
     ActionSpec(
         "get_group_ignored_notifies",
-        "查看当前群被忽略的通知记录；仅查被忽略的加群申请用 get_group_ignore_add_request",
+        "查看当前群已忽略的系统通知",
         a.Empty,
-        "groups.read",
+        "groups",
+        deferred=True,
         inject_peer=False,
         filter_groups=True,
     ),
     ActionSpec(
         "get_group_ignore_add_request",
-        "查看当前群被忽略的加群申请；一般入群请求与邀请用 get_group_system_msg",
+        "查看当前群已忽略的加群申请",
         a.Empty,
-        "groups.read",
+        "groups",
+        deferred=True,
         inject_peer=False,
         filter_groups=True,
     ),
+    ActionSpec("set_group_ban", "禁言或解除禁言群成员", a.MemberBan, "groups", deferred=True),
+    ActionSpec("set_group_whole_ban", "开启或关闭全员禁言", a.Enabled, "groups", deferred=True),
+    ActionSpec("set_group_kick", "将指定成员移出当前群", a.MemberKick, "groups", deferred=True),
     ActionSpec(
-        "set_group_ban", "管理当前群成员的禁言状态", a.MemberBan, "groups.manage", effects=True
-    ),
-    ActionSpec(
-        "set_group_whole_ban", "调整当前群全员禁言", a.Enabled, "groups.manage", effects=True
-    ),
-    ActionSpec("set_group_kick", "移出当前群成员", a.MemberKick, "groups.manage", effects=True),
-    ActionSpec(
-        "set_group_kick_members", "批量移出当前群成员", a.MembersKick, "groups.manage", effects=True
+        "set_group_kick_members", "批量将成员移出当前群", a.MembersKick, "groups", deferred=True
     ),
     ActionSpec(
         "set_group_admin",
-        "调整当前群的 QQ 平台管理员",
+        "设置或取消群管理员",
         a.MemberAdmin,
-        "groups.manage",
-        effects=True,
+        "groups",
+        deferred=True,
     ),
-    ActionSpec("set_group_card", "修改当前群成员名片", a.MemberCard, "groups.manage", effects=True),
+    ActionSpec("set_group_card", "修改群成员的群名片", a.MemberCard, "groups"),
     ActionSpec(
         "set_group_special_title",
-        "修改当前群成员头衔",
+        "修改群成员的专属头衔",
         a.MemberTitle,
-        "groups.manage",
-        effects=True,
+        "groups",
     ),
-    ActionSpec("set_group_name", "修改当前群名称", a.GroupName, "groups.manage", effects=True),
+    ActionSpec("set_group_name", "修改当前群名称", a.GroupName, "groups", deferred=True),
     ActionSpec(
         "set_group_remark",
-        "修改当前群在机器人账号中的备注",
+        "修改当前群的本地备注",
         a.GroupRemark,
-        "groups.manage",
-        effects=True,
+        "groups",
+        deferred=True,
     ),
-    ActionSpec("set_group_leave", "退出或解散当前群", a.GroupLeave, "groups.manage", effects=True),
-    ActionSpec("set_group_sign", "在当前群打卡", a.Empty, "groups.manage", effects=True),
-    ActionSpec(
-        "_send_group_notice", "发布当前群公告", a.GroupNotice, "notices.manage", effects=True
-    ),
-    ActionSpec(
-        "_del_group_notice", "删除当前群指定公告", a.NoticeId, "notices.manage", effects=True
-    ),
+    ActionSpec("set_group_leave", "退出或解散当前群", a.GroupLeave, "groups", deferred=True),
+    ActionSpec("set_group_sign", "在当前群签到打卡", a.Empty, "groups"),
+    ActionSpec("_send_group_notice", "发布群公告", a.GroupNotice, "notices", deferred=True),
+    ActionSpec("_del_group_notice", "删除指定群公告", a.NoticeId, "notices", deferred=True),
     ActionSpec(
         "set_essence_msg",
-        "将当前群消息设为精华；取消使用 delete_essence_msg",
+        "将群消息设为精华消息",
         a.MessageId,
-        "messages.manage",
-        effects=True,
+        "messages",
         message_bound=True,
         inject_peer=False,
     ),
     ActionSpec(
         "delete_essence_msg",
-        "移除当前群消息的精华标记；添加使用 set_essence_msg",
+        "取消群消息的精华标记",
         a.MessageId,
-        "messages.manage",
-        effects=True,
+        "messages",
         message_bound=True,
         inject_peer=False,
     ),
@@ -228,109 +259,179 @@ ACTION_SPECS = (
         "delete_msg",
         "撤回当前会话中的指定消息",
         a.MessageId,
-        "messages.manage",
+        "messages",
         "both",
-        True,
+        False,
         True,
         False,
     ),
     ActionSpec(
         "set_msg_emoji_like",
-        "添加或取消消息的指定表情回应：set=true 添加，set=false 取消",
+        "给消息添加或取消贴表情回应（set=true 添加，set=false 取消）",
         a.Reaction,
-        "messages.manage",
+        "messages",
         "both",
-        True,
+        False,
         True,
         False,
     ),
     ActionSpec(
         "mark_msg_as_read",
-        "标记当前会话的指定消息为已读",
+        "将当前会话的指定消息标为已读",
         a.MessageId,
-        "messages.manage",
+        "messages",
         "both",
         True,
         True,
         False,
     ),
-    ActionSpec("get_group_file_system_info", "了解当前群文件空间", a.Empty, "files.read"),
-    ActionSpec("get_group_root_files", "浏览当前群根目录文件", a.Empty, "files.read"),
-    ActionSpec("get_group_files_by_folder", "浏览当前群文件夹", a.Folder, "files.read"),
-    ActionSpec("get_group_file_url", "取得当前群文件下载地址", a.FileId, "files.read"),
     ActionSpec(
-        "create_group_file_folder", "创建当前群文件夹", a.FolderCreate, "files.manage", effects=True
+        "get_group_file_system_info",
+        "查询群文件空间用量与文件总数",
+        a.Empty,
+        "files",
+        deferred=True,
     ),
+    ActionSpec("get_group_root_files", "查看群文件根目录下的文件与文件夹", a.Empty, "files"),
+    ActionSpec("get_group_files_by_folder", "查看指定群文件夹内的文件列表", a.Folder, "files"),
+    ActionSpec("get_group_file_url", "获取群文件的下载链接", a.FileId, "files"),
     ActionSpec(
-        "delete_group_file", "删除当前群指定文件", a.GroupFile, "files.manage", effects=True
+        "create_group_file_folder",
+        "在群文件中新建文件夹",
+        a.FolderCreate,
+        "files",
+        deferred=True,
     ),
+    ActionSpec("delete_group_file", "删除指定的群文件", a.GroupFile, "files", deferred=True),
+    ActionSpec("delete_group_folder", "删除指定的群文件夹", a.Folder, "files", deferred=True),
+    ActionSpec("move_group_file", "移动群文件到指定目录", a.MoveFile, "files", deferred=True),
+    ActionSpec("rename_group_file", "重命名群文件", a.RenameFile, "files", deferred=True),
+    ActionSpec("send_like", "给指定 QQ 号的资料卡点赞", a.Like, "contacts", "account"),
     ActionSpec(
-        "delete_group_folder", "删除当前群指定文件夹", a.Folder, "files.manage", effects=True
+        "set_friend_remark",
+        "修改好友备注",
+        a.FriendRemark,
+        "contacts",
+        "account",
+        deferred=True,
     ),
-    ActionSpec("move_group_file", "移动当前群文件", a.MoveFile, "files.manage", effects=True),
-    ActionSpec("rename_group_file", "重命名当前群文件", a.RenameFile, "files.manage", effects=True),
-    ActionSpec("send_like", "给 QQ 资料点赞", a.Like, "contacts.manage", "account", True),
-    ActionSpec(
-        "set_friend_remark", "修改好友备注", a.FriendRemark, "contacts.manage", "account", True
-    ),
-    ActionSpec("delete_friend", "删除指定好友关系", a.User, "contacts.manage", "account", True),
+    ActionSpec("delete_friend", "删除指定好友", a.User, "contacts", "account", deferred=True),
     ActionSpec(
         "set_friend_add_request",
-        "处理好友申请",
+        "同意或拒绝好友申请",
         a.FriendRequest,
-        "contacts.manage",
+        "contacts",
         "account",
-        True,
+        deferred=True,
     ),
     ActionSpec(
-        "get_doubt_friends_add_request", "查看可疑好友申请", a.Empty, "contacts.read", "account"
+        "get_doubt_friends_add_request",
+        "查看被过滤的可疑好友申请",
+        a.Empty,
+        "contacts",
+        "account",
+        deferred=True,
     ),
-    ActionSpec("get_online_clients", "查看账号的在线客户端", a.Empty, "account.read", "account"),
     ActionSpec(
-        "set_self_longnick", "修改机器人个性签名", a.LongNick, "account.manage", "account", True
+        "get_online_clients",
+        "查看当前账号同时在线的设备列表",
+        a.Empty,
+        "account",
+        "account",
+        deferred=True,
     ),
     ActionSpec(
-        "set_online_status", "修改机器人在线状态", a.OnlineStatus, "account.manage", "account", True
+        "set_self_longnick",
+        "修改机器人个性签名",
+        a.LongNick,
+        "account",
+        "account",
+        deferred=True,
+    ),
+    ActionSpec(
+        "set_online_status",
+        "修改机器人在线状态",
+        a.OnlineStatus,
+        "account",
+        "account",
+        deferred=True,
     ),
     ActionSpec(
         "set_diy_online_status",
         "修改机器人自定义在线状态",
         a.DiyStatus,
-        "account.manage",
         "account",
-        True,
+        "account",
+        deferred=True,
     ),
     ActionSpec(
-        "set_qq_profile", "修改机器人公开资料", a.QQProfile, "account.manage", "account", True
+        "set_qq_profile",
+        "修改机器人昵称、个人介绍或性别",
+        a.QQProfile,
+        "account",
+        "account",
+        deferred=True,
     ),
     ActionSpec(
         "fetch_custom_face",
-        "列出收藏表情的图片 URL，可用 read_media 的 media_url 查看；删除前先用 fetch_custom_face_detail 获取 resId",
+        "获取账号收藏表情的图片链接列表",
         a.Count,
-        "account.read",
         "account",
+        "account",
+        deferred=True,
     ),
     ActionSpec(
-        "get_collection_list", "查看机器人收藏内容", a.Collection, "account.read", "account"
+        "get_collection_list",
+        "查看账号 QQ 收藏列表",
+        a.Collection,
+        "account",
+        "account",
+        deferred=True,
     ),
-    ActionSpec("get_profile_like", "查看机器人资料点赞情况", a.Signed, "account.read", "account"),
+    ActionSpec(
+        "get_profile_like",
+        "查看谁给机器人资料卡点了赞",
+        a.Signed,
+        "account",
+        "account",
+        deferred=True,
+    ),
     ActionSpec(
         "get_ai_characters",
-        "查询群 AI 语音角色 character ID；发送时直接在 send_message.parts 中使用 type=ai_voice、character、text",
+        "查询群 AI 语音可用声线列表（拿到 character 后可在 send_message 中发 ai_voice）",
         a.AICharacters,
-        "media.read",
+        "media",
     ),
     ActionSpec(
         "get_ai_record",
-        "生成 QQ AI 语音资源供读取处理；只需发送时直接用 send_message.parts 的 ai_voice，无需先生成资源",
+        "生成 AI 语音音频资源（仅在需要读取音频数据时使用；直接发送语音请用 send_message 的 ai_voice）",
         a.AIRecord,
-        "media.read",
+        "media",
+        deferred=True,
     ),
-    ActionSpec("get_qun_album_list", "浏览当前群相册", a.Empty, "albums.read"),
-    ActionSpec("get_group_album_media_list", "浏览当前群相册中的媒体", a.AlbumMedia, "albums.read"),
-    ActionSpec("translate_en2zh", "翻译不熟悉的英文词句", a.Words, "utilities.read", "account"),
+    ActionSpec("get_qun_album_list", "查看群相册列表", a.Empty, "albums", deferred=True),
     ActionSpec(
-        "check_url_safely", "核对 QQ 对公网链接的风险判断", a.CheckUrl, "utilities.read", "account"
+        "get_group_album_media_list",
+        "查看指定群相册内的照片与视频",
+        a.AlbumMedia,
+        "albums",
+        deferred=True,
+    ),
+    ActionSpec(
+        "translate_en2zh",
+        "将英文词句翻译为中文",
+        a.Words,
+        "utilities",
+        "account",
+        deferred=True,
+    ),
+    ActionSpec(
+        "check_url_safely",
+        "查询 QQ 对指定链接的安全风险评级",
+        a.CheckUrl,
+        "utilities",
+        "account",
+        deferred=True,
     ),
 )
 
@@ -356,7 +457,6 @@ async def invoke(
     action: str,
     params: JsonObject,
     *,
-    effects: bool = False,
     count_send: bool = False,
 ) -> ToolResult:
     if context.cancelled():
@@ -366,12 +466,11 @@ async def invoke(
         return denied
     if count_send:
         context.send_attempts += 1
-    context.effect_submitted = effects
     try:
         data = await context.napcat.call(action, params)
         return ToolResult.success(data)
     except NapCatError as exc:
-        if effects and re.search(
+        if count_send and re.search(
             r"Timeout: NTEvent\s+serviceAndMethod:NodeIKernelMsgService/sendMsg\s+"
             r"ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate\b",
             str(exc),
@@ -380,26 +479,24 @@ async def invoke(
             return ToolResult(
                 status="unknown",
                 error_type=f"NapCat:{exc.code}",
-                message="QQ 发送接口已调用，但等待发送成功回执超时；是否送达尚未确认，核实前不要重发。",
+                message="消息发送请求已提交，但等待回执超时；送达状态未确认，请勿重复发送。",
             )
         return ToolResult.failure(str(exc), f"NapCat:{exc.code}")
     except NapCatUnavailable as exc:
-        if not exc.submitted:
-            context.effect_submitted = False
-            if count_send:
-                context.send_attempts -= 1
+        if not exc.submitted and count_send:
+            context.send_attempts -= 1
         return ToolResult(
-            status="unknown" if effects and exc.submitted else "error",
+            status="unknown" if count_send and exc.submitted else "error",
             error_type="NapCatUnavailable",
             message=str(exc),
         )
     except (TimeoutError, ConnectionError) as exc:
         return ToolResult(
-            status="unknown" if effects else "error",
+            status="unknown" if count_send else "error",
             error_type=type(exc).__name__,
-            message="动作已提交但没有取得确定回执；请先核实，不能直接重试。"
-            if effects
-            else "NapCat 连接失败或读取超时",
+            message="消息发送已提交但未收到回执，请勿直接重发。"
+            if count_send
+            else "NapCat 连接失败或响应超时",
         )
 
 
@@ -598,7 +695,7 @@ def action_tool(spec: ActionSpec) -> ToolDefinition:
                 params["group_id"] = context.target.peer_id
             elif spec.scope == "private":
                 params["user_id"] = context.target.peer_id
-        result = await invoke(context, spec.action, params, effects=spec.effects)
+        result = await invoke(context, spec.action, params)
         if result.status == "ok" and spec.filter_groups:
             result.data = filtered_groups(result.data, context.target.peer_id)
         if result.status != "ok":
@@ -623,10 +720,10 @@ def action_tool(spec: ActionSpec) -> ToolDefinition:
         spec.summary,
         spec.category,
         model_binding(spec.model, handle),
-        effects=spec.effects,
         scope=spec.scope,
         cross_scope=spec.scope in ("both", "group", "private"),
         title=ACTION_TITLES.get(spec.action, spec.summary),
+        deferred=spec.deferred,
     )
 
 
@@ -816,163 +913,169 @@ class HistoryVisibility(Model):
 EXTRA_SPECS = (
     ActionSpec(
         "_mark_all_as_read",
-        "将机器人账号所有会话标记已读",
+        "将账号下所有会话标为已读",
         a.Empty,
-        "account.manage",
         "account",
-        True,
+        "account",
+        deferred=True,
     ),
     ActionSpec(
         "set_restart",
-        "重启 NapCat 服务；将中断所有 QQ 会话连接",
+        "重启 NapCat 服务",
         a.Empty,
-        "system.manage",
+        "system",
         "account",
-        True,
+        deferred=True,
     ),
     ActionSpec(
         "bot_exit",
-        "退出 NapCat 进程；将中断所有 QQ 会话连接",
+        "退出 NapCat 进程",
         a.Empty,
-        "system.manage",
+        "system",
         "account",
-        True,
+        deferred=True,
     ),
     ActionSpec(
         "clean_cache",
-        "清除 NapCat 和 QQ 媒体缓存；可能使旧媒体不可再次读取",
+        "清理 NapCat 与 QQ 媒体缓存",
         a.Empty,
-        "system.manage",
+        "system",
         "account",
-        True,
+        deferred=True,
     ),
     ActionSpec(
         "fetch_custom_face_detail",
-        "查询收藏表情的 URL 与 resId；删除时把 resId 传给 delete_custom_face.res_id",
+        "查询收藏表情的链接与 resId（删除收藏表情时需传入该 resId）",
         a.Count,
-        "account.read",
         "account",
+        "account",
+        deferred=True,
     ),
     ActionSpec(
         "delete_custom_face",
-        "删除收藏表情；res_id 必须使用 fetch_custom_face_detail 返回的 resId",
+        "按 resId 删除收藏表情",
         a.DeleteFaces,
-        "account.manage",
         "account",
-        True,
+        "account",
+        deferred=True,
     ),
     ActionSpec(
         "get_emoji_likes",
-        "按已知 emoji_id 读取群消息点亮该表情的用户列表；群聊/私聊分页用 fetch_emoji_like",
+        "查看群消息指定表情回应的用户列表",
         a.ReactionList,
-        "messages.read",
+        "messages",
+        deferred=True,
         message_bound=True,
     ),
     ActionSpec(
         "fetch_emoji_like",
-        "按已知 emojiId 分页查询群聊或私聊消息点亮该表情的用户列表；用返回的 cookie 续页，不枚举所有表情",
+        "分页查看消息指定表情回应的用户列表",
         a.EmojiPage,
-        "messages.read",
+        "messages",
         "both",
-        False,
+        True,
         True,
         False,
     ),
     ActionSpec(
         "create_collection",
-        "保存内容到 QQ 收藏",
+        "新增一条 QQ 收藏",
         a.CreateCollection,
-        "account.manage",
         "account",
-        True,
+        "account",
+        deferred=True,
     ),
     ActionSpec(
         "set_doubt_friends_add_request",
-        "接受可疑好友申请",
+        "同意被过滤的可疑好友申请",
         a.DoubtRequest,
-        "contacts.manage",
+        "contacts",
         "account",
-        True,
+        deferred=True,
     ),
     ActionSpec(
         "set_input_status",
-        "在当前私聊展示输入状态",
+        "在私聊窗口显示“对方正在输入…”状态",
         a.InputStatus,
-        "messages.manage",
+        "messages",
         "private",
-        True,
+        deferred=True,
     ),
     ActionSpec(
         "set_group_todo",
-        "将群消息设为 QQ 群待办；完成用 complete_group_todo，取消用 cancel_group_todo",
+        "将指定群消息设为群待办",
         a.GroupTodo,
-        "groups.manage",
-        effects=True,
+        "notices",
+        deferred=True,
         message_bound=True,
     ),
     ActionSpec(
         "complete_group_todo",
-        "完成群消息对应的 QQ 群待办；创建用 set_group_todo，取消用 cancel_group_todo",
+        "将群待办标为已完成",
         a.GroupTodo,
-        "groups.manage",
-        effects=True,
+        "notices",
+        deferred=True,
         message_bound=True,
     ),
     ActionSpec(
         "cancel_group_todo",
-        "取消群消息对应的 QQ 群待办；创建用 set_group_todo，标为完成用 complete_group_todo",
+        "取消群待办",
         a.GroupTodo,
-        "groups.manage",
-        effects=True,
+        "notices",
+        deferred=True,
         message_bound=True,
     ),
     ActionSpec(
         "set_group_album_media_like",
-        "点赞群相册媒体；取消使用 cancel_group_album_media_like",
+        "给群相册照片或视频点赞",
         a.AlbumLike,
-        "albums.manage",
-        effects=True,
+        "albums",
+        deferred=True,
     ),
     ActionSpec(
         "cancel_group_album_media_like",
-        "取消群相册媒体点赞；添加使用 set_group_album_media_like",
+        "取消群相册照片或视频点赞",
         a.AlbumLike,
-        "albums.manage",
-        effects=True,
+        "albums",
+        deferred=True,
     ),
     ActionSpec(
-        "del_group_album_media", "删除当前群相册媒体", a.AlbumDelete, "albums.manage", effects=True
+        "del_group_album_media",
+        "删除群相册中的照片或视频",
+        a.AlbumDelete,
+        "albums",
+        deferred=True,
     ),
     ActionSpec(
         "do_group_album_comment",
-        "评论当前群相册媒体",
+        "评论群相册中的照片或视频",
         a.AlbumComment,
-        "albums.manage",
-        effects=True,
+        "albums",
+        deferred=True,
     ),
     ActionSpec(
-        "set_group_add_option", "设置当前群入群条件", GroupAddOption, "groups.manage", effects=True
+        "set_group_add_option", "设置群加群方式与验证问题", GroupAddOption, "groups", deferred=True
     ),
     ActionSpec(
         "set_group_member_invite_policy",
-        "设置当前群的成员邀请规则",
+        "设置群成员邀请他人入群的规则",
         InvitePolicy,
-        "groups.manage",
-        effects=True,
+        "groups",
+        deferred=True,
     ),
     ActionSpec(
         "set_group_member_permissions",
-        "设置 QQ 平台群功能开关",
+        "设置群内相册上传、临时会话等权限开关",
         MemberPermissions,
-        "groups.manage",
-        effects=True,
+        "groups",
+        deferred=True,
     ),
     ActionSpec(
         "set_group_new_member_history_visibility",
-        "设置 QQ 平台新成员历史可见性",
+        "设置新入群成员是否可查看近期历史消息",
         HistoryVisibility,
-        "groups.manage",
-        effects=True,
+        "groups",
+        deferred=True,
     ),
 )
 
@@ -1001,17 +1104,19 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             params: JsonObject = {"file": "base64://" + base64.b64encode(content).decode("ascii")}
             if group:
                 params["group_id"] = context.target.peer_id
-            return await invoke(context, action, params, effects=True)
+            return await invoke(context, action, params)
 
         return ToolDefinition(
             "qq__" + action,
-            "当你判断有必要更新当前群或机器人头像时，主动调用。图片从获准的共享工作区或公网读取，不接受宿主机路径。",
-            "groups.manage" if group else "account.manage",
+            "修改当前群头像（支持工作区文件、公网图片 URL 或 generated_id）。"
+            if group
+            else "修改机器人账号头像（支持工作区文件、公网图片 URL 或 generated_id）。",
+            "groups" if group else "account",
             model_binding(a.ImageSource, avatar),
-            effects=True,
             scope="group" if group else "account",
             cross_scope=group,
             title="更新当前群头像" if group else "更新机器人头像",
+            deferred=True,
         )
 
     tools.extend((avatar_tool(True), avatar_tool(False)))
@@ -1048,7 +1153,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             {
                 "messages": [item.model_dump(mode="json") for item in selected],
                 "complete": False,
-                "coverage": "仅包含 NapCat 本次返回的有界历史；不能据此认定此前没有消息",
+                "coverage": "返回近期消息记录",
             }
         )
 
@@ -1101,7 +1206,6 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         if denied is not None:
             return denied
         # runner 的二进制写入以 O_EXCL 原子创建，不做先读取再覆盖的竞态检查。
-        context.effect_submitted = True
         await context.write_workspace(request.destination, asset.content)
         return ToolResult.success(
             {"path": request.destination, "size": len(asset.content), "mime_type": asset.mime_type}
@@ -1129,59 +1233,52 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             context,
             "set_group_add_request",
             request.model_dump(mode="json"),
-            effects=True,
         )
 
-    custom: list[tuple[str, str, str, ToolBinding, str, bool]] = [
+    custom: list[tuple[str, str, str, ToolBinding, str]] = [
         (
             "qq__get_history",
             "读取会话历史",
-            "主动补充当前会话上下文、核对前文或按北京时间筛选近期消息。远端历史不是完整归档。",
+            "拉取当前会话的近期历史消息，支持向前翻页或按北京时间范围筛选。",
             model_binding(a.History, history),
-            "messages.read",
-            False,
+            "messages",
         ),
         (
             "qq__get_message",
             "读取单条消息",
-            "当你需要核实当前会话的引用、消息原文或消息段时，主动读取这条消息；不会读取其他会话。",
+            "按 message_id 查询当前会话中的单条消息详情。",
             model_binding(a.MessageId, get_message),
-            "messages.read",
-            False,
+            "messages",
         ),
         (
             "qq__get_forward_messages",
             "展开合并转发",
-            "当对话提及合并转发但缺少内容时，主动展开当前会话消息中的转发节点。必须提供外层消息 ID。",
+            "展开当前会话消息中的合并转发内容（需传入外层消息的 message_id）。",
             model_binding(a.Forward, get_forward),
-            "messages.read",
-            False,
+            "messages",
         ),
         (
             "qq__read_media",
             "读取媒体内容",
-            "读取消息或转发中的媒体、指定 QQ 用户头像、当前群头像或 QQ 官方图床图片。message_id、user_id、group_avatar、media_url 四选一；单个资源失败返回部分错误。",
+            "读取消息或合并转发中的图片/语音/视频/文件、指定 QQ 号头像、当前群头像或 QQ 官方图床图片（message_id、user_id、group_avatar、media_url 四选一）。",
             model_binding(a.ReadMedia, read_media),
-            "media.read",
-            False,
+            "media",
         ),
         (
             "qq__send_message",
             "发送消息",
-            "在 QQ 发言或交付文件的唯一入口，按 parts 顺序发送纯文本正文（禁止 Markdown 语法）、引用、艾特、媒体；AI 语音直接用 type=ai_voice、character、text。普通模型正文不会发送，结果未知时不得重发。",
+            "向 QQ 发送消息或文件的唯一入口。按 parts 顺序组合纯文本（不支持 Markdown 语法）、引用回复、@成员、表情、图片/语音/视频/文件、戳一戳、AI 语音（type=ai_voice）或合并转发。",
             model_binding(a.SendMessage, send),
-            "messages.send",
-            True,
+            "messages",
         ),
     ]
-    for name, title, description, binding, category, effects in custom:
+    for name, title, description, binding, category in custom:
         tools.append(
             ToolDefinition(
                 name,
                 description,
                 category,
                 binding,
-                effects=effects,
                 cross_scope=True,
                 title=title,
             )
@@ -1189,10 +1286,9 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
     tools.append(
         ToolDefinition(
             "qq__save_media_to_workspace",
-            "将消息媒体、QQ 用户头像、群头像或 QQ 官方图床图片保存到共享工作区，用于代码分析和转换。与 read_media 共用四选一来源；指定一个资源和相对文件名，不覆盖已有文件。",
-            "media.read",
+            "将消息附件、QQ 头像、群头像或官方图床图片保存到沙箱工作区供代码处理（与 read_media 共用四选一来源，每次保存单个资源）。",
+            "media",
             model_binding(SaveMedia, save_media),
-            effects=True,
             cross_scope=True,
             requires=("sandbox__write_file",),
             title="保存媒体到共享工作区",
@@ -1201,13 +1297,13 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
     tools.append(
         ToolDefinition(
             "qq__set_group_add_request",
-            "当你判断有必要处理当前群入群申请时，主动调用；申请必须能从当前群请求列表验证归属。",
-            "groups.manage",
+            "同意或拒绝当前群的入群申请与邀请。",
+            "groups",
             model_binding(a.GroupRequest, add_request),
-            effects=True,
             scope="group",
             cross_scope=True,
             title="处理当前群入群申请",
+            deferred=True,
         )
     )
     return tools
@@ -1216,6 +1312,10 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
 async def send_message(
     context: ToolContext, request: a.SendMessage, reader: MediaReader
 ) -> ToolResult:
+    if any(
+        isinstance(item, dict) and item.get("status") == "unknown" for item in context.sent_messages
+    ):
+        raise ValueError("本轮已有发送结果未确认，请勿重复发送")
     target = context.target
     destination: JsonObject = {"group_id" if target.kind == "group" else "user_id": target.peer_id}
     actions: list[tuple[str, JsonObject]] = []
@@ -1310,7 +1410,7 @@ async def send_message(
         raise ValueError("本轮实际发送次数将超过当前群限制；请合并正文或减少独立文件/转发")
     receipts: list[JsonValue] = []
     for action, params in actions:
-        result = await invoke(context, action, params, effects=True, count_send=True)
+        result = await invoke(context, action, params, count_send=True)
         receipt: JsonObject = {"action": action, "status": result.status, "data": result.data}
         receipts.append(receipt)
         if result.status in ("ok", "unknown"):

@@ -16,7 +16,6 @@ const activityKinds: Record<string, Label> = {
   compaction: { text: "上下文压缩", tone: "neutral" },
   session: { text: "会话回收", tone: "warning" },
   reset: { text: "会话重置", tone: "neutral" },
-  resolution: { text: "动作核实", tone: "neutral" },
   config: { text: "配置", tone: "neutral" },
   error: { text: "错误", tone: "danger" },
   overload: { text: "排队已满", tone: "warning" },

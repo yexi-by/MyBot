@@ -290,8 +290,8 @@ function SandboxOverview() {
             />
             <p className="muted small">
               {data.available
-                ? "Python 3.14、uv、Node.js 24、npm、Git 可用。磁盘用量受底层硬配额限制。"
-                : data.reason || "沙箱控制器没有响应，请检查 Runner 容器。"}
+                ? "已预装 Python 3.14（uv）、Node.js 24（npm）与 Git。"
+                : data.reason || "沙箱服务未响应，请检查 Runner 容器状态。"}
             </p>
           </div>
           <div className="row wrap">
@@ -387,7 +387,7 @@ export function SandboxPage({ view }: { view: "overview" | "settings" }) {
     <div className="page">
       <PageHeader
         title="沙箱"
-        description="获准的会话共用一个持久工作区来执行代码；代码只能访问公网 HTTP 和 HTTPS"
+        description="会话共用的代码运行环境与持久化文件工作区"
         save={view === "settings"}
       />
       <div className="sticky-tabs">

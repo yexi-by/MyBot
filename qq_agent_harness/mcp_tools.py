@@ -143,7 +143,7 @@ class MCPManager:
                     retry_delay = RETRY_INITIAL
                 self.statuses[name] = {
                     "state": "reconnecting",
-                    "message": "MCP 连接或工具目录不可用，将自动重新连接；不会重放工具调用",
+                    "message": "MCP 连接断开，正在自动重连",
                     "error_type": type(error).__name__,
                     "retry_in": retry_delay,
                 }
@@ -216,18 +216,12 @@ class MCPManager:
                 ):
                     excluded.append({"name": item.name, "reason": "工具 schema 含外部引用"})
                     continue
-                # 注解只描述执行特征，不授予调用权限；本地声明可覆盖服务提供的特征。
-                effects = item.name in config.effect_tools or not (
-                    item.name in config.read_only_tools
-                    or (item.annotations is not None and item.annotations.readOnlyHint is True)
-                )
                 # 远端标题只用于控制台展示，不参与授权判断。
                 title = item.title or (item.annotations.title if item.annotations else None)
                 definitions.append(
                     ToolDefinition(
                         f"mcp__{name}__{item.name}",
-                        item.description
-                        or f"当你需要 {item.name} 能力辅助当前对话时，可主动调用。",
+                        item.description or f"调用 MCP 服务 {name} 的 {item.name} 工具。",
                         f"mcp.{name}",
                         json_binding(
                             parameters,
@@ -235,12 +229,10 @@ class MCPManager:
                                 session,
                                 item.name,
                                 config.timeout,
-                                effects,
                                 disconnected,
                                 disconnect,
                             ),
                         ),
-                        effects=effects,
                         title=title or item.name,
                     )
                 )
@@ -268,7 +260,6 @@ class MCPManager:
         session: ClientSession,
         name: str,
         timeout: float,
-        effects: bool,
         disconnected: asyncio.Event,
         disconnect: Callable[[], None],
     ):
@@ -280,7 +271,6 @@ class MCPManager:
             try:
                 if denied := _context.recheck():
                     return denied
-                _context.effect_submitted = effects
                 operation = asyncio.create_task(
                     session.call_tool(
                         name, arguments, read_timeout_seconds=timedelta(seconds=timeout)
@@ -323,20 +313,18 @@ class MCPManager:
             except McpError as error:
                 # -32000 也可能是服务端普通错误；是否断线由接收通道确认。
                 if error.error.code in (CONNECTION_CLOSED, 408, -32001):
-                    return ToolResult(
-                        status="unknown" if effects else "error",
-                        message=f"MCP 未取得回执（JSON-RPC {error.error.code}）",
-                        error_type="MCPTransportError",
+                    return ToolResult.failure(
+                        f"MCP 未收到响应（JSON-RPC {error.error.code}）",
+                        "MCPTransportError",
                     )
                 return ToolResult.failure(
-                    f"MCP 调用被拒绝（JSON-RPC {error.error.code}）；请检查工具参数",
+                    f"MCP 调用被拒绝（JSON-RPC {error.error.code}），请检查工具参数",
                     "MCPRemoteError",
                 )
             except TimeoutError, httpx.TimeoutException:
-                return ToolResult(
-                    status="unknown" if effects else "error",
-                    message="MCP 单次调用超时；连接与其他工具保留",
-                    error_type="MCPTimeout",
+                return ToolResult.failure(
+                    "MCP 调用超时",
+                    "MCPTimeout",
                 )
             except (
                 ConnectionError,
@@ -347,16 +335,14 @@ class MCPManager:
                 anyio.ClosedResourceError,
             ):
                 disconnect()
-                return ToolResult(
-                    status="unknown" if effects else "error",
-                    message="MCP 连接已中断；已提交动作的状态以实际回执为准",
-                    error_type="MCPError",
+                return ToolResult.failure(
+                    "MCP 连接已断开",
+                    "MCPError",
                 )
             except Exception as error:
-                return ToolResult(
-                    status="unknown" if effects else "error",
-                    message=f"MCP 单次调用失败（{type(error).__name__}）；其他工具仍可调用",
-                    error_type=type(error).__name__,
+                return ToolResult.failure(
+                    f"MCP 调用失败（{type(error).__name__}）",
+                    type(error).__name__,
                 )
             finally:
                 pending = [task for task in (operation, connection_lost) if task is not None]

@@ -128,9 +128,8 @@ async def test_same_group_reuses_history_and_tool_results_but_resets_turn_limits
         ToolDefinition(
             "qq__send_message",
             "发送",
-            "messages.send",
+            "messages",
             model_binding(Empty, send),
-            effects=True,
         )
     )
 
@@ -221,9 +220,8 @@ async def test_chat_null_optional_fields_finish_after_send_and_survive_next_wake
         ToolDefinition(
             "qq__send_message",
             "发送",
-            "messages.send",
+            "messages",
             json_binding(schema(Empty), send),
-            effects=True,
         )
     )
 
@@ -288,7 +286,7 @@ async def test_only_new_history_is_added_and_persona_updates_without_losing_sess
     async def read(_context, _arguments):
         return ToolResult.success([])
 
-    registry.add(ToolDefinition("qq__get_history", "历史", "messages.read", json_binding({}, read)))
+    registry.add(ToolDefinition("qq__get_history", "历史", "messages", json_binding({}, read)))
 
     class Hub(FakeHub):
         history = [message("older"), message("old"), message("old"), message("first")]
@@ -366,9 +364,7 @@ async def test_all_authorized_tools_are_stable_across_rounds_and_wakes_until_rev
         return ToolResult.success({"found": True})
 
     for name in reversed(names):
-        registry.add(
-            ToolDefinition(name, "查询", "messages.read", json_binding(schema(Empty), read))
-        )
+        registry.add(ToolDefinition(name, "查询", "messages", json_binding(schema(Empty), read)))
     bodies = []
 
     def respond(request):
@@ -429,9 +425,7 @@ async def test_automatic_message_media_obeys_the_same_source_restrictions_as_too
     async def read(_context, _arguments):
         raise AssertionError("模型不应主动读取媒体")
 
-    registry.add(
-        ToolDefinition("qq__read_media", "媒体", "media.read", model_binding(ReadMedia, read))
-    )
+    registry.add(ToolDefinition("qq__read_media", "媒体", "media", model_binding(ReadMedia, read)))
 
     async def read_media(segments, _connection) -> MediaBatch:
         selected.append(segments)
@@ -463,7 +457,7 @@ async def test_automatic_message_media_obeys_the_same_source_restrictions_as_too
 
 
 @pytest.mark.parametrize("protocol", ["chat_completions", "responses"])
-async def test_cancel_closes_all_calls_and_unknown_effect_is_not_replayed_on_next_wake(
+async def test_cancel_closes_all_calls_and_revoked_tool_cannot_be_called_on_next_wake(
     tmp_path, protocol
 ):
     store = make_store(tmp_path)
@@ -473,7 +467,6 @@ async def test_cancel_closes_all_calls_and_unknown_effect_is_not_replayed_on_nex
     dispatched, bodies = [], []
 
     async def blocked(context, _arguments):
-        context.effect_submitted = True
         dispatched.append(context.turn_id)
         entered.set()
         await asyncio.Event().wait()
@@ -483,9 +476,8 @@ async def test_cancel_closes_all_calls_and_unknown_effect_is_not_replayed_on_nex
         ToolDefinition(
             "qq__send_message",
             "发送",
-            "messages.send",
+            "messages",
             model_binding(Empty, blocked),
-            effects=True,
         )
     )
 
@@ -496,7 +488,7 @@ async def test_cancel_closes_all_calls_and_unknown_effect_is_not_replayed_on_nex
             tool_response(protocol, "interrupted", "not-started")
             if count == 1
             else tool_response(protocol, f"retry-{count}")
-            if count in (2, 4)
+            if count == 2
             else answer(protocol)
         )
         return httpx.Response(200, json=payload)
@@ -513,6 +505,8 @@ async def test_cancel_closes_all_calls_and_unknown_effect_is_not_replayed_on_nex
             await runtime.receive(first)
             await asyncio.wait_for(entered.wait(), 2)
             assert await runtime.cancel(first.scope.key)
+            # 已披露的目录不替代执行时授权；撤权后模型猜工具名也不能调用。
+            store.settings.private.policy.tools["qq__send_message"] = False
             await wake(runtime, message("second"))
             assert len(dispatched) == 1
             field = "messages" if protocol == "chat_completions" else "input"
@@ -525,13 +519,8 @@ async def test_cancel_closes_all_calls_and_unknown_effect_is_not_replayed_on_nex
                 json.loads(item.get("content", item.get("output")))["status"] for item in outputs
             ]
             assert statuses == ["unknown", "cancelled"]
-            assert "unknown" in json.dumps(bodies[2])
-            # 已披露的目录不替代执行时授权；撤权后模型猜工具名也不能调用。
-            store.settings.private.policy.tools["qq__send_message"] = False
-            await wake(runtime, message("third"))
-            assert len(dispatched) == 1
-            assert "PermissionDenied" in json.dumps(bodies[4])
-            names = [tool.get("function", tool)["name"] for tool in bodies[3]["tools"]]
+            assert "PermissionDenied" in json.dumps(bodies[2])
+            names = [tool.get("function", tool)["name"] for tool in bodies[1]["tools"]]
             assert "qq__send_message" not in names
         finally:
             await runtime.close()
@@ -650,7 +639,7 @@ async def test_completed_results_survive_model_failure_between_wakes(tmp_path):
         return ToolResult.success({"fact": f"LOOKUP_RESULT_{len(dispatched)}"})
 
     registry.add(
-        ToolDefinition("qq__lookup", "查询", "messages.read", json_binding(schema(Empty), lookup))
+        ToolDefinition("qq__lookup", "查询", "messages", json_binding(schema(Empty), lookup))
     )
 
     def respond(request):

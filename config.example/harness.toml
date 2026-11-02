@@ -74,9 +74,8 @@ cross_private = false
 max_sends_per_turn = 5
 
 [private.policy.categories]
-"messages.read" = true
-"messages.send" = true
-"members.read" = true
+messages = true
+members = true
 
 [private.policy.tools]
 

@@ -3,7 +3,7 @@
 import pytest
 from test_napcat import Bot, registry
 
-from qq_agent_harness.contracts import JsonObject, JsonValue, ToolContext
+from qq_agent_harness.contracts import JsonObject, JsonValue
 from qq_agent_harness.napcat.connection import NapCatError
 
 SEND_TIMEOUT = (
@@ -12,7 +12,7 @@ SEND_TIMEOUT = (
 )
 
 
-async def test_send_confirmation_timeout_is_unknown_and_blocks_duplicate_across_turns() -> None:
+async def test_send_confirmation_timeout_is_unknown_and_blocks_duplicate_in_same_turn() -> None:
     async def remote(_action: str, _params: JsonObject) -> JsonValue:
         raise NapCatError(SEND_TIMEOUT, 1200)
 
@@ -30,16 +30,8 @@ async def test_send_confirmation_timeout_is_unknown_and_blocks_duplicate_across_
         {"action": "send_group_msg", "status": "unknown", "data": None}
     ]
     assert "已成功的前序" not in result.message
-    assert len(context.unknown_effects) == 1
-    assert (await tools.execute(context, "qq__send_message", payload)).status == "unknown"
-    next_turn = ToolContext(
-        context.scope,
-        "next-turn",
-        bot,
-        read_workspace=read,
-        unknown_effects=context.unknown_effects,
-    )
-    assert (await tools.execute(next_turn, "qq__send_message", payload)).status == "unknown"
+    again = await tools.execute(context, "qq__send_message", payload)
+    assert again.status == "error"
     assert len(bot.calls) == 1
 
 
@@ -66,7 +58,6 @@ async def test_other_napcat_errors_remain_errors_and_allow_retry(error: str) -> 
     payload: JsonObject = {"parts": [{"type": "text", "text": "重试同一请求"}]}
     result = await tools.execute(context, "qq__send_message", payload)
     assert result.status == "error" and result.error_type == "NapCat:1200"
-    assert not context.unknown_effects
     assert "已成功的前序" not in result.message
     assert (await tools.execute(context, "qq__send_message", payload)).status == "ok"
     assert len(bot.calls) == 2

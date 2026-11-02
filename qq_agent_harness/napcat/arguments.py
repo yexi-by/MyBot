@@ -18,20 +18,16 @@ class Fresh(Model):
 
 
 class User(Model):
-    user_id: Id = Field(description="操作对象 QQ 号；不是发起者权限")
+    user_id: Id = Field(description="目标用户 QQ 号")
 
 
 class UserFresh(User):
-    no_cache: bool = Field(default=False, description="是否刷新远端缓存")
+    no_cache: bool = Field(default=False, description="是否跳过缓存直接拉取最新数据")
 
 
 class MemberInfo(UserFresh):
-    include_profile: bool = Field(
-        default=True, description="同时读取 QQ 公开资料；需获准调用 get_stranger_info"
-    )
-    include_status: bool = Field(
-        default=False, description="同时读取在线状态；需获准调用 nc_get_user_status"
-    )
+    include_profile: bool = Field(default=True, description="是否同时查询 QQ 公开资料")
+    include_status: bool = Field(default=False, description="是否同时查询在线状态")
 
 
 class GroupMemberList(Fresh):
@@ -93,7 +89,7 @@ class Honor(Model):
 
 
 class MessageId(Model):
-    message_id: Id = Field(description="当前会话中的消息 ID，不能填其他会话的 ID")
+    message_id: Id = Field(description="当前会话中的消息 ID")
 
 
 class Reaction(MessageId):
@@ -144,22 +140,18 @@ class AlbumComment(AlbumLike):
 
 
 class History(Model):
-    count: int = Field(default=30, ge=1, description="最多获取条数；远端可能只返回部分历史")
-    before_message_id: str | None = Field(
-        default=None, description="当前会话中用于向前翻页的消息 ID"
-    )
-    minutes: int | None = Field(
-        default=None, ge=1, description="筛选最近多少分钟；仅筛选本次返回的有界历史"
-    )
+    count: int = Field(default=30, ge=1, description="最大获取条数")
+    before_message_id: str | None = Field(default=None, description="从该消息 ID 之前继续向前翻页")
+    minutes: int | None = Field(default=None, ge=1, description="只保留最近多少分钟内的消息")
     start_time: str | None = Field(
         default=None,
         pattern=r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$",
-        description="北京时间起点，严格 YYYY-MM-DD HH:MM:SS",
+        description="起始时间（北京时间 YYYY-MM-DD HH:MM:SS）",
     )
     end_time: str | None = Field(
         default=None,
         pattern=r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$",
-        description="北京时间终点，严格 YYYY-MM-DD HH:MM:SS",
+        description="结束时间（北京时间 YYYY-MM-DD HH:MM:SS）",
     )
 
     @model_validator(mode="after")
@@ -364,13 +356,13 @@ class TextPart(Model):
     type: Literal["text"]
     text: str = Field(
         min_length=1,
-        description="纯文本正文；QQ 不渲染 Markdown（禁用 **加粗**、# 标题、- 列表、`代码`、表格等语法），也不会解析 CQ 码",
+        description="纯文本内容（QQ 不支持渲染 Markdown 语法或 CQ 码）",
     )
 
 
 class AtPart(Model):
     type: Literal["at"]
-    qq: Id = Field(description="艾特对象 QQ 号；all 表示全体，必须由群策略允许")
+    qq: Id = Field(description="要 @ 的 QQ 号，全体成员填 all")
 
 
 class ReplyPart(Model):
