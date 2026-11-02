@@ -62,6 +62,24 @@ class FakeHub:
         return []
 
 
+class LookupConnection:
+    """控制台只读查询用的在线连接：每个动作都返回同一结果或抛出同一异常。"""
+
+    closed = False
+
+    def __init__(self, result: JsonValue | Exception):
+        self.result = result
+        self.calls: list[str] = []
+
+    async def call(
+        self, action: str, params: JsonObject, *, timeout: float | None = None
+    ) -> JsonValue:
+        self.calls.append(action)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
 def make_store(tmp_path: Path) -> ConfigStore:
     (tmp_path / "persona.md").write_text("测试人格", encoding="utf-8")
 
@@ -425,27 +443,12 @@ def test_tool_access_follows_each_conversation_policy(tmp_path):
 
 
 def test_napcat_group_directory_handles_offline_and_upstream_failure(tmp_path):
-    class Directory:
-        closed = False
-
-        def __init__(self, result: JsonValue | Exception):
-            self.result = result
-            self.calls: list[str] = []
-
-        async def call(
-            self, action: str, params: JsonObject, *, timeout: float | None = None
-        ) -> JsonValue:
-            self.calls.append(action)
-            if isinstance(self.result, Exception):
-                raise self.result
-            return self.result
-
     store = make_store(tmp_path)
     app = create_app(store.path, connect_mcp=False)
     with TestClient(app) as client:
         offline = client.get("/api/napcat/groups").json()
         assert offline["available"] is False and offline["groups"] == []
-        directory = Directory(
+        directory = LookupConnection(
             [
                 {"group_id": "100", "group_name": "测试群", "member_count": 12},
                 {"group_name": "缺少群号的条目"},
@@ -464,10 +467,31 @@ def test_napcat_group_directory_handles_offline_and_upstream_failure(tmp_path):
         ]
         client.get("/api/napcat/groups")
         assert directory.calls == ["get_group_list"]
-        app.state.hub.connections["bot"] = Directory(NapCatError("账号状态异常", 1))
+        app.state.hub.connections["bot"] = LookupConnection(NapCatError("账号状态异常", 1))
         failed = client.get("/api/napcat/groups", params={"refresh": True})
         assert failed.status_code == 200 and failed.json()["available"] is False
         # 假连接没有真实 WebSocket，退出前移除，避免关闭流程去关闭它。
+        app.state.hub.connections.clear()
+
+
+def test_napcat_account_caches_nickname_and_falls_back_to_qq_number(tmp_path):
+    app = create_app(make_store(tmp_path).path, connect_mcp=False)
+    with TestClient(app) as client:
+        assert client.get("/api/napcat/account").json() == {"bot_id": "", "nickname": ""}
+        account = LookupConnection({"user_id": "bot", "nickname": " 小助手 "})
+        app.state.hub.connections["bot"] = account
+        for _ in range(2):
+            assert client.get("/api/napcat/account").json() == {
+                "bot_id": "bot",
+                "nickname": "小助手",
+            }
+        assert account.calls == ["get_login_info"]
+        # 换号后不能沿用上一个账号的昵称；NapCat 超时只让界面退回显示 QQ 号。
+        app.state.hub.connections.clear()
+        app.state.hub.connections["other"] = LookupConnection(TimeoutError())
+        failed = client.get("/api/napcat/account")
+        assert failed.status_code == 200
+        assert failed.json() == {"bot_id": "other", "nickname": ""}
         app.state.hub.connections.clear()
 
 

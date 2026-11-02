@@ -216,6 +216,11 @@ export interface GroupDirectory {
   reason: string;
   groups: GroupInfo[];
 }
+/** 控制台展示的机器人账号；离线时 bot_id 为空，昵称读取失败时 nickname 为空。 */
+export interface BotAccount {
+  bot_id: string;
+  nickname: string;
+}
 export interface CoverageAction {
   action: string;
   status: string;

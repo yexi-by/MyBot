@@ -25,6 +25,8 @@ uv run --locked python -m qq_agent_harness --config config/harness.toml
 
 控制台默认端口 6055；开发时前端执行 `npm --prefix webui ci`、`npm --prefix webui run dev`，API 代理到 6056。后端可加 `--port 6056`。测试使用临时配置副本，不能使用真实配置。
 
+侧栏左下角显示已连接机器人的 QQ 头像、昵称和连接状态。昵称由后端经 NapCat `get_login_info` 读取，按账号缓存 60 秒；头像由浏览器直接从 QQ 头像服务 `q1.qlogo.cn` 加载，不发送来源页，加载失败时显示昵称首字。
+
 WebUI 的“服务商”页只配置连接：协议、base_url、密钥、代理和超时。模型在各个群和私聊的“会话 → 模型”中选择：会话模型填写服务商、模型名称、思考等级、上下文预算和实际输入模态，闲时压缩可以另选压缩模型。模型必须支持工具调用，只支持 Chat Completions 和 Responses 两种协议。默认不设置采样或输出长度参数。官方协议未支持的音视频输入会明确返回能力错误，不自动转写或抽帧。没有选好会话模型的会话不回复；模型设置可以一次应用到多个会话，添加群时也可以复制已有会话的设置。
 
 会话模型的 `max_context_tokens` 是该会话的上下文预算，默认 128000 token，不应超过模型的实际上下文窗口；它不会作为回复长度参数发送，设得更小会更早压缩，每次唤醒发送的内容也更少。`reasoning_effort` 可省略，省略时保留接口默认行为；明确选择后分别使用 Chat Completions 的 `reasoning_effort` 或 Responses 的 `reasoning.effort`。可选值是否可用取决于模型和接口，不会静默降级。[OpenAI 思考参数](https://developers.openai.com/api/docs/guides/reasoning)

@@ -80,6 +80,7 @@ const shapes: [RegExp, (value: Data) => boolean][] = [
       typeof v.available === "boolean" &&
       arrayOf(v.groups, (g) => record(g) && text(g.group_id)),
   ],
+  [/^\/api\/napcat\/account$/, (v) => text(v.bot_id) && text(v.nickname)],
   [
     /^\/api\/sandbox\/status$/,
     (v) =>

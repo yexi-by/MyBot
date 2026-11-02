@@ -291,14 +291,18 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
         result["mcp"] = servers
         return result
 
+    def console_bot() -> str:
+        """控制台展示的机器人：优先配置的账号，否则取第一个在线连接。"""
+        connected = [bot for bot, connection in hub.connections.items() if not connection.closed]
+        expected = startup.napcat.expected_bot_id
+        return expected if expected in connected else (connected[0] if connected else "")
+
     group_cache: dict[str, tuple[float, list[JsonValue]]] = {}
 
     @app.get("/api/napcat/groups")
     async def napcat_groups(refresh: bool = False) -> JsonObject:
         # 只读群目录，仅用于控制台显示群名称；不进入模型上下文，也不记录返回内容。
-        connected = [bot for bot, connection in hub.connections.items() if not connection.closed]
-        expected = startup.napcat.expected_bot_id
-        bot_id = expected if expected in connected else (connected[0] if connected else "")
+        bot_id = console_bot()
         if not bot_id:
             return {
                 "available": False,
@@ -335,6 +339,25 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
             )
         group_cache[bot_id] = (time.monotonic() + 60, groups)
         return {"available": True, "bot_id": bot_id, "reason": "", "groups": groups}
+
+    nickname_cache: dict[str, tuple[float, str]] = {}
+
+    @app.get("/api/napcat/account")
+    async def napcat_account() -> JsonObject:
+        # 只读机器人昵称，仅用于控制台侧栏显示；读取失败时昵称留空，界面改显示 QQ 号。
+        bot_id = console_bot()
+        if not bot_id:
+            return {"bot_id": "", "nickname": ""}
+        cached = nickname_cache.get(bot_id)
+        if cached and cached[0] > time.monotonic():
+            return {"bot_id": bot_id, "nickname": cached[1]}
+        try:
+            data = await hub.bot_connection(bot_id).call("get_login_info", {}, timeout=10)
+        except NapCatError, OSError:
+            return {"bot_id": bot_id, "nickname": ""}
+        nickname = str(data.get("nickname") or "").strip() if isinstance(data, dict) else ""
+        nickname_cache[bot_id] = (time.monotonic() + 60, nickname)
+        return {"bot_id": bot_id, "nickname": nickname}
 
     @app.get("/api/napcat/coverage")
     async def napcat_coverage() -> JsonObject:

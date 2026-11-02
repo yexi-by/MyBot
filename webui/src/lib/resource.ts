@@ -1,6 +1,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { errorMessage, get } from "./api";
 import type {
+  BotAccount,
   Coverage,
   GroupDirectory,
   GroupInfo,
@@ -114,6 +115,9 @@ export const accessResource = new Resource(() =>
 );
 export const coverageResource = new Resource(() =>
   get<Coverage>("/api/napcat/coverage"),
+);
+export const accountResource = new Resource(() =>
+  get<BotAccount>("/api/napcat/account"),
 );
 export const filesResource = new Resource(() =>
   get<{ files: string[] }>("/api/files/list").then((data) => data.files),

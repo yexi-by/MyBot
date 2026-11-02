@@ -1,12 +1,12 @@
-import { useEffect } from "react";
-import { CircleAlert, Menu, Monitor, Moon, Search, Sun, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CircleAlert, Menu, Monitor, Moon, Search, Sun, UserRound, X } from "lucide-react";
 import { CommandPalette } from "./components/CommandPalette";
 import { GlobalDialog, Toasts } from "./components/Overlays";
 import { ConflictDialog, GlobalBanners, PowerOverlay } from "./components/shell";
 import { Button, EmptyState, IconButton, Spinner, StatusDot } from "./components/primitives";
 import { getConfig, loadConfig, pollConfig, save, useConfig } from "./lib/config";
 import { linkHandler, navigate, useLocation } from "./lib/navigation";
-import { runtimeResource, useResource } from "./lib/resource";
+import { accountResource, runtimeResource, useResource } from "./lib/resource";
 import { cycleTheme, themeLabels, useTheme } from "./lib/theme";
 import { activeSaver, setConflictDialog, setNav, setPalette, toast, useUi } from "./lib/ui";
 import { ConversationsPage } from "./pages/Conversations";
@@ -62,22 +62,62 @@ function Logo() {
 
 const themeIcons = { system: Monitor, light: Sun, dark: Moon };
 
-function NapcatStatus() {
-  const runtime = useResource(runtimeResource, 10_000);
-  const bots = runtime.data?.napcat.connected ?? [];
-  const known = runtime.data !== null;
-  const text = !known ? "QQ 状态未知" : bots.length ? "QQ 已连接" : "QQ 未连接";
+/**
+ * QQ 头像由浏览器直接向 QQ 头像服务读取，不带来源页；加载前和读不到时显示昵称首字或占位图标。
+ * 换号时由调用方以 key 重新挂载，重置加载失败状态。
+ */
+function Avatar({ qq, name }: { qq: string; name: string }) {
+  const [failed, setFailed] = useState(false);
+  const initial = Array.from(name)[0];
+  return (
+    <span className="avatar">
+      {initial ? <span aria-hidden="true">{initial}</span> : <UserRound size={18} aria-hidden="true" />}
+      {qq && !failed && (
+        <img
+          src={"https://q1.qlogo.cn/g?b=qq&nk=" + encodeURIComponent(qq) + "&s=100"}
+          alt=""
+          referrerPolicy="no-referrer"
+          decoding="async"
+          onError={() => setFailed(true)}
+        />
+      )}
+    </span>
+  );
+}
+
+/** 侧栏左下角的机器人账号：头像、昵称与连接状态，点击进入 NapCat 设置。 */
+function SidebarAccount() {
+  const runtime = useResource(runtimeResource, 10_000).data;
+  const account = useResource(accountResource, 60_000).data;
+  const known = runtime !== null;
+  const bots = runtime?.napcat.connected ?? [];
+  const expected = runtime?.napcat.expected_bot_id ?? "";
+  // 与后端相同：优先显示配置的账号，否则取第一个在线连接。
+  const bot = bots.includes(expected) ? expected : (bots[0] ?? "");
+  const loaded = account?.bot_id;
+  useEffect(() => {
+    // 机器人上线或换号后立即读取昵称，不等下一次轮询。
+    if (known && loaded !== undefined && loaded !== bot) void accountResource.refresh();
+  }, [known, bot, loaded]);
+  const nickname = loaded === bot ? (account?.nickname ?? "") : "";
+  const status = !known ? "QQ 状态未知" : bots.length ? "QQ 已连接" : "QQ 未连接";
+  const names = bots.map((id) => (id === bot && nickname ? nickname + "（" + id + "）" : id));
   return (
     <a
-      className="sidebar-status"
+      className="sidebar-account"
       href="/settings/napcat"
       onClick={linkHandler("/settings/napcat", () => setNav(false))}
-      title={bots.length ? text + "：" + bots.join("、") : text}
+      title={bots.length ? status + "：" + names.join("、") : status}
     >
-      <StatusDot tone={bots.length ? "success" : known ? "warning" : "neutral"} />
-      <span className="sidebar-status-text">
-        <span>{text}</span>
-        {bots.length > 0 && <span className="muted num">{bots.join("、")}</span>}
+      <span className="sidebar-avatar">
+        <Avatar key={bot} qq={bot} name={nickname} />
+        <StatusDot tone={bots.length ? "success" : known ? "warning" : "neutral"} />
+      </span>
+      <span className="sidebar-account-text">
+        <span className="sidebar-account-name">{nickname || status}</span>
+        {bot && (
+          <span className="muted num">{bots.length > 1 ? bot + " 等 " + bots.length + " 个账号" : bot}</span>
+        )}
       </span>
     </a>
   );
@@ -128,7 +168,7 @@ function Sidebar({ route }: { route: Route }) {
         })}
       </nav>
       <div className="sidebar-foot">
-        <NapcatStatus />
+        <SidebarAccount />
         <IconButton
           icon={ThemeIcon}
           label={"主题：" + themeLabels[theme] + "，点击切换"}

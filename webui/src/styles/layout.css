@@ -127,33 +127,74 @@
   padding-top: 8px;
   border-top: 1px solid var(--border);
 }
-.sidebar-status {
+.sidebar-account {
   display: flex;
   flex: 1;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
-  padding: 6px 8px;
+  padding: 6px;
   border-radius: var(--r);
   color: var(--text-2);
   font-size: var(--fs-sm);
 }
-.sidebar-status:hover {
+.sidebar-account:hover {
   background: var(--surface-2);
   text-decoration: none;
 }
-.sidebar-status-text {
+/* 头像右下角的连接状态点，用侧栏底色描边与头像分开。 */
+.sidebar-avatar {
+  position: relative;
+  flex-shrink: 0;
+}
+.sidebar-avatar .dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 10px;
+  height: 10px;
+  box-shadow: 0 0 0 2px var(--sidebar);
+}
+.sidebar-account:hover .sidebar-avatar .dot {
+  box-shadow: 0 0 0 2px var(--surface-2);
+}
+/* 图片在昵称首字或占位图标之上，加载前和加载失败时露出下层。 */
+.avatar {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+.avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.sidebar-account-text {
   display: flex;
   flex-direction: column;
   min-width: 0;
   line-height: 1.3;
 }
-.sidebar-status-text span {
+.sidebar-account-text span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.sidebar-status-text .muted {
+.sidebar-account-name {
+  color: var(--text);
+  font-weight: 500;
+}
+.sidebar-account-text .muted {
   font-size: var(--fs-xs);
 }
 .nav-scrim {
@@ -511,7 +552,7 @@
   .nav-label,
   .sidebar-search-text,
   .sidebar-search kbd,
-  .sidebar-status-text {
+  .sidebar-account-text {
     display: none;
   }
   .sidebar-search {
@@ -528,9 +569,9 @@
     flex-direction: column;
     align-items: center;
   }
-  .sidebar-status {
+  .sidebar-account {
     justify-content: center;
-    padding: 10px;
+    padding: 4px;
   }
   .content {
     padding: 20px 24px 40px;
