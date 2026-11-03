@@ -9,7 +9,6 @@ import {
   Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { ConversationTab } from "./lib/conversations";
 import { navigate, prefersReducedMotion } from "./lib/navigation";
 import type { Path } from "./lib/types";
 import { fieldId, routeForPath } from "./schema/fields";
@@ -37,7 +36,6 @@ export type Route =
       page: "conversations";
       kind: "group" | "private" | null;
       id: string;
-      tab: ConversationTab;
     }
   | { page: "providers"; id: string }
   | { page: "prompts"; path: string }
@@ -63,14 +61,11 @@ export function parseRoute(location: string): Route {
   // 会话键形如 `机器人:group:群号`，整体编码为一段路径。
   if (head === "sessions" && parts.length <= 2) return { page: "sessions", key: decode(second) };
   if (head === "conversations") {
-    const requested = query.get("tab");
-    const tab: ConversationTab =
-      requested === "permissions" || requested === "model" ? requested : "general";
     if (second === "private" && parts.length === 2)
-      return { page: "conversations", kind: "private", id: "", tab };
+      return { page: "conversations", kind: "private", id: "" };
     if (second === "group" && third && parts.length === 3)
-      return { page: "conversations", kind: "group", id: decode(third), tab };
-    if (!second) return { page: "conversations", kind: null, id: "", tab };
+      return { page: "conversations", kind: "group", id: decode(third) };
+    if (!second) return { page: "conversations", kind: null, id: "" };
   }
   if (head === "providers" && parts.length <= 2) return { page: "providers", id: decode(second) };
   if (head === "prompts" && parts.length === 1)

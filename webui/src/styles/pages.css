@@ -697,6 +697,7 @@ a.activity-scope:hover {
   border: none;
 }
 .model-parts legend {
+  width: 100%;
   margin-bottom: 8px;
   padding: 0;
 }

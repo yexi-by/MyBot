@@ -452,6 +452,30 @@ export const limitsSection: SectionDef = {
   ],
 };
 
+export const promptsSection: SectionDef = {
+  id: "prompts",
+  title: "提示词与知识库",
+  description: "当前会话使用的人格提示词和知识库文件（相对配置目录的路径）。",
+  fields: [
+    {
+      key: "persona_file",
+      label: "人格文件",
+      type: "select",
+      editable: true,
+      options: [],
+      placeholder: "persona.md",
+      help: "决定当前会话的角色设定与说话方式，留空无法保存。",
+    },
+    {
+      key: "knowledge_files",
+      label: "知识库文件",
+      type: "tags",
+      placeholder: "输入或选择知识库文件后按回车",
+      help: "作为背景资料提供给当前会话，按顺序注入；不进入系统指令。",
+    },
+  ],
+};
+
 export const mcpConnectionSection: SectionDef = {
   id: "mcp-connection",
   title: "连接",
@@ -771,6 +795,8 @@ export function defaultConversation(): ObjectValue {
   return {
     enabled: false,
     keywords: [],
+    persona_file: "persona.md",
+    knowledge_files: [],
     model: defaultSessionModel(),
     idle_compaction: defaultIdleCompaction(),
     policy: defaultPolicy(),
@@ -853,33 +879,23 @@ export function fieldInstances(config: ObjectValue): FieldInstance[] {
   for (const [base, route] of conversations) {
     add(wakeSection, base, route);
     add(limitsSection, [...base, "policy"], route);
-    add(sessionModelSection, [...base, "model"], route + "?tab=model");
-    add(idleCompactionSection, [...base, "idle_compaction"], route + "?tab=model");
-    add(compactionModelSection, [...base, "idle_compaction", "model"], route + "?tab=model");
+    add(promptsSection, base, route);
+    add(sessionModelSection, [...base, "model"], route);
+    add(idleCompactionSection, [...base, "idle_compaction"], route);
+    add(compactionModelSection, [...base, "idle_compaction", "model"], route);
   }
   return output;
-}
-
-/** 会话内路径所在的标签页查询串。 */
-function conversationTab(rest: Path): string {
-  const [section, key] = rest.map(String);
-  if (section === "model" || section === "idle_compaction") return "?tab=model";
-  if (section === "policy" && ["categories", "tools", "parameters"].includes(key))
-    return "?tab=permissions";
-  return "";
 }
 
 /** 配置路径对应的页面；用于错误提示和保存记录的跳转。 */
 export function routeForPath(path: Path): string {
   const [head, id] = path;
-  if (head === "groups" && id !== undefined)
-    return "/conversations/group/" + enc(String(id)) + conversationTab(path.slice(2));
-  if (head === "private") return "/conversations/private" + conversationTab(path.slice(1));
+  if (head === "groups" && id !== undefined) return "/conversations/group/" + enc(String(id));
+  if (head === "private") return "/conversations/private";
   if (head === "providers" && id !== undefined) return "/providers/" + enc(String(id));
   if (head === "image") return "/tools/image";
   if (head === "tts") return "/tools/tts";
   if (head === "mcp" && id !== undefined) return "/tools/mcp/" + enc(String(id));
-  if (head === "persona_file" || head === "knowledge_files") return "/prompts";
   if (head === "sandbox") return "/sandbox/settings";
   if (head === "napcat") return "/settings/napcat";
   if (head === "runtime") return "/settings/runtime";
@@ -893,6 +909,8 @@ export function fieldId(path: Path): string {
 
 const conversationParts: Record<string, string> = {
   enabled: "启用",
+  persona_file: "人格文件",
+  knowledge_files: "知识库文件",
   categories: "能力权限",
   tools: "工具权限",
   parameters: "参数限制",
@@ -927,8 +945,6 @@ export function fieldLabel(config: ObjectValue, path: Path): string {
   if (head === "tts") return name ? "语音合成 · " + name : "语音合成";
   if (head === "mcp") return scoped("MCP " + id, path.slice(2), name);
   if (name) return name;
-  if (head === "persona_file") return "人格文件";
-  if (head === "knowledge_files") return "知识库文件";
   return path.join(".");
 }
 
@@ -979,26 +995,30 @@ export function validateClient(config: ObjectValue): { path: Path; message: stri
           errors.push({ path: [...path, "max_length"], message: "最大长度须为不小于 0 的整数" });
       }
   const providers = object(config.providers);
-  for (const [base, conversation] of conversationEntries(config))
+  for (const [base, conversation] of conversationEntries(config)) {
     for (const part of [["model"], ["idle_compaction", "model"]]) {
       const provider = getAt(conversation, [...part, "provider"]);
       if (typeof provider === "string" && provider && !Object.hasOwn(providers, provider))
         errors.push({ path: [...base, ...part, "provider"], message: "所选服务商不存在，请重新选择" });
     }
-  const persona = config.persona_file;
-  if (typeof persona !== "string" || !persona.trim())
-    errors.push({ path: ["persona_file"], message: "请选择人格文件" });
-  const paths: [Path, Json][] = [
-    [["persona_file"], persona ?? null],
-    ...(Array.isArray(config.knowledge_files) ? config.knowledge_files : []).map(
-      (value, index) => [["knowledge_files", index], value] as [Path, Json],
-    ),
-  ];
-  for (const [path, value] of paths)
-    if (
-      typeof value === "string" &&
-      (value.split("/").includes("..") || value.includes(":") || value.startsWith("/") || value.includes("\\"))
-    )
-      errors.push({ path, message: "文件必须位于配置目录内" });
+    const persona = conversation.persona_file;
+    if (typeof persona !== "string" || !persona.trim())
+      errors.push({ path: [...base, "persona_file"], message: "请选择人格文件" });
+    const paths: [Path, Json][] = [
+      [[...base, "persona_file"], persona ?? null],
+      ...(Array.isArray(conversation.knowledge_files) ? conversation.knowledge_files : []).map(
+        (value, index) => [[...base, "knowledge_files", index], value] as [Path, Json],
+      ),
+    ];
+    for (const [path, value] of paths)
+      if (
+        typeof value === "string" &&
+        (value.split("/").includes("..") ||
+          value.includes(":") ||
+          value.startsWith("/") ||
+          value.includes("\\"))
+      )
+        errors.push({ path, message: "文件必须位于配置目录内" });
+  }
   return errors;
 }

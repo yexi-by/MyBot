@@ -336,7 +336,7 @@ export function ToolDrawer({
                 <ul className="chips">
                   {openIn.map((key) => {
                     const scope = accessScope(key, groups);
-                    const to = scope.route + "?tab=permissions";
+                    const to = scope.route;
                     return (
                       <li key={key}>
                         <a className="chip" href={to} onClick={linkHandler(to, onClose)}>

@@ -280,7 +280,7 @@ async def test_only_new_history_is_added_and_persona_updates_without_losing_sess
     store.settings.providers["test"].protocol = protocol
     store.settings.runtime.history_count = 60
     (tmp_path / "knowledge.md").write_text("KNOWLEDGE_ONE", encoding="utf-8")
-    store.settings.knowledge_files = ["knowledge.md"]
+    store.settings.private.knowledge_files = ["knowledge.md"]
     registry = ToolRegistry(lambda: store.settings)
 
     async def read(_context, _arguments):

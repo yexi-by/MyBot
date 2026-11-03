@@ -67,9 +67,23 @@ class IdleCompactionSettings(Model):
 class ConversationSettings(Model):
     enabled: bool = False
     keywords: list[str] = Field(default_factory=list)
+    persona_file: str = "persona.md"
+    knowledge_files: list[str] = Field(default_factory=list)
     model: SessionModelSettings = Field(default_factory=SessionModelSettings)
     idle_compaction: IdleCompactionSettings = Field(default_factory=IdleCompactionSettings)
     policy: Policy = Field(default_factory=Policy)
+
+    @model_validator(mode="after")
+    def check_references(self) -> ConversationSettings:
+        for name in self.persona_paths:
+            path = Path(name)
+            if path.is_absolute() or ".." in path.parts or ":" in name or "\\" in name:
+                raise ValueError("提示词和知识库路径必须位于配置目录内")
+        return self
+
+    @property
+    def persona_paths(self) -> list[str]:
+        return [self.persona_file, *self.knowledge_files]
 
 
 class ProviderSettings(Model):
@@ -244,20 +258,12 @@ class HarnessSettings(Model):
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     image: ImageSettings = Field(default_factory=ImageSettings)
     tts: TTSSettings = Field(default_factory=TTSSettings)
-    persona_file: str = "persona.md"
-    knowledge_files: list[str] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def check_references(self) -> HarnessSettings:
-        for name in self.persona_paths:
-            path = Path(name)
-            if path.is_absolute() or ".." in path.parts or ":" in name or "\\" in name:
-                raise ValueError("提示词和知识库路径必须位于配置目录内")
-        return self
-
-    @property
-    def persona_paths(self) -> list[str]:
-        return [self.persona_file, *self.knowledge_files]
+    def conversations(self) -> list[tuple[list[str], ConversationSettings]]:
+        return [
+            (["private"], self.private),
+            *((["groups", key], value) for key, value in self.groups.items()),
+        ]
 
     def conversation(self, scope: ConversationScope) -> ConversationSettings:
         return (
@@ -268,13 +274,9 @@ class HarnessSettings(Model):
 
     def missing_providers(self) -> list[list[str]]:
         """引用了不存在服务商的字段路径。"""
-        conversations = [
-            (["private"], self.private),
-            *((["groups", key], value) for key, value in self.groups.items()),
-        ]
         return [
             [*base, *section, "provider"]
-            for base, conversation in conversations
+            for base, conversation in self.conversations()
             for section, choice in (
                 (["model"], conversation.model),
                 (["idle_compaction", "model"], conversation.idle_compaction.model),

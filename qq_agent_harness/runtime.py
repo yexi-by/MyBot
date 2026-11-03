@@ -446,7 +446,9 @@ class AgentRuntime:
                 },
                 ensure_ascii=False,
             )
-            persona = self.store.resolve_file(config.persona_file).read_text(encoding="utf-8")
+            persona = self.store.resolve_file(config.conversation(scope).persona_file).read_text(
+                encoding="utf-8"
+            )
             if retained is None or retained.model is None:
                 session = self.session_factory(endpoint, compose_prompt(persona), conversation)
                 if retained is None:
@@ -677,7 +679,7 @@ class AgentRuntime:
         # 资料与当前输入分开：旧历史和知识可以压缩，当前消息及安全规则保持完整。
         knowledge = [
             (path, self.store.resolve_file(path).read_text(encoding="utf-8"))
-            for path in config.knowledge_files
+            for path in config.conversation(scope).knowledge_files
         ]
         if knowledge != retained.knowledge:
             session.add_background(

@@ -100,13 +100,9 @@ export function PermissionEditor({ base, kind }: { base: Path; kind: "group" | "
 
   return (
     <div className="permissions">
-      {conversation.enabled !== true && (
-        <Banner tone="warning" icon={CircleAlert}>
-          会话未启用，以下权限在启用后才会生效。
-        </Banner>
-      )}
       <div className="perm-list card">
         <header className="card-header wrap">
+          <h2>能力权限</h2>
           <SearchInput value={query} onChange={setQuery} placeholder="搜索工具名称" label="搜索工具" />
           <Segmented
             size="sm"

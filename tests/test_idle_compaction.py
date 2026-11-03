@@ -291,7 +291,7 @@ async def test_idle_estimate_counts_tools_when_first_turn_exceeds_budget():
 async def test_idle_compaction_uses_its_own_model_and_keeps_only_persona_and_knowledge(tmp_path):
     store = make_store(tmp_path)
     (tmp_path / "knowledge.md").write_text("KNOWLEDGE_FACT", encoding="utf-8")
-    store.settings.knowledge_files = ["knowledge.md"]
+    store.settings.groups["a"].knowledge_files = ["knowledge.md"]
     enable_idle(
         store,
         ModelChoice(
@@ -475,7 +475,7 @@ async def test_idle_compaction_falls_back_to_session_model_above_threshold(tmp_p
 async def test_knowledge_folded_by_turn_compaction_returns_after_idle_compaction(tmp_path):
     store = make_store(tmp_path)
     (tmp_path / "knowledge.md").write_text("KNOWLEDGE_FACT " * 100, encoding="utf-8")
-    store.settings.knowledge_files = ["knowledge.md"]
+    store.settings.groups["a"].knowledge_files = ["knowledge.md"]
     store.settings.groups["a"].model.max_context_tokens = 8192
     enable_idle(store, ModelChoice(provider="cheap", name="small"))
     registry = ToolRegistry(lambda: store.settings)

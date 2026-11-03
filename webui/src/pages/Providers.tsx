@@ -110,7 +110,7 @@ function ModelCatalog({ id }: { id: string }) {
         ) : models.length ? (
           <>
             <p className="muted small">
-              接口返回 {formatNumber(models.length)} 个模型，可在会话的「模型」页中选择。
+              接口返回 {formatNumber(models.length)} 个模型，可在会话的「会话模型」中选择。
             </p>
             <div className="chips catalog-chips">
               {models.map((model) => (

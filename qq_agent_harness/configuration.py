@@ -101,36 +101,42 @@ class ConfigStore:
                     for path in missing
                 ]
             )
-        for name in settings.persona_paths:
-            path = self.resolve_file(name)
-            if path == self.path:
+        for base, conversation in settings.conversations():
+            if not conversation.persona_file.strip():
                 raise ConfigError(
-                    [
-                        {
-                            "path": [
-                                "persona_file"
-                                if name == settings.persona_file
-                                else "knowledge_files"
-                            ],
-                            "message": "运行配置不能作为提示词或知识库发送给模型",
-                        }
-                    ]
+                    [{"path": [*base, "persona_file"], "message": "人格提示词不能为空"}]
                 )
-            if not path.is_file():
-                raise ConfigError(
-                    [
-                        {
-                            "path": [
-                                "persona_file"
-                                if name == settings.persona_file
-                                else "knowledge_files"
-                            ],
-                            "message": "引用文件不存在",
-                        }
-                    ]
-                )
-            if name == settings.persona_file and not path.read_text(encoding="utf-8").strip():
-                raise ConfigError([{"path": ["persona_file"], "message": "人格提示词不能为空"}])
+            for field_name, names in (
+                ("persona_file", [conversation.persona_file]),
+                ("knowledge_files", conversation.knowledge_files),
+            ):
+                for name in names:
+                    path = self.resolve_file(name)
+                    if path == self.path:
+                        raise ConfigError(
+                            [
+                                {
+                                    "path": [*base, field_name],
+                                    "message": "运行配置不能作为提示词或知识库发送给模型",
+                                }
+                            ]
+                        )
+                    if not path.is_file():
+                        raise ConfigError(
+                            [
+                                {
+                                    "path": [*base, field_name],
+                                    "message": "引用文件不存在",
+                                }
+                            ]
+                        )
+                    if (
+                        field_name == "persona_file"
+                        and not path.read_text(encoding="utf-8").strip()
+                    ):
+                        raise ConfigError(
+                            [{"path": [*base, "persona_file"], "message": "人格提示词不能为空"}]
+                        )
         return settings
 
     def reload(self) -> bool:
@@ -204,7 +210,13 @@ class ConfigStore:
                 raise ValueError(
                     "文本文件超过配置编辑预算；可在运行设置中调整 config_text_max_bytes"
                 )
-            if relative == self.settings.persona_file and not content.strip():
+            if (
+                any(
+                    relative == conversation.persona_file
+                    for _, conversation in self.settings.conversations()
+                )
+                and not content.strip()
+            ):
                 raise ValueError("人格提示词不能为空")
             self._write(path, content)
             return self.read_file(relative)

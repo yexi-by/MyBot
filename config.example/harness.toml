@@ -1,6 +1,4 @@
 # QQ Agent Harness；不要提交真实密钥。
-persona_file = "persona.md"
-knowledge_files = ["knowledge.md"]
 
 [server]
 host = "0.0.0.0"
@@ -42,6 +40,8 @@ store_supported = true
 [private]
 enabled = false
 keywords = []
+persona_file = "persona.md"
+knowledge_files = ["knowledge.md"]
 
 # 会话模型；未填写模型名称时该会话不回复。
 [private.model]
