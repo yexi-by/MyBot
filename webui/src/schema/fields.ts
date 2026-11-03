@@ -678,13 +678,13 @@ export const ttsAccountSection: SectionDef = {
   id: "tts-account",
   title: "服务账号",
   description:
-    "导入 Google Cloud 服务账号密钥 JSON。服务账号需要 Vertex AI User 角色，项目需启用 Vertex AI API。",
+    "支持 Google Cloud 服务账号密钥或包含 service_account 的 Vertex 项目导出 JSON。服务账号需要 Vertex AI User 角色，项目需启用 Vertex AI API。",
   fields: [
     {
       key: "credentials",
       label: "服务账号密钥",
       type: "credentials",
-      help: "私钥只保存在配置文件中，页面不显示。",
+      help: "导出文件中的项目 ID 和区域会一并填入，未提供的设置保持当前值。私钥只保存在配置文件中，页面不显示。",
     },
     {
       key: "project_id",

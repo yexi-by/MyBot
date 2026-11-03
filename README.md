@@ -65,6 +65,8 @@ MCP 调用权限由群策略中的服务分类、具体工具及参数限制决�
 
 语音合成在 WebUI 的“工具 → 语音合成”页配置，目前使用 Vertex（现名 Gemini Enterprise Agent Platform）上的 Gemini TTS：导入 Google Cloud 服务账号密钥 JSON，选择模型、音色、语言代码和区域，保存后立即生效。服务账号需要 Vertex AI User 角色，项目需启用 Vertex AI API 并可结算。私钥只写入 TOML，页面、日志和错误信息都不显示；访问令牌只缓存在内存中，换取令牌固定使用 Google 官方地址，不采用 JSON 中的 `token_uri`。音色由管理员选定且必须填写，Agent 不能更换：可选 30 个内置音色、音色库 ID（如 `zh-cn-concierge-1`）或自定义音色。启用后在会话“能力权限”中开放“语音合成”，Agent 调用 `tts__synthesize`（`text` 逐字朗读，`style` 只控制这句的情绪、语气或语速）得到 `generated_id`，再用 `qq__send_message` 的 `{type: "record", generated_id}` 发送；QQ 语音单独成条，不能附带引用，WAV 由 NapCat 转成 QQ 语音。工具说明把它作为 Agent 用自己声音说话的首选方式，并与 QQ 自带的 AI 语音（`ai_voice`，QQ 提供的角色声线）区分。失败只返回 HTTP 状态、Google 错误枚举和中文提示，不回显服务端原文。页面“试听”按已保存的设置直接合成、不经过 QQ，每次都会产生少量费用。
 
+导入文件和粘贴 JSON 均支持标准服务账号密钥，以及包含 `service_account` 的 Vertex 项目导出格式（该字段可以是对象或 JSON 字符串）。项目导出文件中的非空 `project_id`、`location` 会同步填入项目 ID 和区域；未提供的设置保持当前值，区域仅支持 `global`、`us`、`eu`。配置中只保存提取后的标准服务账号密钥和对应连接设置，不保存导出文件中的标签、禁用状态等额外字段。
+
 “自定义音色”用一两句话描述年龄、性别、嗓音质感、口音和基本语气，经 Vertex Voices API（预览版，只在全球区域提供）生成音色和样音，满意后设为当前音色。音色保存在创建它的 Google Cloud 项目中，一年未使用会自动过期；换项目后只能重新设计，声音也不会完全相同。每次设计都按语音合成费率计费，且不自动重试，避免重复创建；列出、试听样音和删除不计费，正在使用的音色不能删除。自定义音色只能在全球区域使用，选了其他区域时保存会被拒绝。新项目的音色创建配额可能为 0，此时页面会提示到 Google Cloud 控制台的配额页申请提高。
 
 QQ 媒体、合并转发、工作区文件列表均支持分页。`qq__read_media` 与 `qq__save_media_to_workspace` 共用四选一来源：`message_id` 读取消息附件，`user_id` 读取 QQ 用户头像，`group_avatar=true` 读取当前获准目标群头像，`media_url` 读取 QQ 图床图片。图床限制为 `qpic.cn`、`qlogo.cn`、`nt.qq.com.cn` 及其子域名，重定向仍检查域名、公网地址和体积；相册、公告或收藏表情返回的图片 URL 可直接用于读取。媒体先按 `indexes` 选择，再按本页数量读取；嵌套转发使用返回的 `forward_paths` 逐层读取，同一转发的内联副本不会重复注入。

@@ -2,8 +2,9 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Check, ClipboardPaste, Dices, Eye, EyeOff, Plus, Trash2, Upload, X } from "lucide-react";
 import { ApiError, errorMessage, get } from "../lib/api";
-import { change, useConfig } from "../lib/config";
+import { change, changeMany, useConfig } from "../lib/config";
 import { parseServiceAccount } from "../lib/credentials";
+import type { ServiceAccountSummary } from "../lib/credentials";
 import { formatNumber } from "../lib/format";
 import { getAt, object } from "../lib/types";
 import type { Json, Path } from "../lib/types";
@@ -168,7 +169,7 @@ export function ServiceAccountInput({
 }: {
   id: string;
   value: Json | undefined;
-  onChange: (value: Json) => void;
+  onChange: (value: string, settings?: ServiceAccountSummary["settings"]) => void;
 }) {
   const text = typeof value === "string" ? value : "";
   const summary = useMemo(() => (text.trim() ? parseServiceAccount(text) : null), [text]);
@@ -179,8 +180,8 @@ export function ServiceAccountInput({
       toast("无法导入：" + parsed, "danger");
       return;
     }
-    onChange(parsed.compact);
-    toast("已导入服务账号 " + parsed.email, "success");
+    onChange(parsed.compact, parsed.settings);
+    toast("已导入服务账号 " + parsed.email + (Object.keys(parsed.settings).length ? "，已同步项目设置" : ""), "success");
   };
   const pick = async (selected: File | undefined) => {
     if (!selected) return;
@@ -194,7 +195,7 @@ export function ServiceAccountInput({
   const paste = async () => {
     const raw = await prompt({
       title: "粘贴服务账号 JSON",
-      message: "粘贴从 Google Cloud 下载的服务账号密钥 JSON 全文。",
+      message: "支持 Google Cloud 服务账号密钥，或包含 service_account 的 Vertex 项目导出 JSON。导出文件中的项目 ID 和区域会一并填入。",
       label: "服务账号密钥 JSON",
       placeholder: '{"type": "service_account", ...}',
       confirmLabel: "导入",
@@ -890,7 +891,16 @@ export function ConfigField({
       );
     }
     case "credentials":
-      return shell(<ServiceAccountInput id={id} value={value} onChange={update} />);
+      return shell(
+        <ServiceAccountInput
+          id={id}
+          value={value}
+          onChange={(next, settings) => changeMany([
+            [path, next],
+            ...Object.entries(settings ?? {}).map(([key, entry]): [Path, Json] => [[...base, key], entry]),
+          ])}
+        />,
+      );
     case "segmented":
       return shell(
         <Segmented
