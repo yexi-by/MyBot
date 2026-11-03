@@ -874,7 +874,8 @@ export function ConfigField({
         <SecretInput id={id} value={value} onChange={update} generate={def.generate} invalid={!!error} label={def.label} />,
       );
     case "select": {
-      const options = def.options ?? [];
+      // 页面可以追加运行时读取的候选项，例如项目中的自定义音色。
+      const options = [...(def.options ?? []), ...(suggestions ?? [])];
       return shell(
         <Combobox
           id={id}

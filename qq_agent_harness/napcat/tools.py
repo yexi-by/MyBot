@@ -398,13 +398,14 @@ ACTION_SPECS = (
     ),
     ActionSpec(
         "get_ai_characters",
-        "查询群 AI 语音可用声线列表（拿到 character 后可在 send_message 中发 ai_voice）",
+        "查询 QQ 群 AI 语音的角色声线（QQ 自带配音，不是你自己的声音；可用 tts__synthesize 时，"
+        "用自己的声音说话应优先用它）。拿到 character 后可在 send_message 中发 ai_voice",
         a.AICharacters,
         "media",
     ),
     ActionSpec(
         "get_ai_record",
-        "生成 AI 语音音频资源（仅在需要读取音频数据时使用；直接发送语音请用 send_message 的 ai_voice）",
+        "生成 QQ AI 语音音频资源（仅在需要读取音频数据时使用；直接发送 QQ AI 语音请用 send_message 的 ai_voice）",
         a.AIRecord,
         "media",
         deferred=True,
@@ -1269,7 +1270,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         (
             "qq__send_message",
             "发送消息",
-            "向 QQ 发送消息或文件的唯一入口。按 parts 顺序组合纯文本（不支持 Markdown 语法）、引用回复、@成员、表情、图片/语音/视频/文件、戳一戳、AI 语音（type=ai_voice）或合并转发；语音（record）单独成条。",
+            "向 QQ 发送消息或文件的唯一入口。按 parts 顺序组合纯文本（不支持 Markdown 语法）、引用回复、@成员、表情、图片/语音/视频/文件、戳一戳、QQ AI 语音（type=ai_voice，QQ 自带角色声线，不是你的声音）或合并转发；语音（record）单独成条。",
             model_binding(a.SendMessage, send),
             "messages",
         ),

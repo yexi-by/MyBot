@@ -21,7 +21,14 @@ from test_napcat import GROUP, Bot
 
 from qq_agent_harness import contracts
 from qq_agent_harness.configuration import ConfigError, ConfigStore
-from qq_agent_harness.contracts import GeneratedMedia, JsonObject, ToolContext, remember_generated
+from qq_agent_harness.contracts import (
+    GeneratedMedia,
+    JsonObject,
+    JsonValue,
+    ToolContext,
+    ToolResult,
+    remember_generated,
+)
 from qq_agent_harness.napcat import build_tools as build_qq_tools
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.sandbox import RunnerClient
@@ -34,7 +41,7 @@ from qq_agent_harness.settings import (
     TTSSettings,
     VertexTTSSettings,
 )
-from qq_agent_harness.tts import TOKEN_URL
+from qq_agent_harness.tts import TOKEN_URL, AccessTokens, design_voice, list_voices
 from qq_agent_harness.tts import build_tools as build_tts_tools
 from qq_agent_harness.web import create_app
 
@@ -42,6 +49,7 @@ VERTEX_PATH = (
     "/v1/projects/demo-project-123/locations/global"
     "/publishers/google/models/gemini-3.8-flash-tts:generateContent"
 )
+VOICES_PATH = "/v1beta1/projects/demo-project-123/locations/global/voices"
 SECRET_TEXT = "只该出现在请求正文里的台词"
 
 
@@ -160,7 +168,7 @@ async def test_signed_assertion_request_format_cached_token_and_record_send() ->
         first = await registry.execute(
             context,
             "tts__synthesize",
-            {"text": "你好呀 <short pause> 晒太阳吗", "style": "慵懒、俏皮", "voice": "Puck"},
+            {"text": "你好呀 <short pause> 晒太阳吗", "style": "慵懒、俏皮"},
         )
         second = await registry.execute(context, "tts__synthesize", {"text": "第二句"})
 
@@ -180,7 +188,7 @@ async def test_signed_assertion_request_format_cached_token_and_record_send() ->
     assert [request.headers["authorization"] for request in vertex_requests] == [
         "Bearer ya29.first-token"
     ] * 2
-    # 风格放在 speechMetadata，不发送会被 3.8 TTS 拒绝的采样参数；未指定音色时用默认音色。
+    # 风格放在 speechMetadata，不发送会被 3.8 TTS 拒绝的采样参数；音色固定取自配置。
     assert json.loads(vertex_requests[0].content) == {
         "contents": [
             {
@@ -195,7 +203,7 @@ async def test_signed_assertion_request_format_cached_token_and_record_send() ->
         ],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
-            "speechConfig": {"voiceConfig": {"voice": "Puck"}, "languageCode": "cmn-CN"},
+            "speechConfig": {"voiceConfig": {"voice": "Kore"}, "languageCode": "cmn-CN"},
         },
     }
     assert json.loads(vertex_requests[1].content)["generationConfig"]["speechConfig"] == {
@@ -207,7 +215,7 @@ async def test_signed_assertion_request_format_cached_token_and_record_send() ->
     assert generated_id.startswith("tts_")
     assert first.data["mime_type"] == "audio/wav"
     assert first.data["duration_seconds"] == 0.5
-    assert first.data["voice"] == "Puck"
+    assert "voice" not in first.data
     assert context.generated_media[generated_id].content == audio
 
     sent = await registry.execute(
@@ -247,6 +255,7 @@ async def test_raw_pcm_is_wrapped_and_project_override_routes_to_multi_region() 
     config = TTSSettings(
         enabled=True,
         model="gemini-3.8-flash-lite-tts",
+        voice="Charon",
         vertex=VertexTTSSettings(
             credentials=service_account()[0], project_id="other-project-77", location="us"
         ),
@@ -261,9 +270,10 @@ async def test_raw_pcm_is_wrapped_and_project_override_routes_to_multi_region() 
         "/v1/projects/other-project-77/locations/us"
         "/publishers/google/models/gemini-3.8-flash-lite-tts:generateContent"
     )
-    # 配置未设置音色与语言时不发送 speechConfig。
-    assert "speechConfig" not in json.loads(requests[0].content)["generationConfig"]
-    assert "voice" not in result.data
+    # 未配置语言时只发送音色，由模型识别语言。
+    assert json.loads(requests[0].content)["generationConfig"]["speechConfig"] == {
+        "voiceConfig": {"voice": "Charon"}
+    }
     content = context.generated_media[str(result.data["generated_id"])].content
     with wave.open(io.BytesIO(content), "rb") as reader:
         assert (reader.getnchannels(), reader.getsampwidth(), reader.getframerate()) == (
@@ -407,6 +417,10 @@ async def test_tool_is_gated_by_config_and_checks_workspace_and_cancellation_fir
         settings.tts.vertex.credentials = ""
         assert registry.permitted(GROUP, tool) == (False, "语音合成尚未导入服务账号")
         settings.tts.vertex.credentials = service_account()[0]
+        # 音色由管理员固定；没有选定音色时工具不可用，不退回接口默认音色。
+        settings.tts.voice = ""
+        assert registry.permitted(GROUP, tool) == (False, "语音合成尚未选择音色")
+        settings.tts.voice = "Kore"
         settings.tts.enabled = False
         denied = await registry.execute(context, "tts__synthesize", {"text": "未启用"})
         assert denied.error_type == "PermissionDenied"
@@ -440,6 +454,246 @@ async def test_tool_is_gated_by_config_and_checks_workspace_and_cancellation_fir
     assert saved.status == "ok" and isinstance(saved.data, dict)
     assert saved.data["workspace_path"] == "voice/a.wav"
     assert written == {"voice/a.wav": wav_bytes()}
+
+
+async def test_agent_cannot_choose_the_voice() -> None:
+    requests: list[httpx.Request] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return token_response()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as client:
+        registry, context, _, _ = setup_tts(client)
+        definition = next(
+            item for item in registry.definitions(context) if item["name"] == "tts__synthesize"
+        )
+        parameters = definition["parameters"]
+        assert isinstance(parameters, dict) and isinstance(parameters["properties"], dict)
+        assert set(parameters["properties"]) == {"text", "style", "workspace_path"}
+        result = await registry.execute(
+            context, "tts__synthesize", {"text": "换个声音", "voice": "Puck"}
+        )
+    assert result.status == "error" and result.error_type == "InvalidArguments"
+    assert not requests
+
+
+def test_custom_voice_requires_global_location(tmp_path: Path) -> None:
+    store = ConfigStore(write_config(tmp_path, {"enabled": False}))
+    config = store.snapshot()["config"]
+    assert isinstance(config, dict) and isinstance(config["tts"], dict)
+    config["tts"]["voice"] = "voice_abc123"
+    config["tts"]["vertex"] = {"credentials": service_account()[0], "location": "us"}
+    with pytest.raises(ConfigError) as caught:
+        store.save(config, store.last_sha)
+    assert caught.value.issues == [
+        {"path": ["tts", "vertex", "location"], "message": "自定义音色只能在全球区域使用"}
+    ]
+
+    # 内置音色和音色库音色不受区域限制；自定义音色改用全球区域后可以保存。
+    config["tts"]["voice"] = "zh-cn-concierge-1"
+    store.save(config, store.last_sha)
+    config["tts"]["voice"] = "voice_abc123"
+    config["tts"]["vertex"]["location"] = "global"
+    store.save(config, store.last_sha)
+    assert ConfigStore(store.path).settings.tts.voice == "voice_abc123"
+
+
+def test_console_designs_lists_auditions_and_deletes_voices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pcm = b"\x03\x00" * 12_000
+    sample = {
+        "mime_type": "audio/l16; rate=24000; channels=1",
+        "data": base64.b64encode(pcm).decode("ascii"),
+    }
+    seen: list[tuple[str, str, str]] = []
+    designs: list[JsonValue] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == TOKEN_URL:
+            return token_response()
+        # 音色接口固定走全球区域的 v1beta1。
+        assert request.url.host == "aiplatform.googleapis.com"
+        assert request.url.path.startswith(VOICES_PATH)
+        seen.append((request.method, request.url.path, request.url.query.decode()))
+        if request.method == "POST":
+            designs.append(json.loads(request.content))
+            return httpx.Response(200, json={"id": "voice_new01", "sample_audio": sample})
+        if request.method == "DELETE":
+            return httpx.Response(200, json={})
+        if request.url.path.endswith("/voice_new01"):
+            return httpx.Response(200, json={"id": "voice_new01", "sample_audio": sample})
+        if "page_token" not in request.url.params:
+            return httpx.Response(
+                200,
+                json={
+                    "voices": [
+                        {"id": "voice_a1", "type": "VOICE_TYPE_PROMPTED", "display_name": " 小夏 "},
+                        # 不符合格式的 ID 会拼进请求路径，必须忽略。
+                        {"id": "../voice_x", "type": "VOICE_TYPE_PROMPTED"},
+                        {"id": "Kore", "type": "VOICE_TYPE_PREBUILT"},
+                    ],
+                    "next_page_token": "p2",
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "voices": [
+                    {"id": "voice_b2", "type": "VOICE_TYPE_REPLICATED", "displayName": "复刻"}
+                ]
+            },
+        )
+
+    real_client: Callable[..., httpx.AsyncClient] = httpx.AsyncClient
+    monkeypatch.setattr(
+        "qq_agent_harness.tts.httpx.AsyncClient",
+        lambda **kwargs: real_client(**{**kwargs, "transport": httpx.MockTransport(serve)}),
+    )
+    config = write_config(
+        tmp_path,
+        {
+            "model": "gemini-3.8-flash-tts",
+            "voice": "voice_a1",
+            "vertex": {"credentials": service_account()[0]},
+        },
+    )
+    with TestClient(create_app(config, connect_mcp=False)) as client:
+        listed = client.get("/api/tts/voices")
+        assert listed.status_code == 200
+        assert listed.json() == {
+            "voices": [
+                {"id": "voice_a1", "name": "小夏", "kind": "prompted"},
+                {"id": "voice_b2", "name": "复刻", "kind": "replicated"},
+            ]
+        }
+        assert seen == [
+            ("GET", VOICES_PATH, "type=prompted&type=replicated"),
+            ("GET", VOICES_PATH, "type=prompted&type=replicated&page_token=p2"),
+        ]
+
+        designed = client.post(
+            "/api/tts/voice-design",
+            json={"name": " 小冬 ", "description": "二十多岁的女声，清亮柔和，语速适中。"},
+        )
+        assert designed.status_code == 200
+        body = designed.json()
+        assert (body["id"], body["name"]) == ("voice_new01", "小冬")
+        assert designs == [
+            {
+                "store": True,
+                "voice": {
+                    "type": "VOICE_TYPE_PROMPTED",
+                    "displayName": "小冬",
+                    "prompted": {"input": "二十多岁的女声，清亮柔和，语速适中。"},
+                },
+            }
+        ]
+        # 接口给出的裸 PCM 样音补成 WAV 后返回。
+        with wave.open(io.BytesIO(base64.b64decode(body["sample"])), "rb") as reader:
+            assert (reader.getframerate(), reader.readframes(reader.getnframes())) == (24_000, pcm)
+
+        audition = client.get("/api/tts/voices/voice_new01/sample")
+        assert audition.status_code == 200 and audition.headers["content-type"] == "audio/wav"
+
+        seen.clear()
+        current = client.delete("/api/tts/voices/voice_a1")
+        assert current.status_code == 409 and "正在使用" in current.json()["detail"]
+        invalid = client.delete("/api/tts/voices/bad.id")
+        assert invalid.status_code == 400
+        assert not seen
+        deleted = client.delete("/api/tts/voices/voice_b2")
+        assert deleted.status_code == 200
+        assert seen == [("DELETE", VOICES_PATH + "/voice_b2", "")]
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        ("timeout", "音色接口连接失败（ReadTimeout）"),
+        ("unavailable", "音色接口返回 HTTP 503；UNAVAILABLE：服务暂时不可用"),
+        ("quota", "RESOURCE_EXHAUSTED / RATE_LIMIT_EXCEEDED：项目的音色创建配额不足"),
+    ],
+)
+async def test_voice_design_is_never_retried_and_errors_stay_sanitized(
+    failure: str,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("qq_agent_harness.tts.asyncio.sleep", fast_sleep)
+    posts = 0
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        if str(request.url) == TOKEN_URL:
+            return token_response()
+        posts += 1
+        if failure == "timeout":
+            raise httpx.ReadTimeout("slow " + SECRET_TEXT, request=request)
+        if failure == "unavailable":
+            return httpx.Response(
+                503, json={"error": {"status": "UNAVAILABLE", "message": SECRET_TEXT}}
+            )
+        return httpx.Response(
+            429,
+            json={
+                "error": {
+                    "code": 429,
+                    "status": "RESOURCE_EXHAUSTED",
+                    "message": "Quota exceeded for " + SECRET_TEXT,
+                    "details": [
+                        {
+                            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                            "reason": "RATE_LIMIT_EXCEEDED",
+                            "metadata": {
+                                "quota_metric": "aiplatform.googleapis.com/voice_creations",
+                                "consumer": "projects/" + SECRET_TEXT,
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+
+    caplog.set_level(logging.INFO)
+    config = TTSSettings(max_retries=3, vertex=VertexTTSSettings(credentials=service_account()[0]))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as client:
+        result = await design_voice(config, "小夏", "女声", tokens=AccessTokens(), client=client)
+
+    # 创建按次计费，超时或服务端错误后可能已经创建，重试会重复创建。
+    assert posts == 1
+    assert isinstance(result, ToolResult) and result.status == "error"
+    assert expected in result.message
+    logged = " ".join(f"{record.getMessage()} {record.__dict__}" for record in caplog.records)
+    assert SECRET_TEXT not in result.message and SECRET_TEXT not in logged
+
+
+async def test_voice_listing_retries_transient_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("qq_agent_harness.tts.asyncio.sleep", fast_sleep)
+    responses = iter(
+        [
+            httpx.Response(503, json={"error": {"status": "UNAVAILABLE"}}),
+            # 项目里还没有自定义音色时，接口返回空对象。
+            httpx.Response(200, json={}),
+        ]
+    )
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == TOKEN_URL:
+            return token_response()
+        return next(responses)
+
+    config = TTSSettings(max_retries=1, vertex=VertexTTSSettings(credentials=service_account()[0]))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as client:
+        assert await list_voices(config, tokens=AccessTokens(), client=client) == []
 
 
 async def test_generated_media_types_are_checked_before_any_send() -> None:
@@ -596,3 +850,12 @@ def test_console_preview_returns_wav_and_sanitized_errors(
     with TestClient(create_app(empty, connect_mcp=False)) as client:
         missing = client.post("/api/tts/preview", json={"text": "试听"})
         assert missing.status_code == 400 and missing.json()["detail"] == "请先导入服务账号"
+
+    # 没有选定音色时不退回接口默认音色，试听也要先选音色。
+    silent = write_config(
+        tmp_path,
+        {"model": "gemini-3.8-flash-tts", "vertex": {"credentials": service_account()[0]}},
+    )
+    with TestClient(create_app(silent, connect_mcp=False)) as client:
+        missing = client.post("/api/tts/preview", json={"text": "试听"})
+        assert missing.status_code == 400 and missing.json()["detail"] == "请先选择音色"

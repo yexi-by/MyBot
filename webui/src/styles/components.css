@@ -1836,3 +1836,54 @@ button.save-danger:hover {
     display: none;
   }
 }
+.input.textarea {
+  height: auto;
+  min-height: 76px;
+  padding: 8px 10px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.voice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 20px 16px;
+  border-top: 1px solid var(--border);
+}
+.voice-list h3 {
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+.voice-list ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.voice-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.voice-list li:first-child {
+  border-top: none;
+}
+.voice-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.voice-row .grow {
+  display: flex;
+  /* 名称至少保留 180px，窄屏时操作按钮换到下一行。 */
+  flex: 1 1 180px;
+  flex-direction: column;
+  gap: 2px;
+}
+.voice-row .mono {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}

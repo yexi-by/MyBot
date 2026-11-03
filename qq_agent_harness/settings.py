@@ -19,6 +19,8 @@ _PROJECT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _VOICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _LANGUAGE_CODE = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*")
+# 设计或复刻得到的自定义音色 ID 前缀；这类音色只在全球区域可用。
+CUSTOM_VOICE_PREFIXES = ("voice_", "voicekey_")
 
 
 class ParameterRule(Model):
@@ -272,8 +274,9 @@ class TTSSettings(Model):
     enabled: bool = False
     protocol: Literal["vertex_gemini"] = "vertex_gemini"
     model: str = ""
-    # 留空时不指定音色与语言，由接口使用默认音色并自动识别语言。
+    # 音色由管理员固定，Agent 不能更换：内置音色名、音色库 ID 或自定义音色 ID。
     voice: str = ""
+    # 留空时由模型根据文本识别语言。
     language_code: str = ""
     timeout: float = Field(default=120, gt=0)
     max_retries: int = Field(default=3, ge=0)
@@ -301,6 +304,9 @@ class TTSSettings(Model):
             raise ValueError("语言代码应为 BCP-47 格式，例如 cmn-CN、en-US")
         return value
 
+    def custom_voice(self) -> bool:
+        return self.voice.startswith(CUSTOM_VOICE_PREFIXES)
+
     def unavailable_reason(self) -> str:
         if not self.enabled:
             return "尚未启用语音合成"
@@ -308,6 +314,8 @@ class TTSSettings(Model):
             return "语音合成尚未导入服务账号"
         if not self.model:
             return "语音合成尚未选择模型"
+        if not self.voice:
+            return "语音合成尚未选择音色"
         return ""
 
 

@@ -101,6 +101,10 @@ class ConfigStore:
                     for path in missing
                 ]
             )
+        if settings.tts.custom_voice() and settings.tts.vertex.location != "global":
+            raise ConfigError(
+                [{"path": ["tts", "vertex", "location"], "message": "自定义音色只能在全球区域使用"}]
+            )
         for name in settings.persona_paths:
             path = self.resolve_file(name)
             if path == self.path:

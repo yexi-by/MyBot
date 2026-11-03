@@ -106,7 +106,8 @@ max_retries = 3
 
 [image.headers]
 
-# 语音合成：目前支持 Vertex 上的 Gemini TTS；voice 留空使用接口默认音色，language_code 留空自动识别。
+# 语音合成：目前支持 Vertex 上的 Gemini TTS。voice 是 Agent 固定使用的音色，必须选定，Agent 不能更换；
+# 可填内置音色名、音色库 ID 或在 WebUI 设计的自定义音色 ID（voice_…）。language_code 留空自动识别。
 [tts]
 enabled = false
 protocol = "vertex_gemini"
@@ -117,7 +118,7 @@ timeout = 120.0
 max_retries = 3
 
 # credentials 是服务账号密钥 JSON 原文，建议在 WebUI 中导入；project_id 留空时使用 JSON 中的项目。
-# location 可选 global、us、eu。
+# location 可选 global、us、eu；自定义音色只能用 global。
 [tts.vertex]
 credentials = ""
 project_id = ""

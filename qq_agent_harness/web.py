@@ -1,7 +1,9 @@
 """配置控制台和反向 WebSocket 接入，同端口提供 API 与前端。"""
 
 import asyncio
+import base64
 import os
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -29,8 +31,17 @@ from .runtime import AgentRuntime, SessionBusy
 from .sandbox.client import RunnerClient
 from .sandbox.tools import CATEGORY_LABELS as SANDBOX_CATEGORIES
 from .sandbox.tools import build_tools as sandbox_tools
+from .settings import TTSSettings
 from .tts import CATEGORY_LABELS as TTS_CATEGORIES
-from .tts import VOICE_PATTERN, AccessTokens, synthesize_speech
+from .tts import (
+    VOICE_PATTERN,
+    AccessTokens,
+    delete_voice,
+    design_voice,
+    list_voices,
+    synthesize_speech,
+    voice_sample,
+)
 from .tts import build_tools as tts_tools
 
 
@@ -66,6 +77,12 @@ class PreviewSpeech(Model):
     text: str = Field(min_length=1, max_length=200)
     style: str | None = Field(default=None, min_length=1, max_length=200)
     voice: str | None = Field(default=None, pattern=VOICE_PATTERN)
+
+
+class DesignVoice(Model):
+    name: str = Field(min_length=1, max_length=40)
+    # 官方建议用一两句话描述年龄、性别、嗓音质感、口音和基本语气。
+    description: str = Field(min_length=1, max_length=500)
 
 
 def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
@@ -507,27 +524,84 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
         model_cache["__image__"] = (time.monotonic() + 30, fingerprint, ids)
         return {"models": [model for model in ids]}
 
-    @app.post("/api/tts/preview", response_model=None)
-    async def tts_preview(request: PreviewSpeech) -> Response:
-        # 按已保存的配置合成一小段，不经过 QQ；只返回音频，不写日志或文件。
+    def speech_account() -> TTSSettings:
+        # 试听与音色管理都按已保存的配置访问 Vertex，不要求先启用语音合成。
         config = store.settings.tts
         if not config.vertex.credentials.strip():
             raise HTTPException(400, "请先导入服务账号")
+        return config
+
+    def voice_id(value: str) -> str:
+        # 音色 ID 会拼进 Voices API 路径，只接受字母、数字、下划线和连字符。
+        if not re.fullmatch(VOICE_PATTERN, value):
+            raise HTTPException(400, "音色 ID 无效")
+        return value
+
+    def wav(audio: bytes) -> Response:
+        return Response(audio, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/tts/preview", response_model=None)
+    async def tts_preview(request: PreviewSpeech) -> Response:
+        # 按已保存的配置合成一小段，不经过 QQ；只返回音频，不写日志或文件。
+        config = speech_account()
         if not config.model:
             raise HTTPException(400, "请先选择模型")
+        voice = request.voice or config.voice
+        if not voice:
+            raise HTTPException(400, "请先选择音色")
         result = await synthesize_speech(
             config,
             request.text,
             request.style,
-            request.voice or config.voice or None,
+            voice,
             tokens=speech_tokens,
             max_bytes=startup.napcat.media_max_bytes,
         )
         if isinstance(result, ToolResult):
             raise HTTPException(502, result.message)
-        return Response(
-            result.content, media_type="audio/wav", headers={"Cache-Control": "no-store"}
-        )
+        return wav(result.content)
+
+    @app.get("/api/tts/voices")
+    async def tts_voices() -> JsonObject:
+        result = await list_voices(speech_account(), tokens=speech_tokens)
+        if isinstance(result, ToolResult):
+            raise HTTPException(502, result.message)
+        return {
+            "voices": [{"id": item.id, "name": item.name, "kind": item.kind} for item in result]
+        }
+
+    @app.post("/api/tts/voice-design")
+    async def tts_design_voice(request: DesignVoice) -> JsonObject:
+        # 每次设计都会计费并在项目中保存一个音色；样音随结果返回，不落盘。
+        name, description = request.name.strip(), request.description.strip()
+        if not name or not description:
+            raise HTTPException(400, "请填写音色名称和描述")
+        result = await design_voice(speech_account(), name, description, tokens=speech_tokens)
+        if isinstance(result, ToolResult):
+            raise HTTPException(502, result.message)
+        sample = result.sample
+        return {
+            "id": result.id,
+            "name": result.name,
+            "sample": base64.b64encode(sample.content).decode("ascii") if sample else None,
+        }
+
+    @app.get("/api/tts/voices/{voice}/sample", response_model=None)
+    async def tts_voice_sample(voice: str) -> Response:
+        result = await voice_sample(speech_account(), voice_id(voice), tokens=speech_tokens)
+        if isinstance(result, ToolResult):
+            raise HTTPException(502, result.message)
+        return wav(result.content)
+
+    @app.delete("/api/tts/voices/{voice}")
+    async def tts_delete_voice(voice: str) -> JsonObject:
+        config = speech_account()
+        if voice_id(voice) == config.voice:
+            raise HTTPException(409, "正在使用的音色不能删除，请先换成其他音色")
+        result = await delete_voice(config, voice, tokens=speech_tokens)
+        if isinstance(result, ToolResult):
+            raise HTTPException(502, result.message)
+        return {"deleted": voice}
 
     @app.post("/api/system/{operation}")
     async def power(operation: Literal["restart", "shutdown"]) -> JsonObject:

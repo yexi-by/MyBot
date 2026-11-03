@@ -67,6 +67,12 @@ _GOOGLE_REASON_HINTS = {
     "RATE_LIMIT_EXCEEDED": "请求频率超限",
     "RESOURCE_EXHAUSTED": "配额已用尽",
 }
+# 配额指标白名单；命中时给出比频率超限更具体的处理方法。
+_GOOGLE_QUOTA_HINTS = {
+    "aiplatform.googleapis.com/voice_creations": (
+        "项目的音色创建配额不足；配额为 0 时需在 Google Cloud 控制台的配额页申请提高"
+    ),
+}
 
 
 def google_error_metadata(data: JsonObject) -> str:
@@ -76,14 +82,23 @@ def google_error_metadata(data: JsonObject) -> str:
         return ""
     status = error.get("status")
     status = status if isinstance(status, str) and status in _GOOGLE_STATUS_HINTS else ""
-    reason = ""
+    reason = quota = ""
     details = error.get("details")
     for detail in details if isinstance(details, list) else []:
-        value = detail.get("reason") if isinstance(detail, dict) else None
-        if isinstance(value, str) and value in _GOOGLE_REASON_HINTS:
+        if not isinstance(detail, dict):
+            continue
+        value = detail.get("reason")
+        if not reason and isinstance(value, str) and value in _GOOGLE_REASON_HINTS:
             reason = value
-            break
-    hint = _GOOGLE_REASON_HINTS.get(reason) or _GOOGLE_STATUS_HINTS.get(status, "")
+        metadata = detail.get("metadata")
+        metric = metadata.get("quota_metric") if isinstance(metadata, dict) else None
+        if isinstance(metric, str) and metric in _GOOGLE_QUOTA_HINTS:
+            quota = metric
+    hint = (
+        _GOOGLE_QUOTA_HINTS.get(quota)
+        or _GOOGLE_REASON_HINTS.get(reason)
+        or _GOOGLE_STATUS_HINTS.get(status, "")
+    )
     label = " / ".join(part for part in (status, reason) if part)
     return f"{label}：{hint}" if label else ""
 

@@ -1,12 +1,37 @@
-import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronUp, CircleAlert, ExternalLink, Play, Plug, Plus, Trash2, Wrench } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  CircleAlert,
+  ExternalLink,
+  Play,
+  Plug,
+  Plus,
+  RefreshCw,
+  Trash2,
+  WandSparkles,
+  Wrench,
+} from "lucide-react";
 import { Combobox } from "../components/Combobox";
 import { ConfigSection, FieldShell } from "../components/form";
 import { Menu } from "../components/Menu";
-import { Badge, Banner, Button, EmptyState, Segmented, Spinner, StatusDot, Switch, Tabs } from "../components/primitives";
+import {
+  Badge,
+  Banner,
+  Button,
+  EmptyState,
+  IconButton,
+  Segmented,
+  Spinner,
+  StatusDot,
+  Switch,
+  Tabs,
+} from "../components/primitives";
 import { DetailHeader, MasterDetail, PageHeader, SearchInput } from "../components/shell";
 import { ToolDrawer } from "../components/ToolDrawer";
-import { change, save, useConfig } from "../lib/config";
+import { errorMessage, get, post, request } from "../lib/api";
+import { change, getConfig, save, useConfig } from "../lib/config";
 import { parseServiceAccount } from "../lib/credentials";
 import { accessScope } from "../lib/conversations";
 import { coverageState, mcpState, toolScopes } from "../lib/labels";
@@ -34,6 +59,7 @@ import {
   ttsVoiceOptions,
   ttsVoiceSection,
 } from "../schema/fields";
+import type { Option } from "../schema/fields";
 
 type ToolsRoute = Extract<Route, { page: "tools" }>;
 const enc = encodeURIComponent;
@@ -612,27 +638,314 @@ function ImageGeneration() {
   );
 }
 
+/** 按已保存的设置访问 Vertex；有未保存的语音合成修改时先保存。 */
+async function saveSpeechSettings(): Promise<boolean> {
+  return !getConfig().changed.some((path) => path[0] === "tts") || (await save());
+}
+
+/** 读取失败响应中可展示的中文原因。 */
+async function failureDetail(response: Response): Promise<string> {
+  const payload: unknown = await response.json().catch(() => ({}));
+  const detail = payload && typeof payload === "object" && "detail" in payload ? payload.detail : null;
+  return typeof detail === "string" ? detail : "请求失败（HTTP " + response.status + "）";
+}
+
+/** 持有一段录音的对象 URL；换新录音或离开页面时释放占用的内存。 */
+function useAudioUrl(): [string | null, (audio: Blob | null) => void] {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(
+    () => () => {
+      if (url) URL.revokeObjectURL(url);
+    },
+    [url],
+  );
+  return [url, (audio) => setUrl(audio ? URL.createObjectURL(audio) : null)];
+}
+
+interface CustomVoice {
+  id: string;
+  name: string;
+  kind: string;
+}
+
+const voiceKind = (voice: CustomVoice) => (voice.kind === "replicated" ? "复刻音色" : "设计音色");
+const voiceOptions = (voices: CustomVoice[]): Option[] =>
+  voices.map((voice) => ({ value: voice.id, label: voice.name + " · " + voiceKind(voice) }));
+
+/** 项目中的自定义音色；按已保存的凭据和项目读取，二者变更后重新读取。 */
+function useCustomVoices() {
+  const vertex = object(object(useConfig().base.tts).vertex);
+  const ready = typeof vertex.credentials === "string" && vertex.credentials.trim() !== "";
+  const key = JSON.stringify([vertex.credentials, vertex.project_id]);
+  const [voices, setVoices] = useState<CustomVoice[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const ticket = useRef(0);
+  const reload = useCallback(async () => {
+    const current = ++ticket.current;
+    if (!ready) {
+      setVoices([]);
+      setError("");
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const result = await get<{ voices: CustomVoice[] }>("/api/tts/voices");
+      if (current !== ticket.current) return;
+      setVoices(result.voices);
+      setError("");
+    } catch (failure) {
+      if (current === ticket.current) setError("无法读取自定义音色：" + errorMessage(failure));
+    } finally {
+      if (current === ticket.current) setLoading(false);
+    }
+  }, [ready]);
+  useEffect(() => {
+    void reload();
+    return () => {
+      ticket.current++;
+    };
+  }, [reload, key]);
+  return { ready, voices, loading, error, reload };
+}
+
+/** 设计自定义音色并管理项目中保存的音色；音色由管理员选定，Agent 不能更换。 */
+function CustomVoices({ list }: { list: ReturnType<typeof useCustomVoices> }) {
+  const tts = object(useConfig().draft.tts);
+  const current = typeof tts.voice === "string" ? tts.voice : "";
+  const location = object(tts.vertex).location;
+  const global = location === undefined || location === "global";
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [designed, setDesigned] = useState<CustomVoice | null>(null);
+  const [sample, setSample] = useAudioUrl();
+  const [listening, setListening] = useState({ id: "", busy: false, error: "" });
+  const [audition, setAudition] = useAudioUrl();
+  const design = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      if (!(await saveSpeechSettings())) {
+        setError("请先修正并保存语音合成设置");
+        return;
+      }
+      const result = await post<{ id: string; name: string; sample: string | null }>("/api/tts/voice-design", {
+        name: name.trim(),
+        description: description.trim(),
+      });
+      setDesigned({ id: result.id, name: result.name, kind: "prompted" });
+      setSample(
+        result.sample
+          ? new Blob([Uint8Array.from(atob(result.sample), (char) => char.charCodeAt(0))], { type: "audio/wav" })
+          : null,
+      );
+      toast("已设计音色「" + result.name + "」", "success");
+      void list.reload();
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const select = (voice: CustomVoice) => {
+    change(["tts", "voice"], voice.id);
+    toast("已将「" + voice.name + "」设为当前音色", "success");
+  };
+  const listen = async (voice: CustomVoice) => {
+    setListening({ id: voice.id, busy: true, error: "" });
+    setAudition(null);
+    let failure = "";
+    try {
+      const response = await fetch("/api/tts/voices/" + enc(voice.id) + "/sample");
+      if (response.ok) setAudition(await response.blob());
+      else failure = await failureDetail(response);
+    } catch {
+      failure = "无法连接控制台服务，请确认服务正在运行";
+    }
+    setListening({ id: voice.id, busy: false, error: failure });
+  };
+  const remove = async (voice: CustomVoice) => {
+    const accepted = await confirm({
+      title: "删除音色",
+      message: "删除「" + voice.name + "」后无法恢复；之后重新设计也不会得到完全相同的声音。",
+      confirmLabel: "删除",
+      danger: true,
+    });
+    if (!accepted) return;
+    try {
+      await request("/api/tts/voices/" + enc(voice.id), { method: "DELETE" });
+      toast("已删除音色「" + voice.name + "」", "success");
+      if (designed?.id === voice.id) {
+        setDesigned(null);
+        setSample(null);
+      }
+      if (listening.id === voice.id) setAudition(null);
+      void list.reload();
+    } catch (failure) {
+      toast(errorMessage(failure), "danger");
+    }
+  };
+  return (
+    <section className="card form-section" id="section-tts-voices">
+      <header className="section-header">
+        <div className="grow">
+          <h2>自定义音色</h2>
+          <p>用文字描述设计专属音色，保存在 Google Cloud 项目中，一年未使用会自动过期；只能在全球区域使用。</p>
+        </div>
+        {list.ready && (
+          <IconButton
+            icon={RefreshCw}
+            label="刷新自定义音色"
+            disabled={list.loading}
+            onClick={() => void list.reload()}
+          />
+        )}
+      </header>
+      <div className="form-grid">
+        <FieldShell id="tts-design-name" label="音色名称" help="只用于在列表中区分，最多 40 字。">
+          <input
+            id="tts-design-name"
+            className="input"
+            value={name}
+            maxLength={40}
+            placeholder="例如：耄耋本音"
+            onChange={(event) => setName(event.target.value)}
+          />
+        </FieldShell>
+        <FieldShell
+          id="tts-design-description"
+          label="音色描述"
+          help="一两句话写清年龄、性别、嗓音质感、口音和基本语气；每句话的情绪由 Agent 在合成时决定。"
+        >
+          <textarea
+            id="tts-design-description"
+            className="input textarea"
+            rows={3}
+            value={description}
+            maxLength={500}
+            placeholder="例如：二十多岁的年轻女性，声音清亮柔和、略带俏皮，普通话标准，语速适中。"
+            onChange={(event) => setDescription(event.target.value)}
+          />
+        </FieldShell>
+        <FieldShell
+          id="tts-design-result"
+          label="设计结果"
+          help={list.ready ? "每次设计都会按语音合成费率计费，并在项目中多保存一个音色。" : "导入服务账号后可以设计音色。"}
+        >
+          {/* 标签指向容器而不是按钮，按钮名称保持为自身文字。 */}
+          <div id="tts-design-result" className="row wrap">
+            <Button
+              variant="primary"
+              icon={WandSparkles}
+              loading={busy}
+              disabled={!list.ready || busy || !name.trim() || !description.trim()}
+              onClick={() => void design()}
+            >
+              设计音色
+            </Button>
+            {designed &&
+              (designed.id === current ? (
+                <Badge tone="success">当前音色</Badge>
+              ) : (
+                <Button icon={Check} disabled={!global} onClick={() => select(designed)}>
+                  设为当前音色
+                </Button>
+              ))}
+          </div>
+          {error && (
+            <p className="field-error" role="alert">
+              {error}
+            </p>
+          )}
+          {sample && <audio className="preview-audio" controls src={sample} />}
+        </FieldShell>
+      </div>
+      <div className="voice-list">
+        <div className="row">
+          <h3>项目中的音色</h3>
+          {list.loading && <Spinner label="正在读取" />}
+        </div>
+        {!global && <p className="field-status">当前区域不是全球，自定义音色不能设为当前音色。</p>}
+        {!list.ready ? (
+          <p className="field-status">导入服务账号后显示项目中的自定义音色。</p>
+        ) : list.error ? (
+          <p className="field-status is-error">{list.error}</p>
+        ) : list.voices.length === 0 ? (
+          !list.loading && <p className="field-status">项目中还没有自定义音色。</p>
+        ) : (
+          <ul>
+            {list.voices.map((voice) => (
+              <li key={voice.id}>
+                <div className="voice-row">
+                  <div className="grow">
+                    <strong>{voice.name}</strong>
+                    <span className="mono">
+                      {voice.id} · {voiceKind(voice)}
+                    </span>
+                  </div>
+                  <div className="row">
+                    {voice.kind === "prompted" && (
+                      <Button
+                        size="sm"
+                        icon={Play}
+                        loading={listening.busy && listening.id === voice.id}
+                        onClick={() => void listen(voice)}
+                      >
+                        样音
+                      </Button>
+                    )}
+                    {voice.id === current ? (
+                      <Badge tone="success">当前音色</Badge>
+                    ) : (
+                      <Button size="sm" icon={Check} disabled={!global} onClick={() => select(voice)}>
+                        设为当前
+                      </Button>
+                    )}
+                    <IconButton
+                      icon={Trash2}
+                      size="sm"
+                      tone="danger"
+                      label={"删除音色 " + voice.name}
+                      disabled={voice.id === current}
+                      onClick={() => void remove(voice)}
+                    />
+                  </div>
+                </div>
+                {listening.id === voice.id && listening.error && (
+                  <p className="field-error" role="alert">
+                    {listening.error}
+                  </p>
+                )}
+                {listening.id === voice.id && audition && (
+                  <audio className="preview-audio" controls autoPlay src={audition} />
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
 /** 按已保存的设置合成一小段语音，不经过 QQ；用来确认凭据、模型和音色可用。 */
-function SpeechPreview({ ready }: { ready: boolean }) {
-  const state = useConfig();
+function SpeechPreview({ ready, voices }: { ready: boolean; voices: CustomVoice[] }) {
+  const current = object(useConfig().draft.tts).voice;
   const [text, setText] = useState("你好，这是一段语音合成试听。");
   const [style, setStyle] = useState("");
   const [voice, setVoice] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [audio, setAudio] = useState<string | null>(null);
-  // 换新录音或离开页面时释放上一段音频占用的内存。
-  useEffect(
-    () => () => {
-      if (audio) URL.revokeObjectURL(audio);
-    },
-    [audio],
-  );
+  const [audio, setAudio] = useAudioUrl();
+  const hasVoice = voice !== "" || (typeof current === "string" && current !== "");
   const run = async () => {
     setBusy(true);
     setError("");
     try {
-      if (state.changed.some((path) => path[0] === "tts") && !(await save())) {
+      if (!(await saveSpeechSettings())) {
         setError("请先修正并保存语音合成设置");
         return;
       }
@@ -647,13 +960,10 @@ function SpeechPreview({ ready }: { ready: boolean }) {
         body: JSON.stringify(body),
       });
       if (!response.ok) {
-        const payload: unknown = await response.json().catch(() => ({}));
-        const detail =
-          payload && typeof payload === "object" && "detail" in payload ? payload.detail : null;
-        setError(typeof detail === "string" ? detail : "试听失败（HTTP " + response.status + "）");
+        setError(await failureDetail(response));
         return;
       }
-      setAudio(URL.createObjectURL(await response.blob()));
+      setAudio(await response.blob());
     } catch {
       setError("无法连接控制台服务，请确认服务正在运行");
     } finally {
@@ -688,21 +998,23 @@ function SpeechPreview({ ready }: { ready: boolean }) {
             onChange={(event) => setStyle(event.target.value)}
           />
         </FieldShell>
-        <FieldShell id="tts-preview-voice" label="试听音色" help="只用于这次试听，不修改默认音色。">
+        <FieldShell id="tts-preview-voice" label="试听音色" help="只用于这次试听，不修改当前音色。">
           <Combobox
             id="tts-preview-voice"
             label="试听音色"
             value={voice}
             editable
-            options={[{ value: "", label: "使用默认音色" }, ...ttsVoiceOptions]}
-            placeholder="使用默认音色"
+            options={[{ value: "", label: "使用当前音色" }, ...ttsVoiceOptions, ...voiceOptions(voices)]}
+            placeholder="使用当前音色"
             onChange={setVoice}
           />
         </FieldShell>
         <FieldShell
           id="tts-preview-result"
           label="合成结果"
-          help={ready ? undefined : "导入服务账号并选择模型后可以试听。"}
+          help={
+            !ready ? "导入服务账号并选择模型后可以试听。" : hasVoice ? undefined : "先选择当前音色或试听音色。"
+          }
         >
           {/* 标签指向容器而不是按钮，按钮名称保持为自身文字。 */}
           <div id="tts-preview-result" className="row">
@@ -710,7 +1022,7 @@ function SpeechPreview({ ready }: { ready: boolean }) {
               variant="primary"
               icon={Play}
               loading={busy}
-              disabled={!ready || busy || !text.trim()}
+              disabled={!ready || !hasVoice || busy || !text.trim()}
               onClick={() => void run()}
             >
               合成试听
@@ -734,16 +1046,19 @@ function SpeechSynthesis() {
   const credentials = object(tts.vertex).credentials;
   const imported = typeof credentials === "string" && credentials.trim() !== "";
   const hasModel = typeof tts.model === "string" && tts.model !== "";
+  const hasVoice = typeof tts.voice === "string" && tts.voice !== "";
   const account = imported ? parseServiceAccount(credentials) : null;
   const project = account && typeof account !== "string" ? account.project : "";
+  const voices = useCustomVoices();
   return (
     <div className="stack">
-      {tts.enabled === true && (!imported || !hasModel) && (
+      {tts.enabled === true && (!imported || !hasModel || !hasVoice) && (
         <Banner tone="warning" icon={CircleAlert}>
-          请导入服务账号并选择模型，否则 Agent 无法调用语音合成工具。
+          请导入服务账号并选择模型和音色，否则 Agent 无法调用语音合成工具。
         </Banner>
       )}
-      <ConfigSection def={ttsVoiceSection} base={["tts"]} />
+      <ConfigSection def={ttsVoiceSection} base={["tts"]} suggestions={{ voice: voiceOptions(voices.voices) }} />
+      <CustomVoices list={voices} />
       <ConfigSection
         def={ttsAccountSection}
         base={["tts", "vertex"]}
@@ -752,7 +1067,7 @@ function SpeechSynthesis() {
         }
       />
       <ConfigSection def={ttsRequestSection} base={["tts"]} />
-      <SpeechPreview ready={imported && hasModel} />
+      <SpeechPreview ready={imported && hasModel} voices={voices.voices} />
     </div>
   );
 }

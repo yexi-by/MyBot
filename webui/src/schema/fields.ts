@@ -644,7 +644,7 @@ export const ttsVoiceSection: SectionDef = {
       key: "enabled",
       label: "启用语音合成",
       type: "toggle",
-      help: "启用、导入服务账号并选好模型后，在会话的「能力权限」中开放「语音合成」即可使用。",
+      help: "启用、导入服务账号并选好模型和音色后，在会话的「能力权限」中开放「语音合成」即可使用。",
     },
     {
       key: "model",
@@ -657,12 +657,12 @@ export const ttsVoiceSection: SectionDef = {
     },
     {
       key: "voice",
-      label: "默认音色",
+      label: "音色",
       type: "select",
       editable: true,
-      options: [{ value: "", label: "接口默认" }, ...ttsVoiceOptions],
-      placeholder: "接口默认",
-      help: "Agent 没有指定音色时使用；也可输入自定义音色 ID。",
+      options: ttsVoiceOptions,
+      placeholder: "选择音色",
+      help: "Agent 说话固定使用这个音色，不能自行更换。可选内置音色、下方设计的自定义音色，或直接输入音色库 ID。",
     },
     {
       key: "language_code",
@@ -702,7 +702,7 @@ export const ttsAccountSection: SectionDef = {
         { value: "us", label: "美国" },
         { value: "eu", label: "欧盟" },
       ],
-      help: "全球区域可用的模型最多；美国、欧盟只在对应区域内处理。",
+      help: "全球区域可用的模型最多；美国、欧盟只在对应区域内处理。自定义音色只能用全球区域。",
     },
   ],
 };

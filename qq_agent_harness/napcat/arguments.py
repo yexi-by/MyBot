@@ -382,8 +382,8 @@ class PokePart(Model):
 
 class AIVoicePart(Model):
     type: Literal["ai_voice"]
-    character: Id = Field(description="get_ai_characters 返回的声音角色 ID")
-    text: str = Field(min_length=1, description="要通过 QQ AI 语音发送的文字")
+    character: Id = Field(description="get_ai_characters 返回的 QQ AI 声线角色 ID")
+    text: str = Field(min_length=1, description="要用 QQ AI 声线读出的文字")
 
 
 class MediaPart(Model):

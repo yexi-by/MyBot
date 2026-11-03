@@ -45,6 +45,8 @@ export function evaluate(
       return { allowed: false, reason: "语音合成尚未导入服务账号" };
     if (typeof tts.model !== "string" || !tts.model)
       return { allowed: false, reason: "语音合成尚未选择模型" };
+    if (typeof tts.voice !== "string" || !tts.voice)
+      return { allowed: false, reason: "语音合成尚未选择音色" };
   }
   if (tool.scope !== "both" && tool.scope !== "account" && tool.scope !== kind)
     return { allowed: false, reason: kind === "group" ? "不适用于群聊" : "不适用于私聊" };

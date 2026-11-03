@@ -114,6 +114,11 @@ const shapes: [RegExp, (value: Data) => boolean][] = [
       ),
   ],
   [/^\/api\/providers\/[^/]+\/models$/, (v) => arrayOf(v.models, text)],
+  [
+    /^\/api\/tts\/voices$/,
+    (v) => arrayOf(v.voices, (item) => record(item) && text(item.id) && text(item.name) && text(item.kind)),
+  ],
+  [/^\/api\/tts\/voice-design$/, (v) => text(v.id) && text(v.name) && (v.sample === null || text(v.sample))],
 ];
 
 function check(url: string, payload: unknown) {
