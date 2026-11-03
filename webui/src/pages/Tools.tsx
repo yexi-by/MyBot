@@ -4,13 +4,15 @@ import {
   ChevronDown,
   ChevronUp,
   CircleAlert,
+  Cpu,
   ExternalLink,
   Play,
   Plug,
   Plus,
+  Power,
   RefreshCw,
   Trash2,
-  WandSparkles,
+  Upload,
   Wrench,
 } from "lucide-react";
 import { Combobox } from "../components/Combobox";
@@ -32,7 +34,6 @@ import { DetailHeader, MasterDetail, PageHeader, SearchInput } from "../componen
 import { ToolDrawer } from "../components/ToolDrawer";
 import { errorMessage, get, post, request } from "../lib/api";
 import { change, getConfig, save, useConfig } from "../lib/config";
-import { parseServiceAccount } from "../lib/credentials";
 import { accessScope } from "../lib/conversations";
 import { coverageState, mcpState, toolScopes } from "../lib/labels";
 import { linkHandler, navigate } from "../lib/navigation";
@@ -54,9 +55,7 @@ import {
   imageRequestSection,
   mcpConnectionSection,
   mcpSecretsSection,
-  ttsAccountSection,
   ttsRequestSection,
-  ttsVoiceOptions,
   ttsVoiceSection,
 } from "../schema/fields";
 import type { Option } from "../schema/fields";
@@ -638,7 +637,7 @@ function ImageGeneration() {
   );
 }
 
-/** 按已保存的设置访问 Vertex；有未保存的语音合成修改时先保存。 */
+/** 按已保存的设置访问本机 IndexTTS 服务；有未保存的语音合成修改时先保存。 */
 async function saveSpeechSettings(): Promise<boolean> {
   return !getConfig().changed.some((path) => path[0] === "tts") || (await save());
 }
@@ -648,6 +647,19 @@ async function failureDetail(response: Response): Promise<string> {
   const payload: unknown = await response.json().catch(() => ({}));
   const detail = payload && typeof payload === "object" && "detail" in payload ? payload.detail : null;
   return typeof detail === "string" ? detail : "请求失败（HTTP " + response.status + "）";
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(new Error("无法读取所选音频文件"));
+    reader.readAsDataURL(file);
+  });
 }
 
 /** 持有一段录音的对象 URL；换新录音或离开页面时释放占用的内存。 */
@@ -665,18 +677,36 @@ function useAudioUrl(): [string | null, (audio: Blob | null) => void] {
 interface CustomVoice {
   id: string;
   name: string;
-  kind: string;
+  duration: number;
 }
 
-const voiceKind = (voice: CustomVoice) => (voice.kind === "replicated" ? "复刻音色" : "设计音色");
-const voiceOptions = (voices: CustomVoice[]): Option[] =>
-  voices.map((voice) => ({ value: voice.id, label: voice.name + " · " + voiceKind(voice) }));
+interface TTSStatus {
+  enabled: boolean;
+  configured: boolean;
+  available: boolean;
+  reason: string;
+  model_version: string;
+  loaded: boolean;
+  device: string;
+  bf16: boolean;
+  vram_allocated_mb: number | null;
+  vram_reserved_mb: number | null;
+  voice_count: number;
+}
 
-/** 项目中的自定义音色；按已保存的凭据和项目读取，二者变更后重新读取。 */
-function useCustomVoices() {
-  const vertex = object(object(useConfig().base.tts).vertex);
-  const ready = typeof vertex.credentials === "string" && vertex.credentials.trim() !== "";
-  const key = JSON.stringify([vertex.credentials, vertex.project_id]);
+const voiceOptions = (voices: CustomVoice[]): Option[] =>
+  voices.map((voice) => ({
+    value: voice.id,
+    label: voice.name + " · " + (voice.duration > 0 ? voice.duration + "s" : voice.id),
+  }));
+
+/** 本机 IndexTTS 服务状态与音色库；按已保存的服务地址和密钥读取，变更后自动刷新。 */
+function useSpeechResources() {
+  const saved = object(useConfig().base.tts);
+  const baseUrl = typeof saved.base_url === "string" ? saved.base_url.trim() : "";
+  const ready = baseUrl !== "";
+  const key = JSON.stringify([baseUrl, saved.api_key, saved.proxy]);
+  const [status, setStatus] = useState<TTSStatus | null>(null);
   const [voices, setVoices] = useState<CustomVoice[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -684,6 +714,7 @@ function useCustomVoices() {
   const reload = useCallback(async () => {
     const current = ++ticket.current;
     if (!ready) {
+      setStatus(null);
       setVoices([]);
       setError("");
       setLoading(false);
@@ -691,17 +722,26 @@ function useCustomVoices() {
     }
     setLoading(true);
     try {
-      const result = await get<{ voices: CustomVoice[] }>("/api/tts/voices");
+      const nextStatus = await get<TTSStatus>("/api/tts/status");
       if (current !== ticket.current) return;
-      setVoices(result.voices);
+      setStatus(nextStatus);
+      if (!nextStatus.available) {
+        setVoices([]);
+        setError(nextStatus.reason || "无法连接本机 IndexTTS 服务");
+        return;
+      }
+      const nextVoices = await get<{ voices: CustomVoice[] }>("/api/tts/voices");
+      if (current !== ticket.current) return;
+      setVoices(nextVoices.voices);
       setError("");
     } catch (failure) {
-      if (current === ticket.current) setError("无法读取自定义音色：" + errorMessage(failure));
+      if (current === ticket.current) setError("无法读取本机音色库：" + errorMessage(failure));
     } finally {
       if (current === ticket.current) setLoading(false);
     }
   }, [ready]);
   useEffect(() => {
+    setStatus(null);
     setVoices([]);
     setError("");
     void reload();
@@ -709,24 +749,159 @@ function useCustomVoices() {
       ticket.current++;
     };
   }, [reload, key]);
-  return { key, ready, voices, loading, error, reload };
+  return { key, ready, status, setStatus, voices, loading, error, reload };
 }
 
-/** 设计自定义音色并管理项目中保存的音色；音色由管理员选定，Agent 不能更换。 */
-function CustomVoices({ list }: { list: ReturnType<typeof useCustomVoices> }) {
+/** 远程查看与控制本机 IndexTTS 2.5 模型显存状态。 */
+function LocalModelPanel({ resources }: { resources: ReturnType<typeof useSpeechResources> }) {
+  const { ready, status, setStatus, loading, reload } = resources;
+  const [busyAction, setBusyAction] = useState<"load" | "unload" | "">("");
+  const [actionError, setActionError] = useState("");
+
+  const toggleModel = async (action: "load" | "unload") => {
+    setBusyAction(action);
+    setActionError("");
+    try {
+      if (!(await saveSpeechSettings())) {
+        setActionError("请先修正并保存语音合成设置");
+        return;
+      }
+      const next = await post<TTSStatus>("/api/tts/model", { action });
+      setStatus(next);
+      toast(action === "load" ? "本机 IndexTTS 模型已加载到显存" : "已卸载本机模型并释放显存", "success");
+    } catch (failure) {
+      setActionError(errorMessage(failure));
+    } finally {
+      setBusyAction("");
+    }
+  };
+
+  const online = status?.available === true;
+  const loaded = status?.loaded === true;
+
+  return (
+    <section className="card form-section" id="section-tts-status">
+      <header className="section-header">
+        <div className="grow">
+          <div className="row wrap">
+            <h2>本机 IndexTTS 2.5 模型管理</h2>
+            {!ready ? (
+              <Badge tone="neutral">未配置地址</Badge>
+            ) : loading && !status ? (
+              <Badge tone="neutral">正在连接</Badge>
+            ) : online ? (
+              <Badge tone={loaded ? "success" : "warning"}>
+                {loaded ? "在线 · 模型已驻留显存" : "在线 · 待按需加载"}
+              </Badge>
+            ) : (
+              <Badge tone="danger">本机服务离线</Badge>
+            )}
+          </div>
+          <p>在远端直接查看本机 GPU 显存占用，并远程控制本机 IndexTTS 2.5 模型的加载与显存释放。</p>
+        </div>
+        {ready && (
+          <IconButton
+            icon={RefreshCw}
+            label="刷新本机状态"
+            disabled={loading || busyAction !== ""}
+            onClick={() => void reload()}
+          />
+        )}
+      </header>
+      <div className="form-grid">
+        <FieldShell
+          id="tts-status-summary"
+          label="运行状态"
+          help="本机启动 deploy/indextts/start_indextts.bat 后即可在此处连接管理。"
+        >
+          <div id="tts-status-summary" className="row wrap">
+            {!ready ? (
+              <span className="muted small">请先在下方填写并保存本机服务地址。</span>
+            ) : online && status ? (
+              <span className="chips">
+                <span className="chip">{status.model_version || "IndexTTS-2.5"}</span>
+                <span className="chip">{status.device || "GPU"}</span>
+                <span className="chip">{status.bf16 ? "BF16 半精度" : "FP32 全精度"}</span>
+                {status.vram_allocated_mb !== null && (
+                  <span className="chip">
+                    显存 {status.vram_allocated_mb} MB
+                    {status.vram_reserved_mb !== null ? " / 预留 " + status.vram_reserved_mb + " MB" : ""}
+                  </span>
+                )}
+                <span className="chip">音色库 {status.voice_count} 个</span>
+              </span>
+            ) : (
+              <span className="field-error">{status?.reason || resources.error || "正在连接本机服务…"}</span>
+            )}
+          </div>
+        </FieldShell>
+        <FieldShell
+          id="tts-model-actions"
+          label="显存控制"
+          help="不加载时首次合成会自动加载；本机玩游戏需要释放显存时可在此一键卸载。"
+        >
+          <div id="tts-model-actions" className="row wrap">
+            <Button
+              variant={loaded ? undefined : "primary"}
+              icon={Cpu}
+              loading={busyAction === "load"}
+              disabled={!online || loaded || busyAction !== ""}
+              onClick={() => void toggleModel("load")}
+            >
+              加载模型到显存
+            </Button>
+            <Button
+              variant="ghost"
+              icon={Power}
+              loading={busyAction === "unload"}
+              disabled={!online || !loaded || busyAction !== ""}
+              onClick={() => void toggleModel("unload")}
+            >
+              卸载模型释放显存
+            </Button>
+          </div>
+          {actionError && (
+            <p className="field-error" role="alert">
+              {actionError}
+            </p>
+          )}
+        </FieldShell>
+      </div>
+    </section>
+  );
+}
+
+/** 远程管理本机保存的音色与情感参考干声；说话音色由管理员选定，Agent 不能更换。 */
+function CustomVoices({ list }: { list: ReturnType<typeof useSpeechResources> }) {
   const tts = object(useConfig().draft.tts);
   const current = typeof tts.voice === "string" ? tts.voice : "";
-  const location = object(tts.vertex).location;
-  const global = location === undefined || location === "global";
   const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
+  const [customId, setCustomId] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [localPreview, setLocalPreview] = useAudioUrl();
+  const fileInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [designed, setDesigned] = useState<CustomVoice | null>(null);
-  const [sample, setSample] = useAudioUrl();
+  const [uploaded, setUploaded] = useState<CustomVoice | null>(null);
   const [listening, setListening] = useState({ id: "", busy: false, error: "" });
   const [audition, setAudition] = useAudioUrl();
-  const design = async () => {
+
+  const pickFile = (file: File | undefined) => {
+    if (!file) return;
+    if (file.size > 16 * 1024 * 1024) {
+      toast("参考音频不能超过 16 MB", "danger");
+      return;
+    }
+    setSelectedFile(file);
+    setLocalPreview(file);
+    if (!name.trim()) {
+      const stem = file.name.replace(/\.[^.]+$/, "").slice(0, 40);
+      if (stem) setName(stem);
+    }
+  };
+
+  const upload = async () => {
+    if (!selectedFile) return;
     setBusy(true);
     setError("");
     try {
@@ -734,17 +909,19 @@ function CustomVoices({ list }: { list: ReturnType<typeof useCustomVoices> }) {
         setError("请先修正并保存语音合成设置");
         return;
       }
-      const result = await post<{ id: string; name: string; sample: string | null }>("/api/tts/voice-design", {
+      const audioBase64 = await fileToBase64(selectedFile);
+      const body: Record<string, string> = {
         name: name.trim(),
-        description: description.trim(),
-      });
-      setDesigned({ id: result.id, name: result.name, kind: "prompted" });
-      setSample(
-        result.sample
-          ? new Blob([Uint8Array.from(atob(result.sample), (char) => char.charCodeAt(0))], { type: "audio/wav" })
-          : null,
-      );
-      toast("已设计音色「" + result.name + "」", "success");
+        audio: audioBase64,
+      };
+      if (customId.trim()) body.id = customId.trim();
+      const result = await post<CustomVoice>("/api/tts/voices", body);
+      setUploaded(result);
+      setName("");
+      setCustomId("");
+      setSelectedFile(null);
+      setLocalPreview(null);
+      toast("已上传音色「" + result.name + "」到本机", "success");
       void list.reload();
     } catch (failure) {
       setError(errorMessage(failure));
@@ -752,10 +929,12 @@ function CustomVoices({ list }: { list: ReturnType<typeof useCustomVoices> }) {
       setBusy(false);
     }
   };
+
   const select = (voice: CustomVoice) => {
     change(["tts", "voice"], voice.id);
-    toast("已将「" + voice.name + "」设为当前音色", "success");
+    toast("已将「" + voice.name + "」设为当前说话音色", "success");
   };
+
   const listen = async (voice: CustomVoice) => {
     setListening({ id: voice.id, busy: true, error: "" });
     setAudition(null);
@@ -769,10 +948,11 @@ function CustomVoices({ list }: { list: ReturnType<typeof useCustomVoices> }) {
     }
     setListening({ id: voice.id, busy: false, error: failure });
   };
+
   const remove = async (voice: CustomVoice) => {
     const accepted = await confirm({
-      title: "删除音色",
-      message: "删除「" + voice.name + "」后无法恢复；之后重新设计也不会得到完全相同的声音。",
+      title: "删除本机音色",
+      message: "将从本机音色库中删除「" + voice.name + "」（" + voice.id + "），删除后无法恢复。",
       confirmLabel: "删除",
       danger: true,
     });
@@ -780,103 +960,114 @@ function CustomVoices({ list }: { list: ReturnType<typeof useCustomVoices> }) {
     try {
       await request("/api/tts/voices/" + enc(voice.id), { method: "DELETE" });
       toast("已删除音色「" + voice.name + "」", "success");
-      if (designed?.id === voice.id) {
-        setDesigned(null);
-        setSample(null);
-      }
+      if (uploaded?.id === voice.id) setUploaded(null);
       if (listening.id === voice.id) setAudition(null);
       void list.reload();
     } catch (failure) {
       toast(errorMessage(failure), "danger");
     }
   };
+
   return (
     <section className="card form-section" id="section-tts-voices">
       <header className="section-header">
         <div className="grow">
-          <h2>自定义音色</h2>
-          <p>用文字描述设计专属音色，保存在 Google Cloud 项目中，一年未使用会自动过期；只能在全球区域使用。</p>
+          <h2>本机音色与情感参考库</h2>
+          <p>
+            上传 3～15 秒干净的二次元角色干声（WAV）到本机。既可设为主音色，也可作为 Agent 在{" "}
+            <span className="mono">audio</span> 情绪模式下借用的情感参考音频。
+          </p>
         </div>
         {list.ready && (
           <IconButton
             icon={RefreshCw}
-            label="刷新自定义音色"
+            label="刷新本机音色库"
             disabled={list.loading}
             onClick={() => void list.reload()}
           />
         )}
       </header>
       <div className="form-grid">
-        <FieldShell id="tts-design-name" label="音色名称" help="只用于在列表中区分，最多 40 字。">
+        <FieldShell id="tts-design-name" label="音色名称" help="在列表中显示的名称，最多 40 字。">
           <input
             id="tts-design-name"
             className="input"
             value={name}
             maxLength={40}
-            placeholder="例如：耄耋本音"
+            placeholder="例如：伊蕾娜·平静本音 / 傲娇生气参考"
             onChange={(event) => setName(event.target.value)}
           />
         </FieldShell>
         <FieldShell
-          id="tts-design-description"
-          label="音色描述"
-          help="一两句话写清年龄、性别、嗓音质感、口音和基本语气；每句话的情绪由 Agent 在合成时决定。"
+          id="tts-design-id"
+          label="自定义 ID（可选）"
+          help="仅限字母、数字、下划线和连字符；留空自动生成。填写可读 ID 方便 Agent 按 ID 引用情绪参考音频。"
         >
-          <textarea
-            id="tts-design-description"
-            className="input textarea"
-            rows={3}
-            value={description}
-            maxLength={500}
-            placeholder="例如：二十多岁的年轻女性，声音清亮柔和、略带俏皮，普通话标准，语速适中。"
-            onChange={(event) => setDescription(event.target.value)}
+          <input
+            id="tts-design-id"
+            className="input mono"
+            value={customId}
+            maxLength={64}
+            placeholder="例如：elaina_calm 或 tsundere_angry（留空自动生成）"
+            onChange={(event) => setCustomId(event.target.value)}
           />
         </FieldShell>
         <FieldShell
           id="tts-design-result"
-          label="设计结果"
-          help={list.ready ? "每次设计都会按语音合成费率计费，并在项目中多保存一个音色。" : "导入服务账号后可以设计音色。"}
+          label="参考音频"
+          help="推荐 3～15 秒无背景音乐的角色干声 WAV 文件（最大 16 MB）。"
         >
-          {/* 标签指向容器而不是按钮，按钮名称保持为自身文字。 */}
           <div id="tts-design-result" className="row wrap">
+            <Button icon={Upload} onClick={() => fileInput.current?.click()}>
+              {selectedFile ? "更换音频（" + selectedFile.name + "）" : "选择音频文件"}
+            </Button>
             <Button
               variant="primary"
-              icon={WandSparkles}
+              icon={Plus}
               loading={busy}
-              disabled={!list.ready || busy || !name.trim() || !description.trim()}
-              onClick={() => void design()}
+              disabled={!list.ready || busy || !name.trim() || !selectedFile}
+              onClick={() => void upload()}
             >
-              设计音色
+              上传到本机音色库
             </Button>
-            {designed &&
-              (designed.id === current ? (
+            {uploaded &&
+              (uploaded.id === current ? (
                 <Badge tone="success">当前音色</Badge>
               ) : (
-                <Button icon={Check} disabled={!global} onClick={() => select(designed)}>
-                  设为当前音色
+                <Button icon={Check} onClick={() => select(uploaded)}>
+                  将「{uploaded.name}」设为当前音色
                 </Button>
               ))}
           </div>
+          <input
+            ref={fileInput}
+            type="file"
+            accept=".wav,.mp3,.flac,.ogg,audio/*"
+            hidden
+            onChange={(event) => {
+              pickFile(event.target.files?.[0]);
+              event.target.value = "";
+            }}
+          />
           {error && (
             <p className="field-error" role="alert">
               {error}
             </p>
           )}
-          {sample && <audio className="preview-audio" controls src={sample} />}
+          {localPreview && <audio className="preview-audio" controls src={localPreview} />}
         </FieldShell>
       </div>
       <div className="voice-list">
         <div className="row">
-          <h3>项目中的音色</h3>
+          <h3>本机已保存的音色</h3>
           {list.loading && <Spinner label="正在读取" />}
         </div>
-        {!global && <p className="field-status">当前区域不是全球，自定义音色不能设为当前音色。</p>}
         {!list.ready ? (
-          <p className="field-status">导入服务账号后显示项目中的自定义音色。</p>
+          <p className="field-status">填写并保存本机服务地址后显示本机音色库。</p>
         ) : list.error ? (
           <p className="field-status is-error">{list.error}</p>
         ) : list.voices.length === 0 ? (
-          !list.loading && <p className="field-status">项目中还没有自定义音色。</p>
+          !list.loading && <p className="field-status">本机音色库还没有音色，请在上方上传参考干声。</p>
         ) : (
           <ul>
             {list.voices.map((voice) => (
@@ -885,24 +1076,23 @@ function CustomVoices({ list }: { list: ReturnType<typeof useCustomVoices> }) {
                   <div className="grow">
                     <strong>{voice.name}</strong>
                     <span className="mono">
-                      {voice.id} · {voiceKind(voice)}
+                      {voice.id}
+                      {voice.duration > 0 ? " · " + voice.duration + "s" : ""}
                     </span>
                   </div>
                   <div className="row">
-                    {voice.kind === "prompted" && (
-                      <Button
-                        size="sm"
-                        icon={Play}
-                        loading={listening.busy && listening.id === voice.id}
-                        onClick={() => void listen(voice)}
-                      >
-                        样音
-                      </Button>
-                    )}
+                    <Button
+                      size="sm"
+                      icon={Play}
+                      loading={listening.busy && listening.id === voice.id}
+                      onClick={() => void listen(voice)}
+                    >
+                      原声
+                    </Button>
                     {voice.id === current ? (
                       <Badge tone="success">当前音色</Badge>
                     ) : (
-                      <Button size="sm" icon={Check} disabled={!global} onClick={() => select(voice)}>
+                      <Button size="sm" icon={Check} onClick={() => select(voice)}>
                         设为当前
                       </Button>
                     )}
@@ -933,16 +1123,44 @@ function CustomVoices({ list }: { list: ReturnType<typeof useCustomVoices> }) {
   );
 }
 
-/** 按已保存的设置合成一小段语音，不经过 QQ；用来确认凭据、模型和音色可用。 */
+type EmotionMode = "reference" | "text" | "vector" | "audio";
+
+const EMOTION_LABELS: [string, string][] = [
+  ["happy", "开心"],
+  ["angry", "生气"],
+  ["sad", "悲伤"],
+  ["afraid", "害怕"],
+  ["disgusted", "厌恶"],
+  ["melancholic", "低落"],
+  ["surprised", "惊讶"],
+  ["calm", "平静"],
+];
+
+/** 按已保存的设置调用本机 IndexTTS 2.5 合成试听，支持验证全部 4 种情绪控制模式。 */
 function SpeechPreview({ ready, voices }: { ready: boolean; voices: CustomVoice[] }) {
   const current = object(useConfig().draft.tts).voice;
-  const [text, setText] = useState("你好，这是一段语音合成试听。");
-  const [style, setStyle] = useState("");
+  const [text, setText] = useState("哼，才不是特意为你准备的呢，别误会了！");
   const [voice, setVoice] = useState("");
+  const [language, setLanguage] = useState("zh");
+  const [emotionMode, setEmotionMode] = useState<EmotionMode>("reference");
+  const [emotionText, setEmotionText] = useState("傲娇、嘴硬心软，带着一点害羞");
+  const [emotionVoice, setEmotionVoice] = useState("");
+  const [emotionAlpha, setEmotionAlpha] = useState("1.0");
+  const [vector, setVector] = useState<Record<string, number>>({
+    happy: 0,
+    angry: 0.6,
+    sad: 0,
+    afraid: 0,
+    disgusted: 0,
+    melancholic: 0,
+    surprised: 0.3,
+    calm: 0,
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [audio, setAudio] = useAudioUrl();
   const hasVoice = voice !== "" || (typeof current === "string" && current !== "");
+
   const run = async () => {
     setBusy(true);
     setError("");
@@ -951,11 +1169,21 @@ function SpeechPreview({ ready, voices }: { ready: boolean; voices: CustomVoice[
         setError("请先修正并保存语音合成设置");
         return;
       }
-      const body = {
+      const alphaNum = Number(emotionAlpha);
+      const body: Record<string, unknown> = {
         text: text.trim(),
-        ...(style.trim() ? { style: style.trim() } : {}),
+        language,
+        emotion_mode: emotionMode,
+        emotion_alpha: Number.isFinite(alphaNum) ? Math.min(1.5, Math.max(0, alphaNum)) : 1.0,
         ...(voice ? { voice } : {}),
       };
+      if (emotionMode === "text") {
+        body.emotion_text = emotionText.trim();
+      } else if (emotionMode === "vector") {
+        body.emotion_vector = vector;
+      } else if (emotionMode === "audio") {
+        body.emotion_voice = emotionVoice.trim();
+      }
       const response = await fetch("/api/tts/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -972,16 +1200,23 @@ function SpeechPreview({ ready, voices }: { ready: boolean; voices: CustomVoice[
       setBusy(false);
     }
   };
+
+  const modeReady =
+    emotionMode === "reference" ||
+    (emotionMode === "text" && emotionText.trim() !== "") ||
+    (emotionMode === "vector" && Object.values(vector).some((v) => v > 0)) ||
+    (emotionMode === "audio" && emotionVoice.trim() !== "");
+
   return (
     <section className="card form-section" id="section-tts-preview">
       <header className="section-header">
         <div className="grow">
-          <h2>试听</h2>
-          <p>按已保存的设置合成一小段语音，不经过 QQ；每次试听都会产生少量费用。</p>
+          <h2>多模式情感试听</h2>
+          <p>按已保存的设置调用本机 IndexTTS 2.5 合成一小段语音，验证音色与 4 种情绪控制方式的效果。</p>
         </div>
       </header>
       <div className="form-grid">
-        <FieldShell id="tts-preview-text" label="试听文本" help="最多 200 字，可插入 <sigh>、<short pause> 等标签。">
+        <FieldShell id="tts-preview-text" label="试听台词" help="最多 200 字，输入要朗读的台词原文。">
           <input
             id="tts-preview-text"
             className="input"
@@ -990,41 +1225,146 @@ function SpeechPreview({ ready, voices }: { ready: boolean; voices: CustomVoice[
             onChange={(event) => setText(event.target.value)}
           />
         </FieldShell>
-        <FieldShell id="tts-preview-style" label="语气" help="可选，例如“开心、轻快”。">
-          <input
-            id="tts-preview-style"
-            className="input"
-            value={style}
-            maxLength={200}
-            placeholder="自然朗读"
-            onChange={(event) => setStyle(event.target.value)}
-          />
-        </FieldShell>
         <FieldShell id="tts-preview-voice" label="试听音色" help="只用于这次试听，不修改当前音色。">
           <Combobox
             id="tts-preview-voice"
             label="试听音色"
             value={voice}
             editable
-            options={[{ value: "", label: "使用当前音色" }, ...ttsVoiceOptions, ...voiceOptions(voices)]}
+            options={[{ value: "", label: "使用当前音色" }, ...voiceOptions(voices)]}
             placeholder="使用当前音色"
             onChange={setVoice}
           />
         </FieldShell>
+        <FieldShell id="tts-preview-language" label="台词语言" help="选择台词使用的语言，默认中文。">
+          <Segmented
+            id="tts-preview-language"
+            label="台词语言"
+            value={language}
+            onChange={setLanguage}
+            options={[
+              { value: "zh", label: "中文" },
+              { value: "en", label: "英文" },
+              { value: "ja", label: "日文" },
+              { value: "es", label: "西班牙文" },
+              { value: "ar", label: "阿拉伯文" },
+            ]}
+          />
+        </FieldShell>
+        <FieldShell
+          id="tts-preview-mode"
+          label="情绪控制方式"
+          help="Agent 调用 tts__synthesize 时可在这 4 种方式中自主选择。"
+        >
+          <Segmented
+            id="tts-preview-mode"
+            label="情绪控制方式"
+            value={emotionMode}
+            onChange={setEmotionMode}
+            options={[
+              { value: "reference", label: "跟随原声" },
+              { value: "text", label: "自然语言描述" },
+              { value: "vector", label: "8维情感向量" },
+              { value: "audio", label: "参考音频情绪" },
+            ]}
+          />
+        </FieldShell>
+        {emotionMode === "text" && (
+          <FieldShell
+            id="tts-preview-emotion-text"
+            label="自然语言情绪"
+            help="描述这句话的情绪与语气，例如“傲娇、微怒”“委屈快哭出来”。"
+          >
+            <input
+              id="tts-preview-emotion-text"
+              className="input"
+              value={emotionText}
+              maxLength={200}
+              placeholder="例如：傲娇、嘴硬心软"
+              onChange={(event) => setEmotionText(event.target.value)}
+            />
+          </FieldShell>
+        )}
+        {emotionMode === "vector" && (
+          <FieldShell
+            id="tts-preview-emotion-vector"
+            label="8维情感配比"
+            help="每项范围 0.0～1.0，支持组合复合情绪（至少一项大于 0）。"
+          >
+            <div id="tts-preview-emotion-vector" className="row wrap">
+              {EMOTION_LABELS.map(([key, label]) => (
+                <label key={key} className="row small" style={{ minWidth: "130px" }}>
+                  <span>{label}</span>
+                  <input
+                    type="number"
+                    className="input num"
+                    style={{ width: "72px" }}
+                    min={0}
+                    max={1}
+                    step={0.1}
+                    value={vector[key] ?? 0}
+                    onChange={(event) => {
+                      const val = Number(event.target.value);
+                      setVector((prev) => ({
+                        ...prev,
+                        [key]: Number.isFinite(val) ? Math.min(1, Math.max(0, val)) : 0,
+                      }));
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
+          </FieldShell>
+        )}
+        {emotionMode === "audio" && (
+          <FieldShell
+            id="tts-preview-emotion-voice"
+            label="情绪参考音频"
+            help="仅借用该参考音频的情绪语调，说话音色仍保持为当前音色（音色与情绪解耦）。"
+          >
+            <Combobox
+              id="tts-preview-emotion-voice"
+              label="情绪参考音频"
+              value={emotionVoice}
+              editable
+              options={voiceOptions(voices)}
+              placeholder="选择作为情绪来源的音色 ID"
+              onChange={setEmotionVoice}
+            />
+          </FieldShell>
+        )}
+        {emotionMode !== "reference" && (
+          <FieldShell id="tts-preview-alpha" label="情绪强度权重" help="范围 0.0～1.5，默认 1.0。">
+            <input
+              id="tts-preview-alpha"
+              type="number"
+              className="input num"
+              style={{ maxWidth: "140px" }}
+              min={0}
+              max={1.5}
+              step={0.1}
+              value={emotionAlpha}
+              onChange={(event) => setEmotionAlpha(event.target.value)}
+            />
+          </FieldShell>
+        )}
         <FieldShell
           id="tts-preview-result"
           label="合成结果"
           help={
-            !ready ? "导入服务账号并选择模型后可以试听。" : hasVoice ? undefined : "先选择当前音色或试听音色。"
+            !ready
+              ? "填写并保存本机服务地址后可以试听。"
+              : !hasVoice
+                ? "请先选择当前音色或试听音色。"
+                : undefined
           }
         >
-          {/* 标签指向容器而不是按钮，按钮名称保持为自身文字。 */}
           <div id="tts-preview-result" className="row">
             <Button
               variant="primary"
               icon={Play}
               loading={busy}
-              disabled={!ready || !hasVoice || busy || !text.trim()}
+              disabled={!ready || !hasVoice || !modeReady || busy || !text.trim()}
               onClick={() => void run()}
             >
               合成试听
@@ -1045,31 +1385,29 @@ function SpeechPreview({ ready, voices }: { ready: boolean; voices: CustomVoice[
 function SpeechSynthesis() {
   const state = useConfig();
   const tts = object(state.draft.tts);
-  const credentials = object(tts.vertex).credentials;
-  const imported = typeof credentials === "string" && credentials.trim() !== "";
-  const hasModel = typeof tts.model === "string" && tts.model !== "";
+  const hasEndpoint = typeof tts.base_url === "string" && tts.base_url.trim() !== "";
   const hasVoice = typeof tts.voice === "string" && tts.voice !== "";
-  const account = imported ? parseServiceAccount(credentials) : null;
-  const project = account && typeof account !== "string" ? account.project : "";
-  const voices = useCustomVoices();
+  const resources = useSpeechResources();
   return (
     <div className="stack">
-      {tts.enabled === true && (!imported || !hasModel || !hasVoice) && (
+      {tts.enabled === true && (!hasEndpoint || !hasVoice) && (
         <Banner tone="warning" icon={CircleAlert}>
-          请导入服务账号并选择模型和音色，否则 Agent 无法调用语音合成工具。
+          请填写本机 IndexTTS 服务地址并选择当前音色，否则 Agent 无法调用语音合成工具。
         </Banner>
       )}
-      <ConfigSection def={ttsVoiceSection} base={["tts"]} suggestions={{ voice: voiceOptions(voices.voices) }} />
-      <CustomVoices key={"custom-" + voices.key} list={voices} />
+      <LocalModelPanel resources={resources} />
       <ConfigSection
-        def={ttsAccountSection}
-        base={["tts", "vertex"]}
-        helpFor={
-          project ? { project_id: "调用和计费所在的项目；留空时使用服务账号所属的 " + project + "。" } : undefined
-        }
+        def={ttsVoiceSection}
+        base={["tts"]}
+        suggestions={{ voice: voiceOptions(resources.voices) }}
+      />
+      <CustomVoices key={"custom-" + resources.key} list={resources} />
+      <SpeechPreview
+        key={"preview-" + resources.key}
+        ready={resources.ready}
+        voices={resources.voices}
       />
       <ConfigSection def={ttsRequestSection} base={["tts"]} />
-      <SpeechPreview key={"preview-" + voices.key} ready={imported && hasModel} voices={voices.voices} />
     </div>
   );
 }

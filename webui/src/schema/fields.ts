@@ -14,8 +14,7 @@ export type FieldType =
   | "checks"
   | "map"
   | "provider"
-  | "model"
-  | "credentials";
+  | "model";
 export interface Option {
   value: string;
   label: string;
@@ -592,117 +591,40 @@ export const imageRequestSection: SectionDef = {
   ],
 };
 
-export const ttsModelOptions: Option[] = [
-  { value: "gemini-3.8-flash-tts", label: "gemini-3.8-flash-tts · 音质优先" },
-  { value: "gemini-3.8-flash-lite-tts", label: "gemini-3.8-flash-lite-tts · 低成本" },
-];
-// Gemini TTS 的 30 个预置音色：名称、性别与官方描述的音色特点。
-const ttsVoices: [string, string, string][] = [
-  ["Achernar", "女", "柔和"],
-  ["Achird", "男", "友好"],
-  ["Algenib", "男", "沙哑"],
-  ["Algieba", "男", "顺滑"],
-  ["Alnilam", "男", "坚定"],
-  ["Aoede", "女", "轻快"],
-  ["Autonoe", "女", "明亮"],
-  ["Callirrhoe", "女", "随和"],
-  ["Charon", "男", "清晰播报"],
-  ["Despina", "女", "顺滑"],
-  ["Enceladus", "男", "气声"],
-  ["Erinome", "女", "清澈"],
-  ["Fenrir", "男", "兴奋"],
-  ["Gacrux", "女", "成熟"],
-  ["Iapetus", "男", "清澈"],
-  ["Kore", "女", "坚定"],
-  ["Laomedeia", "女", "欢快"],
-  ["Leda", "女", "年轻"],
-  ["Orus", "男", "坚定"],
-  ["Puck", "男", "欢快"],
-  ["Pulcherrima", "女", "直率"],
-  ["Rasalgethi", "男", "清晰播报"],
-  ["Sadachbia", "男", "活泼"],
-  ["Sadaltager", "男", "博学"],
-  ["Schedar", "男", "平稳"],
-  ["Sulafat", "女", "温暖"],
-  ["Umbriel", "男", "随和"],
-  ["Vindemiatrix", "女", "温柔"],
-  ["Zephyr", "女", "明亮"],
-  ["Zubenelgenubi", "男", "随意"],
-];
-export const ttsVoiceOptions: Option[] = ttsVoices.map(([name, gender, trait]) => ({
-  value: name,
-  label: name + " · " + gender + " · " + trait,
-}));
-
 export const ttsVoiceSection: SectionDef = {
   id: "tts-voice",
-  title: "模型与音色",
+  title: "连接与音色",
   description:
-    "通过 Vertex（现名 Gemini Enterprise Agent Platform）调用 Gemini TTS，保存后立即生效。",
+    "连接本机部署的 IndexTTS 2.5 服务进行语音合成与音色复刻管理，保存后立即生效。",
   fields: [
     {
       key: "enabled",
       label: "启用语音合成",
       type: "toggle",
-      help: "启用、导入服务账号并选好模型和音色后，在会话的「能力权限」中开放「语音合成」即可使用。",
+      help: "启用、填写本机服务地址并选好音色后，在会话的「能力权限」中开放「语音合成」即可使用。",
     },
     {
-      key: "model",
-      label: "模型",
-      type: "select",
-      editable: true,
-      options: ttsModelOptions,
-      placeholder: "选择或输入模型名称",
-      help: "目前支持 Gemini 3.8 系列 TTS；新模型可直接输入名称。",
+      key: "base_url",
+      label: "本机服务地址",
+      type: "text",
+      placeholder: "http://192.168.31.100:7861",
+      help: "本机 IndexTTS 2.5 HTTP 服务的根地址。",
+    },
+    {
+      key: "api_key",
+      label: "连接密钥",
+      type: "secret",
+      generate: true,
+      help: "须与本机 IndexTTS 启动时的 API Key 一致；本机未开启鉴权时可留空。",
     },
     {
       key: "voice",
-      label: "音色",
+      label: "当前音色",
       type: "select",
       editable: true,
-      options: ttsVoiceOptions,
-      placeholder: "选择音色",
-      help: "Agent 说话固定使用这个音色，不能自行更换。可选内置音色、下方设计的自定义音色，或直接输入音色库 ID。",
-    },
-    {
-      key: "language_code",
-      label: "语言代码",
-      type: "text",
-      placeholder: "留空自动识别，例如 cmn-CN",
-      help: "BCP-47 语言代码；留空时由模型根据文本识别。",
-    },
-  ],
-};
-
-export const ttsAccountSection: SectionDef = {
-  id: "tts-account",
-  title: "服务账号",
-  description:
-    "支持 Google Cloud 服务账号密钥或包含 service_account 的 Vertex 项目导出 JSON。服务账号需要 Vertex AI User 角色，项目需启用 Vertex AI API。",
-  fields: [
-    {
-      key: "credentials",
-      label: "服务账号密钥",
-      type: "credentials",
-      help: "导出文件中的项目 ID 和区域会一并填入，未提供的设置保持当前值。私钥只保存在配置文件中，页面不显示。",
-    },
-    {
-      key: "project_id",
-      label: "项目 ID",
-      type: "text",
-      placeholder: "留空使用服务账号所属项目",
-      help: "调用和计费所在的 Google Cloud 项目。",
-    },
-    {
-      key: "location",
-      label: "区域",
-      type: "segmented",
-      options: [
-        { value: "global", label: "全球" },
-        { value: "us", label: "美国" },
-        { value: "eu", label: "欧盟" },
-      ],
-      help: "全球区域可用的模型最多；美国、欧盟只在对应区域内处理。自定义音色只能用全球区域。",
+      options: [],
+      placeholder: "选择或输入音色 ID",
+      help: "Agent 说话固定使用这个音色，不能自行更换；情绪控制方式（原声/文本描述/8维情感向量/参考音频）由 Agent 按台词自主选择。",
     },
   ],
 };
@@ -732,7 +654,7 @@ export const ttsRequestSection: SectionDef = {
       type: "text",
       nullable: true,
       placeholder: "http://127.0.0.1:7890",
-      help: "换取令牌和合成请求都经过这个代理；留空表示直连。",
+      help: "连接本机 IndexTTS 服务经过的代理；局域网直连时请留空。",
     },
   ],
 };
@@ -911,7 +833,6 @@ export function fieldInstances(config: ObjectValue): FieldInstance[] {
   add(imageConnectionSection, ["image"], "/tools/image");
   add(imageRequestSection, ["image"], "/tools/image");
   add(ttsVoiceSection, ["tts"], "/tools/tts");
-  add(ttsAccountSection, ["tts", "vertex"], "/tools/tts");
   add(ttsRequestSection, ["tts"], "/tools/tts");
   for (const id of Object.keys(object(config.providers))) {
     const route = "/providers/" + enc(id);

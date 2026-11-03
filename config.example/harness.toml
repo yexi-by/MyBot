@@ -106,21 +106,12 @@ max_retries = 3
 
 [image.headers]
 
-# 语音合成：目前支持 Vertex 上的 Gemini TTS。voice 是 Agent 固定使用的音色，必须选定，Agent 不能更换；
-# 可填内置音色名、音色库 ID 或在 WebUI 设计的自定义音色 ID（voice_…）。language_code 留空自动识别。
+# 语音合成：连接本机部署的 IndexTTS 2.5 服务。voice 是 Agent 固定使用的音色 ID，必须选定，Agent 不能更换；
+# 情绪控制方式（reference/text/vector/audio）由 Agent 按台词自行选择。
 [tts]
 enabled = false
-protocol = "vertex_gemini"
-model = ""
+base_url = "http://127.0.0.1:7861"
+api_key = ""
 voice = ""
-language_code = ""
 timeout = 120.0
 max_retries = 3
-
-# credentials 是服务账号密钥 JSON 原文，建议在 WebUI 中导入；project_id 留空时使用 JSON 中的项目。
-# location 可选 global、us、eu；自定义音色只能用 global。
-[tts.vertex]
-credentials = ""
-project_id = ""
-location = "global"
-

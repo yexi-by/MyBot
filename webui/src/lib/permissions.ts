@@ -39,12 +39,9 @@ export function evaluate(
   }
   if (tool.name.startsWith("tts__")) {
     const tts = object(config.tts);
-    const credentials = object(tts.vertex).credentials;
     if (tts.enabled !== true) return { allowed: false, reason: "尚未启用语音合成" };
-    if (typeof credentials !== "string" || !credentials.trim())
-      return { allowed: false, reason: "语音合成尚未导入服务账号" };
-    if (typeof tts.model !== "string" || !tts.model)
-      return { allowed: false, reason: "语音合成尚未选择模型" };
+    if (typeof tts.base_url !== "string" || !tts.base_url.trim())
+      return { allowed: false, reason: "语音合成尚未填写服务地址" };
     if (typeof tts.voice !== "string" || !tts.voice)
       return { allowed: false, reason: "语音合成尚未选择音色" };
   }

@@ -46,6 +46,7 @@ debug/
 data/
 image/
 images/
+/deploy/indextts/voices/
 tmp/
 *.log
 *.trace

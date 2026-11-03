@@ -20,6 +20,7 @@ logs/
 tmp/
 data/
 images/
+deploy/indextts/voices/
 .playwright-mcp/
 .playwright-cli/
 docs/

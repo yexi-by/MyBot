@@ -115,10 +115,32 @@ const shapes: [RegExp, (value: Data) => boolean][] = [
   ],
   [/^\/api\/providers\/[^/]+\/models$/, (v) => arrayOf(v.models, text)],
   [
-    /^\/api\/tts\/voices$/,
-    (v) => arrayOf(v.voices, (item) => record(item) && text(item.id) && text(item.name) && text(item.kind)),
+    /^\/api\/tts\/status$/,
+    (v) =>
+      typeof v.available === "boolean" &&
+      typeof v.loaded === "boolean" &&
+      text(v.reason) &&
+      text(v.model_version) &&
+      text(v.device),
   ],
-  [/^\/api\/tts\/voice-design$/, (v) => text(v.id) && text(v.name) && (v.sample === null || text(v.sample))],
+  [
+    /^\/api\/tts\/model$/,
+    (v) =>
+      typeof v.available === "boolean" &&
+      typeof v.loaded === "boolean" &&
+      text(v.reason) &&
+      text(v.model_version) &&
+      text(v.device),
+  ],
+  [
+    /^\/api\/tts\/voices$/,
+    (v) =>
+      arrayOf(
+        v.voices,
+        (item) => record(item) && text(item.id) && text(item.name) && typeof item.duration === "number",
+      ) ||
+      (text(v.id) && text(v.name) && typeof v.duration === "number"),
+  ],
 ];
 
 function check(url: string, payload: unknown) {

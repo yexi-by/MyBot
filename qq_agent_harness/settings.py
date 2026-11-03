@@ -1,26 +1,16 @@
 """唯一配置模型；权限不包含任何发起者角色或个人 ACL。"""
 
-import json
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from cryptography.exceptions import UnsupportedAlgorithm
-from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
-from pydantic import Field, JsonValue, ValidationInfo, field_validator, model_validator
+from pydantic import Field, JsonValue, field_validator, model_validator
 
 from .contracts import ConversationScope, Model
 
 # 这些标识会拼入请求地址或请求体，只接受各自的规范字符集。
-_PROJECT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
-_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _VOICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
-_LANGUAGE_CODE = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*")
-# 设计或复刻得到的自定义音色 ID 前缀；这类音色只在全球区域可用。
-CUSTOM_VOICE_PREFIXES = ("voice_", "voicekey_")
 
 
 class ParameterRule(Model):
@@ -195,100 +185,17 @@ class ImageSettings(Model):
         return headers
 
 
-@dataclass(frozen=True)
-class ServiceAccount:
-    """服务账号密钥中签发访问令牌所需的字段。"""
-
-    client_email: str
-    private_key: str = field(repr=False)
-    private_key_id: str = ""
-    project_id: str = ""
-
-
-def parse_service_account(text: str) -> ServiceAccount:
-    """校验服务账号密钥 JSON；错误只说明哪个字段不符合要求，不回显任何取值。"""
-    try:
-        data = json.loads(text)
-    except ValueError:
-        raise ValueError("服务账号凭据不是有效的 JSON") from None
-    if not isinstance(data, dict) or data.get("type") != "service_account":
-        raise ValueError("只支持 type 为 service_account 的服务账号密钥 JSON")
-    if data.get("universe_domain", "googleapis.com") != "googleapis.com":
-        raise ValueError("只支持 googleapis.com 上的服务账号")
-    email, key, key_id, project = (
-        data.get(name) for name in ("client_email", "private_key", "private_key_id", "project_id")
-    )
-    if not isinstance(email, str) or "@" not in email:
-        raise ValueError("服务账号 JSON 缺少有效的 client_email")
-    if not isinstance(key, str) or not key.strip():
-        raise ValueError("服务账号 JSON 缺少 private_key")
-    if not isinstance(key_id, str | None) or not isinstance(project, str | None):
-        raise ValueError("服务账号 JSON 的 private_key_id 或 project_id 格式无效")
-    if project and not _PROJECT_ID.fullmatch(project):
-        raise ValueError("服务账号 JSON 的 project_id 格式无效")
-    try:
-        loaded = load_pem_private_key(key.encode("utf-8"), password=None)
-    except ValueError, TypeError, UnsupportedAlgorithm:
-        raise ValueError("服务账号私钥无法解析") from None
-    if not isinstance(loaded, RSAPrivateKey):
-        raise ValueError("服务账号私钥不是 RSA 密钥")
-    return ServiceAccount(email, key, key_id or "", project or "")
-
-
-class VertexTTSSettings(Model):
-    """Vertex（现名 Gemini Enterprise Agent Platform）连接；凭据是服务账号密钥 JSON 原文。"""
-
-    credentials: str = ""
-    # 留空时使用服务账号所属项目。
-    project_id: str = Field(default="", validate_default=True)
-    location: Literal["global", "us", "eu"] = "global"
-
-    @field_validator("credentials")
-    @classmethod
-    def valid_credentials(cls, value: str) -> str:
-        if value.strip():
-            parse_service_account(value)
-        return value
-
-    @field_validator("project_id")
-    @classmethod
-    def valid_project(cls, value: str, info: ValidationInfo) -> str:
-        if value:
-            if not _PROJECT_ID.fullmatch(value):
-                raise ValueError("项目 ID 应为 6–30 位小写字母、数字或连字符，以字母开头")
-            return value
-        credentials = info.data.get("credentials")
-        if isinstance(credentials, str) and credentials.strip():
-            data = json.loads(credentials)
-            if not (isinstance(data, dict) and data.get("project_id")):
-                raise ValueError("服务账号 JSON 没有 project_id，请填写项目 ID")
-        return value
-
-    def account(self) -> ServiceAccount:
-        return parse_service_account(self.credentials)
-
-
 class TTSSettings(Model):
-    """独立于会话服务商的语音合成配置；protocol 决定使用的连接子表和请求格式。"""
+    """独立于会话服务商的 IndexTTS 2.5 语音合成与音色管理配置。"""
 
     enabled: bool = False
-    protocol: Literal["vertex_gemini"] = "vertex_gemini"
-    model: str = ""
-    # 音色由管理员固定，Agent 不能更换：内置音色名、音色库 ID 或自定义音色 ID。
+    base_url: str = "http://127.0.0.1:7861"
+    api_key: str = ""
+    # 音色由管理员固定，Agent 不能更换。
     voice: str = ""
-    # 留空时由模型根据文本识别语言。
-    language_code: str = ""
     timeout: float = Field(default=120, gt=0)
     max_retries: int = Field(default=3, ge=0)
     proxy: str | None = None
-    vertex: VertexTTSSettings = Field(default_factory=VertexTTSSettings)
-
-    @field_validator("model")
-    @classmethod
-    def valid_model(cls, value: str) -> str:
-        if value and not _MODEL_ID.fullmatch(value):
-            raise ValueError("模型名称只能包含字母、数字、点、下划线和连字符")
-        return value
 
     @field_validator("voice")
     @classmethod
@@ -297,23 +204,25 @@ class TTSSettings(Model):
             raise ValueError("音色只能包含字母、数字、下划线和连字符")
         return value
 
-    @field_validator("language_code")
-    @classmethod
-    def valid_language(cls, value: str) -> str:
-        if value and not _LANGUAGE_CODE.fullmatch(value):
-            raise ValueError("语言代码应为 BCP-47 格式，例如 cmn-CN、en-US")
-        return value
+    def endpoint_base(self) -> str:
+        stripped = self.base_url.strip().rstrip("/")
+        if not stripped:
+            return ""
+        parsed = urlsplit(stripped)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return ""
+        return stripped
 
-    def custom_voice(self) -> bool:
-        return self.voice.startswith(CUSTOM_VOICE_PREFIXES)
+    def request_headers(self) -> dict[str, str]:
+        if self.api_key:
+            return {"Authorization": f"Bearer {self.api_key}"}
+        return {}
 
     def unavailable_reason(self) -> str:
         if not self.enabled:
             return "尚未启用语音合成"
-        if not self.vertex.credentials.strip():
-            return "语音合成尚未导入服务账号"
-        if not self.model:
-            return "语音合成尚未选择模型"
+        if not self.endpoint_base():
+            return "语音合成尚未填写服务地址"
         if not self.voice:
             return "语音合成尚未选择音色"
         return ""
