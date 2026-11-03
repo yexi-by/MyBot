@@ -9,9 +9,12 @@ let guard: (() => Promise<boolean>) | null = null;
 export function setNavigationGuard(next: (() => Promise<boolean>) | null) {
   guard = next;
 }
-function sync() {
+function sync(keepScroll = false) {
+  const previousPath = current.split("?")[0];
   current = window.location.pathname + window.location.search;
   subscribers.forEach((callback) => callback());
+  if (!keepScroll && previousPath !== window.location.pathname)
+    document.querySelector(".md-detail")?.scrollTo({ top: 0 });
 }
 window.addEventListener("popstate", () => {
   void (async () => {
@@ -32,7 +35,7 @@ export async function navigate(
   const samePage = path.split("?")[0] === current.split("?")[0];
   if (options.replace) history.replaceState({}, "", path);
   else history.pushState({}, "", path);
-  sync();
+  sync(options.keepScroll);
   if (!options.keepScroll && !samePage) window.scrollTo({ top: 0 });
   return true;
 }

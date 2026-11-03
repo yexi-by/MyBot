@@ -12,12 +12,12 @@ import {
   Trash2,
 } from "lucide-react";
 import { ConfigSection, FieldShell } from "../components/form";
-import { Badge, Banner, Button, EmptyState, Meter, Spinner, Switch, Tabs } from "../components/primitives";
-import { PageHeader } from "../components/shell";
+import { Badge, Banner, Button, EmptyState, Meter, Spinner, StatusDot, Switch, Tabs } from "../components/primitives";
+import { DetailHeader, MasterDetail, QQAvatar } from "../components/shell";
 import { errorMessage, get, post } from "../lib/api";
 import { change, useConfig } from "../lib/config";
 import { formatBytes } from "../lib/format";
-import { navigate } from "../lib/navigation";
+import { linkHandler, navigate } from "../lib/navigation";
 import { sandboxResource, useResource } from "../lib/resource";
 import { object } from "../lib/types";
 import type { SandboxFile } from "../lib/types";
@@ -383,37 +383,118 @@ function SandboxSettings() {
 export function SandboxPage({ view }: { view: "overview" | "settings" }) {
   const state = useConfig();
   const enabled = object(state.draft.sandbox).enabled === true;
+  const status = useResource(sandboxResource, enabled ? 15_000 : 0).data;
+  const overviewSub = !enabled
+    ? "未启用"
+    : !status
+      ? "正在读取工作区"
+      : !status.available
+        ? "不可用"
+        : "已用 " + formatBytes(status.used_bytes) + " / " + formatBytes(status.quota_bytes);
+  const overviewTone = !enabled
+    ? ("neutral" as const)
+    : !status?.available
+      ? ("danger" as const)
+      : status.busy
+        ? ("accent" as const)
+        : ("success" as const);
+
   return (
-    <div className="page">
-      <PageHeader
-        title="沙箱"
-        description="会话共用的代码运行环境与持久化文件工作区"
-        save={view === "settings"}
-      />
-      <div className="sticky-tabs">
-        <Tabs
-          label="沙箱页面"
-          value={view}
-          onChange={(next) => void navigate(next === "settings" ? "/sandbox/settings" : "/sandbox")}
-          items={[
-            { id: "overview", label: "工作区" },
-            { id: "settings", label: "设置" },
-          ]}
-        />
+    <MasterDetail
+      label="沙箱"
+      mode="section"
+      hasDetail
+      list={
+        <>
+          <div className="md-list-head">
+            <span className="md-pane-title">共享沙箱</span>
+          </div>
+          <ul className="md-items">
+            <li>
+              <a
+                href="/sandbox"
+                className={"md-item" + (view === "overview" ? " active" : "")}
+                aria-current={view === "overview" ? "page" : undefined}
+                onClick={linkHandler("/sandbox")}
+              >
+                <QQAvatar kind="icon" icon={FolderOpen} name="工作区" size="lg" />
+                <span className="md-item-text">
+                  <span className="qq-item-top">
+                    <span className="md-item-title">工作区</span>
+                    <StatusDot tone={overviewTone} />
+                  </span>
+                  <span className="qq-item-bottom">
+                    <span className="md-item-sub">{overviewSub}</span>
+                  </span>
+                </span>
+              </a>
+            </li>
+            <li>
+              <a
+                href="/sandbox/settings"
+                className={"md-item" + (view === "settings" ? " active" : "")}
+                aria-current={view === "settings" ? "page" : undefined}
+                onClick={linkHandler("/sandbox/settings")}
+              >
+                <QQAvatar kind="icon" icon={Box} name="设置" size="lg" />
+                <span className="md-item-text">
+                  <span className="qq-item-top">
+                    <span className="md-item-title">设置</span>
+                    <StatusDot tone={enabled ? "success" : "neutral"} />
+                  </span>
+                  <span className="qq-item-bottom">
+                    <span className="md-item-sub">配额、超时与隔离控制器参数</span>
+                  </span>
+                </span>
+              </a>
+            </li>
+          </ul>
+        </>
+      }
+    >
+      <div className="detail">
+        <div className="detail-sticky">
+          <DetailHeader
+            avatar={
+              <QQAvatar
+                kind="icon"
+                icon={view === "settings" ? Box : FolderOpen}
+                name={view === "settings" ? "沙箱设置" : "工作区"}
+                size="md"
+              />
+            }
+            title={view === "settings" ? "沙箱设置" : "沙箱"}
+            save={view === "settings"}
+            subtitle="会话共用的代码运行环境与持久化文件工作区"
+          />
+          <div className="mobile-subnav">
+            <Tabs
+              label="沙箱页面"
+              value={view}
+              onChange={(next) => void navigate(next === "settings" ? "/sandbox/settings" : "/sandbox")}
+              items={[
+                { id: "overview", label: "工作区" },
+                { id: "settings", label: "设置" },
+              ]}
+            />
+          </div>
+        </div>
+        <div className="detail-body stack">
+          {view === "settings" ? (
+            <SandboxSettings />
+          ) : enabled ? (
+            <SandboxOverview />
+          ) : (
+            <EmptyState
+              icon={Box}
+              title="共享沙箱未启用"
+              action={<Button onClick={() => void navigate("/sandbox/settings")}>打开设置</Button>}
+            >
+              启用后，开放了沙箱能力的会话可以执行 Python 和 Node.js 代码，并在共享工作区中读写文件。
+            </EmptyState>
+          )}
+        </div>
       </div>
-      {view === "settings" ? (
-        <SandboxSettings />
-      ) : enabled ? (
-        <SandboxOverview />
-      ) : (
-        <EmptyState
-          icon={Box}
-          title="共享沙箱未启用"
-          action={<Button onClick={() => void navigate("/sandbox/settings")}>打开设置</Button>}
-        >
-          启用后，开放了沙箱能力的会话可以执行 Python 和 Node.js 代码，并在共享工作区中读写文件。
-        </EmptyState>
-      )}
-    </div>
+    </MasterDetail>
   );
 }

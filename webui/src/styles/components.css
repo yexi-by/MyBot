@@ -536,6 +536,10 @@
   background: var(--surface);
   box-shadow: 0 -8px 0 1px var(--canvas);
 }
+.detail-body .card-header.sticky {
+  position: static;
+  box-shadow: none;
+}
 .card-header h2,
 .section-header h2 {
   font-size: var(--fs-md);
@@ -1133,11 +1137,17 @@ input[type="checkbox"] {
   background: var(--surface);
   color: var(--text-3);
   transition:
+    background-color var(--dur) var(--ease),
     border-color var(--dur) var(--ease),
     box-shadow var(--dur) var(--ease);
 }
+.md-list-head .search-input {
+  border-color: transparent;
+  background: var(--surface-3);
+}
 .search-input:focus-within {
   border-color: var(--accent);
+  background: var(--surface);
   box-shadow: 0 0 0 3px var(--focus);
 }
 .search-input input {

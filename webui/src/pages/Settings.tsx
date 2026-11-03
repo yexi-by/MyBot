@@ -1,15 +1,16 @@
-import { CircleAlert, Power, RotateCw } from "lucide-react";
+import { CircleAlert, FileCode, Gauge, Palette, Power, Radio, RotateCw, Server } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { FileEditor } from "../components/FileEditor";
 import { ConfigSection } from "../components/form";
-import { Banner, Button, EmptyState, Segmented, StatusDot } from "../components/primitives";
-import { CopyButton, PageHeader } from "../components/shell";
+import { Banner, Button, EmptyState, Segmented, StatusDot, Tabs } from "../components/primitives";
+import { CopyButton, DetailHeader, MasterDetail, QQAvatar } from "../components/shell";
 import { useConfig } from "../lib/config";
 import { formatDuration } from "../lib/format";
-import { linkHandler } from "../lib/navigation";
+import { linkHandler, navigate } from "../lib/navigation";
 import { restartHarness, shutdownHarness } from "../lib/power";
 import { runtimeResource, useResource } from "../lib/resource";
-import { setTheme, themeLabels, useTheme } from "../lib/theme";
-import type { Theme } from "../lib/theme";
+import { setSkin, setTheme, skinLabels, themeLabels, useSkin, useTheme } from "../lib/theme";
+import type { Skin, Theme } from "../lib/theme";
 import { object } from "../lib/types";
 import { settingsSections } from "../routes";
 import type { SettingsSection } from "../routes";
@@ -79,6 +80,7 @@ function ConfigFile() {
 
 function Appearance() {
   const theme = useTheme();
+  const skin = useSkin();
   return (
     <section className="card form-section">
       <div className="form-grid">
@@ -95,6 +97,23 @@ function Appearance() {
               options={(["system", "light", "dark"] as Theme[]).map((value) => ({
                 value,
                 label: themeLabels[value],
+              }))}
+            />
+          </div>
+        </div>
+        <div className="field">
+          <div className="field-text">
+            <span className="field-label">界面风格</span>
+            <p className="field-help">切换 NTQQ 纯净默认灰白底或清透淡紫薄荷微渐变底。</p>
+          </div>
+          <div className="field-control">
+            <Segmented<Skin>
+              label="界面风格"
+              value={skin}
+              onChange={setSkin}
+              options={(["clean", "gradient"] as Skin[]).map((value) => ({
+                value,
+                label: skinLabels[value],
               }))}
             />
           </div>
@@ -163,29 +182,77 @@ function Service() {
   );
 }
 
+const sectionMeta: Record<SettingsSection, { icon: LucideIcon; sub: string }> = {
+  napcat: { icon: Radio, sub: "QQ 反向 WebSocket 地址与连接密钥" },
+  runtime: { icon: Gauge, sub: "并发、队列容量与会话保留上限" },
+  server: { icon: Server, sub: "监听地址、端口与控制台安全" },
+  "config-file": { icon: FileCode, sub: "直接查看与编辑运行配置原文" },
+  appearance: { icon: Palette, sub: "浅色/深色主题与 NTQQ 界面风格" },
+  service: { icon: Power, sub: "运行版本信息、重启与关闭进程" },
+};
+
 export function SettingsPage({ section }: { section: SettingsSection }) {
   const editable = section === "napcat" || section === "runtime" || section === "server";
+  const current = settingsSections.find((item) => item.id === section) ?? settingsSections[0];
+  const meta = sectionMeta[section];
   return (
-    <div className="page">
-      <PageHeader title="设置" save={editable} />
-      <div className="settings-layout">
-        <nav className="settings-nav" aria-label="设置分类">
-          {settingsSections.map((item) => {
-            const to = "/settings/" + item.id;
-            return (
-              <a
-                key={item.id}
-                href={to}
-                className={"settings-link" + (item.id === section ? " active" : "")}
-                aria-current={item.id === section ? "page" : undefined}
-                onClick={linkHandler(to)}
-              >
-                {item.label}
-              </a>
-            );
-          })}
-        </nav>
-        <div className="settings-body">
+    <MasterDetail
+      label="设置分类"
+      mode="section"
+      hasDetail
+      list={
+        <>
+          <div className="md-list-head">
+            <span className="md-pane-title">系统设置</span>
+          </div>
+          <ul className="md-items">
+            {settingsSections.map((item) => {
+              const to = "/settings/" + item.id;
+              const active = item.id === section;
+              const info = sectionMeta[item.id];
+              return (
+                <li key={item.id}>
+                  <a
+                    href={to}
+                    className={"md-item" + (active ? " active" : "")}
+                    aria-current={active ? "page" : undefined}
+                    onClick={linkHandler(to)}
+                  >
+                    <QQAvatar kind="icon" icon={info.icon} name={item.label} size="lg" />
+                    <span className="md-item-text">
+                      <span className="qq-item-top">
+                        <span className="md-item-title">{item.label}</span>
+                      </span>
+                      <span className="qq-item-bottom">
+                        <span className="md-item-sub">{info.sub}</span>
+                      </span>
+                    </span>
+                  </a>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      }
+    >
+      <div className="detail">
+        <div className="detail-sticky">
+          <DetailHeader
+            avatar={<QQAvatar kind="icon" icon={meta.icon} name={current.label} size="md" />}
+            title={current.label}
+            save={editable}
+            subtitle={meta.sub}
+          />
+          <div className="mobile-subnav">
+            <Tabs
+              label="设置分类"
+              value={section}
+              onChange={(next) => void navigate("/settings/" + next)}
+              items={settingsSections.map((item) => ({ id: item.id, label: item.label }))}
+            />
+          </div>
+        </div>
+        <div className="detail-body stack">
           {section === "napcat" ? (
             <NapcatSettings />
           ) : section === "runtime" ? (
@@ -201,6 +268,6 @@ export function SettingsPage({ section }: { section: SettingsSection }) {
           )}
         </div>
       </div>
-    </div>
+    </MasterDetail>
   );
 }

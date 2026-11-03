@@ -1,9 +1,9 @@
 import { BookOpen, FilePlus, FileText, UserRound } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { FileEditor } from "../components/FileEditor";
-import { Badge, Button, EmptyState } from "../components/primitives";
-import { DetailHeader, MasterDetail, PageHeader } from "../components/shell";
+import { Badge, Button, EmptyState, IconButton } from "../components/primitives";
+import { DetailHeader, MasterDetail, QQAvatar, SearchInput } from "../components/shell";
 import { ApiError, errorMessage, put } from "../lib/api";
 import { useConfig } from "../lib/config";
 import { promptUsage } from "../lib/models";
@@ -61,11 +61,13 @@ function FileItem({
   selected,
   icon: Icon,
   sub,
+  count,
 }: {
   path: string;
   selected: boolean;
   icon: LucideIcon;
   sub?: string;
+  count?: number;
 }) {
   const to = "/prompts?path=" + enc(path);
   return (
@@ -76,10 +78,17 @@ function FileItem({
         aria-current={selected ? "page" : undefined}
         onClick={linkHandler(to)}
       >
-        <Icon size={16} className="md-item-icon" aria-hidden="true" />
+        <QQAvatar kind="icon" icon={Icon} name={path} size="lg" />
         <span className="md-item-text">
-          <span className="md-item-title">{path}</span>
-          {sub && <span className="md-item-sub">{sub}</span>}
+          <span className="qq-item-top">
+            <span className="md-item-title">{path}</span>
+            {count != null && count > 0 && <span className="qq-pill num">{count}</span>}
+          </span>
+          {sub && (
+            <span className="qq-item-bottom">
+              <span className="md-item-sub">{sub}</span>
+            </span>
+          )}
         </span>
       </a>
     </li>
@@ -91,6 +100,7 @@ export function PromptsPage({ path }: { path: string }) {
   const groups = useGroupNames();
   const files = useResource(filesResource);
   const wide = useMediaQuery("(min-width: 768px)");
+  const [query, setQuery] = useState("");
 
   const allFiles = useMemo(() => {
     const names = new Set<string>((files.data ?? []).filter(isText));
@@ -112,29 +122,30 @@ export function PromptsPage({ path }: { path: string }) {
     return map;
   }, [allFiles, state.draft, groups]);
 
-  const inUseFiles = allFiles.filter((file) => (usageMap.get(file)?.length ?? 0) > 0);
-  const unusedFiles = allFiles.filter((file) => (usageMap.get(file)?.length ?? 0) === 0);
-  const defaultFile = inUseFiles[0] ?? allFiles[0] ?? "";
+  const text = query.trim().toLowerCase();
+  const visibleFiles = allFiles.filter((file) => !text || file.toLowerCase().includes(text));
+  const inUseFiles = visibleFiles.filter((file) => (usageMap.get(file)?.length ?? 0) > 0);
+  const unusedFiles = visibleFiles.filter((file) => (usageMap.get(file)?.length ?? 0) === 0);
+  const defaultFile =
+    allFiles.find((file) => (usageMap.get(file)?.length ?? 0) > 0) ?? allFiles[0] ?? "";
   const selected = path || (wide ? defaultFile : "");
   const uses = selected ? (usageMap.get(selected) ?? promptUsage(state.draft, selected, groups)) : [];
   const usedAsPersona = uses.some((use) => use.parts.includes("人格"));
   const usedAsKnowledge = uses.some((use) => use.parts.includes("知识库"));
+  const onNew = () => void createFile(files.data ?? []);
 
   return (
-    <div className="page">
-      <PageHeader
-        title="提示词"
-        description="管理配置目录中的人格提示词与知识库文件；各会话使用的文件在「会话」页面中单独绑定。"
-        actions={
-          <Button icon={FilePlus} onClick={() => void createFile(files.data ?? [])}>
-            新建文件
-          </Button>
-        }
-      />
-      <MasterDetail
-        label="提示词文件"
-        hasDetail={!!path}
-        list={
+    <MasterDetail
+      label="提示词文件"
+      hasDetail={!!path}
+      list={
+        <>
+          <div className="md-list-head">
+            <div className="md-list-search-row">
+              <SearchInput value={query} onChange={setQuery} placeholder="搜索文件名" label="搜索提示词文件" />
+              <IconButton icon={FilePlus} label="新建文件" className="md-add-btn" onClick={onNew} />
+            </div>
+          </div>
           <ul className="md-items">
             <li className="md-section">会话使用中 · {inUseFiles.length}</li>
             {inUseFiles.length ? (
@@ -152,6 +163,7 @@ export function PromptsPage({ path }: { path: string }) {
                     selected={selected === file}
                     icon={isPersona ? UserRound : BookOpen}
                     sub={roles + " · " + fileUses.length + " 个会话"}
+                    count={fileUses.length}
                   />
                 );
               })
@@ -172,42 +184,57 @@ export function PromptsPage({ path }: { path: string }) {
               <li className="md-empty muted">配置目录中没有其他未绑定的 .md 或 .txt 文件</li>
             )}
           </ul>
-        }
-      >
-        {selected ? (
-          <div className="detail detail-editor">
-            <div className="detail-sticky">
-              <DetailHeader
-                back={{ to: "/prompts", label: "全部文件" }}
-                title={selected}
-                subtitle={
-                  uses.length ? (
-                    <span className="row wrap">
-                      <span className="muted">使用会话：</span>
-                      {uses.map((use) => (
-                        <a
-                          key={use.base.join(":")}
-                          href={use.route}
-                          className="chip"
-                          onClick={linkHandler(use.route)}
-                        >
-                          {use.label}（{use.parts.join("、")}）
-                        </a>
-                      ))}
-                    </span>
-                  ) : (
-                    "当前没有会话绑定此文件，可在「会话」页面的「提示词与知识库」中选择使用"
-                  )
-                }
-                badges={
-                  <>
-                    {usedAsPersona && <Badge tone="accent">人格</Badge>}
-                    {usedAsKnowledge && <Badge tone="accent">知识库</Badge>}
-                    {!usedAsPersona && !usedAsKnowledge && <Badge>未绑定</Badge>}
-                  </>
-                }
-              />
-            </div>
+        </>
+      }
+    >
+      {selected ? (
+        <div className="detail detail-editor">
+          <div className="detail-sticky">
+            <DetailHeader
+              back={{ to: "/prompts", label: "全部文件" }}
+              avatar={
+                <QQAvatar
+                  kind="icon"
+                  icon={usedAsPersona ? UserRound : usedAsKnowledge ? BookOpen : FileText}
+                  name={selected}
+                  size="md"
+                />
+              }
+              title={selected}
+              subtitle={
+                uses.length ? (
+                  <span className="row wrap">
+                    <span className="muted">使用会话：</span>
+                    {uses.map((use) => (
+                      <a
+                        key={use.base.join(":")}
+                        href={use.route}
+                        className="chip"
+                        onClick={linkHandler(use.route)}
+                      >
+                        {use.label}（{use.parts.join("、")}）
+                      </a>
+                    ))}
+                  </span>
+                ) : (
+                  "当前没有会话绑定此文件，可在「会话」页面的「提示词与知识库」中选择使用"
+                )
+              }
+              badges={
+                <>
+                  {usedAsPersona && <Badge tone="accent">人格</Badge>}
+                  {usedAsKnowledge && <Badge tone="accent">知识库</Badge>}
+                  {!usedAsPersona && !usedAsKnowledge && <Badge>未绑定</Badge>}
+                </>
+              }
+              actions={
+                <Button size="sm" icon={FilePlus} onClick={onNew}>
+                  新建文件
+                </Button>
+              }
+            />
+          </div>
+          <div className="detail-body stack">
             <FileEditor
               key={selected}
               path={selected}
@@ -220,12 +247,27 @@ export function PromptsPage({ path }: { path: string }) {
               }
             />
           </div>
-        ) : (
-          <EmptyState icon={FileText} title="选择一个文件">
-            在左侧选择人格或知识库文件进行编辑。
-          </EmptyState>
-        )}
-      </MasterDetail>
-    </div>
+        </div>
+      ) : (
+        <div className="detail">
+          <div className="detail-sticky">
+            <DetailHeader
+              title="提示词"
+              subtitle="管理配置目录中的人格提示词与知识库文件；各会话使用的文件在「会话」页面中单独绑定。"
+              actions={
+                <Button icon={FilePlus} onClick={onNew}>
+                  新建文件
+                </Button>
+              }
+            />
+          </div>
+          <div className="detail-body">
+            <EmptyState icon={FileText} title="选择一个文件">
+              在左侧选择人格或知识库文件进行编辑。
+            </EmptyState>
+          </div>
+        </div>
+      )}
+    </MasterDetail>
   );
 }

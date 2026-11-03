@@ -2,34 +2,20 @@
 
 /* ---------- 概览 ---------- */
 .tiles {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-  gap: 12px;
-}
-.tile {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
+  gap: 4px;
+}
+.tile {
+  border: 1px solid transparent;
   background: var(--surface);
   box-shadow: var(--shadow-card);
-  color: var(--text);
-  transition:
-    border-color var(--dur) var(--ease),
-    box-shadow var(--dur) var(--ease),
-    transform var(--dur) var(--ease);
 }
 .tile:hover {
   border-color: var(--border-strong);
+  background: var(--surface);
   box-shadow: var(--shadow-hover);
   text-decoration: none;
-  transform: translateY(-1px);
-}
-.tile:active {
-  transform: none;
 }
 .tile:focus-visible {
   outline: none;
@@ -37,18 +23,13 @@
   box-shadow: 0 0 0 3px var(--focus);
 }
 .tile-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-3);
-  font-size: var(--fs-sm);
-}
-.tile-head span:nth-child(2) {
-  flex: 1;
+  width: 100%;
 }
 .tile-value {
   overflow: hidden;
-  font-size: var(--fs-lg);
+  max-width: 130px;
+  color: var(--text-2);
+  font-size: var(--fs-xs);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -58,7 +39,8 @@
   overflow: hidden;
   color: var(--text-3);
   font-size: var(--fs-xs);
-  line-height: 1.5;
+  line-height: 1.45;
+  white-space: normal;
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -85,9 +67,9 @@
 .turn {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(200px, 320px) auto;
+  grid-template-columns: auto minmax(0, 1fr) minmax(180px, 280px) auto;
   align-items: center;
-  gap: 12px 20px;
+  gap: 10px 14px;
   padding: 12px 20px;
   transition: background-color var(--dur) var(--ease);
 }
@@ -231,17 +213,15 @@ a.activity-scope:hover {
   display: none;
 }
 
-/* ---------- 会话上下文 ---------- */
+/* ---------- 会话上下文（NTQQ 聊天窗口流） ---------- */
 .session-capacity {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 16px;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 2px 0;
 }
 .session-capacity .meter {
-  flex: 1;
-  min-width: 160px;
-  max-width: 320px;
+  width: 100%;
 }
 .session-overview {
   display: flex;
@@ -300,33 +280,101 @@ a.activity-scope:hover {
   font-size: var(--fs-sm);
 }
 .session-tool {
-  font-weight: 500;
+  font-weight: 600;
 }
 .session-messages {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-.session-message {
+.session-wake-group {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 2px 8px;
-  min-width: 0;
-  font-size: var(--fs-sm);
+  flex-direction: column;
+  gap: 8px;
 }
 .session-sender {
   color: var(--text-2);
   font-weight: 500;
   overflow-wrap: anywhere;
 }
-.session-message .entry-text {
-  flex-basis: 100%;
+
+/* NTQQ 聊天气泡行 */
+.qq-chat-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
 }
+.qq-chat-item.is-bot {
+  flex-direction: row-reverse;
+}
+.qq-chat-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  max-width: min(760px, calc(100% - 46px));
+}
+.qq-chat-item.is-bot .qq-chat-main {
+  align-items: flex-end;
+}
+.qq-chat-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px;
+  font-size: var(--fs-xs);
+}
+.qq-role-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+.qq-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px 12px 12px 12px;
+  background: var(--bubble-peer);
+  box-shadow: var(--shadow-card);
+  color: var(--text);
+}
+.qq-chat-item.is-bot .qq-bubble {
+  border-radius: 12px 4px 12px 12px;
+}
+.qq-bubble.bubble-self {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: var(--bubble-self);
+}
+.qq-bubble.bubble-thought {
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: var(--bubble-thought);
+}
+.qq-bubble.bubble-tool {
+  background: var(--surface);
+}
+
 .session-timeline {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
 }
 .session-timeline-head {
   display: flex;
@@ -338,36 +386,48 @@ a.activity-scope:hover {
   font-weight: 600;
 }
 .session-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 0 8px;
+}
+.session-turn-head {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-self: center;
+  align-items: center;
+  justify-content: center;
+  gap: 6px 10px;
+  max-width: 100%;
+  padding: 4px 14px;
   border: 1px solid var(--border);
-  border-radius: var(--r-lg);
+  border-radius: 999px;
   background: var(--surface);
   box-shadow: var(--shadow-card);
 }
-.session-turn-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 10px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
-}
 .session-turn-head h3 {
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
   font-weight: 600;
 }
-.session-entries > li {
-  border-top: 1px solid var(--border);
-}
-.session-entries > li:first-child {
-  border-top: none;
+.session-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 .session-entry {
   display: flex;
   flex-direction: column;
   gap: 6px;
   min-width: 0;
-  padding: 10px 16px 10px 13px;
-  border-left: 3px solid transparent;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
 }
 .session-entry.entry-accent {
   border-left-color: var(--accent);
@@ -375,13 +435,25 @@ a.activity-scope:hover {
 .session-entry.entry-warning {
   border-left-color: var(--warning);
 }
-.session-boundary {
+.session-entry.session-history-fold {
+  border-left-width: 1px;
+  background: var(--surface-2);
+  box-shadow: none;
+}
+.session-entry.session-boundary {
   flex-direction: row;
   flex-wrap: wrap;
+  align-self: center;
   align-items: center;
+  justify-content: center;
   gap: 4px 8px;
-  border-radius: 0 0 var(--r-lg) var(--r-lg);
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px 14px;
+  border-left-width: 1px;
+  border-radius: 999px;
   background: var(--surface-2);
+  box-shadow: none;
 }
 .entry-head,
 .entry-call-head {
@@ -392,7 +464,7 @@ a.activity-scope:hover {
   min-width: 0;
 }
 .entry-label {
-  margin-right: 4px;
+  margin-right: 2px;
   color: var(--text-3);
   font-size: var(--fs-xs);
   font-weight: 600;
@@ -415,9 +487,10 @@ a.activity-scope:hover {
   overflow-wrap: anywhere;
 }
 .entry-quote {
-  padding: 6px 10px;
-  border-radius: var(--r);
-  background: var(--surface-2);
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--surface);
 }
 .entry-details > summary {
   width: fit-content;
@@ -481,12 +554,6 @@ a.activity-scope:hover {
 }
 .session-fresh:hover {
   background: var(--accent-hover);
-}
-@media (max-width: 767px) {
-  /* 窄屏详情只保留会话本身，容量概况回到列表再看。 */
-  .page:has(.master-detail.has-detail) .session-capacity {
-    display: none;
-  }
 }
 
 /* ---------- 会话与权限 ---------- */
@@ -956,12 +1023,12 @@ button.file-name:hover {
     display: none;
   }
 }
-@media (max-width: 900px) {
+@media (max-width: 960px) {
   .turn {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
   }
   .turn-context {
-    grid-column: 1 / -1;
+    grid-column: 2 / -1;
     grid-row: 2;
   }
   .editor-body.mode-split {
@@ -975,15 +1042,10 @@ button.file-name:hover {
 }
 @media (max-width: 720px) {
   .tiles {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+    gap: 6px;
   }
   .tile {
-    padding: 12px 14px;
-  }
-  /* 五张卡片两列排布时，最后一张占满整行，避免落单留白。 */
-  .tile:last-child:nth-child(odd) {
-    grid-column: 1 / -1;
+    padding: 10px 12px;
   }
   .activity-day {
     padding: 6px 16px;

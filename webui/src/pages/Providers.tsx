@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { CircleAlert, CopyPlus, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { ConfigSection } from "../components/form";
 import { Menu } from "../components/Menu";
-import { Badge, Button, EmptyState } from "../components/primitives";
-import { DetailHeader, MasterDetail, PageHeader } from "../components/shell";
+import { Badge, Button, EmptyState, IconButton } from "../components/primitives";
+import { DetailHeader, MasterDetail, QQAvatar, SearchInput } from "../components/shell";
 import { ApiError, errorMessage, get } from "../lib/api";
 import { change, useConfig } from "../lib/config";
 import { formatNumber } from "../lib/format";
@@ -155,7 +155,7 @@ function UsageCard({ uses }: { uses: ProviderUse[] }) {
   );
 }
 
-function ProviderDetail({ id }: { id: string }) {
+function ProviderDetail({ id, onAdd }: { id: string; onAdd: () => void }) {
   const state = useConfig();
   const groups = useGroupNames();
   const providers = object(state.draft.providers);
@@ -163,13 +163,20 @@ function ProviderDetail({ id }: { id: string }) {
   const raw = getAt(state.draft, base);
   if (raw === undefined)
     return (
-      <EmptyState
-        icon={CircleAlert}
-        title="服务商不存在"
-        action={<Button onClick={() => void navigate("/providers")}>返回列表</Button>}
-      >
-        “{id}”可能已被删除或重命名。
-      </EmptyState>
+      <div className="detail">
+        <div className="detail-sticky">
+          <DetailHeader back={{ to: "/providers", label: "全部服务商" }} title={id} save />
+        </div>
+        <div className="detail-body">
+          <EmptyState
+            icon={CircleAlert}
+            title="服务商不存在"
+            action={<Button onClick={() => void navigate("/providers")}>返回列表</Button>}
+          >
+            “{id}”可能已被删除或重命名。
+          </EmptyState>
+        </div>
+      </div>
     );
   const provider = object(raw);
   const uses = providerUsage(state.draft, id, groups);
@@ -178,59 +185,68 @@ function ProviderDetail({ id }: { id: string }) {
       <div className="detail-sticky">
         <DetailHeader
           back={{ to: "/providers", label: "全部服务商" }}
+          avatar={<QQAvatar kind="icon" icon={Sparkles} name={id} size="md" />}
           title={id}
+          save
           badges={uses.length > 0 && <Badge tone="accent">{uses.length} 个会话在用</Badge>}
           subtitle={host(provider.base_url) || "未填写接口地址"}
           actions={
-            <Menu
-              items={[
-                {
-                  label: "复制为新服务商",
-                  icon: CopyPlus,
-                  onSelect: async () => {
-                    const next = await prompt({
-                      title: "复制服务商",
-                      message: "复制当前服务商的全部设置，包括 API Key。",
-                      label: "新服务商名称",
-                      initial: id + "-copy",
-                      confirmLabel: "复制",
-                      validate: validateId(providers),
-                    });
-                    if (!next) return;
-                    change(["providers", next], structuredClone(provider));
-                    void navigate("/providers/" + enc(next));
+            <>
+              <Button size="sm" icon={Plus} onClick={onAdd}>
+                添加服务商
+              </Button>
+              <Menu
+                items={[
+                  {
+                    label: "复制为新服务商",
+                    icon: CopyPlus,
+                    onSelect: async () => {
+                      const next = await prompt({
+                        title: "复制服务商",
+                        message: "复制当前服务商的全部设置，包括 API Key。",
+                        label: "新服务商名称",
+                        initial: id + "-copy",
+                        confirmLabel: "复制",
+                        validate: validateId(providers),
+                      });
+                      if (!next) return;
+                      change(["providers", next], structuredClone(provider));
+                      void navigate("/providers/" + enc(next));
+                    },
                   },
-                },
-                {
-                  label: "删除",
-                  icon: Trash2,
-                  danger: true,
-                  onSelect: async () => {
-                    if (uses.length) {
-                      toast("还有 " + uses.length + " 个会话在用这个服务商，请先在这些会话中改选其他服务商", "danger");
-                      return;
-                    }
-                    const accepted = await confirm({
-                      title: "删除服务商 " + id + "？",
-                      message: "服务商的地址、密钥和请求设置会一并删除。",
-                      confirmLabel: "删除",
-                      danger: true,
-                    });
-                    if (!accepted) return;
-                    change(base, undefined);
-                    void navigate("/providers", { replace: true });
-                    toast("已删除服务商 " + id);
+                  {
+                    label: "删除",
+                    icon: Trash2,
+                    danger: true,
+                    onSelect: async () => {
+                      if (uses.length) {
+                        toast("还有 " + uses.length + " 个会话在用这个服务商，请先在这些会话中改选其他服务商", "danger");
+                        return;
+                      }
+                      const accepted = await confirm({
+                        title: "删除服务商 " + id + "？",
+                        message: "服务商的地址、密钥和请求设置会一并删除。",
+                        confirmLabel: "删除",
+                        danger: true,
+                      });
+                      if (!accepted) return;
+                      change(base, undefined);
+                      void navigate("/providers", { replace: true });
+                      toast("已删除服务商 " + id);
+                    },
                   },
-                },
-              ]}
-            />
+                ]}
+              />
+            </>
           }
         />
       </div>
-      <ConfigSection def={providerApiSection} base={base} />
-      <ConfigSection def={providerRequestSection} base={base} />
-      <ModelCatalog id={id} />
-      <UsageCard uses={uses} />
+      <div className="detail-body stack">
+        <ConfigSection def={providerApiSection} base={base} />
+        <ConfigSection def={providerRequestSection} base={base} />
+        <ModelCatalog id={id} />
+        <UsageCard uses={uses} />
+      </div>
     </div>
   );
 }
@@ -240,8 +256,15 @@ export function ProvidersPage({ id }: { id: string }) {
   const groups = useGroupNames();
   const location = useLocation();
   const wide = useMediaQuery("(min-width: 768px)");
+  const [query, setQuery] = useState("");
   const providers = object(state.draft.providers);
   const ids = Object.keys(providers);
+  const text = query.trim().toLowerCase();
+  const visible = ids.filter(
+    (name) =>
+      !text ||
+      (name + " " + host(object(providers[name]).base_url)).toLowerCase().includes(text),
+  );
   // 宽屏下未指定时直接显示第一个服务商。
   const shown = id || (wide ? (ids[0] ?? "") : "");
   useEffect(() => {
@@ -252,68 +275,92 @@ export function ProvidersPage({ id }: { id: string }) {
   }, [location]);
   const add = () => void addProvider(providers);
   return (
-    <div className="page">
-      <PageHeader
-        title="服务商"
-        description="服务商只负责连接；每个会话在「会话」页选择自己的会话模型和压缩模型。"
-        actions={
-          ids.length > 0 && (
-            <Button icon={Plus} onClick={add}>
-              添加服务商
-            </Button>
-          )
-        }
-      />
-      {!ids.length ? (
-        <EmptyState
-          icon={Sparkles}
-          title="还没有服务商"
-          action={
-            <Button variant="primary" icon={Plus} onClick={add}>
-              添加服务商
-            </Button>
-          }
-        >
-          添加一个 OpenAI 兼容接口，再到会话中选择模型，Agent 才会回复消息。
-        </EmptyState>
-      ) : (
-        <MasterDetail
-          label="服务商"
-          hasDetail={!!id}
-          list={
-            <ul className="md-items">
-              {ids.map((name) => {
-                const provider = object(providers[name]);
-                const count = providerUsage(state.draft, name, groups).length;
-                const to = "/providers/" + enc(name);
-                return (
-                  <li key={name}>
-                    <a
-                      href={to}
-                      className={"md-item" + (shown === name ? " active" : "")}
-                      aria-current={shown === name ? "page" : undefined}
-                      onClick={linkHandler(to)}
-                    >
-                      <Sparkles size={16} className="md-item-icon" aria-hidden="true" />
-                      <span className="md-item-text">
+    <MasterDetail
+      label="服务商"
+      hasDetail={!!id}
+      list={
+        <>
+          <div className="md-list-head">
+            <div className="md-list-search-row">
+              <SearchInput value={query} onChange={setQuery} placeholder="搜索服务商" label="搜索服务商" />
+              <IconButton icon={Plus} label="添加服务商" className="md-add-btn" onClick={add} />
+            </div>
+          </div>
+          <ul className="md-items">
+            {visible.map((name) => {
+              const provider = object(providers[name]);
+              const count = providerUsage(state.draft, name, groups).length;
+              const to = "/providers/" + enc(name);
+              return (
+                <li key={name}>
+                  <a
+                    href={to}
+                    className={"md-item" + (shown === name ? " active" : "")}
+                    aria-current={shown === name ? "page" : undefined}
+                    onClick={linkHandler(to)}
+                  >
+                    <QQAvatar kind="icon" icon={Sparkles} name={name} size="lg" />
+                    <span className="md-item-text">
+                      <span className="qq-item-top">
                         <span className="md-item-title">{name}</span>
+                        {count > 0 && (
+                          <span className="qq-pill num" title={count + " 个会话在用"}>
+                            {count}
+                          </span>
+                        )}
+                      </span>
+                      <span className="qq-item-bottom">
                         <span className="md-item-sub">{host(provider.base_url) || "未填写接口地址"}</span>
                       </span>
-                      {count > 0 && (
-                        <span className="muted small num" title={count + " 个会话在用"}>
-                          {count}
-                        </span>
-                      )}
-                    </a>
-                  </li>
-                );
-              })}
-            </ul>
-          }
-        >
-          {shown ? <ProviderDetail key={shown} id={shown} /> : null}
-        </MasterDetail>
+                    </span>
+                  </a>
+                </li>
+              );
+            })}
+            {!ids.length && (
+              <li className="md-empty">
+                <p>还没有服务商。</p>
+                <Button size="sm" icon={Plus} onClick={add}>
+                  添加服务商
+                </Button>
+              </li>
+            )}
+            {ids.length > 0 && !visible.length && <li className="md-empty muted">没有匹配的服务商</li>}
+          </ul>
+        </>
+      }
+    >
+      {shown ? (
+        <ProviderDetail key={shown} id={shown} onAdd={add} />
+      ) : (
+        <div className="detail">
+          <div className="detail-sticky">
+            <DetailHeader
+              title="服务商"
+              save
+              subtitle="服务商只负责连接；每个会话在「会话」页选择自己的会话模型和压缩模型。"
+              actions={
+                <Button icon={Plus} onClick={add}>
+                  添加服务商
+                </Button>
+              }
+            />
+          </div>
+          <div className="detail-body">
+            <EmptyState
+              icon={Sparkles}
+              title="还没有服务商"
+              action={
+                <Button variant="primary" icon={Plus} onClick={add}>
+                  添加服务商
+                </Button>
+              }
+            >
+              添加一个 OpenAI 兼容接口，再到会话中选择模型，Agent 才会回复消息。
+            </EmptyState>
+          </div>
+        </div>
       )}
-    </div>
+    </MasterDetail>
   );
 }

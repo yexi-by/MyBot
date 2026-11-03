@@ -12,6 +12,8 @@ import {
   RotateCw,
   Search,
   TriangleAlert,
+  UserRound,
+  Users,
   WifiOff,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -28,10 +30,73 @@ import { restartSections } from "../lib/labels";
 import { navigate, useLocation } from "../lib/navigation";
 import { dismissPower, restartHarness, usePower } from "../lib/power";
 import { setConflictDialog, toast, useUi } from "../lib/ui";
+import type { Tone } from "../lib/ui";
 import { focusField } from "../routes";
 import { fieldLabel } from "../schema/fields";
 import { Dialog } from "./Dialog";
 import { Banner, Button, IconButton } from "./primitives";
+
+const qqIdPattern = /^\d{5,15}$/;
+
+/**
+ * QQ 原生圆形头像：支持个人 QQ 头像（q1.qlogo.cn）、QQ 群头像（p.qlogo.cn）及功能图标占位。
+ * 浏览器以 no-referrer 直接加载；加载前、失败或无号码时显示首字或图标。
+ */
+export function QQAvatar({
+  kind = "user",
+  id = "",
+  name = "",
+  icon: Icon,
+  size = "lg",
+  tone,
+}: {
+  kind?: "user" | "group" | "icon";
+  id?: string;
+  name?: string;
+  icon?: LucideIcon;
+  size?: "sm" | "md" | "lg";
+  tone?: Tone;
+}) {
+  const [failed, setFailed] = useState(false);
+  const cleanId = id.trim();
+  useEffect(() => {
+    setFailed(false);
+  }, [kind, cleanId]);
+
+  const validId = (kind === "user" || kind === "group") && qqIdPattern.test(cleanId);
+  const src = !validId
+    ? ""
+    : kind === "group"
+      ? "https://p.qlogo.cn/gh/" + encodeURIComponent(cleanId) + "/" + encodeURIComponent(cleanId) + "/100"
+      : "https://q1.qlogo.cn/g?b=qq&nk=" + encodeURIComponent(cleanId) + "&s=100";
+
+  const stripped = name.replace(/^(群\s+|私聊\s*·?\s*)/, "").trim();
+  const initial = stripped && !/^\d+$/.test(stripped) ? Array.from(stripped)[0] : "";
+  const FallbackIcon = Icon ?? (kind === "group" ? Users : UserRound);
+  const iconSize = size === "sm" ? 15 : size === "md" ? 18 : 20;
+
+  return (
+    <span className={["avatar", "avatar-" + size, tone ? "avatar-tone-" + tone : ""].filter(Boolean).join(" ")}>
+      {Icon ? (
+        <Icon size={iconSize} aria-hidden="true" />
+      ) : initial ? (
+        <span aria-hidden="true">{initial}</span>
+      ) : (
+        <FallbackIcon size={iconSize} aria-hidden="true" />
+      )}
+      {src && !failed && (
+        <img
+          src={src}
+          alt=""
+          referrerPolicy="no-referrer"
+          decoding="async"
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
+      )}
+    </span>
+  );
+}
 
 /** 复制到剪贴板；局域网 HTTP 页面没有 Clipboard API 时退回到选区复制。 */
 export async function copyText(text: string): Promise<boolean> {
@@ -258,20 +323,27 @@ export function DetailHeader({
   subtitle,
   badges,
   actions,
+  avatar,
+  save = false,
   back,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
   badges?: ReactNode;
   actions?: ReactNode;
-  back: { to: string; label: string };
+  avatar?: ReactNode;
+  save?: boolean;
+  back?: { to: string; label: string };
 }) {
   return (
     <header className="detail-header">
-      <button type="button" className="md-back" onClick={() => void navigate(back.to)}>
-        <ArrowLeft size={16} aria-hidden="true" />
-        {back.label}
-      </button>
+      {back && (
+        <button type="button" className="md-back" onClick={() => void navigate(back.to)}>
+          <ArrowLeft size={16} aria-hidden="true" />
+          {back.label}
+        </button>
+      )}
+      {avatar && <div className="detail-avatar">{avatar}</div>}
       <div className="detail-heading">
         <div className="detail-title">
           <h2>{title}</h2>
@@ -279,7 +351,12 @@ export function DetailHeader({
         </div>
         {subtitle && <div className="detail-subtitle">{subtitle}</div>}
       </div>
-      {actions && <div className="detail-actions">{actions}</div>}
+      {(save || actions) && (
+        <div className="detail-actions">
+          {save && <SaveStatus />}
+          {actions}
+        </div>
+      )}
     </header>
   );
 }
@@ -289,14 +366,24 @@ export function MasterDetail({
   children,
   hasDetail,
   label,
+  mode = "split",
 }: {
   list: ReactNode;
   children: ReactNode;
   hasDetail: boolean;
   label: string;
+  mode?: "split" | "section" | "dashboard";
 }) {
   return (
-    <div className={"master-detail" + (hasDetail ? " has-detail" : "")}>
+    <div
+      className={[
+        "master-detail",
+        "mode-" + mode,
+        hasDetail ? "has-detail" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
       <nav className="md-list" aria-label={label}>
         {list}
       </nav>

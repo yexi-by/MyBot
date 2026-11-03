@@ -30,7 +30,7 @@ import {
   Switch,
   Tabs,
 } from "../components/primitives";
-import { DetailHeader, MasterDetail, PageHeader, SearchInput } from "../components/shell";
+import { DetailHeader, MasterDetail, QQAvatar, SearchInput } from "../components/shell";
 import { ToolDrawer } from "../components/ToolDrawer";
 import { errorMessage, get, post, request } from "../lib/api";
 import { change, getConfig, save, useConfig } from "../lib/config";
@@ -299,7 +299,15 @@ async function addServer(existing: Record<string, unknown>) {
   void navigate("/tools/mcp/" + enc(name));
 }
 
-function McpDetail({ name }: { name: string }) {
+function McpDetail({
+  name,
+  onAdd,
+  subnav,
+}: {
+  name: string;
+  onAdd: () => void;
+  subnav?: React.ReactNode;
+}) {
   const state = useConfig();
   const runtime = useResource(runtimeResource, 5000);
   const tools = useResource(toolsResource);
@@ -315,13 +323,21 @@ function McpDetail({ name }: { name: string }) {
   );
   if (raw === undefined)
     return (
-      <EmptyState
-        icon={CircleAlert}
-        title="MCP 服务不存在"
-        action={<Button onClick={() => void navigate("/tools/mcp")}>返回列表</Button>}
-      >
-        “{name}”可能已被删除。
-      </EmptyState>
+      <div className="detail">
+        <div className="detail-sticky">
+          <DetailHeader back={{ to: "/tools/mcp", label: "全部 MCP 服务" }} title={name} save />
+          {subnav}
+        </div>
+        <div className="detail-body">
+          <EmptyState
+            icon={CircleAlert}
+            title="MCP 服务不存在"
+            action={<Button onClick={() => void navigate("/tools/mcp")}>返回列表</Button>}
+          >
+            “{name}”可能已被删除。
+          </EmptyState>
+        </div>
+      </div>
     );
   const server = object(raw);
   const enabled = server.enabled === true;
@@ -332,7 +348,9 @@ function McpDetail({ name }: { name: string }) {
       <div className="detail-sticky">
         <DetailHeader
           back={{ to: "/tools/mcp", label: "全部 MCP 服务" }}
+          avatar={<QQAvatar kind="icon" icon={Plug} name={name} size="md" />}
           title={name}
+          save
           badges={<Badge tone={label.tone}>{label.text}</Badge>}
           subtitle={
             String(server.transport) === "stdio"
@@ -341,6 +359,9 @@ function McpDetail({ name }: { name: string }) {
           }
           actions={
             <>
+              <Button size="sm" icon={Plus} onClick={onAdd}>
+                添加 MCP 服务
+              </Button>
               <label className="switch-label">
                 <span>{enabled ? "已启用" : "未启用"}</span>
                 <Switch
@@ -385,82 +406,30 @@ function McpDetail({ name }: { name: string }) {
             </>
           }
         />
+        {subnav}
       </div>
-      {status && (status.message || status.error_type) ? (
-        <Banner tone={label.tone === "success" ? "neutral" : "warning"} icon={CircleAlert} title={label.text}>
-          {status.message || status.error_type}
-        </Banner>
-      ) : null}
-      {status?.state === "connected" && (
-        <p className="muted small">已发现 {status.tools ?? discovered.length} 个工具，可在会话的能力权限中开放。</p>
-      )}
-      <ConfigSection def={mcpConnectionSection} base={base} />
-      <ConfigSection def={mcpSecretsSection} base={base} />
-      {!!status?.excluded_tools?.length && <Banner tone="warning" title="部分工具未加载">
-        {status.excluded_tools.map((item) => <p key={item.name}>{item.name}：{item.reason}</p>)}
-      </Banner>}
+      <div className="detail-body stack">
+        {status && (status.message || status.error_type) ? (
+          <Banner tone={label.tone === "success" ? "neutral" : "warning"} icon={CircleAlert} title={label.text}>
+            {status.message || status.error_type}
+          </Banner>
+        ) : null}
+        {status?.state === "connected" && (
+          <p className="muted small">已发现 {status.tools ?? discovered.length} 个工具，可在会话的能力权限中开放。</p>
+        )}
+        <ConfigSection def={mcpConnectionSection} base={base} />
+        <ConfigSection def={mcpSecretsSection} base={base} />
+        {!!status?.excluded_tools?.length && (
+          <Banner tone="warning" title="部分工具未加载">
+            {status.excluded_tools.map((item) => (
+              <p key={item.name}>
+                {item.name}：{item.reason}
+              </p>
+            ))}
+          </Banner>
+        )}
+      </div>
     </div>
-  );
-}
-
-function McpServers({ id }: { id: string }) {
-  const state = useConfig();
-  const runtime = useResource(runtimeResource, 5000);
-  const wide = useMediaQuery("(min-width: 768px)");
-  const servers = object(state.draft.mcp);
-  const names = Object.keys(servers);
-  const shown = id || (wide ? (names[0] ?? "") : "");
-  if (!names.length)
-    return (
-      <EmptyState
-        icon={Plug}
-        title="还没有 MCP 服务"
-        action={
-          <Button variant="primary" icon={Plus} onClick={() => void addServer(servers)}>
-            添加 MCP 服务
-          </Button>
-        }
-      >
-        MCP 服务可以为 Agent 提供额外的工具，例如搜索或文档查询。添加后需要重启 Harness 才会连接。
-      </EmptyState>
-    );
-  return (
-    <MasterDetail
-      label="MCP 服务"
-      hasDetail={!!id}
-      list={
-        <ul className="md-items">
-          {names.map((name) => {
-            const enabled = object(servers[name]).enabled === true;
-            const status = runtime.data?.mcp[name];
-            const label = enabled ? mcpState(status?.state) : mcpState("disabled");
-            const to = "/tools/mcp/" + enc(name);
-            return (
-              <li key={name}>
-                <a
-                  href={to}
-                  className={"md-item" + (shown === name ? " active" : "")}
-                  aria-current={shown === name ? "page" : undefined}
-                  onClick={linkHandler(to)}
-                >
-                  <Plug size={16} className="md-item-icon" aria-hidden="true" />
-                  <span className="md-item-text">
-                    <span className="md-item-title">{name}</span>
-                    <span className="md-item-sub">
-                      {label.text}
-                      {status?.state === "connected" && status.tools !== undefined ? " · " + status.tools + " 个工具" : ""}
-                    </span>
-                  </span>
-                  <StatusDot tone={label.tone} />
-                </a>
-              </li>
-            );
-          })}
-        </ul>
-      }
-    >
-      {shown ? <McpDetail key={shown} name={shown} /> : null}
-    </MasterDetail>
   );
 }
 
@@ -1414,48 +1383,218 @@ function SpeechSynthesis() {
 
 export function ToolsPage({ route }: { route: ToolsRoute }) {
   const state = useConfig();
+  const runtime = useResource(runtimeResource, 5000);
+  const wide = useMediaQuery("(min-width: 768px)");
   const servers = object(state.draft.mcp);
+  const names = Object.keys(servers);
   const imageEnabled = object(state.draft.image).enabled === true;
   const ttsEnabled = object(state.draft.tts).enabled === true;
-  return (
-    <div className="page">
-      <PageHeader
-        title="工具"
-        description="Agent 可以调用的工具；每个会话能用哪些，由会话的能力权限决定"
-        save={route.view === "mcp" || route.view === "image" || route.view === "tts"}
-        actions={
-          route.view === "mcp" && Object.keys(servers).length > 0 ? (
-            <Button icon={Plus} onClick={() => void addServer(servers)}>
-              添加 MCP 服务
-            </Button>
-          ) : undefined
-        }
+  const shownMcp = route.view === "mcp" ? route.id || (wide ? (names[0] ?? "") : "") : "";
+  const onAddMcp = () => void addServer(servers);
+
+  const builtinViews = [
+    {
+      id: "catalog" as const,
+      to: "/tools",
+      label: "工具目录",
+      sub: "查看全部工具与开放范围",
+      icon: Wrench,
+      status: null,
+    },
+    {
+      id: "image" as const,
+      to: "/tools/image",
+      label: "图像生成",
+      sub: imageEnabled ? "已启用 · 生图接口与参考图" : "未启用 · 生图接口设置",
+      icon: Play,
+      status: imageEnabled ? ("success" as const) : ("neutral" as const),
+    },
+    {
+      id: "tts" as const,
+      to: "/tools/tts",
+      label: "语音合成",
+      sub: ttsEnabled ? "已启用 · IndexTTS 2.5 音色库" : "未启用 · IndexTTS 2.5 设置",
+      icon: Cpu,
+      status: ttsEnabled ? ("success" as const) : ("neutral" as const),
+    },
+    {
+      id: "napcat" as const,
+      to: "/tools/napcat",
+      label: "NapCat 覆盖",
+      sub: "OneBot 动作覆盖清单",
+      icon: Check,
+      status: null,
+    },
+  ];
+  const currentBuiltin = builtinViews.find((item) => item.id === route.view);
+
+  const mobileTabs = (
+    <div className="mobile-subnav">
+      <Tabs
+        label="工具页面"
+        value={route.view}
+        onChange={(view) => void navigate(view === "catalog" ? "/tools" : "/tools/" + view)}
+        items={[
+          { id: "catalog", label: "工具目录" },
+          { id: "image", label: "图像生成", count: imageEnabled ? "已启用" : undefined },
+          { id: "tts", label: "语音合成", count: ttsEnabled ? "已启用" : undefined },
+          { id: "mcp", label: "MCP 服务", count: names.length || undefined },
+          { id: "napcat", label: "NapCat 覆盖" },
+        ]}
       />
-      <div className="sticky-tabs">
-        <Tabs
-          label="工具页面"
-          value={route.view}
-          onChange={(view) => void navigate(view === "catalog" ? "/tools" : "/tools/" + view)}
-          items={[
-            { id: "catalog", label: "工具目录" },
-            { id: "image", label: "图像生成", count: imageEnabled ? "已启用" : undefined },
-            { id: "tts", label: "语音合成", count: ttsEnabled ? "已启用" : undefined },
-            { id: "mcp", label: "MCP 服务", count: Object.keys(servers).length || undefined },
-            { id: "napcat", label: "NapCat 覆盖" },
-          ]}
-        />
-      </div>
-      {route.view === "catalog" ? (
-        <Catalog selected={route.tool} />
-      ) : route.view === "image" ? (
-        <ImageGeneration />
-      ) : route.view === "tts" ? (
-        <SpeechSynthesis />
-      ) : route.view === "mcp" ? (
-        <McpServers id={route.id} />
-      ) : (
-        <Coverage />
-      )}
     </div>
+  );
+
+  return (
+    <MasterDetail
+      label="工具与服务"
+      mode={route.view === "mcp" && names.length > 0 ? "split" : "section"}
+      hasDetail={route.view !== "mcp" || !!route.id || !names.length}
+      list={
+        <>
+          <div className="md-list-head">
+            <div className="md-list-search-row">
+              <span className="md-pane-title">工具与服务</span>
+              <IconButton icon={Plus} label="添加 MCP 服务" className="md-add-btn" onClick={onAddMcp} />
+            </div>
+          </div>
+          <ul className="md-items">
+            <li className="md-section">内置模块</li>
+            {builtinViews.map((item) => {
+              const active = route.view === item.id;
+              return (
+                <li key={item.id}>
+                  <a
+                    href={item.to}
+                    className={"md-item" + (active ? " active" : "")}
+                    aria-current={active ? "page" : undefined}
+                    onClick={linkHandler(item.to)}
+                  >
+                    <QQAvatar kind="icon" icon={item.icon} name={item.label} size="lg" />
+                    <span className="md-item-text">
+                      <span className="qq-item-top">
+                        <span className="md-item-title">{item.label}</span>
+                        {item.status && <StatusDot tone={item.status} />}
+                      </span>
+                      <span className="qq-item-bottom">
+                        <span className="md-item-sub">{item.sub}</span>
+                      </span>
+                    </span>
+                  </a>
+                </li>
+              );
+            })}
+            <li className="md-section">MCP 服务 · {names.length}</li>
+            {names.map((name) => {
+              const enabled = object(servers[name]).enabled === true;
+              const status = runtime.data?.mcp[name];
+              const label = enabled ? mcpState(status?.state) : mcpState("disabled");
+              const to = "/tools/mcp/" + enc(name);
+              const active = route.view === "mcp" && shownMcp === name;
+              return (
+                <li key={name}>
+                  <a
+                    href={to}
+                    className={"md-item" + (active ? " active" : "")}
+                    aria-current={active ? "page" : undefined}
+                    onClick={linkHandler(to)}
+                  >
+                    <QQAvatar kind="icon" icon={Plug} name={name} size="lg" />
+                    <span className="md-item-text">
+                      <span className="qq-item-top">
+                        <span className="md-item-title">{name}</span>
+                        <StatusDot tone={label.tone} label={label.text} />
+                      </span>
+                      <span className="qq-item-bottom">
+                        <span className="md-item-sub">
+                          {label.text}
+                          {status?.state === "connected" && status.tools !== undefined
+                            ? " · " + status.tools + " 个工具"
+                            : ""}
+                        </span>
+                      </span>
+                    </span>
+                  </a>
+                </li>
+              );
+            })}
+            {!names.length && (
+              <li className="md-empty">
+                <p>还没有 MCP 服务。</p>
+                <Button size="sm" icon={Plus} onClick={onAddMcp}>
+                  添加 MCP 服务
+                </Button>
+              </li>
+            )}
+          </ul>
+        </>
+      }
+    >
+      {route.view === "mcp" ? (
+        shownMcp ? (
+          <McpDetail key={shownMcp} name={shownMcp} onAdd={onAddMcp} subnav={mobileTabs} />
+        ) : (
+          <div className="detail">
+            <div className="detail-sticky">
+              <DetailHeader
+                avatar={<QQAvatar kind="icon" icon={Plug} name="MCP" size="md" />}
+                title="MCP 服务"
+                save
+                subtitle="Agent 可以调用的外部 MCP 工具服务；每个会话能用哪些，由会话的能力权限决定"
+                actions={
+                  <Button icon={Plus} onClick={onAddMcp}>
+                    添加 MCP 服务
+                  </Button>
+                }
+              />
+              {mobileTabs}
+            </div>
+            <div className="detail-body">
+              <EmptyState
+                icon={Plug}
+                title="还没有 MCP 服务"
+                action={
+                  <Button variant="primary" icon={Plus} onClick={onAddMcp}>
+                    添加 MCP 服务
+                  </Button>
+                }
+              >
+                MCP 服务可以为 Agent 提供额外的工具，例如搜索或文档查询。添加后需要重启 Harness 才会连接。
+              </EmptyState>
+            </div>
+          </div>
+        )
+      ) : (
+        <div className="detail">
+          <div className="detail-sticky">
+            <DetailHeader
+              avatar={
+                <QQAvatar
+                  kind="icon"
+                  icon={currentBuiltin?.icon ?? Wrench}
+                  name={currentBuiltin?.label ?? "工具"}
+                  size="md"
+                />
+              }
+              title={currentBuiltin?.label ?? "工具"}
+              save={route.view === "image" || route.view === "tts"}
+              subtitle="Agent 可以调用的工具；每个会话能用哪些，由会话的能力权限决定"
+            />
+            {mobileTabs}
+          </div>
+          <div className="detail-body stack">
+            {route.view === "catalog" ? (
+              <Catalog selected={route.tool} />
+            ) : route.view === "image" ? (
+              <ImageGeneration />
+            ) : route.view === "tts" ? (
+              <SpeechSynthesis />
+            ) : (
+              <Coverage />
+            )}
+          </div>
+        </div>
+      )}
+    </MasterDetail>
   );
 }

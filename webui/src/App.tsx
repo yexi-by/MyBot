@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
-import { CircleAlert, Menu, Monitor, Moon, Search, Sun, UserRound, X } from "lucide-react";
+import { useEffect } from "react";
+import { CircleAlert, Menu, Monitor, Moon, Search, Settings, Sun, X } from "lucide-react";
 import { CommandPalette } from "./components/CommandPalette";
 import { GlobalDialog, Toasts } from "./components/Overlays";
-import { ConflictDialog, GlobalBanners, PowerOverlay } from "./components/shell";
+import { ConflictDialog, GlobalBanners, PowerOverlay, QQAvatar } from "./components/shell";
 import { Button, EmptyState, IconButton, Spinner, StatusDot } from "./components/primitives";
 import { getConfig, loadConfig, pollConfig, save, useConfig } from "./lib/config";
 import { linkHandler, navigate, useLocation } from "./lib/navigation";
@@ -48,7 +48,7 @@ async function saveConfigNow() {
 function Logo() {
   return (
     <svg className="logo" viewBox="0 0 24 24" aria-hidden="true">
-      <rect width="24" height="24" rx="6" fill="currentColor" />
+      <rect width="24" height="24" rx="7" fill="currentColor" />
       <path
         d="M6.5 8a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v4.5a2 2 0 0 1-2 2h-4L8.5 17v-2.5a2 2 0 0 1-2-2Z"
         fill="none"
@@ -62,30 +62,7 @@ function Logo() {
 
 const themeIcons = { system: Monitor, light: Sun, dark: Moon };
 
-/**
- * QQ 头像由浏览器直接向 QQ 头像服务读取，不带来源页；加载前和读不到时显示昵称首字或占位图标。
- * 换号时由调用方以 key 重新挂载，重置加载失败状态。
- */
-function Avatar({ qq, name }: { qq: string; name: string }) {
-  const [failed, setFailed] = useState(false);
-  const initial = Array.from(name)[0];
-  return (
-    <span className="avatar">
-      {initial ? <span aria-hidden="true">{initial}</span> : <UserRound size={18} aria-hidden="true" />}
-      {qq && !failed && (
-        <img
-          src={"https://q1.qlogo.cn/g?b=qq&nk=" + encodeURIComponent(qq) + "&s=100"}
-          alt=""
-          referrerPolicy="no-referrer"
-          decoding="async"
-          onError={() => setFailed(true)}
-        />
-      )}
-    </span>
-  );
-}
-
-/** 侧栏左下角的机器人账号：头像、昵称与连接状态，点击进入 NapCat 设置。 */
+/** 导航轨顶部的机器人账号：头像、昵称与连接状态，点击进入 NapCat 设置。 */
 function SidebarAccount() {
   const runtime = useResource(runtimeResource, 10_000).data;
   const account = useResource(accountResource, 60_000).data;
@@ -110,7 +87,7 @@ function SidebarAccount() {
       title={bots.length ? status + "：" + names.join("、") : status}
     >
       <span className="sidebar-avatar">
-        <Avatar key={bot} qq={bot} name={nickname} />
+        <QQAvatar key={bot} kind="user" id={bot} name={nickname} size="md" />
         <StatusDot tone={bots.length ? "success" : known ? "warning" : "neutral"} />
       </span>
       <span className="sidebar-account-text">
@@ -125,33 +102,22 @@ function SidebarAccount() {
 
 function Sidebar({ route }: { route: Route }) {
   const theme = useTheme();
+  const runtime = useResource(runtimeResource, 10_000).data;
+  const busyTurns = runtime?.turns.length ?? 0;
   const ThemeIcon = themeIcons[theme];
+  const mainNav = navItems.filter((item) => item.page !== "settings");
+  const settingsActive = route.page === "settings";
   return (
     <aside className="sidebar" aria-label="主导航">
       <div className="sidebar-head">
-        <a className="brand" href="/" onClick={linkHandler("/", () => setNav(false))}>
-          <Logo />
-          <span className="brand-name">QQ Agent Harness</span>
-        </a>
+        <SidebarAccount />
         <IconButton className="sidebar-close" icon={X} label="关闭导航" onClick={() => setNav(false)} />
       </div>
-      <button
-        type="button"
-        className="sidebar-search"
-        onClick={() => {
-          setNav(false);
-          setPalette(true);
-        }}
-        title="搜索或跳转（Ctrl+K）"
-      >
-        <Search size={15} aria-hidden="true" />
-        <span className="sidebar-search-text">搜索或跳转</span>
-        <kbd>Ctrl K</kbd>
-      </button>
       <nav className="nav">
-        {navItems.map((item) => {
+        {mainNav.map((item) => {
           const Icon = item.icon;
           const active = route.page === item.page;
+          const badge = item.page === "sessions" && busyTurns > 0 ? busyTurns : 0;
           return (
             <a
               key={item.path}
@@ -161,19 +127,48 @@ function Sidebar({ route }: { route: Route }) {
               title={item.label}
               onClick={linkHandler(item.path, () => setNav(false))}
             >
-              <Icon size={18} aria-hidden="true" />
+              <Icon size={20} aria-hidden="true" />
               <span className="nav-label">{item.label}</span>
+              {badge > 0 && <span className="nav-badge num">{badge > 99 ? "99+" : badge}</span>}
             </a>
           );
         })}
       </nav>
       <div className="sidebar-foot">
-        <SidebarAccount />
-        <IconButton
-          icon={ThemeIcon}
-          label={"主题：" + themeLabels[theme] + "，点击切换"}
+        <button
+          type="button"
+          className="nav-item sidebar-search"
+          onClick={() => {
+            setNav(false);
+            setPalette(true);
+          }}
+          title="搜索或跳转（Ctrl+K）"
+          aria-label="搜索或跳转"
+        >
+          <Search size={19} aria-hidden="true" />
+          <span className="nav-label">搜索或跳转</span>
+          <kbd>Ctrl K</kbd>
+        </button>
+        <button
+          type="button"
+          className="nav-item"
+          title={"主题：" + themeLabels[theme] + "，点击切换"}
+          aria-label={"主题：" + themeLabels[theme] + "，点击切换"}
           onClick={cycleTheme}
-        />
+        >
+          <ThemeIcon size={19} aria-hidden="true" />
+          <span className="nav-label">{"主题：" + themeLabels[theme]}</span>
+        </button>
+        <a
+          href="/settings"
+          className={"nav-item" + (settingsActive ? " active" : "")}
+          aria-current={settingsActive ? "page" : undefined}
+          title="设置"
+          onClick={linkHandler("/settings", () => setNav(false))}
+        >
+          <Settings size={19} aria-hidden="true" />
+          <span className="nav-label">设置</span>
+        </a>
       </div>
     </aside>
   );

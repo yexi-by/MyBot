@@ -6,14 +6,12 @@ import {
   ChevronUp,
   CircleAlert,
   CircleStop,
-  Hash,
   RotateCcw,
   ScrollText,
   SlidersHorizontal,
-  User,
 } from "lucide-react";
 import { Badge, Banner, Button, EmptyState, Meter, Spinner, StatusDot } from "../components/primitives";
-import { CopyButton, DetailHeader, MasterDetail, PageHeader, SearchInput } from "../components/shell";
+import { CopyButton, DetailHeader, MasterDetail, QQAvatar, SearchInput } from "../components/shell";
 import { conversationRoute, scopeLabel } from "../lib/conversations";
 import {
   formatBytes,
@@ -121,7 +119,15 @@ function CapacityBar({ capacity }: { capacity: SessionCapacity | undefined }) {
   );
 }
 
-function SessionList({ route, rows }: { route: SessionsRoute; rows: Row[] }) {
+function SessionList({
+  route,
+  rows,
+  capacity,
+}: {
+  route: SessionsRoute;
+  rows: Row[];
+  capacity?: SessionCapacity;
+}) {
   const groups = useGroupNames();
   const [query, setQuery] = useState("");
   const text = query.trim().toLowerCase();
@@ -134,7 +140,7 @@ function SessionList({ route, rows }: { route: SessionsRoute; rows: Row[] }) {
   const bots = new Set(rows.map((row) => parseScopeKey(row.key)?.bot));
   const item = (row: Row) => {
     const scope = parseScopeKey(row.key);
-    const Icon = scope?.kind === "private" ? User : Hash;
+    const title = scopeLabel(row.key, groups);
     const to = sessionRoute(row.key);
     const active = route.key === row.key;
     const sub = row.preparing
@@ -156,15 +162,30 @@ function SessionList({ route, rows }: { route: SessionsRoute; rows: Row[] }) {
           aria-current={active ? "page" : undefined}
           onClick={linkHandler(to)}
         >
-          <Icon size={16} className="md-item-icon" aria-hidden="true" />
+          <QQAvatar
+            kind={scope?.kind === "private" ? "user" : "group"}
+            id={scope?.peer ?? ""}
+            name={title}
+            size="lg"
+          />
           <span className="md-item-text">
-            <span className="md-item-title">{scopeLabel(row.key, groups)}</span>
-            <span className="md-item-sub">
-              {bots.size > 1 && scope ? "机器人 " + scope.bot + " · " : ""}
-              {sub}
+            <span className="qq-item-top">
+              <span className="md-item-title">{title}</span>
+              {row.updatedAt > 0 && <time className="qq-item-time num">{formatClock(row.updatedAt)}</time>}
+            </span>
+            <span className="qq-item-bottom">
+              <span className="md-item-sub">
+                {bots.size > 1 && scope ? "机器人 " + scope.bot + " · " : ""}
+                {sub}
+              </span>
+              <span className="qq-item-badges">
+                {row.turns > 0 && (
+                  <span className={"qq-pill num" + (isBusy(row.state) ? " is-busy" : "")}>{row.turns}轮</span>
+                )}
+                <StatusDot tone={stateTone(row.state)} label={turnState(row.state).text} />
+              </span>
             </span>
           </span>
-          <StatusDot tone={stateTone(row.state)} label={turnState(row.state).text} />
         </a>
       </li>
     );
@@ -173,6 +194,7 @@ function SessionList({ route, rows }: { route: SessionsRoute; rows: Row[] }) {
     <>
       <div className="md-list-head">
         <SearchInput value={query} onChange={setQuery} placeholder="搜索群名或 QQ 号" label="搜索会话" />
+        <CapacityBar capacity={capacity} />
       </div>
       <ul className="md-items">
         {busy.length > 0 && <li className="md-section">处理中 · {busy.length}</li>}
@@ -195,12 +217,21 @@ function JsonBlock({ label, value }: { label: string; value: Json | undefined })
   );
 }
 
-function MessageLine({ message, botId }: { message: QQMessage; botId: string }) {
+function MessageLine({ message, botId, tag }: { message: QQMessage; botId: string; tag?: string }) {
+  const sender = senderLabel(message, botId);
   return (
-    <li className="session-message">
-      <span className="session-sender">{senderLabel(message, botId)}</span>
-      {message.time > 0 && <time className="tiny muted num">{formatClock(message.time)}</time>}
-      <span className="entry-text">{messageText(message.segments) || "（空消息）"}</span>
+    <li className="qq-chat-item is-peer">
+      <QQAvatar kind="user" id={message.sender_id} name={sender} size="md" />
+      <div className="qq-chat-main">
+        <div className="qq-chat-meta">
+          {tag && <span className="qq-role-tag">{tag}</span>}
+          <span className="session-sender">{sender}</span>
+          {message.time > 0 && <time className="tiny muted num">{formatClock(message.time)}</time>}
+        </div>
+        <div className="qq-bubble bubble-peer">
+          <span className="entry-text">{messageText(message.segments) || "（空消息）"}</span>
+        </div>
+      </div>
     </li>
   );
 }
@@ -241,7 +272,15 @@ function Outcome({ result }: { result: ToolOutcome }) {
   );
 }
 
-function CallEntry({ entry, tools }: { entry: EntryOf<"call">; tools: Map<string, string> }) {
+function CallEntry({
+  entry,
+  botId,
+  tools,
+}: {
+  entry: EntryOf<"call">;
+  botId: string;
+  tools: Map<string, string>;
+}) {
   const preview = sendPreview(entry.name, entry.arguments);
   const args = object(entry.arguments);
   const target =
@@ -253,20 +292,29 @@ function CallEntry({ entry, tools }: { entry: EntryOf<"call">; tools: Map<string
   const elapsed = entry.result_at !== null && entry.at !== null ? entry.result_at - entry.at : null;
   const status = entry.result ? resultStatus(entry.result.status) : null;
   return (
-    <Entry label="工具调用" at={entry.at}>
-      <div className="entry-call-head">
-        <span className="session-tool" title={entry.name}>
-          {tools.get(entry.name) ?? entry.name}
-        </span>
-        <span className="tiny muted mono">{entry.name}</span>
-        {status ? <Badge tone={status.tone}>{status.text}</Badge> : <Badge tone="accent">执行中</Badge>}
-        {elapsed !== null && <span className="tiny muted num">耗时 {formatElapsed(elapsed)}</span>}
+    <li className="qq-chat-item is-bot">
+      <QQAvatar kind="user" id={botId} name="Bot" size="md" />
+      <div className="qq-chat-main">
+        <div className="qq-chat-meta">
+          <span className="entry-label">{preview !== null ? "发送 QQ 消息" : "工具调用"}</span>
+          {entry.at !== null && <time className="tiny muted num">{formatClock(entry.at)}</time>}
+        </div>
+        <div className={"qq-bubble " + (preview !== null ? "bubble-self" : "bubble-tool")}>
+          <div className="entry-call-head">
+            <span className="session-tool" title={entry.name}>
+              {tools.get(entry.name) ?? entry.name}
+            </span>
+            <span className="tiny muted mono">{entry.name}</span>
+            {status ? <Badge tone={status.tone}>{status.text}</Badge> : <Badge tone="accent">执行中</Badge>}
+            {elapsed !== null && <span className="tiny muted num">耗时 {formatElapsed(elapsed)}</span>}
+          </div>
+          {preview !== null && <p className="entry-text entry-quote">{preview || "（空消息）"}</p>}
+          {target && <p className="tiny muted">目标：{target}</p>}
+          <JsonBlock label="参数" value={entry.arguments} />
+          {entry.result && <Outcome result={entry.result} />}
+        </div>
       </div>
-      {preview !== null && <p className="entry-text entry-quote">{preview || "（空消息）"}</p>}
-      {target && <p className="tiny muted">目标：{target}</p>}
-      <JsonBlock label="参数" value={entry.arguments} />
-      {entry.result && <Outcome result={entry.result} />}
-    </Entry>
+    </li>
   );
 }
 
@@ -302,22 +350,23 @@ function EntryView({
   switch (entry.kind) {
     case "wake":
       return (
-        <Entry label="唤醒" tone="accent" at={entry.at}>
+        <li className="session-wake-group">
           <ul className="session-messages">
-            {entry.messages.map((message) => (
-              <MessageLine key={message.message_id} message={message} botId={botId} />
+            {entry.messages.map((message, idx) => (
+              <MessageLine
+                key={message.message_id}
+                message={message}
+                botId={botId}
+                tag={idx === 0 ? "唤醒" : undefined}
+              />
             ))}
           </ul>
           {entry.notice && <p className="small session-warning-text">{entry.notice}</p>}
-        </Entry>
+        </li>
       );
     case "history":
       return (
-        <Entry label="历史消息" at={entry.at}>
-          <ul className="session-messages">
-            <MessageLine message={entry.message} botId={botId} />
-          </ul>
-        </Entry>
+        <MessageLine message={entry.message} botId={botId} tag="历史" />
       );
     case "knowledge":
       return (
@@ -362,12 +411,22 @@ function EntryView({
       );
     case "assistant":
       return (
-        <Entry label="模型正文" note="未发送到 QQ" at={entry.at}>
-          <p className="entry-text">{entry.text}</p>
-        </Entry>
+        <li className="qq-chat-item is-bot">
+          <QQAvatar kind="user" id={botId} name="Bot" size="md" />
+          <div className="qq-chat-main">
+            <div className="qq-chat-meta">
+              <span className="entry-label">模型正文</span>
+              <span className="tiny muted">未发送到 QQ</span>
+              {entry.at !== null && <time className="tiny muted num">{formatClock(entry.at)}</time>}
+            </div>
+            <div className="qq-bubble bubble-thought">
+              <p className="entry-text">{entry.text}</p>
+            </div>
+          </div>
+        </li>
       );
     case "call":
-      return <CallEntry entry={entry} tools={tools} />;
+      return <CallEntry entry={entry} botId={botId} tools={tools} />;
     case "result":
       return (
         <Entry label="工具结果" at={entry.at}>
@@ -438,7 +497,7 @@ function TurnSection({
       <ol className="session-entries">
         {items.map((item, index) =>
           item.type === "history" ? (
-            <li key={index} className="session-entry">
+            <li key={index} className="session-entry session-history-fold">
               <details className="entry-details">
                 <summary>补入历史消息 {item.messages.length} 条</summary>
                 <ul className="session-messages">
@@ -517,25 +576,32 @@ function blockKey(block: TimelineBlock, index: number) {
 function Timeline({ detail, botId }: { detail: SessionDetail; botId: string }) {
   const tools = useToolTitles();
   const entries = useMemo(() => detail.entries ?? [], [detail.entries]);
+  const hasEntries = entries.length > 0;
   const blocks = useMemo(() => groupEntries(entries), [entries]);
   const end = useRef<HTMLDivElement>(null);
   const nearBottom = useRef(false);
   const seen = useRef("");
   const [fresh, setFresh] = useState(false);
   useEffect(() => {
+    const scroller = end.current?.closest(".md-detail") as HTMLElement | null;
     const check = () => {
-      nearBottom.current =
-        window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 160;
+      const winNear = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 160;
+      const paneNear = scroller
+        ? scroller.clientHeight + scroller.scrollTop >= scroller.scrollHeight - 160
+        : true;
+      nearBottom.current = scroller && scroller.scrollHeight > scroller.clientHeight + 4 ? paneNear : winNear;
       if (nearBottom.current) setFresh(false);
     };
     check();
     window.addEventListener("scroll", check, { passive: true });
     window.addEventListener("resize", check);
+    scroller?.addEventListener("scroll", check, { passive: true });
     return () => {
       window.removeEventListener("scroll", check);
       window.removeEventListener("resize", check);
+      scroller?.removeEventListener("scroll", check);
     };
-  }, []);
+  }, [hasEntries]);
   const jump = () => {
     end.current?.scrollIntoView({ behavior: prefersReducedMotion() ? "instant" : "smooth", block: "end" });
     setFresh(false);
@@ -550,7 +616,7 @@ function Timeline({ detail, botId }: { detail: SessionDetail; botId: string }) {
       end.current?.scrollIntoView({ behavior: prefersReducedMotion() ? "instant" : "smooth", block: "end" });
     else setFresh(true);
   }, [marker]);
-  if (!entries.length)
+  if (!hasEntries)
     return (
       <EmptyState icon={ScrollText} title={detail.cleared ? "上下文已清空" : "还没有内容"} compact>
         {detail.cleared ? "下次唤醒时会从近期 QQ 历史重新建立上下文。" : "会话建立后，这里会按轮次显示保留的内容。"}
@@ -711,31 +777,43 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
   const title = scopeLabel(scopeKey, groups);
   const settings = scope ? conversationRoute(scope.kind, scope.peer) : "/conversations";
   const botId = scope?.bot ?? "";
+  const avatar = (
+    <QQAvatar
+      kind={scope?.kind === "private" ? "user" : "group"}
+      id={scope?.peer ?? ""}
+      name={title}
+      size="md"
+    />
+  );
   if (!detail)
     return (
       <div className="detail">
-        <DetailHeader back={back} title={title} />
-        {missing && preparing ? (
-          <EmptyState title="正在建立会话" compact>
-            首次唤醒正在读取历史，会话建立后会自动显示。
-          </EmptyState>
-        ) : missing ? (
-          <EmptyState
-            icon={CircleAlert}
-            title="这个会话没有保留的上下文"
-            action={<Button onClick={() => void navigate(settings)}>打开会话设置</Button>}
-          >
-            它可能还没有被唤醒、已被容量回收，或者 Harness 重启过。
-          </EmptyState>
-        ) : error ? (
-          <EmptyState icon={CircleAlert} title="无法读取会话" action={<Button onClick={refresh}>重试</Button>}>
-            {error}
-          </EmptyState>
-        ) : (
-          <div className="page-center">
-            <Spinner label="正在读取会话…" />
-          </div>
-        )}
+        <div className="detail-sticky">
+          <DetailHeader back={back} avatar={avatar} title={title} />
+        </div>
+        <div className="detail-body">
+          {missing && preparing ? (
+            <EmptyState title="正在建立会话" compact>
+              首次唤醒正在读取历史，会话建立后会自动显示。
+            </EmptyState>
+          ) : missing ? (
+            <EmptyState
+              icon={CircleAlert}
+              title="这个会话没有保留的上下文"
+              action={<Button onClick={() => void navigate(settings)}>打开会话设置</Button>}
+            >
+              它可能还没有被唤醒、已被容量回收，或者 Harness 重启过。
+            </EmptyState>
+          ) : error ? (
+            <EmptyState icon={CircleAlert} title="无法读取会话" action={<Button onClick={refresh}>重试</Button>}>
+              {error}
+            </EmptyState>
+          ) : (
+            <div className="page-center">
+              <Spinner label="正在读取会话…" />
+            </div>
+          )}
+        </div>
       </div>
     );
   const busy = isBusy(detail.state);
@@ -744,6 +822,7 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
       <div className="detail-sticky">
         <DetailHeader
           back={back}
+          avatar={avatar}
           title={title}
           badges={
             <>
@@ -792,18 +871,20 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
           }
         />
       </div>
-      {detail.cleared && (
-        <Banner tone="accent" icon={RotateCcw}>
-          上下文已重置，下次唤醒时将重新建立。
-        </Banner>
-      )}
-      {error && (
-        <p className="danger-text small" role="alert">
-          刷新失败：{error}。下面是上次读取的内容。
-        </p>
-      )}
-      <SessionSummary detail={detail} botId={botId} />
-      <Timeline detail={detail} botId={botId} />
+      <div className="detail-body">
+        {detail.cleared && (
+          <Banner tone="accent" icon={RotateCcw}>
+            上下文已重置，下次唤醒时将重新建立。
+          </Banner>
+        )}
+        {error && (
+          <p className="danger-text small" role="alert">
+            刷新失败：{error}。下面是上次读取的内容。
+          </p>
+        )}
+        <SessionSummary detail={detail} botId={botId} />
+        <Timeline detail={detail} botId={botId} />
+      </div>
     </div>
   );
 }
@@ -812,27 +893,33 @@ export function SessionsPage({ route }: { route: SessionsRoute }) {
   const runtime = useResource(runtimeResource, 3000);
   const rows = useMemo(() => rowsOf(runtime.data), [runtime.data]);
   return (
-    <div className="page">
-      <PageHeader
-        title="会话上下文"
-        save={false}
-        description="查看各会话当前保留在内存中的对话上下文与工具调用记录"
-      />
-      <CapacityBar capacity={runtime.data?.capacity} />
-      {runtime.error && !runtime.data && (
-        <p className="danger-text small" role="alert">
-          无法读取运行状态：{runtime.error}
-        </p>
+    <MasterDetail
+      label="会话列表"
+      hasDetail={!!route.key}
+      list={<SessionList route={route} rows={rows} capacity={runtime.data?.capacity} />}
+    >
+      {route.key ? (
+        <SessionView key={route.key} scopeKey={route.key} runtime={runtime.data} />
+      ) : (
+        <div className="detail">
+          <div className="detail-sticky">
+            <DetailHeader
+              title="会话上下文"
+              subtitle="查看各会话当前保留在内存中的对话上下文与工具调用记录"
+            />
+          </div>
+          <div className="detail-body">
+            {runtime.error && !runtime.data && (
+              <p className="danger-text small" role="alert">
+                无法读取运行状态：{runtime.error}
+              </p>
+            )}
+            <EmptyState icon={ScrollText} title="选择一个会话">
+              查看它保留的上下文：唤醒消息、模型正文、工具调用与结果、压缩摘要。
+            </EmptyState>
+          </div>
+        </div>
       )}
-      <MasterDetail label="会话列表" hasDetail={!!route.key} list={<SessionList route={route} rows={rows} />}>
-        {route.key ? (
-          <SessionView key={route.key} scopeKey={route.key} runtime={runtime.data} />
-        ) : (
-          <EmptyState icon={ScrollText} title="选择一个会话">
-            查看它保留的上下文：唤醒消息、模型正文、工具调用与结果、压缩摘要。
-          </EmptyState>
-        )}
-      </MasterDetail>
-    </div>
+    </MasterDetail>
   );
 }

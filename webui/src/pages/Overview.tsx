@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge, Button, EmptyState, Meter, Segmented, StatusDot } from "../components/primitives";
-import { PageHeader, SearchInput } from "../components/shell";
+import { DetailHeader, MasterDetail, QQAvatar, SearchInput } from "../components/shell";
 import { useConfig } from "../lib/config";
 import { scopeLabel } from "../lib/conversations";
 import { conversationRefs, hasSessionModel } from "../lib/models";
@@ -67,14 +67,20 @@ function Tile({
   to: string;
 }) {
   return (
-    <a className={"tile tile-" + tone} href={to} onClick={linkHandler(to)}>
-      <span className="tile-head">
-        <Icon size={16} aria-hidden="true" />
-        <span>{label}</span>
-        <StatusDot tone={tone} />
+    <a className={"md-item tile tile-" + tone} href={to} onClick={linkHandler(to)}>
+      <QQAvatar kind="icon" icon={Icon} name={label} size="lg" tone={tone} />
+      <span className="md-item-text">
+        <span className="qq-item-top tile-head">
+          <span className="md-item-title">{label}</span>
+          <span className="qq-item-badges">
+            <span className="tile-value">{value}</span>
+            <StatusDot tone={tone} />
+          </span>
+        </span>
+        <span className="qq-item-bottom">
+          <span className="md-item-sub tile-detail">{detail}</span>
+        </span>
       </span>
-      <span className="tile-value">{value}</span>
-      <span className="tile-detail">{detail}</span>
     </a>
   );
 }
@@ -215,12 +221,20 @@ function TurnRow({ turn }: { turn: Turn }) {
   const state = turnState(turn.state);
   const context = turn.context;
   const route = sessionRoute(turn.scope_key);
+  const scope = parseScopeKey(turn.scope_key);
+  const title = scopeLabel(turn.scope_key, groups);
   return (
     <li className="turn is-link">
+      <QQAvatar
+        kind={scope?.kind === "private" ? "user" : "group"}
+        id={scope?.peer ?? ""}
+        name={title}
+        size="md"
+      />
       <div className="turn-main">
         <div className="turn-title">
           <a href={route} onClick={linkHandler(route)}>
-            {scopeLabel(turn.scope_key, groups)}
+            {title}
           </a>
           <Badge tone={state.tone}>{turn.idle ? "闲时压缩" : state.text}</Badge>
         </div>
@@ -258,12 +272,20 @@ function RetainedSessions({ sessions }: { sessions: RetainedSession[] }) {
           {[...sessions].reverse().map((session) => {
             const state = turnState(session.state);
             const route = sessionRoute(session.scope_key);
+            const scope = parseScopeKey(session.scope_key);
+            const title = scopeLabel(session.scope_key, groups);
             return (
               <li className="turn is-link" key={session.session_id}>
+                <QQAvatar
+                  kind={scope?.kind === "private" ? "user" : "group"}
+                  id={scope?.peer ?? ""}
+                  name={title}
+                  size="md"
+                />
                 <div className="turn-main">
                   <div className="turn-title">
                     <a href={route} onClick={linkHandler(route)}>
-                      {scopeLabel(session.scope_key, groups)}
+                      {title}
                     </a>
                     <Badge tone={state.tone}>{state.text}</Badge>
                     {session.cleared && <Badge>已重置</Badge>}
@@ -458,45 +480,119 @@ function ActivityFeed({ activity }: { activity: Activity[] }) {
   );
 }
 
+function QuickSessionList({ sessions, turns }: { sessions: RetainedSession[]; turns: Turn[] }) {
+  const groups = useGroupNames();
+  const busySet = new Set(turns.map((turn) => turn.scope_key));
+  const ordered = [
+    ...turns.filter((turn) => !sessions.some((session) => session.scope_key === turn.scope_key)),
+    ...[...sessions].reverse(),
+  ];
+  if (!ordered.length) return null;
+  return (
+    <div className="overview-quick-sessions">
+      <div className="md-section">活跃会话 · {ordered.length}</div>
+      <ul className="md-items">
+        {ordered.slice(0, 12).map((session) => {
+          const scope = parseScopeKey(session.scope_key);
+          const title = scopeLabel(session.scope_key, groups);
+          const to = sessionRoute(session.scope_key);
+          const state = turnState(session.state);
+          const busy = busySet.has(session.scope_key);
+          const count = "turns" in session ? session.turns : 0;
+          const updatedAt = "updated_at" in session ? session.updated_at : session.started_at;
+          return (
+            <li key={session.scope_key}>
+              <a className="md-item" href={to} onClick={linkHandler(to)}>
+                <QQAvatar
+                  kind={scope?.kind === "private" ? "user" : "group"}
+                  id={scope?.peer ?? ""}
+                  name={title}
+                  size="md"
+                />
+                <span className="md-item-text">
+                  <span className="qq-item-top">
+                    <span className="md-item-title">{title}</span>
+                    <span className="qq-item-badges">
+                      {count > 0 && (
+                        <span className={"qq-pill num" + (busy ? " is-busy" : "")}>{count}轮</span>
+                      )}
+                      <StatusDot tone={state.tone} label={state.text} />
+                    </span>
+                  </span>
+                  <span className="qq-item-bottom">
+                    <span className="md-item-sub">
+                      {updatedAt > 0 ? formatRelative(updatedAt) : state.text}
+                    </span>
+                  </span>
+                </span>
+              </a>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 export function OverviewPage() {
   const runtime = useResource(runtimeResource, 3000);
   const data = runtime.data;
+  const uptimeText = data
+    ? "Harness 已运行 " + formatDuration(Date.now() / 1000 - data.started_at)
+    : "运行状态与最近活动";
   return (
-    <div className="page">
-      <PageHeader
-        title="概览"
-        save={false}
-        description={data ? "Harness 已运行 " + formatDuration(Date.now() / 1000 - data.started_at) : "运行状态与最近活动"}
-      />
-      <StatusTiles />
-      {!!data && (data.capacity.rejected_messages > 0 || data.napcat.dropped_events > 0) && (
-        <p className="warning-text small" role="status">
-          本次启动以来，接入队列已丢弃 {data.napcat.dropped_events} 条事件，运行队列已拒收 {data.capacity.rejected_messages} 条唤醒。
-          可在设置中调整队列容量，并查看最近活动。
-        </p>
-      )}
-      {runtime.error && !data && (
-        <p className="danger-text small" role="alert">
-          无法读取运行状态：{runtime.error}
-        </p>
-      )}
-      <section className="card">
-        <header className="card-header">
-          <h2 className="grow">正在运行</h2>
-          <span className="muted small">{data?.turns.length ? data.turns.length + " 个会话" : ""}</span>
-        </header>
-        {data?.turns.length ? (
-          <ul className="turns">
-            {data.turns.map((turn) => (
-              <TurnRow key={turn.scope_key} turn={turn} />
-            ))}
-          </ul>
-        ) : (
-          <p className="card-empty">当前没有进行中的对话。被唤醒的会话会在这里显示进度和上下文用量。</p>
-        )}
-      </section>
-      <RetainedSessions sessions={data?.sessions ?? []} />
-      <ActivityFeed activity={data?.activity ?? []} />
-    </div>
+    <MasterDetail
+      label="系统状态"
+      mode="dashboard"
+      hasDetail
+      list={
+        <>
+          <div className="md-list-head overview-list-head">
+            <span className="md-pane-title">系统状态</span>
+            <span className="tiny muted num">{uptimeText}</span>
+          </div>
+          <div className="md-items overview-tiles-pane">
+            <StatusTiles />
+            <QuickSessionList sessions={data?.sessions ?? []} turns={data?.turns ?? []} />
+          </div>
+        </>
+      }
+    >
+      <div className="detail">
+        <div className="detail-sticky">
+          <DetailHeader title="概览" subtitle={uptimeText} />
+        </div>
+        <div className="detail-body stack">
+          {!!data && (data.capacity.rejected_messages > 0 || data.napcat.dropped_events > 0) && (
+            <p className="warning-text small" role="status">
+              本次启动以来，接入队列已丢弃 {data.napcat.dropped_events} 条事件，运行队列已拒收{" "}
+              {data.capacity.rejected_messages} 条唤醒。可在设置中调整队列容量，并查看最近活动。
+            </p>
+          )}
+          {runtime.error && !data && (
+            <p className="danger-text small" role="alert">
+              无法读取运行状态：{runtime.error}
+            </p>
+          )}
+          <section className="card">
+            <header className="card-header">
+              <h2 className="grow">正在运行</h2>
+              <span className="muted small">{data?.turns.length ? data.turns.length + " 个会话" : ""}</span>
+            </header>
+            {data?.turns.length ? (
+              <ul className="turns">
+                {data.turns.map((turn) => (
+                  <TurnRow key={turn.scope_key} turn={turn} />
+                ))}
+              </ul>
+            ) : (
+              <p className="card-empty">当前没有进行中的对话。被唤醒的会话会在这里显示进度和上下文用量。</p>
+            )}
+          </section>
+          <RetainedSessions sessions={data?.sessions ?? []} />
+          <ActivityFeed activity={data?.activity ?? []} />
+        </div>
+      </div>
+    </MasterDetail>
   );
 }

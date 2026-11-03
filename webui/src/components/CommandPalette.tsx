@@ -31,7 +31,7 @@ import {
   useResource,
 } from "../lib/resource";
 import { sessionRoute } from "../lib/sessions";
-import { setTheme } from "../lib/theme";
+import { setSkin, setTheme } from "../lib/theme";
 import { object } from "../lib/types";
 import type { Path } from "../lib/types";
 import { setConflictDialog, setPalette, toast, useUi } from "../lib/ui";
@@ -178,6 +178,8 @@ function useCommands(): Command[] {
       { id: "action:light", group: "操作", title: "切换到浅色主题", keywords: "theme", icon: Sun, run: () => setTheme("light") },
       { id: "action:dark", group: "操作", title: "切换到深色主题", keywords: "theme", icon: Moon, run: () => setTheme("dark") },
       { id: "action:system", group: "操作", title: "主题跟随系统", keywords: "theme", icon: Monitor, run: () => setTheme("system") },
+      { id: "action:skin-clean", group: "操作", title: "切换到纯净默认风格", keywords: "skin ntqq", icon: Monitor, run: () => setSkin("clean") },
+      { id: "action:skin-gradient", group: "操作", title: "切换到清透微渐变风格", keywords: "skin gradient ntqq", icon: Sparkles, run: () => setSkin("gradient") },
       { id: "action:restart", group: "操作", title: "重启 Harness", keywords: "restart", icon: RotateCw, run: () => void restartHarness() },
     );
     return list;

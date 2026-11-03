@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CircleAlert,
   Copy,
   FileText,
-  Hash,
   ListChecks,
   MessagesSquare,
   Plus,
@@ -16,8 +15,8 @@ import { Dialog } from "../components/Dialog";
 import { ConfigSection } from "../components/form";
 import { Menu } from "../components/Menu";
 import { PermissionEditor } from "../components/PermissionEditor";
-import { Banner, Button, EmptyState, StatusDot, Switch } from "../components/primitives";
-import { CopyButton, DetailHeader, MasterDetail, PageHeader, SearchInput } from "../components/shell";
+import { Banner, Button, EmptyState, IconButton, StatusDot, Switch } from "../components/primitives";
+import { CopyButton, DetailHeader, MasterDetail, QQAvatar, SearchInput } from "../components/shell";
 import { change, changeMany, useConfig } from "../lib/config";
 import { conversationRoute, groupTitle } from "../lib/conversations";
 import { formatNumber } from "../lib/format";
@@ -28,7 +27,7 @@ import {
   hasSessionModel,
 } from "../lib/models";
 import type { ConversationRef } from "../lib/models";
-import { linkHandler, navigate, useLocation } from "../lib/navigation";
+import { linkHandler, navigate, prefersReducedMotion, useLocation } from "../lib/navigation";
 import {
   filesResource,
   groupsResource,
@@ -497,7 +496,10 @@ function ConversationList({ route, onAdd }: { route: ConversationRoute; onAdd: (
   return (
     <>
       <div className="md-list-head">
-        <SearchInput value={query} onChange={setQuery} placeholder="搜索群名或群号" label="搜索会话" />
+        <div className="md-list-search-row">
+          <SearchInput value={query} onChange={setQuery} placeholder="搜索群名或群号" label="搜索会话" />
+          <IconButton icon={Plus} label="添加群" className="md-add-btn" onClick={onAdd} />
+        </div>
       </div>
       <ul className="md-items">
         {showPrivate && (
@@ -508,12 +510,16 @@ function ConversationList({ route, onAdd }: { route: ConversationRoute; onAdd: (
               aria-current={route.kind === "private" ? "page" : undefined}
               onClick={linkHandler("/conversations/private")}
             >
-              <User size={16} className="md-item-icon" aria-hidden="true" />
+              <QQAvatar kind="icon" icon={User} name="私聊" size="lg" />
               <span className="md-item-text">
-                <span className="md-item-title">私聊</span>
-                <span className="md-item-sub">所有私聊共用</span>
+                <span className="qq-item-top">
+                  <span className="md-item-title">私聊</span>
+                  <StatusDot tone={privateStatus.tone} label={privateStatus.label} />
+                </span>
+                <span className="qq-item-bottom">
+                  <span className="md-item-sub">所有私聊共用 · {modelName(state.draft, ["private"])}</span>
+                </span>
               </span>
-              <StatusDot tone={privateStatus.tone} label={privateStatus.label} />
             </a>
           </li>
         )}
@@ -523,6 +529,7 @@ function ConversationList({ route, onAdd }: { route: ConversationRoute; onAdd: (
           const info = groups.get(id);
           const active = route.kind === "group" && route.id === id;
           const to = conversationRoute("group", id);
+          const title = info?.group_name || id;
           return (
             <li key={id}>
               <a
@@ -531,12 +538,18 @@ function ConversationList({ route, onAdd }: { route: ConversationRoute; onAdd: (
                 aria-current={active ? "page" : undefined}
                 onClick={linkHandler(to)}
               >
-                <Hash size={16} className="md-item-icon" aria-hidden="true" />
+                <QQAvatar kind="group" id={id} name={title} size="lg" />
                 <span className="md-item-text">
-                  <span className="md-item-title">{info?.group_name || id}</span>
-                  <span className="md-item-sub mono">{info?.group_name ? id : "群名未知"}</span>
+                  <span className="qq-item-top">
+                    <span className="md-item-title">{title}</span>
+                    <StatusDot tone={status.tone} label={status.label} />
+                  </span>
+                  <span className="qq-item-bottom">
+                    <span className="md-item-sub">
+                      <span className="mono">{id}</span> · {modelName(state.draft, ["groups", id])}
+                    </span>
+                  </span>
                 </span>
-                <StatusDot tone={status.tone} label={status.label} />
               </a>
             </li>
           );
@@ -556,6 +569,7 @@ function ConversationList({ route, onAdd }: { route: ConversationRoute; onAdd: (
 }
 
 function ConversationDetail({ route }: { route: ConversationRoute }) {
+  const header = useRef<HTMLDivElement>(null);
   const state = useConfig();
   const groups = useGroupNames();
   const files = useResource(filesResource, 30_000);
@@ -591,13 +605,20 @@ function ConversationDetail({ route }: { route: ConversationRoute }) {
 
   if (raw === undefined)
     return (
-      <EmptyState
-        icon={CircleAlert}
-        title="这个群不在配置中"
-        action={<Button onClick={() => void navigate("/conversations")}>返回会话列表</Button>}
-      >
-        群 {route.id} 可能已被删除，或者配置文件被外部修改。
-      </EmptyState>
+      <div className="detail">
+        <div className="detail-sticky">
+          <DetailHeader back={back} title={route.id} save />
+        </div>
+        <div className="detail-body">
+          <EmptyState
+            icon={CircleAlert}
+            title="这个群不在配置中"
+            action={<Button onClick={() => void navigate("/conversations")}>返回会话列表</Button>}
+          >
+            群 {route.id} 可能已被删除，或者配置文件被外部修改。
+          </EmptyState>
+        </div>
+      </div>
     );
   const conversation = object(raw);
   const enabled = conversation.enabled === true;
@@ -640,13 +661,38 @@ function ConversationDetail({ route }: { route: ConversationRoute }) {
     route: conversationRoute(kind, route.id),
   };
   const hasOtherConversations = kind === "group" || Object.keys(object(state.draft.groups)).length > 0;
+  const jumpTo = (sectionId: string) => {
+    const section = document.getElementById(sectionId);
+    if (!section || !header.current) return;
+    const offset = header.current.offsetHeight + parseFloat(getComputedStyle(header.current).top) + 12;
+    section.style.scrollMarginTop = offset + "px";
+    section.scrollIntoView({ behavior: prefersReducedMotion() ? "instant" : "smooth", block: "start" });
+  };
+  const anchors = [
+    ...(kind === "group" ? [{ id: "section-wake", label: "唤醒" }] : []),
+    { id: "section-limits", label: "限制" },
+    { id: "section-prompts", label: "提示词" },
+    { id: "section-session-model", label: "模型" },
+    { id: "section-idle-compaction", label: "闲时压缩" },
+    { id: "section-permissions", label: "能力权限" },
+  ];
 
   return (
     <div className="detail">
-      <div className="detail-sticky">
+      <div className="detail-sticky" ref={header}>
         <DetailHeader
           back={back}
+          avatar={
+            <QQAvatar
+              kind={kind === "private" ? "icon" : "group"}
+              id={route.id}
+              icon={kind === "private" ? User : undefined}
+              name={title}
+              size="md"
+            />
+          }
           title={title}
+          save
           subtitle={
             kind === "group" ? (
               <span className="row">
@@ -716,9 +762,21 @@ function ConversationDetail({ route }: { route: ConversationRoute }) {
             </>
           }
         />
+        <nav className="detail-anchors" aria-label="会话设置分组跳转">
+          {anchors.map((anchor) => (
+            <button
+              key={anchor.id}
+              type="button"
+              className="detail-anchor-pill"
+              onClick={() => jumpTo(anchor.id)}
+            >
+              {anchor.label}
+            </button>
+          ))}
+        </nav>
       </div>
 
-      <div className="stack">
+      <div className="detail-body stack">
         {!enabled && (
           <Banner
             tone="warning"
@@ -816,7 +874,9 @@ function ConversationDetail({ route }: { route: ConversationRoute }) {
         <ConfigSection def={idleCompactionSection} base={[...base, "idle_compaction"]} />
         <ConfigSection def={compactionModelSection} base={[...base, "idle_compaction", "model"]} />
 
-        <PermissionEditor base={base} kind={kind} />
+        <div id="section-permissions">
+          <PermissionEditor base={base} kind={kind} />
+        </div>
       </div>
 
       <ApplyConversationDialog open={applying} onClose={() => setApplying(false)} source={self} />
@@ -836,16 +896,7 @@ export function ConversationsPage({ route }: { route: ConversationRoute }) {
     }
   }, [location]);
   return (
-    <div className="page">
-      <PageHeader
-        title="会话"
-        description="在一个视图中集中配置私聊和各群的唤醒限制、提示词与知识库、模型与压缩、能力权限，支持跨会话一键复制与批量应用。"
-        actions={
-          <Button icon={Plus} onClick={() => setAdding(true)}>
-            添加群
-          </Button>
-        }
-      />
+    <>
       <MasterDetail
         label="会话列表"
         hasDetail={route.kind !== null}
@@ -854,12 +905,28 @@ export function ConversationsPage({ route }: { route: ConversationRoute }) {
         {route.kind ? (
           <ConversationDetail key={route.kind + route.id} route={route} />
         ) : (
-          <EmptyState icon={MessagesSquare} title="选择一个会话">
-            在左侧选择私聊或群，在同一页面集中配置唤醒、提示词、模型和能力权限。
-          </EmptyState>
+          <div className="detail">
+            <div className="detail-sticky">
+              <DetailHeader
+                title="会话"
+                save
+                subtitle="在一个视图中集中配置私聊和各群的唤醒限制、提示词与知识库、模型与压缩、能力权限，支持跨会话一键复制与批量应用。"
+                actions={
+                  <Button icon={Plus} onClick={() => setAdding(true)}>
+                    添加群
+                  </Button>
+                }
+              />
+            </div>
+            <div className="detail-body">
+              <EmptyState icon={MessagesSquare} title="选择一个会话">
+                在左侧选择私聊或群，在同一页面集中配置唤醒、提示词、模型和能力权限。
+              </EmptyState>
+            </div>
+          </div>
         )}
       </MasterDetail>
       <AddGroupDialog open={adding} onClose={() => setAdding(false)} />
-    </div>
+    </>
   );
 }
