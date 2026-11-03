@@ -31,7 +31,7 @@ from .runtime import AgentRuntime, SessionBusy
 from .sandbox.client import RunnerClient
 from .sandbox.tools import CATEGORY_LABELS as SANDBOX_CATEGORIES
 from .sandbox.tools import build_tools as sandbox_tools
-from .settings import TTSSettings
+from .settings import CUSTOM_VOICE_PREFIXES, TTSSettings
 from .tts import CATEGORY_LABELS as TTS_CATEGORIES
 from .tts import (
     VOICE_PATTERN,
@@ -549,6 +549,8 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
         voice = request.voice or config.voice
         if not voice:
             raise HTTPException(400, "请先选择音色")
+        if voice.startswith(CUSTOM_VOICE_PREFIXES) and config.vertex.location != "global":
+            raise HTTPException(400, "自定义音色只能在全球区域使用")
         result = await synthesize_speech(
             config,
             request.text,

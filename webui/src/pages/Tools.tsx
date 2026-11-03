@@ -702,12 +702,14 @@ function useCustomVoices() {
     }
   }, [ready]);
   useEffect(() => {
+    setVoices([]);
+    setError("");
     void reload();
     return () => {
       ticket.current++;
     };
   }, [reload, key]);
-  return { ready, voices, loading, error, reload };
+  return { key, ready, voices, loading, error, reload };
 }
 
 /** 设计自定义音色并管理项目中保存的音色；音色由管理员选定，Agent 不能更换。 */
@@ -1058,7 +1060,7 @@ function SpeechSynthesis() {
         </Banner>
       )}
       <ConfigSection def={ttsVoiceSection} base={["tts"]} suggestions={{ voice: voiceOptions(voices.voices) }} />
-      <CustomVoices list={voices} />
+      <CustomVoices key={"custom-" + voices.key} list={voices} />
       <ConfigSection
         def={ttsAccountSection}
         base={["tts", "vertex"]}
@@ -1067,7 +1069,7 @@ function SpeechSynthesis() {
         }
       />
       <ConfigSection def={ttsRequestSection} base={["tts"]} />
-      <SpeechPreview ready={imported && hasModel} voices={voices.voices} />
+      <SpeechPreview key={"preview-" + voices.key} ready={imported && hasModel} voices={voices.voices} />
     </div>
   );
 }

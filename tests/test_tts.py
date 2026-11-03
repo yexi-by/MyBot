@@ -783,6 +783,53 @@ def test_invalid_credentials_are_rejected_on_save_without_echo(tmp_path: Path) -
     assert reloaded.account().project_id == "demo-project-123"
 
 
+@pytest.mark.parametrize(
+    ("location", "voice", "status"),
+    [
+        ("us", "voice_preview", 400),
+        ("eu", "voice_preview", 400),
+        ("global", "voice_preview", 200),
+        ("us", "Leda", 200),
+    ],
+)
+def test_preview_checks_the_selected_voices_region_before_requesting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str, voice: str, status: int
+) -> None:
+    requests: list[httpx.Request] = []
+    audio = wav_bytes()
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if str(request.url) == TOKEN_URL:
+            return token_response()
+        assert json.loads(request.content)["generationConfig"]["speechConfig"]["voiceConfig"] == {
+            "voice": voice
+        }
+        return audio_response(audio)
+
+    real_client: Callable[..., httpx.AsyncClient] = httpx.AsyncClient
+    monkeypatch.setattr(
+        "qq_agent_harness.tts.httpx.AsyncClient",
+        lambda **kwargs: real_client(**{**kwargs, "transport": httpx.MockTransport(serve)}),
+    )
+    config = write_config(
+        tmp_path,
+        {
+            "model": "gemini-3.8-flash-tts",
+            "voice": "Kore",
+            "vertex": {"credentials": service_account()[0], "location": location},
+        },
+    )
+    with TestClient(create_app(config, connect_mcp=False)) as client:
+        response = client.post("/api/tts/preview", json={"text": "试听", "voice": voice})
+    assert response.status_code == status
+    if status == 400:
+        assert response.json()["detail"] == "自定义音色只能在全球区域使用"
+        assert not requests
+    else:
+        assert response.content == audio
+
+
 def test_console_preview_returns_wav_and_sanitized_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
