@@ -363,7 +363,7 @@ export const idleCompactionSection: SectionDef = {
       min: 0,
       integer: true,
       unit: "token",
-      help: "上下文低于这个量时不压缩，避免为很短的对话付压缩费用。",
+      help: "可压缩的对话内容（不含系统提示、知识库和工具定义）低于这个量时不压缩，避免为很短的对话付压缩费用。",
       hidden: idleOff,
     },
   ],

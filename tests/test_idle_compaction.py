@@ -520,3 +520,155 @@ async def test_knowledge_folded_by_turn_compaction_returns_after_idle_compaction
         await runtime.close()
     context = context_text(turns[-1])
     assert "KNOWLEDGE_FACT" in context and "IDLE_SUMMARY" in context
+
+
+async def test_immediate_wake_before_idle_worker_steps_does_not_strand_session(tmp_path):
+    store = make_store(tmp_path)
+    enable_idle(store, ModelChoice(provider="cheap", name="small"))
+    turns: list[JsonObject] = []
+    summaries = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal summaries
+        body = json.loads(request.content)
+        if "tools" not in body:
+            summaries += 1
+            return httpx.Response(200, json=answer("chat_completions", "IDLE_SUMMARY"))
+        turns.append(body)
+        return httpx.Response(200, json=answer("responses", "TURN_OK"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        runtime = runtime_for(store, client)
+        await wake(runtime, message("first", "a", "group", "member"))
+        ended = runtime.sessions[KEY].updated_at
+        assert runtime.compact_idle_sessions(now=ended + 300) == [KEY]
+        # 紧接着在事件循环尚未调度新建 worker 任务前收到唤醒消息，不能卡死在压缩状态。
+        await runtime.receive(message("second", "a", "group", "member"))
+        await finish(runtime)
+        assert not runtime.workers and not runtime.turns and not runtime.compacting
+        assert not runtime.started_workers and not runtime.idle_interrupts
+        assert runtime.sessions[KEY].idle_compacted is False
+        await wake(runtime, message("third", "a", "group", "member"))
+        await runtime.close()
+    assert summaries == 0
+    assert len(turns) == 3
+    assert "INPUT_first" in context_text(turns[1]) and "INPUT_second" in context_text(turns[1])
+
+
+async def test_immediate_cancel_before_worker_steps_cleans_up_and_allows_reset(tmp_path):
+    store = make_store(tmp_path)
+    enable_idle(store, ModelChoice(provider="cheap", name="small"))
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if "tools" not in json.loads(request.content):
+            return httpx.Response(200, json=answer("chat_completions", "IDLE_SUMMARY"))
+        return httpx.Response(200, json=answer("responses"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        runtime = runtime_for(store, client)
+        await wake(runtime, message("first", "a", "group", "member"))
+        ended = runtime.sessions[KEY].updated_at
+        assert runtime.compact_idle_sessions(now=ended + 300) == [KEY]
+        # 任务刚创建尚未进入协程体即执行停止并重置，必须兜底清理而不能报 SessionBusy。
+        await runtime.reset(KEY, stop=True)
+        assert not runtime.workers and not runtime.turns and not runtime.compacting
+        assert runtime.activity[-2]["kind"] == "compaction"
+        assert runtime.activity[-2]["status"] == "cancelled"
+        assert runtime.activity[-1]["kind"] == "reset"
+        await runtime.close()
+
+
+async def test_interrupted_idle_compaction_clears_idle_badge_while_queued_for_semaphore(tmp_path):
+    store = make_store(tmp_path)
+    store.settings.runtime.concurrent_conversations = 1
+    store.settings.groups["b"] = store.settings.groups["a"].model_copy(deep=True)
+    enable_idle(store, ModelChoice(provider="cheap", name="small"))
+    hold_b = asyncio.Event()
+    b_started = asyncio.Event()
+    idle_started = asyncio.Event()
+    turns_seen: list[str] = []
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if "tools" not in body:
+            idle_started.set()
+            await asyncio.Event().wait()
+        text = context_text(body)
+        if "INPUT_hold_b" in text:
+            turns_seen.append("b")
+            b_started.set()
+            await hold_b.wait()
+        else:
+            turns_seen.append("a")
+        return httpx.Response(200, json=answer("responses"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        runtime = runtime_for(store, client)
+        await wake(runtime, message("first", "a", "group", "member"))
+        assert runtime.compact_idle_sessions(now=runtime.sessions[KEY].updated_at + 300) == [KEY]
+        async with asyncio.timeout(5):
+            await idle_started.wait()
+        # 用会话 b 占满唯一的并发槽位，再唤醒会话 a 中断其闲时压缩并进入排队。
+        await runtime.receive(message("hold_b", "b", "group", "member"))
+        async with asyncio.timeout(5):
+            await b_started.wait()
+        await runtime.receive(message("second", "a", "group", "member"))
+        async with asyncio.timeout(5):
+            while runtime.turns.get(KEY, {}).get("state") != "queued":
+                await asyncio.sleep(0)
+        assert runtime.turns[KEY]["state"] == "queued"
+        assert "idle" not in runtime.turns[KEY]
+        snap_sessions = runtime.snapshot()["sessions"]
+        assert isinstance(snap_sessions, list)
+        session_a = next(
+            item
+            for item in snap_sessions
+            if isinstance(item, dict) and item.get("scope_key") == KEY
+        )
+        assert session_a["state"] == "queued" and session_a["idle"] is False
+        hold_b.set()
+        await finish(runtime)
+        await runtime.close()
+    assert turns_seen == ["a", "b", "a"]
+
+
+async def test_idle_compaction_min_tokens_excludes_system_knowledge_and_tools_base(tmp_path):
+    store = make_store(tmp_path)
+    (tmp_path / "knowledge.md").write_text("知识库事实" * 800, encoding="utf-8")
+    store.settings.groups["a"].knowledge_files = ["knowledge.md"]
+    enable_idle(store, ModelChoice(provider="cheap", name="small"))
+    store.settings.groups["a"].idle_compaction.min_tokens = 2500
+
+    async def noop_send(_context, _arguments) -> ToolResult:
+        return ToolResult.success({})
+
+    registry = ToolRegistry(lambda: store.settings)
+    registry.add(
+        ToolDefinition(
+            "qq__send_message",
+            "工具说明 " * 300,
+            "messages",
+            model_binding(Empty, noop_send),
+        )
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if "tools" not in json.loads(request.content):
+            return httpx.Response(200, json=answer("chat_completions", "IDLE_SUMMARY"))
+        return httpx.Response(200, json=answer("responses", "ok"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        runtime = runtime_for(store, client, registry)
+        await wake(runtime, message("hi", "a", "group", "member"))
+        retained = runtime.sessions[KEY]
+        assert retained.model is not None
+        assert retained.model.idle_pressure() > 2500
+        assert retained.idle_tokens < 2500
+        assert runtime.compact_idle_sessions(now=retained.updated_at + 300) == []
+        # 注入长对话内容后，可压缩对话部分超过 min_tokens，应当触发闲时压缩。
+        await wake(runtime, message("长对话内容" * 1200, "a", "group", "member"))
+        assert retained.idle_tokens >= 2500
+        assert runtime.compact_idle_sessions(now=retained.updated_at + 300) == [KEY]
+        await finish(runtime)
+        assert retained.idle_tokens == 0
+        await runtime.close()

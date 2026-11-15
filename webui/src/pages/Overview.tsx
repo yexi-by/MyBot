@@ -218,7 +218,7 @@ function ContextMeter({ context, showSource = false }: { context: TurnContext; s
 
 function TurnRow({ turn }: { turn: Turn }) {
   const groups = useGroupNames();
-  const state = turnState(turn.state);
+  const state = turnState(turn.state, turn.idle);
   const context = turn.context;
   const route = sessionRoute(turn.scope_key);
   const scope = parseScopeKey(turn.scope_key);
@@ -236,7 +236,7 @@ function TurnRow({ turn }: { turn: Turn }) {
           <a href={route} onClick={linkHandler(route)}>
             {title}
           </a>
-          <Badge tone={state.tone}>{turn.idle ? "闲时压缩" : state.text}</Badge>
+          <Badge tone={state.tone}>{state.text}</Badge>
         </div>
         <div className="turn-meta muted">
           开始于 {formatRelative(turn.started_at)}
@@ -270,7 +270,7 @@ function RetainedSessions({ sessions }: { sessions: RetainedSession[] }) {
       {sessions.length ? (
         <ul className="turns">
           {[...sessions].reverse().map((session) => {
-            const state = turnState(session.state);
+            const state = turnState(session.state, session.idle);
             const route = sessionRoute(session.scope_key);
             const scope = parseScopeKey(session.scope_key);
             const title = scopeLabel(session.scope_key, groups);

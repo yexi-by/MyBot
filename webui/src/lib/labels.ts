@@ -45,11 +45,13 @@ const turnStates: Record<string, Label> = {
   idle: { text: "等待唤醒", tone: "neutral" },
   queued: { text: "排队中", tone: "neutral" },
   running: { text: "运行中", tone: "accent" },
-  compacting: { text: "压缩上下文", tone: "warning" },
+  compacting: { text: "轮内压缩", tone: "warning" },
   retrying: { text: "等待重试", tone: "warning" },
 };
-export const turnState = (state: string | undefined) =>
-  lookup(turnStates, state);
+export const turnState = (state: string | undefined, idle?: boolean): Label =>
+  idle && state === "compacting"
+    ? { text: "闲时压缩", tone: "warning" }
+    : lookup(turnStates, state);
 
 export const toolScopes: Record<ToolScope, string> = {
   both: "群聊和私聊",

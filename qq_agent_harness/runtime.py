@@ -124,6 +124,7 @@ class AgentRuntime:
         self.seen: OrderedDict[tuple[str, str], float] = OrderedDict()
         self.sessions: OrderedDict[str, ConversationSession] = OrderedDict()
         self.compacting: set[str] = set()
+        self.started_workers: set[str] = set()
         self.idle_interrupts: set[str] = set()
         self.rejected_messages = 0
         self.idle_task: asyncio.Task[None] | None = None
@@ -154,7 +155,7 @@ class AgentRuntime:
         kind = event.get("request_kind")
         label = {
             "model": "模型请求",
-            "compaction": "压缩请求",
+            "compaction": "轮内压缩请求",
             "idle_compaction": "闲时压缩请求",
         }.get(str(kind), "模型请求")
         level = (
@@ -248,33 +249,61 @@ class AgentRuntime:
         self.seen[identity] = now
         if key in self.compacting and key not in self.idle_interrupts:
             self.idle_interrupts.add(key)
-            self.workers[key].cancel()
+            if key in self.started_workers:
+                self.workers[key].cancel()
         if key not in self.workers:
             self.stopping.discard(key)
             self.turns[key] = {"scope_key": key, "state": "queued", "started_at": time.time()}
             self.workers[key] = asyncio.create_task(self._worker(key))
 
+    def _interrupt_idle(self, key: str) -> None:
+        self.idle_interrupts.discard(key)
+        self.compacting.discard(key)
+        if retained := self.sessions.get(key):
+            retained.idle_compacted = False
+        self.record(
+            key,
+            "compaction",
+            "新消息到达，已中断闲时压缩并保留原上下文",
+            status="cancelled",
+        )
+
+    async def _cleanup_worker(self, key: str) -> None:
+        self.pending.pop(key, None)
+        self.turns.pop(key, None)
+        self.workers.pop(key, None)
+        self.started_workers.discard(key)
+        self.stopping.discard(key)
+        self.compacting.discard(key)
+        self.idle_interrupts.discard(key)
+        await self._trim_sessions()
+
     async def _worker(self, key: str, *, idle: bool = False) -> None:
         # 闲时压缩占用处理位置；新唤醒只中断一次压缩，保留原文后接入排队消息。
         compacting = idle
+        self.started_workers.add(key)
         try:
             if idle:
-                try:
-                    await self._compact_idle(key)
-                except asyncio.CancelledError:
-                    if key not in self.idle_interrupts or key in self.stopping or self.closing:
-                        raise
-                    self.idle_interrupts.discard(key)
-                    if task := asyncio.current_task():
-                        task.uncancel()
-                    self.record(
-                        key,
-                        "compaction",
-                        "新消息到达，已中断闲时压缩并保留原上下文",
-                        status="cancelled",
-                    )
+                if key in self.idle_interrupts and key not in self.stopping and not self.closing:
+                    self._interrupt_idle(key)
+                else:
+                    try:
+                        await self._compact_idle(key)
+                    except asyncio.CancelledError:
+                        if key not in self.idle_interrupts or key in self.stopping or self.closing:
+                            raise
+                        if task := asyncio.current_task():
+                            task.uncancel()
+                        self._interrupt_idle(key)
             compacting = False
             while self.pending.get(key):
+                turn = self.turns.get(key)
+                if turn is None or turn.get("idle") or turn.get("state") != "queued":
+                    self.turns[key] = {
+                        "scope_key": key,
+                        "state": "queued",
+                        "started_at": time.time(),
+                    }
                 async with self.semaphore:
                     batch = self.pending.pop(key, [])
                     if batch:
@@ -290,13 +319,7 @@ class AgentRuntime:
                 "worker_failed scope=%s error_type=%s", key, type(exc).__name__, exc_info=True
             )
         finally:
-            self.pending.pop(key, None)
-            self.turns.pop(key, None)
-            self.workers.pop(key, None)
-            self.stopping.discard(key)
-            self.compacting.discard(key)
-            self.idle_interrupts.discard(key)
-            await self._trim_sessions()
+            await self._cleanup_worker(key)
 
     async def _trim_sessions(self) -> None:
         while (
@@ -337,6 +360,7 @@ class AgentRuntime:
             if (
                 not settings.enabled
                 or now - retained.updated_at < settings.after_minutes * 60
+                or retained.idle_tokens <= 0
                 or retained.idle_tokens < settings.min_tokens
             ):
                 continue
@@ -395,7 +419,7 @@ class AgentRuntime:
                 # 知识库原文此前已在轮内压缩时并入摘要；下次唤醒重新补入当前原文。
                 retained.knowledge = []
             retained.generated_media.clear()
-            retained.idle_tokens = after
+            retained.idle_tokens = session.idle_compactable_tokens()
             retained.retained_bytes = retained.measure()
             self.record(
                 key,
@@ -556,7 +580,7 @@ class AgentRuntime:
                 retained.outcome = outcome
                 retained.retained_bytes = retained.measure()
                 retained.idle_compacted = False
-                retained.idle_tokens = session.idle_pressure()
+                retained.idle_tokens = session.idle_compactable_tokens()
                 self.sessions.move_to_end(key)
 
     def _tool_context(self, scope: ConversationScope, turn_id: str) -> ToolContext:
@@ -633,17 +657,17 @@ class AgentRuntime:
         if isinstance(count := event.get("request_count"), int):
             self.turns[key]["rounds"] = count
         if phase == "compacting":
-            self.record(key, "compaction", "上下文达到阈值，正在压缩历史内容", status="running")
+            self.record(key, "compaction", "上下文达到阈值，正在进行轮内压缩", status="running")
         elif phase == "compacted":
             self.record(
                 key,
                 "compaction",
-                f"上下文已压缩：{event.get('before_tokens')} → {event.get('after_tokens')} token",
+                f"轮内压缩完成：{event.get('before_tokens')} → {event.get('after_tokens')} token",
                 status="completed",
             )
         elif phase == "compaction_skipped":
             self.record(
-                key, "compaction", "压缩未完成，当前输入仍在窗口内，继续本轮", status="warning"
+                key, "compaction", "轮内压缩未完成，当前输入仍在窗口内，继续本轮", status="warning"
             )
 
     async def _load_history(
@@ -767,11 +791,19 @@ class AgentRuntime:
         task = self.workers.get(key)
         if task is None:
             return False
+        was_compacting = key in self.compacting
         self.stopping.add(key)
         self.pending.pop(key, None)
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        # 任务在进入协程体前就被取消时，try/finally 不会执行，需在此兜底清理。
+        if self.workers.get(key) is task:
+            if was_compacting:
+                self.record(key, "compaction", "闲时压缩已停止，原上下文保留", status="cancelled")
+            else:
+                self.record(key, "turn", "本轮已手动停止", status="cancelled")
+            await self._cleanup_worker(key)
         return True
 
     async def reset(self, key: str, *, stop: bool) -> str:
@@ -828,6 +860,7 @@ class AgentRuntime:
             "turns": model.turn if model else 0,
             "updated_at": retained.updated_at,
             "state": self._state(key),
+            "idle": bool((turn := self.turns.get(key)) and turn.get("idle")),
             "pending": len(self.pending.get(key, [])),
             "last_outcome": retained.outcome,
             "context": model.context_state if model else {},

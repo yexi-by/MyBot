@@ -56,6 +56,7 @@ type EntryOf<K extends SessionEntry["kind"]> = Extract<SessionEntry, { kind: K }
 interface Row {
   key: string;
   state: string;
+  idle: boolean;
   turns: number;
   updatedAt: number;
   tokens: number;
@@ -69,6 +70,7 @@ function rowsOf(data: RuntimeEnvelope | null): Row[] {
   const rows: Row[] = data.sessions.map((session) => ({
     key: session.scope_key,
     state: session.state,
+    idle: Boolean(session.idle),
     turns: session.turns,
     updatedAt: session.updated_at,
     tokens: session.context.input_tokens ?? 0,
@@ -81,6 +83,7 @@ function rowsOf(data: RuntimeEnvelope | null): Row[] {
       rows.push({
         key: turn.scope_key,
         state: turn.state,
+        idle: Boolean(turn.idle),
         turns: 0,
         updatedAt: turn.started_at,
         tokens: 0,
@@ -182,7 +185,7 @@ function SessionList({
                 {row.turns > 0 && (
                   <span className={"qq-pill num" + (isBusy(row.state) ? " is-busy" : "")}>{row.turns}轮</span>
                 )}
-                <StatusDot tone={stateTone(row.state)} label={turnState(row.state).text} />
+                <StatusDot tone={stateTone(row.state)} label={turnState(row.state, row.idle).text} />
               </span>
             </span>
           </span>
@@ -539,7 +542,7 @@ function StandaloneEntry({
     return (
       <section className="session-standalone session-digest">
         <div className="entry-head">
-          <span className="entry-label">{entry.origin === "idle" ? "闲时压缩摘要" : "压缩摘要"}</span>
+          <span className="entry-label">{entry.origin === "idle" ? "闲时压缩摘要" : "轮内压缩摘要"}</span>
           <span className="tiny muted">
             {entry.origin === "idle"
               ? (entry.turn !== null ? "第 " + entry.turn + " 轮后闲置时生成，" : "闲置时生成，") + "替代了此前的全部对话原文"
@@ -826,7 +829,7 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
           title={title}
           badges={
             <>
-              <Badge tone={stateTone(detail.state)}>{turnState(detail.state).text}</Badge>
+              <Badge tone={stateTone(detail.state)}>{turnState(detail.state, detail.idle).text}</Badge>
               {detail.cleared && <Badge>已重置</Badge>}
             </>
           }

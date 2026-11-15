@@ -533,6 +533,38 @@ class ModelSession:
         """闲置时的上下文用量：工具定义按最近一次请求计入，并沿用接口用量校准。"""
         return self._calibrated(estimate_tokens(self._normal_body([])) + self._tools_tokens)
 
+    def _idle_parts(self) -> tuple[list[JsonObject], list[JsonObject]]:
+        """闲时压缩保留的最新知识库条目与待摘要的对话条目。"""
+        knowledge = [
+            item
+            for item in self.items[1:]
+            if (note := self.note(item)) is not None and note.kind == "knowledge"
+        ]
+        # 新版知识库替代旧版：最新版本保留原文，旧版本直接移除，不并入摘要。
+        kept = knowledge[-1:]
+        excluded = {id(item) for item in knowledge}
+        source = [item for item in self.items[1:] if id(item) not in excluded]
+        return kept, source
+
+    def idle_compactable_tokens(self) -> int:
+        """可被闲时压缩的对话用量：扣除系统提示、最新知识库与工具定义，并按接口口径校准。"""
+        kept, source = self._idle_parts()
+        if not source:
+            return 0
+        if (
+            len(source) == 1
+            and (note := self.note(source[0])) is not None
+            and note.kind == "summary"
+            and note.origin == "idle"
+        ):
+            return 0
+        before = self.idle_pressure()
+        current = estimate_tokens(self._normal_body([]))
+        base = estimate_tokens(self._normal_body([], [self.items[0], *kept]))
+        if current <= base:
+            return 0
+        return max(1, (current - base) * before // (current + self._tools_tokens))
+
     def _event(self, phase: str, tokens: int, **extra: JsonValue) -> None:
         self.context_state = {
             "input_tokens": tokens,
@@ -1012,15 +1044,7 @@ class ModelSession:
         """
         if any(not group.complete for group in self._groups):
             raise CompactionError("工具调用尚未闭合，不能压缩上下文")
-        knowledge = [
-            item
-            for item in self.items[1:]
-            if (note := self.note(item)) is not None and note.kind == "knowledge"
-        ]
-        # 新版知识库替代旧版：最新版本保留原文，旧版本直接移除，不并入摘要。
-        kept = knowledge[-1:]
-        excluded = {id(item) for item in knowledge}
-        source = [item for item in self.items[1:] if id(item) not in excluded]
+        kept, source = self._idle_parts()
         if not source:
             raise CompactionError("没有可压缩的对话内容")
         before = self.idle_pressure()

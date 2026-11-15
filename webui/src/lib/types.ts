@@ -104,6 +104,7 @@ export interface RetainedSession {
   turns: number;
   updated_at: number;
   state: SessionState;
+  idle?: boolean;
   /** 排队等待下一轮的唤醒消息数。 */
   pending: number;
   last_outcome: string;
