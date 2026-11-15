@@ -102,8 +102,6 @@ async def test_same_group_reuses_history_and_tool_results_but_resets_turn_limits
 ):
     store = make_store(tmp_path)
     store.settings.providers["test"].protocol = protocol
-    store.settings.runtime.max_model_rounds = 2
-    store.settings.groups["a"].policy.max_sends_per_turn = 1
     registry = ToolRegistry(lambda: store.settings)
     bodies, sent = [], []
     tz = timezone(timedelta(hours=8))
@@ -354,7 +352,6 @@ async def test_all_authorized_tools_are_stable_across_rounds_and_wakes_until_rev
 ):
     store = make_store(tmp_path)
     store.settings.providers["test"].protocol = protocol
-    store.settings.runtime.max_model_rounds = 2
     registry = ToolRegistry(lambda: store.settings)
     names = [f"lookup__item_{index:02d}" for index in range(16)]
     dispatched = []
@@ -741,5 +738,61 @@ async def test_capacity_reclamation_never_closes_a_running_session(tmp_path, mon
             await asyncio.gather(*list(runtime.workers.values()))
             assert set(runtime.sessions) == {"bot:private:a"}
             assert sessions(runtime)[0]["last_outcome"] == "silent"
+        finally:
+            await runtime.close()
+
+
+async def test_long_running_turn_exceeds_twenty_rounds_without_limit(tmp_path):
+    store = make_store(tmp_path)
+    registry = ToolRegistry(lambda: store.settings)
+    steps: list[int] = []
+
+    async def step_work(_context, _arguments):
+        steps.append(len(steps) + 1)
+        return ToolResult.success({"step": len(steps)})
+
+    registry.add(
+        ToolDefinition(
+            "qq__step_work", "执行分步工作", "messages", json_binding(schema(Empty), step_work)
+        )
+    )
+
+    calls = 0
+
+    def respond(_request):
+        nonlocal calls
+        calls += 1
+        if calls <= 25:
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "call_id": f"work-{calls}",
+                            "name": "qq__step_work",
+                            "arguments": "{}",
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(200, json=answer("responses", "全部 25 步已完成"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        runtime = AgentRuntime(
+            store,
+            registry,
+            FakeHub(),
+            session_factory=lambda *args: ModelSession(*args, client=client),
+        )
+        try:
+            await wake(runtime, message("long-task"))
+            assert len(steps) == 25 and calls == 26
+            assert sessions(runtime)[0]["last_outcome"] == "silent"
+            assert (
+                runtime.activity[-1]["kind"] == "turn"
+                and runtime.activity[-1]["status"] == "silent"
+            )
         finally:
             await runtime.close()

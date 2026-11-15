@@ -106,7 +106,7 @@ class GenerateImageInput(Model):
             "非空时调用 /images/edits 图生图或改图"
         ),
     )
-    n: int = Field(default=1, ge=1, le=4, description="生成图片张数")
+    n: int = Field(default=1, ge=1, le=10, description="生成图片张数")
     size: str | None = Field(
         default=None,
         min_length=1,

@@ -94,7 +94,6 @@ async def test_soft_budget_or_summary_failure_does_not_stop_fitting_request(comp
         )
         if compressible:
             session.add_background("x" * 16_500)
-        session.request_limit = 1
         await session.step([])
         assert session.model_request_count == 1
         assert session.compaction_request_count == int(compressible)
@@ -129,15 +128,20 @@ async def test_preflight_send_failure_preserves_budget_and_other_messages_can_fo
     first: JsonObject = {"parts": [{"type": "text", "text": "first"}]}
     assert (await tools.execute(context, "qq__send_message", first)).status == "unknown"
     bot.handler = None
+    # 同一轮重复提交相同的未确认发送请求仍被阻止，但发送新内容的消息可以正常执行。
     assert (await tools.execute(context, "qq__send_message", first)).status == "error"
+    follow = await tools.execute(
+        context, "qq__send_message", {"parts": [{"type": "text", "text": "阶段进展汇报"}]}
+    )
+    assert follow.status == "ok"
     next_turn = ToolContext(context.scope, "next-turn", bot)
     assert (
         await tools.execute(
             next_turn, "qq__send_message", {"parts": [{"type": "text", "text": "new" * 5000}]}
         )
     ).status == "ok"
-    assert context.send_attempts == 1 and next_turn.send_attempts == 1
-    assert len([name for name, _ in bot.calls if name == "send_group_msg"]) == 2
+    assert context.send_attempts == 2 and next_turn.send_attempts == 1
+    assert len([name for name, _ in bot.calls if name == "send_group_msg"]) == 3
 
 
 async def test_non_qq_data_and_more_than_twelve_tools_remain_usable():
@@ -304,7 +308,7 @@ async def test_large_text_and_directory_continue_without_hiding_files(tmp_path):
         await client.close()
 
 
-async def test_queued_execution_cancel_does_not_start_it_and_reads_wait_for_active_work(tmp_path):
+async def test_queued_execution_cancel_does_not_start_it_and_reads_bypass_exec_lock(tmp_path):
     (tmp_path / "ready.txt").write_text("ready", encoding="utf-8")
     engine = FakeEngine(block=True)
     runner = make_runner(tmp_path, engine=engine)
@@ -317,25 +321,27 @@ async def test_queued_execution_cancel_does_not_start_it_and_reads_wait_for_acti
     running = asyncio.create_task(client.execute("first", owner="first"))
     await engine.started.wait()
     queued = asyncio.create_task(client.execute("second", owner="second"))
-    read = asyncio.create_task(client.read_text("ready.txt"))
+    queued_two = asyncio.create_task(client.execute("third", owner="third"))
     try:
         async with asyncio.timeout(2):
             while len(runner.waiting) < 3:
                 await asyncio.sleep(0)
-            assert not read.done()
+            # 文件读取不等待活动执行容器锁，即使排队槽位已满也立即可读。
+            assert (await client.read_text("ready.txt"))["content"] == "ready"
             with pytest.raises(httpx.HTTPStatusError) as overflow:
                 await client.execute("overflow", owner="overflow")
             assert overflow.value.response.status_code == 429
             await client.cancel("second")
             assert (await queued)["status"] == "cancelled"
+            await client.cancel("third")
+            assert (await queued_two)["status"] == "cancelled"
             assert len(engine.created) == 1
             await client.cancel("first")
             assert (await running)["status"] == "cancelled"
-            assert (await read)["content"] == "ready"
         assert not runner.lock.locked() and not runner.waiting
     finally:
         await client.cancel()
-        await asyncio.gather(running, queued, read, return_exceptions=True)
+        await asyncio.gather(running, queued, queued_two, return_exceptions=True)
         await client.close()
 
 

@@ -37,14 +37,14 @@ services:
     environment:
       HARNESS_EGRESS_PORTS: ${HARNESS_EGRESS_PORTS:-80,443}
       HARNESS_EGRESS_IDLE_TIMEOUT: ${HARNESS_EGRESS_IDLE_TIMEOUT:-180}
-      HARNESS_EGRESS_CONNECTIONS: ${HARNESS_EGRESS_CONNECTIONS:-32}
+      HARNESS_EGRESS_CONNECTIONS: ${HARNESS_EGRESS_CONNECTIONS:-128}
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    mem_limit: 128m
+    mem_limit: 256m
     cpus: 0.5
-    pids_limit: 64
+    pids_limit: 128
     networks:
       sandbox:
         ipv4_address: 172.30.240.2

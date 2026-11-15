@@ -1315,10 +1315,9 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
 async def send_message(
     context: ToolContext, request: a.SendMessage, reader: MediaReader
 ) -> ToolResult:
-    if any(
-        isinstance(item, dict) and item.get("status") == "unknown" for item in context.sent_messages
-    ):
-        raise ValueError("本轮已有发送结果未确认，请勿重复发送")
+    request_payload = request.model_dump(mode="json")
+    if (context.target.key, request_payload) in context.unknown_sends:
+        raise ValueError("该发送请求本轮结果未确认，请先核实聊天记录，勿直接重发同一内容")
     target = context.target
     destination: JsonObject = {"group_id" if target.kind == "group" else "user_id": target.peer_id}
     actions: list[tuple[str, JsonObject]] = []
@@ -1423,8 +1422,8 @@ async def send_message(
             else:
                 segments.append({"type": part.type, "data": {"file": encoded}})
     flush()
-    if context.send_attempts + len(actions) > context.max_sends:
-        raise ValueError("本轮实际发送次数将超过当前群限制；请合并正文或减少独立文件/转发")
+    if any((action, params) in context.unknown_actions for action, params in actions):
+        raise ValueError("包含本轮结果未确认的发送内容，请先核实聊天记录，勿直接重发同一内容")
     receipts: list[JsonValue] = []
     for action, params in actions:
         result = await invoke(context, action, params, count_send=True)
@@ -1432,6 +1431,11 @@ async def send_message(
         receipts.append(receipt)
         if result.status in ("ok", "unknown"):
             context.sent_messages.append(receipt)
+        if result.status == "unknown":
+            if (context.target.key, request_payload) not in context.unknown_sends:
+                context.unknown_sends.append((context.target.key, request_payload))
+            if (action, params) not in context.unknown_actions:
+                context.unknown_actions.append((action, params))
         if result.status != "ok":
             has_success = any(
                 isinstance(item, dict) and item.get("status") == "ok" for item in receipts

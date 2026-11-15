@@ -7,18 +7,17 @@ port = 6055
 [napcat]
 token = ""
 expected_bot_id = ""
-action_timeout = 30.0
-media_timeout = 30.0
+action_timeout = 120.0
+media_timeout = 120.0
 media_max_bytes = 50000000
 media_concurrency = 4
 event_queue_size = 128
 
 [runtime]
 concurrent_conversations = 4
-max_model_rounds = 20
 history_count = 60
 max_pending_conversations = 100
-max_pending_messages = 20
+max_pending_messages = 200
 activity_limit = 200
 max_retained_sessions = 100
 max_retained_bytes = 268435456
@@ -29,7 +28,7 @@ config_text_max_bytes = 2000000
 protocol = "responses"
 base_url = "https://api.openai.com/v1"
 api_key = ""
-timeout = 120.0
+timeout = 600.0
 max_retries = 10
 store_supported = true
 
@@ -71,7 +70,6 @@ max_context_tokens = 128000
 allow_at_all = false
 cross_groups = []
 cross_private = false
-max_sends_per_turn = 5
 
 [private.policy.categories]
 messages = true
@@ -91,7 +89,7 @@ quota_bytes = 50000000000
 cpus = 2.0
 memory_bytes = 4294967296
 pids_limit = 256
-command_timeout = 120.0
+command_timeout = 1800.0
 output_limit = 1048576
 transfer_max_bytes = 50000000
 max_pending_operations = 32

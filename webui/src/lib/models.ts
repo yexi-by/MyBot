@@ -13,8 +13,8 @@ export interface ConversationCopyPart {
 export const conversationCopyParts: ConversationCopyPart[] = [
   {
     id: "wake_limits",
-    label: "唤醒与发送限制",
-    description: "唤醒关键词、每轮最多发送次数、允许 @全体成员、跨会话私聊与可操作群",
+    label: "唤醒与跨会话",
+    description: "唤醒关键词、允许 @全体成员、跨会话私聊与可操作群",
   },
   {
     id: "prompts",
@@ -64,12 +64,6 @@ export function conversationChanges(
         if (policy.allow_at_all !== undefined) {
           changes.push([[...target, "policy", "allow_at_all"], Boolean(policy.allow_at_all)]);
         }
-      }
-      if (policy.max_sends_per_turn !== undefined) {
-        changes.push([
-          [...target, "policy", "max_sends_per_turn"],
-          structuredClone(policy.max_sends_per_turn),
-        ]);
       }
       if (policy.cross_private !== undefined) {
         changes.push([[...target, "policy", "cross_private"], Boolean(policy.cross_private)]);

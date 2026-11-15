@@ -18,10 +18,6 @@ class CompactionError(ProviderError):
     pass
 
 
-class ModelRequestLimit(ProviderError):
-    pass
-
-
 class ContextWindowExceeded(ProviderError):
     pass
 

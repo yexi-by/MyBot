@@ -80,7 +80,7 @@ class Cleanup(Model):
 
 
 class PreviewSpeech(Model):
-    text: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=1000)
     language: SpeechLanguage = "zh"
     voice: str | None = Field(default=None, pattern=VOICE_PATTERN)
     emotion_mode: EmotionMode | None = None

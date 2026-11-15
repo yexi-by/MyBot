@@ -102,7 +102,7 @@ class EmotionVector(Model):
 class SynthesizeSpeech(Model):
     text: str = Field(
         min_length=1,
-        max_length=2000,
+        max_length=10000,
         description="要读出的台词原文，逐字朗读",
     )
     language: SpeechLanguage = Field(

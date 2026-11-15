@@ -230,7 +230,7 @@ class ToolRegistry:
             if score > 0:
                 scored.append((score, tool))
         scored.sort(key=lambda item: (-item[0], not item[1].deferred, item[1].name))
-        matched = [tool for _, tool in scored[:15]]
+        matched = [tool for _, tool in scored]
         for tool in matched:
             if tool.deferred:
                 context.discovered_tools.add(tool.name)
@@ -358,7 +358,6 @@ class ToolRegistry:
         if tool.deferred:
             context.discovered_tools.add(name)
         policy = self.policy(context.scope)
-        context.max_sends = policy.max_sends_per_turn
         args = copy.deepcopy(arguments)
         target = context.scope
         if tool.cross_scope:
@@ -413,12 +412,9 @@ class ToolRegistry:
         def recheck() -> ToolResult | None:
             if context.cancelled():
                 return ToolResult(status="cancelled", message="本轮已停止")
-            context.max_sends = self.policy(context.scope).max_sends_per_turn
             denied = self.authorize(context.scope, tool, args, target)
             if denied:
                 return denied
-            if name == "qq__send_message" and context.send_attempts >= context.max_sends:
-                return ToolResult.failure("已达到本轮实际发送上限", "SendLimit")
             return None
 
         def check_tool(child_name: str, child_arguments: JsonObject) -> ToolResult | None:

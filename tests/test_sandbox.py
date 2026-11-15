@@ -7,6 +7,7 @@ import pytest
 
 from qq_agent_harness.contracts import JSON_OBJECT, JsonObject
 from qq_agent_harness.sandbox.client import RunnerClient
+from qq_agent_harness.sandbox.docker import container_config
 from qq_agent_harness.sandbox.egress import (
     DestinationDenied,
     PublicProxy,
@@ -164,9 +165,36 @@ async def test_timeout_and_nonzero_exit_are_observable(tmp_path: Path) -> None:
     runner = make_runner(tmp_path, engine=engine, timeout=0.01)
     assert (await runner.execute(ExecuteRequest(command="wait")))["status"] == "timeout"
     assert len(engine.removed) == 1
+    override_runner = make_runner(tmp_path, engine=engine, timeout=60)
+    async with asyncio.timeout(1):
+        res = await override_runner.execute(ExecuteRequest(command="wait", timeout=0.02))
+    assert res["status"] == "timeout" and len(engine.removed) == 2
     failure = make_runner(tmp_path, engine=FakeEngine(exit_code=3))
     result = await failure.execute(ExecuteRequest(command="exit 3"))
     assert (result["status"], result["exit_code"]) == ("error", 3)
+
+    small_cfg = container_config(
+        command="echo ok",
+        cwd="",
+        image="sandbox:1.0.0",
+        host_workspace="/test/workspace",
+        network="qah-sandbox",
+        proxy="http://172.30.240.2:3128",
+        settings=SandboxSettings(memory_bytes=134_217_728),
+    )
+    large_cfg = container_config(
+        command="echo ok",
+        cwd="",
+        image="sandbox:1.0.0",
+        host_workspace="/test/workspace",
+        network="qah-sandbox",
+        proxy="http://172.30.240.2:3128",
+        settings=SandboxSettings(memory_bytes=4_294_967_296),
+    )
+    assert isinstance(small_host := small_cfg["HostConfig"], dict)
+    assert isinstance(large_host := large_cfg["HostConfig"], dict)
+    assert small_host["ShmSize"] == 67_108_864
+    assert large_host["ShmSize"] == 536_870_912
 
 
 async def test_http_files_auth_cleanup_and_busy(tmp_path: Path) -> None:

@@ -173,7 +173,7 @@ function AddGroupDialog({ open, onClose }: { open: boolean; onClose: () => void 
             ]}
           />
           <span className="field-help">
-            一键复制唤醒与限制、提示词与知识库、会话模型、闲时压缩与能力权限；添加后仍可单独修改。
+            一键复制唤醒与跨会话、提示词与知识库、会话模型、闲时压缩与能力权限；添加后仍可单独修改。
           </span>
         </div>
         <section className="picker">

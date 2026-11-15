@@ -14,7 +14,6 @@ from qq_agent_harness.providers import (
     ContextLimitError,
     ContextWindowExceeded,
     MediaInput,
-    ModelRequestLimit,
     ModelSession,
     ProviderError,
 )
@@ -251,7 +250,6 @@ async def test_summary_failure_preserves_original_context(protocol, invalid):
             client=client,
         )
         session.add_background("old " * 2000)
-        session.request_limit = 20
         original = copy.deepcopy(session.items)
         with pytest.raises(CompactionError):
             await session.step([])
@@ -396,27 +394,28 @@ async def test_unrelated_errors_do_not_trigger_compaction(status, code, message)
     assert len(bodies) == 1
 
 
-async def test_summary_requests_share_turn_limit_and_keep_original_on_partial_failure():
+async def test_multi_chunk_summary_failure_keeps_original_context():
     bodies = []
 
     def respond(request):
         bodies.append(json.loads(request.content))
-        return httpx.Response(200, json=answer("responses", "摘要"))
+        if len(bodies) == 1:
+            return httpx.Response(200, json=answer("responses", "摘要第一段"))
+        return httpx.Response(400, json={"error": {"message": "bad summary request"}})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(
-            ModelEndpoint(model="test", max_context_tokens=4096),
+            ModelEndpoint(model="test", max_context_tokens=4096, max_retries=0),
             "system",
             "current",
             client=client,
         )
-        session.request_limit = 1
         session.add_background("历史" * 5000)
         original = copy.deepcopy(session.items)
-        with pytest.raises(ModelRequestLimit):
+        with pytest.raises(CompactionError):
             await session.step([])
-        assert session.request_count == 1 and session.items == original
-    assert len(bodies) == 1
+        assert session.request_count == 2 and session.items == original
+    assert len(bodies) == 2
 
 
 async def test_incomplete_tool_group_cannot_be_sent_or_summarized():
@@ -605,3 +604,62 @@ async def test_provider_custom_headers_are_sent_and_can_override_authorization()
     assert seen[0]["user-agent"] == "MyBot/1.0"
     assert seen[0]["x-title"] == "Harness"
     assert seen[1]["authorization"] == "Custom token-123"
+
+
+async def test_many_consecutive_steps_and_media_budget_recovery_after_compaction():
+    import base64
+
+    bodies = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if "tools" not in body:
+            return httpx.Response(200, json=answer("responses", "已摘要历史媒体和工具调用"))
+        if len([item for item in bodies if "tools" in item]) <= 24:
+            return httpx.Response(200, json=call_answer("responses", f"step-{len(bodies)}"))
+        return httpx.Response(200, json=answer("responses", "all-done"))
+
+    small_png = base64.b64encode(b"x" * 150).decode("ascii")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        session = ModelSession(
+            ModelEndpoint(model="test", max_context_tokens=16_384, compaction_target_percent=30),
+            "system",
+            "current",
+            client=client,
+        )
+        session.media_limit = 200
+        for idx in range(24):
+            reply = await session.step([])
+            if idx == 0:
+                session.result(
+                    reply.calls[0],
+                    ToolResult.success(
+                        {
+                            "idx": idx,
+                            "media": [
+                                {"type": "image", "mime_type": "image/png", "base64": small_png}
+                            ],
+                        }
+                    ),
+                )
+            elif idx == 1:
+                # 在第 1 步刚把工具媒体冲入上下文后，总媒体已达 150 字节；再次尝试追加 150 字节触发配额提示
+                assert session.media_bytes == 150
+                blocked = session.add_media([MediaInput("image", "image/png", small_png)])
+                assert blocked and "超过配置上限" in blocked[0]
+                session.result(
+                    reply.calls[0], ToolResult.success({"idx": idx, "pad": "背景" * 300})
+                )
+            else:
+                session.result(
+                    reply.calls[0], ToolResult.success({"idx": idx, "pad": "背景" * 300})
+                )
+        final = await session.step([])
+        assert final.text == "all-done"
+        assert session.model_request_count == 25
+        # 经过轮内压缩回收早期工具调用组的媒体项后，本轮媒体计数清零并恢复后续媒体预算
+        assert session.compaction_request_count >= 1
+        assert session.media_bytes == 0
+        assert session.add_media([MediaInput("image", "image/png", small_png)]) == []
+        assert session.media_bytes == 150

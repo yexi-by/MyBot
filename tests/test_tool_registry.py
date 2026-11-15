@@ -274,3 +274,25 @@ async def test_deferred_tools_discovery_and_direct_execution_respect_policy() ->
 
     policy.tools["qq__rare_ban"] = False
     assert [item["name"] for item in registry.definitions(context)] == ["qq__common_action"]
+
+
+async def test_search_tools_returns_and_unlocks_all_matches_beyond_fifteen() -> None:
+    registry, context, _ = setup_registry()
+    for index in range(22):
+        registry.add(
+            ToolDefinition(
+                f"qq__ext_{index:02d}",
+                f"扩展能力 {index}",
+                "fixture",
+                json_binding(schema(Empty), echo),
+                title=f"扩展动作 {index}",
+                deferred=True,
+            )
+        )
+    searched = await registry.execute(context, "qq__search_tools", {"query": "扩展"})
+    assert searched.status == "ok" and isinstance(searched.data, dict)
+    assert searched.data["total_matched"] == 22
+    matched = searched.data["matched"]
+    assert isinstance(matched, list) and len(matched) == 22
+    expected = [f"qq__ext_{index:02d}" for index in range(22)] + ["qq__search_tools"]
+    assert [item["name"] for item in registry.definitions(context)] == expected

@@ -149,14 +149,6 @@ export const runtimeSection: SectionDef = {
       help: "不同会话可以并行；同一会话的消息始终按顺序处理。",
     },
     {
-      key: "max_model_rounds",
-      label: "每轮模型请求上限",
-      type: "number",
-      min: 1,
-      integer: true,
-      help: "一轮对话的正常模型请求上限；压缩请求独立使用相同数量的额度。失败重试单独计数，不消耗此额度。",
-    },
-    {
       key: "history_count",
       label: "读取历史消息数",
       type: "number",
@@ -311,7 +303,7 @@ export const sessionModelSection: SectionDef = {
       label: "压缩目标",
       type: "number",
       min: 10,
-      max: 70,
+      max: 79,
       integer: true,
       unit: "%",
       help: "上下文达到预算的 80% 时，用会话模型把旧资料压缩到预算的这个比例。",
@@ -418,17 +410,8 @@ export const wakeSection: SectionDef = {
 
 export const limitsSection: SectionDef = {
   id: "limits",
-  title: "发送与跨会话",
+  title: "跨会话与 @全体",
   fields: [
-    {
-      key: "max_sends_per_turn",
-      label: "每轮最多发送",
-      type: "number",
-      min: 1,
-      integer: true,
-      unit: "次",
-      help: "一轮对话里发送消息的次数上限，文件和合并转发各算一次。",
-    },
     {
       key: "allow_at_all",
       label: "允许 @全体成员",
@@ -770,7 +753,6 @@ export function defaultPolicy(): ObjectValue {
     allow_at_all: false,
     cross_groups: [],
     cross_private: false,
-    max_sends_per_turn: 5,
   };
 }
 export function defaultSessionModel(): ObjectValue {
@@ -808,7 +790,7 @@ export function defaultProvider(): ObjectValue {
     base_url: "https://api.openai.com/v1",
     api_key: "",
     headers: {},
-    timeout: 120,
+    timeout: 600,
     max_retries: 10,
     proxy: null,
     store_supported: true,
@@ -823,7 +805,7 @@ export function defaultMcp(): ObjectValue {
     args: [],
     env: {},
     headers: {},
-    timeout: 60,
+    timeout: 300,
   };
 }
 

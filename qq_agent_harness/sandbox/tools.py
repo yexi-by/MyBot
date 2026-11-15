@@ -27,6 +27,9 @@ class ExecInput(Model):
         description="要在沙箱中执行的 bash 命令",
     )
     cwd: str = Field(default="", description="工作区内的相对目录，默认为工作区根目录")
+    timeout: float | None = Field(
+        default=None, gt=0, description="命令最大运行时长（秒）；省略时使用沙箱默认超时"
+    )
 
 
 class FileInput(Model):
@@ -76,7 +79,9 @@ def build_tools(
             if isinstance(request, ExecInput):
                 if denied := context.recheck():
                     return denied
-                result = await connection.execute(request.command, request.cwd, context.turn_id)
+                result = await connection.execute(
+                    request.command, request.cwd, context.turn_id, timeout=request.timeout
+                )
                 state = result.get("status")
                 if state == "cancelled":
                     return ToolResult(status="cancelled", data=result, message="代码执行已停止")

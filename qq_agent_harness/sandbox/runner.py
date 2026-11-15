@@ -39,6 +39,7 @@ class ExecuteRequest(Model):
     command: str = Field(min_length=1)
     cwd: str = ""
     owner: str = Field(default="", max_length=128)
+    timeout: float | None = Field(default=None, gt=0)
 
 
 class CancelRequest(Model):
@@ -88,6 +89,8 @@ class Runner:
         self.owner = ""
         self.waiting: dict[str, tuple[str | None, asyncio.Event]] = {}
         self.active_slot: str | None = None
+        self.active_file_ops = 0
+        self.cleaning = False
 
     async def status(self) -> JsonObject:
         applied_settings = JSON_OBJECT.validate_python(
@@ -127,8 +130,26 @@ class Runner:
         await self.network_guard.check()
 
     def ensure_idle(self) -> None:
-        if self.lock.locked() or self.container_id is not None or self.waiting:
+        if (
+            self.lock.locked()
+            or self.container_id is not None
+            or self.waiting
+            or self.active_file_ops > 0
+            or self.cleaning
+        ):
             raise HTTPException(409, "共享工作区正在执行或处理文件，请先停止执行")
+
+    @asynccontextmanager
+    async def file_slot(self) -> AsyncIterator[None]:
+        if self.cleaning:
+            raise HTTPException(409, "共享工作区正在清理文件，请稍后重试")
+        if self.active_file_ops >= self.settings.max_pending_operations:
+            raise HTTPException(429, "工作区并发文件操作已满，请稍后重试")
+        self.active_file_ops += 1
+        try:
+            yield
+        finally:
+            self.active_file_ops -= 1
 
     async def cancel(self, owner: str = "") -> JsonObject:
         queued = matched = 0
@@ -247,14 +268,19 @@ class Runner:
                         "truncated": False,
                     }
                 await self.engine.start(container_id)
-                deadline = asyncio.get_running_loop().time() + self.settings.command_timeout
+                effective_timeout = (
+                    request.timeout
+                    if request.timeout is not None
+                    else self.settings.command_timeout
+                )
+                deadline = asyncio.get_running_loop().time() + effective_timeout
                 logs = asyncio.create_task(consume(container_id))
                 wait = asyncio.create_task(self.engine.wait(container_id))
                 cancelled = asyncio.create_task(self.cancel_event.wait())
                 # 显式收集并回收三个协程，不能让 stdout 或 wait 在取消后悬挂。
                 done, _ = await asyncio.wait(
                     {wait, cancelled},
-                    timeout=self.settings.command_timeout,
+                    timeout=effective_timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if cancelled in done:
@@ -408,14 +434,14 @@ def create_app(runner: Runner, token: str) -> FastAPI:
     async def files(
         path: str = "", offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1)
     ) -> JsonObject:
-        async with runner.operation_slot(None):
+        async with runner.file_slot():
             return await asyncio.to_thread(runner.workspace.files, path, offset, limit)
 
     @app.get("/file/text")
     async def read_text(
         path: str, offset: int = Query(default=0, ge=0), limit: int = Query(default=65_536, ge=1)
     ) -> JsonObject:
-        async with runner.operation_slot(None):
+        async with runner.file_slot():
             return await asyncio.to_thread(
                 runner.workspace.read_text,
                 path,
@@ -425,7 +451,7 @@ def create_app(runner: Runner, token: str) -> FastAPI:
 
     @app.get("/file")
     async def read(path: str) -> Response:
-        async with runner.operation_slot(None):
+        async with runner.file_slot():
             content = await asyncio.to_thread(
                 runner.workspace.read, path, runner.settings.transfer_max_bytes
             )
@@ -433,7 +459,7 @@ def create_app(runner: Runner, token: str) -> FastAPI:
 
     @app.put("/file")
     async def write(payload: WriteRequest, request: Request) -> JsonObject:
-        async with runner.operation_slot(None):
+        async with runner.file_slot():
             if await request.is_disconnected():
                 raise HTTPException(499, "调用方已断开，文件未写入")
             await runner.quota.check()
@@ -457,7 +483,7 @@ def create_app(runner: Runner, token: str) -> FastAPI:
 
     @app.post("/file/content")
     async def write_content(request: Request, path: str) -> JsonObject:
-        async with runner.operation_slot(None):
+        async with runner.file_slot():
             await runner.quota.check()
             runner.workspace.path(path)
             content = bytearray()
@@ -480,7 +506,15 @@ def create_app(runner: Runner, token: str) -> FastAPI:
             raise HTTPException(400, "清理前必须确认影响范围")
         runner.ensure_idle()
         async with runner.lock:
-            removed = await asyncio.to_thread(runner.workspace.cleanup, request.mode, request.paths)
+            if runner.active_file_ops > 0 or runner.container_id is not None or runner.waiting:
+                raise HTTPException(409, "共享工作区正在执行或处理文件，请先停止执行")
+            runner.cleaning = True
+            try:
+                removed = await asyncio.to_thread(
+                    runner.workspace.cleanup, request.mode, request.paths
+                )
+            finally:
+                runner.cleaning = False
         return JSON_OBJECT.validate_python({"removed": removed, **await runner.status()})
 
     return app

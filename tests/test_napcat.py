@@ -61,12 +61,10 @@ class Bot:
 
 
 def registry(
-    bot: Bot, *, scope: ConversationScope = GROUP, max_sends: int = 5
+    bot: Bot, *, scope: ConversationScope = GROUP
 ) -> tuple[ToolRegistry, ToolContext, HarnessSettings]:
     tools = build_tools()
-    policy = Policy(
-        categories={tool.category: True for tool in tools}, max_sends_per_turn=max_sends
-    )
+    policy = Policy(categories={tool.category: True for tool in tools})
     settings = HarnessSettings(
         groups={"10": ConversationSettings(enabled=True, policy=policy)},
         private=ConversationSettings(enabled=True, policy=policy),
@@ -150,20 +148,48 @@ async def test_partial_send_unknown_has_receipts_and_is_not_retried() -> None:
     assert [action for action, _ in bot.calls] == ["send_group_msg", "upload_group_file"]
     assert [item["status"] for item in context.sent_messages] == ["ok", "unknown"]
     again = await tools.execute(context, "qq__send_message", payload)
-    assert again.status in ("error", "unknown")
+    assert again.status == "error"
     assert len(bot.calls) == 2
+    same_file = await tools.execute(
+        context,
+        "qq__send_message",
+        {"parts": [{"type": "file", "workspace_path": "report.txt", "name": "report.txt"}]},
+    )
+    assert same_file.status == "error"
+    assert len(bot.calls) == 2
+    progress = await tools.execute(
+        context,
+        "qq__send_message",
+        {"parts": [{"type": "text", "text": "继续汇报其他任务进展"}]},
+    )
+    assert progress.status == "ok"
+    assert [action for action, _ in bot.calls] == [
+        "send_group_msg",
+        "upload_group_file",
+        "send_group_msg",
+    ]
+    assert [item["status"] for item in context.sent_messages] == ["ok", "unknown", "ok"]
 
 
-async def test_actual_batch_send_count_is_checked_before_any_effect() -> None:
+async def test_multi_batch_sends_succeed_without_per_turn_send_limit() -> None:
     bot = Bot()
-    tools, context, _ = registry(bot, max_sends=1)
+    tools, context, _ = registry(bot)
     result = await tools.execute(
         context,
         "qq__send_message",
-        {"parts": [{"type": "text", "text": "第一条"}, {"type": "poke", "user_id": "20"}]},
+        {
+            "parts": [
+                {"type": "text", "text": "第一条"},
+                {"type": "poke", "user_id": "20"},
+                {"type": "text", "text": "第二条"},
+                {"type": "poke", "user_id": "20"},
+                {"type": "text", "text": "第三条"},
+                {"type": "poke", "user_id": "20"},
+            ]
+        },
     )
-    assert result.status == "error"
-    assert not bot.calls
+    assert result.status == "ok"
+    assert context.send_attempts == 6 and len(bot.calls) == 6
 
 
 async def test_unconnected_action_is_error_not_unknown_and_group_bound_actions() -> None:

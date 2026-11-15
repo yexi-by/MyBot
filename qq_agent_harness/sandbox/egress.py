@@ -55,7 +55,7 @@ class PublicProxy:
         *,
         allowed_ports: set[int] | None = None,
         idle_timeout: float = 180,
-        connections: int = 32,
+        connections: int = 128,
     ):
         self.resolver, self.connector = resolver, connector
         self.allowed_ports = {80, 443} if allowed_ports is None else allowed_ports
@@ -216,7 +216,7 @@ async def serve() -> None:
     if not ports or any(not 1 <= port <= 65535 for port in ports):
         raise ValueError("出口端口必须在 1–65535 范围内")
     timeout = float(os.environ.get("HARNESS_EGRESS_IDLE_TIMEOUT", "180"))
-    connections = int(os.environ.get("HARNESS_EGRESS_CONNECTIONS", "32"))
+    connections = int(os.environ.get("HARNESS_EGRESS_CONNECTIONS", "128"))
     if timeout <= 0 or connections < 1:
         raise ValueError("出口空闲超时和连接数必须为正数")
     proxy = PublicProxy(allowed_ports=ports, idle_timeout=timeout, connections=connections)

@@ -139,14 +139,15 @@ class RunnerClient:
             ).json()
         )
 
-    async def execute(self, command: str, cwd: str = "", owner: str = "") -> JsonObject:
+    async def execute(
+        self, command: str, cwd: str = "", owner: str = "", *, timeout: float | None = None
+    ) -> JsonObject:
+        body: JsonObject = {"command": command, "cwd": cwd, "owner": owner}
+        if timeout is not None:
+            body["timeout"] = timeout
         try:
             return JSON_OBJECT.validate_python(
-                (
-                    await self.request(
-                        "POST", "/exec", body={"command": command, "cwd": cwd, "owner": owner}
-                    )
-                ).json()
+                (await self.request("POST", "/exec", body=body)).json()
             )
         except asyncio.CancelledError, httpx.TimeoutException:
             try:

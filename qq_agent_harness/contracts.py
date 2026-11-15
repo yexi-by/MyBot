@@ -79,8 +79,8 @@ class GeneratedMedia:
 
 
 # 每个会话只保留最近的生成物，数量和总字节任一超限时回收最早的项目。
-MAX_GENERATED_MEDIA = 16
-MAX_GENERATED_BYTES = 64 * 1024 * 1024
+MAX_GENERATED_MEDIA = 64
+MAX_GENERATED_BYTES = 256 * 1024 * 1024
 
 
 def remember_generated(store: OrderedDict[str, GeneratedMedia], item: GeneratedMedia) -> None:
@@ -101,7 +101,8 @@ class ToolContext:
     target_scope: ConversationScope | None = None
     sent_messages: list[JsonObject] = field(default_factory=list)
     send_attempts: int = 0
-    max_sends: int = 5
+    unknown_sends: list[tuple[str, JsonObject]] = field(default_factory=list)
+    unknown_actions: list[tuple[str, JsonObject]] = field(default_factory=list)
     generated_media: OrderedDict[str, GeneratedMedia] = field(default_factory=OrderedDict)
     discovered_tools: set[str] = field(default_factory=set)
     read_workspace: Callable[[str], Awaitable[bytes]] | None = None

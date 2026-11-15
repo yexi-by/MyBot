@@ -108,7 +108,6 @@ async def test_transient_failure_retries_same_request_and_recovers(
             "INPUT",
             client=client,
         )
-        session.request_limit = 1
         session.on_request_event = events.append
         result = await session.step([])
         assert result.text == "RECOVERED" and result.calls == []
@@ -283,11 +282,9 @@ async def test_empty_summary_retries_atomically_with_its_selected_protocol(
                 ModelEndpoint(
                     protocol=protocol, model="summary", max_context_tokens=4096, max_retries=1
                 ),
-                request_limit=1,
             )
             assert after < before and normal == 0
         else:
-            session.request_limit = 2
             assert (await session.step([])).text == "完成"
             assert session.model_request_count == 2 and session.compaction_request_count == 1
         assert summaries == 2 and "保留的背景事实" in json.dumps(session.items, ensure_ascii=False)
@@ -310,7 +307,6 @@ async def test_default_retry_budget_allows_ten_retries_and_then_stops(recover, i
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         session = ModelSession(ModelEndpoint(model="test"), "system", "input", client=client)
-        session.request_limit = 1
         session.on_request_event = events.append
         if recover:
             assert (await session.step([])).text == "RECOVERED"
@@ -443,7 +439,6 @@ async def test_retry_after_tool_result_does_not_repeat_completed_action(
     store = make_store(tmp_path)
     store.settings.providers["test"].protocol = protocol
     store.settings.providers["test"].max_retries = 1
-    store.settings.runtime.max_model_rounds = 2
     registry = ToolRegistry(lambda: store.settings)
     effects, bodies = [], []
 

@@ -169,12 +169,12 @@ def container_config(
             "NanoCpus": int(settings.cpus * 1_000_000_000),
             "PidsLimit": settings.pids_limit,
             "Ulimits": [{"Name": "core", "Soft": 0, "Hard": 0}],
-            "ShmSize": 16_777_216,
+            "ShmSize": max(67_108_864, min(536_870_912, settings.memory_bytes // 4)),
             "Init": True,
             "RestartPolicy": {"Name": "no"},
             "LogConfig": {
                 "Type": "local",
-                "Config": {"max-size": "2m", "max-file": "1", "compress": "false"},
+                "Config": {"max-size": "20m", "max-file": "3", "compress": "false"},
             },
         },
     }

@@ -31,7 +31,6 @@ from .providers import (
     CompactionError,
     ContextLimitError,
     MediaInput,
-    ModelRequestLimit,
     ModelSession,
     ProviderError,
 )
@@ -397,9 +396,7 @@ class AgentRuntime:
             )
             session.on_request_event = lambda event: self._model_request_event(key, event)
             try:
-                before, after = await session.compact_idle(
-                    endpoint, request_limit=config.runtime.max_model_rounds
-                )
+                before, after = await session.compact_idle(endpoint)
             except ProviderError as exc:
                 # 消息由协议层生成固定脱敏文本，不含上游响应正文。
                 self.record(key, "compaction", f"闲时压缩失败，原上下文保留：{exc}", status="error")
@@ -418,7 +415,6 @@ class AgentRuntime:
             if retained.knowledge and not session.contains("knowledge"):
                 # 知识库原文此前已在轮内压缩时并入摘要；下次唤醒重新补入当前原文。
                 retained.knowledge = []
-            retained.generated_media.clear()
             retained.idle_tokens = session.idle_compactable_tokens()
             retained.retained_bytes = retained.measure()
             self.record(
@@ -488,15 +484,16 @@ class AgentRuntime:
                 session.begin_turn(conversation)
             self.sessions.move_to_end(key)
             self.turns[key]["session_id"] = retained.session_id
-            session.request_limit = config.runtime.max_model_rounds
             session.on_context_event = partial(self._context_event, key, session)
             session.on_request_event = lambda event: self._model_request_event(key, event)
             self._add_background(session, retained, batch, history, config)
             await self._add_media(session, context, batch, config)
-            for round_number in range(config.runtime.max_model_rounds):
+            round_number = 0
+            while True:
+                round_number += 1
                 definitions = self.registry.definitions(context)
                 self._update_actions(session, context, executed)
-                self.turns[key]["rounds"] = round_number + 1
+                self.turns[key]["rounds"] = max(session.request_count, round_number)
                 reply = await session.step(definitions)
                 self.turns[key]["context"] = session.context_state
                 self.turns[key]["rounds"] = session.request_count
@@ -550,11 +547,6 @@ class AgentRuntime:
                         tool=call.name,
                         status=result.status,
                     )
-            outcome = "limit"
-            self.record(key, "turn", "达到本轮模型请求上限，已停止", status=outcome)
-        except ModelRequestLimit:
-            outcome = "limit"
-            self.record(key, "turn", "达到模型或压缩请求上限，已停止", status="limit")
         except ContextLimitError as exc:
             outcome = "limit"
             self.record(key, "turn", str(exc), status="limit")
@@ -642,7 +634,6 @@ class AgentRuntime:
         session.action_state = {
             "sent_receipts": receipts,
             "send_attempts": context.send_attempts,
-            "max_sends_per_turn": self.registry.policy(context.scope).max_sends_per_turn,
             "executed_calls": [
                 {"call_id": call_id, "tool": name, "status": result.status}
                 for call_id, (name, _arguments, result) in executed.items()

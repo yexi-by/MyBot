@@ -1185,12 +1185,12 @@ function SpeechPreview({ ready, voices }: { ready: boolean; voices: CustomVoice[
         </div>
       </header>
       <div className="form-grid">
-        <FieldShell id="tts-preview-text" label="试听台词" help="最多 200 字，输入要朗读的台词原文。">
+        <FieldShell id="tts-preview-text" label="试听台词" help="最多 1000 字，输入要朗读的台词原文。">
           <input
             id="tts-preview-text"
             className="input"
             value={text}
-            maxLength={200}
+            maxLength={1000}
             onChange={(event) => setText(event.target.value)}
           />
         </FieldShell>

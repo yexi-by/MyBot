@@ -13,7 +13,13 @@ from test_runtime_sessions import message, sessions, tool_response, wake
 
 from qq_agent_harness.configuration import ConfigError, ConfigStore
 from qq_agent_harness.context import estimate_tokens
-from qq_agent_harness.contracts import JsonObject, ToolDefinition, ToolResult, model_binding
+from qq_agent_harness.contracts import (
+    GeneratedMedia,
+    JsonObject,
+    ToolDefinition,
+    ToolResult,
+    model_binding,
+)
 from qq_agent_harness.providers import ContextLimitError, ModelSession
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime
@@ -118,7 +124,7 @@ def test_conversation_models_must_reference_existing_providers(tmp_path):
     assert store.path.read_bytes() == original
 
 
-@pytest.mark.parametrize(("target", "kept"), [(50, True), (15, False)])
+@pytest.mark.parametrize(("target", "kept"), [(79, True), (50, True), (15, False)])
 async def test_compaction_target_controls_how_much_recent_context_stays(target, kept):
     bodies: list[JsonObject] = []
     events: list[JsonObject] = []
@@ -167,7 +173,7 @@ async def test_idle_compaction_reports_shrink_in_api_calibrated_tokens():
         cheap = ModelEndpoint(
             protocol="chat_completions", base_url="https://cheap.example/v1", model="small"
         )
-        before, after = await session.compact_idle(cheap, request_limit=1)
+        before, after = await session.compact_idle(cheap)
     assert before == shown and after < before
     assert session.context_state["input_tokens"] == after
 
@@ -310,10 +316,14 @@ async def test_idle_compaction_uses_its_own_model_and_keeps_only_persona_and_kno
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         runtime = runtime_for(store, client)
         await wake(runtime, message("first", "a", "group", "member"))
+        runtime.sessions[KEY].generated_media["kept-img"] = GeneratedMedia(
+            "kept-img", b"\x89PNG", "image/png"
+        )
         ended = runtime.sessions[KEY].updated_at
         assert runtime.compact_idle_sessions(now=ended + 299) == []
         assert runtime.compact_idle_sessions(now=ended + 300) == [KEY]
         await finish(runtime)
+        assert "kept-img" in runtime.sessions[KEY].generated_media
         url, summary = requests[-1]
         source = context_text(summary)
         assert url == CHEAP_URL and summary["model"] == "small"

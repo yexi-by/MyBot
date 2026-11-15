@@ -69,7 +69,7 @@ def setup_image_harness(
     )
     all_tools = [*qq_tools, *sb_tools, *img_tools]
     categories = {tool.category: True for tool in all_tools}
-    policy = Policy(categories=categories, max_sends_per_turn=5)
+    policy = Policy(categories=categories)
     settings.groups["10"] = ConversationSettings(enabled=True, policy=policy)
     settings.private = ConversationSettings(enabled=True, policy=policy)
 

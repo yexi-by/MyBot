@@ -35,9 +35,9 @@ class GroupMemberList(Fresh):
         default=None, description="按群主、管理员或普通成员身份筛选"
     )
     query: str | None = Field(
-        default=None, max_length=100, description="按昵称、群名片、QQ 号或头衔模糊搜索"
+        default=None, max_length=500, description="按昵称、群名片、QQ 号或头衔模糊搜索"
     )
-    limit: int = Field(default=50, ge=1, le=100, description="本页成员数，最多 100")
+    limit: int = Field(default=50, ge=1, le=5000, description="本页成员数，最多 5000")
     offset: int = Field(default=0, ge=0, description="筛选后列表的分页起点")
 
 

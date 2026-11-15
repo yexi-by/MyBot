@@ -217,7 +217,7 @@ def setup_tts(
         *build_sandbox_tools(lambda: settings.sandbox, RunnerClient(lambda: settings.sandbox)),
         *build_tts_tools(lambda: settings.tts, client=client),
     ]
-    policy = Policy(categories={tool.category: True for tool in tools}, max_sends_per_turn=5)
+    policy = Policy(categories={tool.category: True for tool in tools})
     settings.groups["10"] = ConversationSettings(enabled=True, policy=policy)
     registry = ToolRegistry(lambda: settings)
     for tool in tools:

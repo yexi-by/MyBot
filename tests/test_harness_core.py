@@ -750,7 +750,6 @@ async def test_compaction_keeps_action_receipts_and_does_not_replay_unknown_send
     store = make_store(tmp_path)
     store.settings.providers["test"].protocol = "chat_completions"
     store.settings.private.model.max_context_tokens = 8192
-    store.settings.runtime.max_model_rounds = 50
     registry = ToolRegistry(lambda: store.settings)
     sends = []
     normal_requests = []
