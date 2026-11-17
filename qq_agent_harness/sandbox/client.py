@@ -9,6 +9,8 @@ import httpx
 from ..contracts import JSON_OBJECT, JsonObject
 from ..settings import SandboxSettings
 
+CleanupMode = Literal["temp", "cache", "selected", "all"]
+
 
 class RunnerClient:
     def __init__(
@@ -67,6 +69,35 @@ class RunnerClient:
             ).json()
         )
 
+    async def search_files(
+        self,
+        query: str = "",
+        *,
+        path: str = "",
+        glob: str = "*",
+        regex: bool = False,
+        case_sensitive: bool = False,
+        include_hidden: bool = False,
+        max_results: int = 100,
+    ) -> JsonObject:
+        return JSON_OBJECT.validate_python(
+            (
+                await self.request(
+                    "GET",
+                    "/files/search",
+                    params={
+                        "query": query,
+                        "path": path,
+                        "glob": glob,
+                        "regex": "true" if regex else "false",
+                        "case_sensitive": "true" if case_sensitive else "false",
+                        "include_hidden": "true" if include_hidden else "false",
+                        "max_results": str(max_results),
+                    },
+                )
+            ).json()
+        )
+
     async def read_text(self, path: str, offset: int = 0, limit: int = 65_536) -> JsonObject:
         return JSON_OBJECT.validate_python(
             (
@@ -78,9 +109,7 @@ class RunnerClient:
             ).json()
         )
 
-    async def cleanup(
-        self, mode: Literal["cache", "selected", "all"], paths: list[str], confirmed: bool
-    ) -> JsonObject:
+    async def cleanup(self, mode: CleanupMode, paths: list[str], confirmed: bool) -> JsonObject:
         return JSON_OBJECT.validate_python(
             (
                 await self.request(
@@ -101,7 +130,7 @@ class RunnerClient:
     async def read_file(self, path: str) -> bytes:
         return (await self.request("GET", "/file", params={"path": path})).content
 
-    async def write_bytes(self, path: str, data: bytes) -> None:
+    async def write_bytes(self, path: str, data: bytes, *, overwrite: bool = False) -> None:
         settings = self.get_settings()
         if not settings.enabled or not settings.runner_token:
             raise ValueError("共享沙箱未启用或缺少连接凭据")
@@ -109,9 +138,12 @@ class RunnerClient:
             raise ValueError(
                 f"传入文件超过已配置的单次传输上限（{settings.transfer_max_bytes} 字节）"
             )
+        params = {"path": path}
+        if overwrite:
+            params["overwrite"] = "true"
         response = await self.http.post(
             settings.runner_url.rstrip("/") + "/file/content",
-            params={"path": path},
+            params=params,
             content=data,
             headers={
                 "Authorization": f"Bearer {settings.runner_token}",
@@ -135,6 +167,35 @@ class RunnerClient:
                         "overwrite": overwrite,
                         "append": append,
                     },
+                )
+            ).json()
+        )
+
+    async def edit_file(
+        self, path: str, old_string: str, new_string: str, *, replace_all: bool = False
+    ) -> JsonObject:
+        return JSON_OBJECT.validate_python(
+            (
+                await self.request(
+                    "POST",
+                    "/file/edit",
+                    body={
+                        "path": path,
+                        "old_string": old_string,
+                        "new_string": new_string,
+                        "replace_all": replace_all,
+                    },
+                )
+            ).json()
+        )
+
+    async def delete_path(self, path: str, *, recursive: bool = False) -> JsonObject:
+        return JSON_OBJECT.validate_python(
+            (
+                await self.request(
+                    "POST",
+                    "/file/delete",
+                    body={"path": path, "recursive": recursive},
                 )
             ).json()
         )

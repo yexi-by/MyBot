@@ -3,6 +3,7 @@
 [server]
 host = "0.0.0.0"
 port = 6055
+auth_token = ""
 
 [napcat]
 token = ""
@@ -29,7 +30,9 @@ protocol = "responses"
 base_url = "https://api.openai.com/v1"
 api_key = ""
 timeout = 600.0
+idle_timeout = 120.0
 max_retries = 10
+stream = true
 store_supported = true
 
 [providers.default.headers]
@@ -92,6 +95,7 @@ pids_limit = 256
 command_timeout = 1800.0
 output_limit = 1048576
 transfer_max_bytes = 50000000
+concurrent_executions = 2
 max_pending_operations = 32
 
 [image]

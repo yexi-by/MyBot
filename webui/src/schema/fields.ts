@@ -115,12 +115,13 @@ export const napcatSection: SectionDef = {
 export const serverSection: SectionDef = {
   id: "server",
   title: "控制台服务",
-  description: "控制台、API 和 NapCat 接入共用这个地址。修改后需重启生效。",
+  description: "控制台、API 和 NapCat 接入共用这个地址。监听地址与端口修改后需重启生效。",
   fields: [
     {
       key: "host",
       label: "监听地址",
       type: "text",
+      restart: true,
       help: "0.0.0.0 接受所有网卡的连接；只在本机使用时可填 127.0.0.1。",
     },
     {
@@ -130,6 +131,14 @@ export const serverSection: SectionDef = {
       min: 1,
       max: 65535,
       integer: true,
+      restart: true,
+    },
+    {
+      key: "auth_token",
+      label: "控制台访问口令",
+      type: "secret",
+      generate: true,
+      help: "填写后打开控制台需输入该口令解锁（保存后立即生效）；留空表示免密访问。不影响 NapCat 连接密钥。",
     },
   ],
 };
@@ -240,12 +249,25 @@ export const providerRequestSection: SectionDef = {
       help: "每次模型请求的最长等待时间，包含响应正文接收；超时后按重试次数设置重新请求。",
     },
     {
+      key: "idle_timeout",
+      label: "流式空闲超时",
+      type: "number",
+      ...seconds,
+      help: "流式接收期间相邻数据分片的最长间隔；超时即判定连接挂起并自动重试。",
+    },
+    {
       key: "max_retries",
       label: "失败重试次数",
       type: "number",
       min: 0,
       integer: true,
       help: "首次请求失败后最多重试的次数，默认 10 次（合计最多 11 次请求）；0 表示不重试。用于临时服务错误、限流、连接异常和超时。",
+    },
+    {
+      key: "stream",
+      label: "启用 SSE 流式接收",
+      type: "toggle",
+      help: "流式逐片接收正文与工具参数，防止长推理期间连接因静默被中间网关断开。",
     },
     {
       key: "store_supported",
@@ -737,6 +759,8 @@ export const sandboxSection: SectionDef = {
     },
     { key: "transfer_max_bytes", label: "单次文件传输预算", type: "bytes", bytes: "decimal", min: 1, integer: true,
       help: "单次读写或传输文件的大小上限。" },
+    { key: "concurrent_executions", label: "并发执行容器数", type: "number", min: 1, max: 16, integer: true,
+      help: "允许同时运行的沙箱命令容器上限；不同会话可并行执行代码。" },
     { key: "max_pending_operations", label: "工作区等待操作上限", type: "number", min: 1, integer: true,
       help: "沙箱并发排队操作的最大数量。" },
   ],
@@ -791,7 +815,9 @@ export function defaultProvider(): ObjectValue {
     api_key: "",
     headers: {},
     timeout: 600,
+    idle_timeout: 120,
     max_retries: 10,
+    stream: true,
     proxy: null,
     store_supported: true,
   };

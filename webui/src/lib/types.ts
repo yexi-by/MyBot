@@ -60,6 +60,7 @@ export interface SandboxStatus {
   enabled: boolean;
   available: boolean;
   busy: boolean;
+  active_count?: number;
   quota_bytes: number;
   used_bytes: number | null;
   reason: string;
@@ -73,16 +74,23 @@ export interface SandboxFile {
   name: string;
   size: number;
   is_dir: boolean;
+  mtime?: number;
+  is_system?: boolean;
 }
 export interface TurnContext {
   input_tokens?: number;
   max_tokens?: number;
   trigger_tokens?: number;
   compactions?: number;
+  prunes?: number;
   request_count?: number;
   model_request_count?: number;
   compaction_request_count?: number;
   retry_count?: number;
+  cached_tokens?: number;
+  reasoning_tokens?: number;
+  cached_tokens_total?: number;
+  prompt_tokens_total?: number;
   usage_source?: string;
 }
 export interface Turn {
@@ -191,12 +199,26 @@ export interface McpStatus {
   tools?: number;
   excluded_tools?: { name: string; reason: string }[];
 }
+export interface TimerItem {
+  timer_id: string;
+  scope_key?: string;
+  created_at: number;
+  due_at: number;
+  remaining_seconds: number;
+  delay_seconds: number;
+  note: string;
+}
+export interface AuthStatus {
+  protected: boolean;
+  authenticated: boolean;
+}
 export interface RuntimeEnvelope {
   started_at: number;
   turns: Turn[];
   sessions: RetainedSession[];
   capacity: SessionCapacity;
   activity: Activity[];
+  timers?: TimerItem[];
   napcat: {
     connected: string[];
     expected_bot_id: string;

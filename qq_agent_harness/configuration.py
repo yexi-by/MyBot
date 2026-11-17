@@ -196,7 +196,10 @@ class ConfigStore:
         with self.lock:
             path = self.resolve_file(relative)
             if not path.parent.is_dir():
-                raise ValueError("父目录不存在")
+                if expected_sha is None:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                else:
+                    raise ValueError("父目录不存在")
             if path.is_dir():
                 raise ValueError("该路径是目录，不能作为文本文件保存")
             if expected_sha is None:

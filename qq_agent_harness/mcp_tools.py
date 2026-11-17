@@ -216,8 +216,9 @@ class MCPManager:
                 ):
                     excluded.append({"name": item.name, "reason": "工具 schema 含外部引用"})
                     continue
-                # 远端标题只用于控制台展示，不参与授权判断。
+                # 远端标题只用于控制台展示，不参与授权判断；readOnlyHint 仅用于允许同批只读并发。
                 title = item.title or (item.annotations.title if item.annotations else None)
+                read_only = bool(item.annotations and item.annotations.readOnlyHint is True)
                 definitions.append(
                     ToolDefinition(
                         f"mcp__{name}__{item.name}",
@@ -233,6 +234,7 @@ class MCPManager:
                                 disconnect,
                             ),
                         ),
+                        concurrency_safe=read_only,
                         title=title or item.name,
                     )
                 )

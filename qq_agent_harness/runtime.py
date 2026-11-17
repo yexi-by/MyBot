@@ -1,4 +1,4 @@
-"""有界内存对话循环；无业务存档、重启恢复或自动发送。"""
+"""有界内存对话循环；支持同批只读并发、轮中新消息实时注入、无进展循环防卫与按需技能目录。"""
 
 import asyncio
 import base64
@@ -21,6 +21,7 @@ from .contracts import (
     JsonValue,
     Message,
     NapCatConnection,
+    OrderedSet,
     ToolContext,
     ToolResult,
 )
@@ -33,10 +34,12 @@ from .providers import (
     MediaInput,
     ModelSession,
     ProviderError,
+    ToolCall,
 )
 from .registry import ToolRegistry
 from .session_view import project, scrub
 from .settings import HarnessSettings
+from .skills import SKILL_TOOL_NAME, discover_skills
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,9 @@ MAX_MESSAGE_IDS = 2048
 # 闲时压缩按固定间隔检查；同时进行的压缩数量有上限，不占用会话并发名额。
 IDLE_SCAN_SECONDS = 15
 MAX_IDLE_COMPACTIONS = 2
+MAX_PARALLEL_READ_TOOLS = 8
+REPEAT_REMINDER_THRESHOLDS = (3, 5, 8)
+REPEAT_ERROR_BLOCK_THRESHOLD = 8
 
 
 class SessionBusy(RuntimeError):
@@ -59,9 +65,10 @@ class ConversationSession:
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     message_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     wake_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
-    discovered_tools: set[str] = field(default_factory=set)
+    discovered_tools: OrderedSet = field(default_factory=OrderedSet)
     generated_media: OrderedDict[str, GeneratedMedia] = field(default_factory=OrderedDict)
     knowledge: list[tuple[str, str]] = field(default_factory=list)
+    skills_catalog: list[tuple[str, str]] = field(default_factory=list)
     updated_at: float = 0
     outcome: str = ""
     retained_bytes: int = 0
@@ -83,6 +90,7 @@ class ConversationSession:
                 {
                     "items": self.model.items if self.model else [],
                     "knowledge": self.knowledge,
+                    "skills": self.skills_catalog,
                 },
                 ensure_ascii=False,
             ).encode("utf-8")
@@ -129,7 +137,7 @@ class AgentRuntime:
         self.idle_task: asyncio.Task[None] | None = None
         self.closing = False
         self.read_workspace: Callable[[str], Awaitable[bytes]] | None = None
-        self.write_workspace: Callable[[str, bytes], Awaitable[None]] | None = None
+        self.write_workspace: Callable[..., Awaitable[None]] | None = None
         self.read_media: (
             Callable[[list[JsonObject], NapCatConnection], Awaitable[MediaBatch]] | None
         ) = None
@@ -219,9 +227,7 @@ class AgentRuntime:
                     self.record(message.scope.key, "wake", "无法验证被引用消息的归属")
         return False
 
-    async def receive(self, message: Message) -> None:
-        if self.closing or not await self.should_wake(message):
-            return
+    def _enqueue_message(self, message: Message) -> bool:
         key = message.scope.key
         settings = self.store.settings.runtime
         now = time.monotonic()
@@ -232,18 +238,18 @@ class AgentRuntime:
         identity = (key, message.message_id)
         retained = self.sessions.get(key)
         if identity in self.seen or retained and message.message_id in retained.wake_ids:
-            return
+            return False
         if key not in self.workers and len(self.workers) >= settings.max_pending_conversations:
             self.rejected_messages += 1
             self.record(key, "overload", "等待会话已满，本次唤醒未接入")
-            return
+            return False
         queue = self.pending.setdefault(key, [])
         if any(item.message_id == message.message_id for item in queue):
-            return
+            return False
         if len(queue) >= settings.max_pending_messages:
             self.rejected_messages += 1
             self.record(key, "overload", "当前会话等待消息已满，本次唤醒未接入")
-            return
+            return False
         queue.append(message)
         self.seen[identity] = now
         if key in self.compacting and key not in self.idle_interrupts:
@@ -254,6 +260,31 @@ class AgentRuntime:
             self.stopping.discard(key)
             self.turns[key] = {"scope_key": key, "state": "queued", "started_at": time.time()}
             self.workers[key] = asyncio.create_task(self._worker(key))
+        return True
+
+    async def receive(self, message: Message) -> None:
+        if self.closing or not await self.should_wake(message):
+            return
+        self._enqueue_message(message)
+
+    async def wake_timer(self, scope: ConversationScope, timer_id: str, note: str) -> None:
+        if self.closing or not self.store.settings.conversation(scope).enabled:
+            return
+        timer_msg = Message(
+            scope=scope,
+            message_id=f"timer:{timer_id}",
+            sender_id=scope.bot_id,
+            sender_name="[系统定时提醒]",
+            time=int(time.time()),
+            segments=[
+                {
+                    "type": "text",
+                    "data": {"text": f"[系统定时提醒 {timer_id} 已到期] 提醒事项：{note}"},
+                }
+            ],
+        )
+        if self._enqueue_message(timer_msg):
+            self.record(scope.key, "wake", f"定时提醒已到期唤醒（{timer_id}）", status="ok")
 
     def _interrupt_idle(self, key: str) -> None:
         self.idle_interrupts.discard(key)
@@ -415,6 +446,7 @@ class AgentRuntime:
             if retained.knowledge and not session.contains("knowledge"):
                 # 知识库原文此前已在轮内压缩时并入摘要；下次唤醒重新补入当前原文。
                 retained.knowledge = []
+            retained.skills_catalog = []
             retained.idle_tokens = session.idle_compactable_tokens()
             retained.retained_bytes = retained.measure()
             self.record(
@@ -455,6 +487,56 @@ class AgentRuntime:
         executed: ExecutedCalls = {}
         outcome = "error"
         interrupted_call: str | None = None
+        repeat_sig: tuple[str, str, str] | None = None
+        repeat_count = 0
+
+        def record_completed(call: ToolCall, result: ToolResult) -> str | None:
+            nonlocal repeat_sig, repeat_count
+            assert session is not None
+            session.result(call, result)
+            executed[call.id] = (
+                call.name,
+                call.arguments,
+                result.model_copy(
+                    update={
+                        "data": None,
+                        "message": result.message or "该调用已执行，详细结果见先前回执",
+                    }
+                ),
+            )
+            self.record(
+                key,
+                "tool",
+                result.message or "工具执行完成",
+                tool=call.name,
+                status=result.status,
+            )
+            if call.name == "qq__search_tools":
+                return None
+            canon_args = json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)
+            # 只有输入相同且结果完全停滞（或连续失败）才计入无进展重复，避免误伤步进状态工具。
+            outcome_fp = (
+                f"err:{result.error_type}:{result.message}"
+                if result.status != "ok"
+                else "ok:" + json.dumps(result.data, sort_keys=True, ensure_ascii=False)[:1024]
+            )
+            sig = (call.name, canon_args, outcome_fp)
+            if sig == repeat_sig:
+                repeat_count += 1
+            else:
+                repeat_sig, repeat_count = sig, 1
+            if repeat_count in REPEAT_REMINDER_THRESHOLDS:
+                if repeat_count == REPEAT_REMINDER_THRESHOLDS[0]:
+                    return (
+                        "循环提醒：你已连续多次以相同参数调用同一工具且返回结果没有变化。"
+                        "请先仔细检查上一条工具结果，尝试更换参数、换用其他工具，或基于已有事实收尾。"
+                    )
+                preview = canon_args if len(canon_args) <= 300 else canon_args[:300] + "…"
+                return (
+                    f"循环警告：工具 {call.name}（参数 {preview}）已连续无进展重复调用 {repeat_count} 次。"
+                    "请勿再次发出完全相同的调用，立即更换方案或结束当前任务。"
+                )
+            return None
 
         try:
             history, history_error = await self._load_history(scope, config)
@@ -490,6 +572,26 @@ class AgentRuntime:
             await self._add_media(session, context, batch, config)
             round_number = 0
             while True:
+                if not context.cancelled() and self.pending.get(key):
+                    mid_batch = self.pending.pop(key, [])
+                    if mid_batch:
+                        retained.remember([m.message_id for m in mid_batch], wake=True)
+                        session.append_mid_turn_wake(
+                            json.dumps(
+                                {
+                                    "来源会话": scope.model_dump(),
+                                    "说明": "本轮处理期间收到的新消息，请结合当前进展一并回应或按最新要求调整行动。",
+                                    "当前唤醒消息": [m.model_dump(mode="json") for m in mid_batch],
+                                },
+                                ensure_ascii=False,
+                            )
+                        )
+                        await self._add_media(session, context, mid_batch, self.store.settings)
+                        repeat_sig, repeat_count = None, 0
+                        self.record(
+                            key, "wake", f"轮中实时并入 {len(mid_batch)} 条新消息", status="ok"
+                        )
+
                 round_number += 1
                 definitions = self.registry.definitions(context)
                 self._update_actions(session, context, executed)
@@ -498,6 +600,9 @@ class AgentRuntime:
                 self.turns[key]["context"] = session.context_state
                 self.turns[key]["rounds"] = session.request_count
                 if not reply.calls:
+                    if not context.cancelled() and self.pending.get(key):
+                        # 收尾瞬间若恰好有新消息抵达，直接衔接进同一轮，避免漏看最新发言。
+                        continue
                     outcome = "completed" if context.sent_messages else "silent"
                     ending = (
                         "本轮结束"
@@ -513,40 +618,92 @@ class AgentRuntime:
                         status=outcome,
                     )
                     return
-                # 每个调用完整回填一次，保持协议配对；不把正文补发至QQ。
-                for call in reply.calls:
+
+                # 每个调用完整回填一次：连续的纯只读工具并发执行并按原序回填，副作用工具独占执行。
+                reminders: list[str] = []
+                calls = reply.calls
+                idx = 0
+                while idx < len(calls):
+                    call = calls[idx]
                     if call.id in executed:
-                        old_name, old_args, result = executed[call.id]
-                        if (old_name, old_args) != (call.name, call.arguments):
-                            result = ToolResult.failure(
-                                "模型复用了工具调用 ID 且参数不同", "DuplicateCall"
-                            )
-                    elif call.invalid:
+                        old_name, old_args, prev_result = executed[call.id]
+                        result = (
+                            ToolResult.failure("模型复用了工具调用 ID 且参数不同", "DuplicateCall")
+                            if (old_name, old_args) != (call.name, call.arguments)
+                            else prev_result
+                        )
+                        if note := record_completed(call, result):
+                            reminders.append(note)
+                        idx += 1
+                        continue
+                    if call.invalid:
                         result = ToolResult.failure(
                             "工具参数不是有效 JSON 对象", "InvalidArguments"
                         )
-                    else:
-                        interrupted_call = call.id
-                        result = await self.registry.execute(context, call.name, call.arguments)
-                    session.result(call, result)
+                        if note := record_completed(call, result):
+                            reminders.append(note)
+                        idx += 1
+                        continue
+
+                    tool_def = self.registry.tools.get(call.name)
+                    canon_args = json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)
+                    is_stuck_error = (
+                        repeat_sig is not None
+                        and repeat_sig[0] == call.name
+                        and repeat_sig[1] == canon_args
+                        and repeat_sig[2].startswith("err:")
+                        and repeat_count >= REPEAT_ERROR_BLOCK_THRESHOLD - 1
+                    )
+                    if is_stuck_error:
+                        result = ToolResult.failure(
+                            f"已拦截连续第 {repeat_count + 1} 次完全相同的失败调用；请修正参数、改换方法或直接结束。",
+                            "RepeatedToolCallBlocked",
+                        )
+                        if note := record_completed(call, result):
+                            reminders.append(note)
+                        idx += 1
+                        continue
+
+                    if tool_def is not None and tool_def.concurrency_safe:
+                        parallel_batch = [call]
+                        idx += 1
+                        while idx < len(calls) and len(parallel_batch) < MAX_PARALLEL_READ_TOOLS:
+                            nxt = calls[idx]
+                            if nxt.id in executed or nxt.invalid:
+                                break
+                            ntool = self.registry.tools.get(nxt.name)
+                            if ntool is None or not ntool.concurrency_safe:
+                                break
+                            parallel_batch.append(nxt)
+                            idx += 1
+                        if len(parallel_batch) == 1:
+                            single = parallel_batch[0]
+                            res = await self.registry.execute(
+                                context, single.name, single.arguments
+                            )
+                            if note := record_completed(single, res):
+                                reminders.append(note)
+                        else:
+                            batch_results = await asyncio.gather(
+                                *(
+                                    self.registry.execute(context, item.name, item.arguments)
+                                    for item in parallel_batch
+                                )
+                            )
+                            for item, res in zip(parallel_batch, batch_results, strict=True):
+                                if note := record_completed(item, res):
+                                    reminders.append(note)
+                        continue
+
+                    interrupted_call = call.id
+                    result = await self.registry.execute(context, call.name, call.arguments)
                     interrupted_call = None
-                    executed[call.id] = (
-                        call.name,
-                        call.arguments,
-                        result.model_copy(
-                            update={
-                                "data": None,
-                                "message": result.message or "该调用已执行，详细结果见先前回执",
-                            }
-                        ),
-                    )
-                    self.record(
-                        key,
-                        "tool",
-                        result.message or "工具执行完成",
-                        tool=call.name,
-                        status=result.status,
-                    )
+                    if note := record_completed(call, result):
+                        reminders.append(note)
+                    idx += 1
+
+                for reminder in reminders:
+                    session.add_notice(reminder)
         except ContextLimitError as exc:
             outcome = "limit"
             self.record(key, "turn", str(exc), status="limit")
@@ -595,21 +752,24 @@ class AgentRuntime:
                 raise ValueError(denied.message)
             return await self.read_workspace(path)
 
-        async def write_workspace(path: str, data: bytes) -> None:
+        async def write_workspace(path: str, data: bytes, *, overwrite: bool = False) -> None:
             tool = self.registry.tools.get("sandbox__write_file")
             if not tool or not self.write_workspace:
                 raise ValueError("当前群未开放共享工作区写入能力")
             denied = self.registry.authorize(
-                scope, tool, {"path": path, "overwrite": False, "append": False}
+                scope, tool, {"path": path, "overwrite": overwrite, "append": False}
             )
             if denied:
                 raise ValueError(denied.message)
             if any(
-                key == "content" or key.startswith("content.")
-                for key in self.registry.policy(scope).parameters.get(tool.name, {})
+                k == "content" or k.startswith("content.")
+                for k in self.registry.policy(scope).parameters.get(tool.name, {})
             ):
                 raise ValueError("二进制导入不能满足该群对文本写入内容的限制")
-            await self.write_workspace(path, data)
+            if overwrite:
+                await self.write_workspace(path, data, overwrite=True)
+            else:
+                await self.write_workspace(path, data)
 
         return ToolContext(
             scope,
@@ -649,6 +809,13 @@ class AgentRuntime:
             self.turns[key]["rounds"] = count
         if phase == "compacting":
             self.record(key, "compaction", "上下文达到阈值，正在进行轮内压缩", status="running")
+        elif phase == "pruned":
+            self.record(
+                key,
+                "compaction",
+                f"前置无损减压完成：{event.get('before_tokens')} → {event.get('after_tokens')} token",
+                status="completed",
+            )
         elif phase == "compacted":
             self.record(
                 key,
@@ -708,6 +875,23 @@ class AgentRuntime:
                 "knowledge",
             )
             retained.knowledge = knowledge
+
+        skill_tool = self.registry.tools.get(SKILL_TOOL_NAME)
+        if skill_tool is not None and self.registry.permitted(scope, skill_tool)[0]:
+            skills = [(item.name, item.description) for item in discover_skills(self.store)]
+            if skills and skills != retained.skills_catalog:
+                session.add_background(
+                    json.dumps(
+                        {
+                            "可用技能目录": [{"名称": name, "说明": desc} for name, desc in skills],
+                            "说明": "遇到相关领域需求时，先调用 skill__load 读取完整规范再执行。",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "background",
+                )
+                retained.skills_catalog = skills
+
         current_ids = {message.message_id for message in batch}
         waiting_ids = {message.message_id for message in self.pending.get(key, [])}
         known_ids = current_ids | waiting_ids | retained.message_ids.keys()
@@ -813,6 +997,7 @@ class AgentRuntime:
         model, retained.model = retained.model, None
         retained.session_id = uuid.uuid4().hex
         retained.knowledge = []
+        retained.skills_catalog = []
         retained.discovered_tools.clear()
         retained.generated_media.clear()
         # 清空已读历史，下次唤醒像新会话一样补入近期 QQ 历史。

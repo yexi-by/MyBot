@@ -1,10 +1,12 @@
 """NapCat 能力目录与类型化内置工具。发送只有一个入口，读写来源由可信上下文绑定。"""
 
 import base64
+import mimetypes
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, JsonValue
 
@@ -716,6 +718,9 @@ def action_tool(spec: ActionSpec) -> ToolDefinition:
             return await complete_member(context, result, request)
         return result
 
+    is_readonly = spec.action.startswith(
+        ("get_", "_get_", "can_", "nc_get_", "fetch_", "check_", "translate_")
+    )
     return ToolDefinition(
         spec.name,
         spec.summary,
@@ -725,6 +730,7 @@ def action_tool(spec: ActionSpec) -> ToolDefinition:
         cross_scope=spec.scope in ("both", "group", "private"),
         title=ACTION_TITLES.get(spec.action, spec.summary),
         deferred=spec.deferred,
+        concurrency_safe=is_readonly,
     )
 
 
@@ -879,7 +885,14 @@ async def media_segments(context: ToolContext, request: a.ReadMedia) -> MediaSel
 
 class SaveMedia(a.ReadMedia):
     destination: str = Field(
-        min_length=1, description="共享沙箱中的目标相对文件路径；只保存一个媒体"
+        default="",
+        description=(
+            "共享沙箱中的目标相对路径；留空（推荐用于一次性查看/处理）时自动存入 .scratch/ 临时目录并返回生成路径"
+        ),
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="显式指定 destination 且同名文件已存在时，是否覆盖已有文件",
     )
 
 
@@ -1198,6 +1211,21 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
             }
         )
 
+    def _media_ext(mime_type: str, content: bytes) -> str:
+        if content.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "png"
+        if content.startswith(b"\xff\xd8\xff"):
+            return "jpg"
+        if content.startswith((b"GIF87a", b"GIF89a")):
+            return "gif"
+        if len(content) >= 12 and content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+            return "webp"
+        guessed = mimetypes.guess_extension(mime_type.split(";")[0].strip()) or ""
+        cleaned = guessed.lstrip(".")
+        if cleaned == "jpe":
+            return "jpg"
+        return cleaned if cleaned and cleaned.isalnum() else "bin"
+
     async def save_media(context: ToolContext, request: SaveMedia) -> ToolResult:
         if context.write_workspace is None:
             raise ValueError("沙箱文件写入服务不可用")
@@ -1208,10 +1236,17 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         denied = context.recheck()
         if denied is not None:
             return denied
-        # runner 的二进制写入以 O_EXCL 原子创建，不做先读取再覆盖的竞态检查。
-        await context.write_workspace(request.destination, asset.content)
+        dest = request.destination.strip()
+        if not dest:
+            ext = _media_ext(asset.mime_type, asset.content)
+            stamp = datetime.now(BEIJING).strftime("%Y%m%d_%H%M%S")
+            dest = f".scratch/media_{stamp}_{uuid4().hex[:8]}.{ext}"
+            overwrite = False
+        else:
+            overwrite = request.overwrite
+        await context.save_workspace_bytes(dest, asset.content, overwrite=overwrite)
         return ToolResult.success(
-            {"path": request.destination, "size": len(asset.content), "mime_type": asset.mime_type}
+            {"path": dest, "size": len(asset.content), "mime_type": asset.mime_type}
         )
 
     async def send(context: ToolContext, request: a.SendMessage) -> ToolResult:
@@ -1283,13 +1318,17 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
                 category,
                 binding,
                 cross_scope=True,
+                concurrency_safe=name != "qq__send_message",
                 title=title,
             )
         )
     tools.append(
         ToolDefinition(
             "qq__save_media_to_workspace",
-            "将消息附件、QQ 头像、群头像或官方图床图片保存到沙箱工作区供代码处理（与 read_media 共用四选一来源，每次保存单个资源）。",
+            (
+                "将消息附件、QQ 头像、群头像或官方图床图片保存到沙箱工作区供代码处理"
+                "（与 read_media 共用四选一来源，每次保存单个资源；省略 destination 时自动存入 .scratch/ 临时目录）。"
+            ),
             "media",
             model_binding(SaveMedia, save_media),
             cross_scope=True,

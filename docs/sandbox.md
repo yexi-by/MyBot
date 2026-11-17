@@ -14,7 +14,7 @@
 docker build -f Dockerfile.sandbox -t qq-agent-harness-sandbox:1.0.0 .
 ```
 
-Python 3.14.8、uv/uvx 0.13.4、Node.js 24.22.1/npm 来自固定版本镜像，预装 Git、ripgrep、fd、jq、编译与全格式压缩工具、FFmpeg、ImageMagick、Poppler/QPDF、Pandoc、Graphviz、Tesseract 中英 OCR、SQLite、Noto CJK/Emoji 字体，以及常用科学计算、绘图、文档与网络 Python 库。运行时根目录只读，新增依赖和缓存应写到 `/workspace`，例如 `uv venv .venv` 后用该环境安装包。`HOME`、临时目录、uv/npm/Matplotlib 缓存均位于同一配额空间。
+Python 3.14.8、uv/uvx 0.13.4、Node.js 24.22.1/npm 来自固定版本镜像，预装 Git、ripgrep、fd、jq、编译与全格式压缩工具、FFmpeg、ImageMagick、libcairo2（含 `cairosvg`、`resvg-py`）、Poppler/QPDF、Pandoc、Graphviz、Tesseract 中英 OCR、SQLite、Noto CJK/Emoji 字体，以及常用科学计算、绘图、文档与网络 Python 库。运行时根目录只读，每次执行独立挂载专属 `/tmp`（命令结束自动回收），跨命令临时素材使用 `.scratch/`，新增依赖和缓存写到 `/workspace`（如 `uv venv .venv`）。`HOME`、临时目录、uv/npm/Matplotlib 缓存均位于同一配额空间。
 
 ## 初始化工作区与公网出口
 
@@ -44,15 +44,15 @@ runner 在启动时读取资源配置和连接令牌，随后保持这份生效�
 
 ## 生命周期与清理
 
-每个命令创建无特权、只读根文件系统的容器；同一时间只执行一个命令，其他命令在内存中等待，按 owner 可取消尚未开始的执行；文件列表与读写操作不等待活动容器执行即可并发处理（仅清理期间互斥）。`max_pending_operations` 默认允许 32 项等待操作，超过容量返回 429 并说明本次未执行。默认 2 CPU、4 GiB 内存、256 进程、1800 秒超时（且每次执行支持传入自定义 `timeout`）和 1 MiB 输出预览。超出预览时完整输出保存到工作区 `.outputs/`，回执带 `output_path` 供分段读取；日志收尾受本次执行剩余时间约束并可取消，未完整读取会标明 `output_complete=false`，不再固定 5 秒丢弃尾部。结束、超时、取消后强制回收整个容器，清除子进程及短暂容器日志；共享文件不删除。runner 启动时仅回收带专用执行标签的遗留容器。
+每个命令创建无特权、只读根文件系统的容器，并为单次执行独立挂载 `.tmp/exec-<id>` 到容器 `/tmp`（结束后立即销毁）；默认允许 `concurrent_executions = 2` 个容器并行执行，超出并发度时在内存中排队，按 owner 可精确定向取消排队或执行中的容器而不误伤其他会话；文件列表、搜索、精确编辑、删除与读写操作不等待活动容器执行即可并发处理（仅清理期间互斥）。`max_pending_operations` 默认允许 32 项等待操作，超过容量返回 429 并说明本次未执行。默认 2 CPU、4 GiB 内存、256 进程、1800 秒超时（且每次执行支持传入自定义 `timeout`）和 1 MiB 输出预览。超出预览时采用 UTF-8 安全的头尾双端保留策略返回预览，完整输出以 `1000:1000` 属主保存到工作区 `.outputs/`（未超限或超时无输出时不留 0B 空文件，且自动滚动清理最老溢出日志）；日志收尾受本次执行剩余时间约束并可取消，未完整读取会标明 `output_complete=false`。结束、超时、取消后强制回收整个容器，清除子进程、独立 `/tmp` 及短暂容器日志；共享文件不删除。runner 启动时仅回收带专用执行标签的遗留容器与残留 `.tmp/exec-*`。
 
 普通目录写权限不足以防止 Btrfs 子卷绕过父子卷的配额：Linux v6.12 的子卷创建路径只检查目录写入/执行权限，拥有源子卷也可创建快照。因此执行镜像包含只读 bootstrap，runner 固定以 `/usr/local/bin/python -I -S /usr/local/libexec/qah-sandbox-guard.py` 启动；共享 HOME 的用户 site、`.pth` 和 `PYTHONPATH` 不会在防护安装前运行。[内核创建路径](https://github.com/torvalds/linux/blob/v6.12/fs/btrfs/ioctl.c)
 
 bootstrap 设置 `no_new_privs` 后叠加 seccomp BPF，保留 Docker 默认过滤器。它按 ioctl 命令低 16 位拒绝 `0x9401/0x940e/0x9417/0x9418`（子卷/快照创建）和 `0x9428–0x942b`（配额控制），返回 `EPERM`；正常 `FICLONE` 文件复制不受这层过滤影响。过滤随 fork/exec 继承且不能撤销。只有原生小端 64 位 Linux x86_64/aarch64 支持启动；x32、32 位 compat 或其他 ABI 被拒绝，无法安装过滤器时退出 126，绝不继续执行命令。跨架构模拟不属于支持的部署方式。[Btrfs ioctl 定义](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/btrfs.h)、[叠加 seccomp 语义](https://docs.kernel.org/userspace-api/seccomp_filter.html)
 
-WebUI 可以分页查看文件与占用，清理缓存、选定文件或全部工作区；配额或网络检查失败时仍保留文件与清理入口。正在执行时清理返回 409；停止后才能清理。清理不跟随符号链接，不触及配置和知识库。工作区满时返回错误，不自动删除其他成果。
+WebUI 可以按修改时间/大小/名称查看文件与占用（根目录默认折叠系统隐藏目录），分级清理临时与日志（`temp`：清理 `.tmp`、`.scratch`、`.outputs`）、依赖缓存（`cache`：清理 `.cache`）、选定文件或全部工作区；配额或网络检查失败时仍保留文件与清理入口。正在执行时清理返回 409；停止后才能清理。清理不跟随符号链接，不触及配置和知识库。工作区满时返回错误，不自动删除其他成果。
 
-API：`GET /status`、`GET /files?path=&offset=&limit=`、`GET /file?path=`、`GET /file/text?path=&offset=&limit=`、`PUT /file`（支持 append）、`POST /exec`、`POST /cancel`、`POST /cleanup`。只有可信应用调用 runner API，WebUI 通过应用代理访问。代码工具本身没有清空工作区的 API。
+API：`GET /status`、`GET /files?path=&offset=&limit=`、`GET /files/search`、`GET /file?path=`、`GET /file/text?path=&offset=&limit=`、`PUT /file`（支持 append）、`POST /file/edit`、`POST /file/delete`、`POST /file/content`（支持 overwrite）、`POST /exec`、`POST /cancel`、`POST /cleanup`。只有可信应用调用 runner API，WebUI 通过应用代理访问。代码工具本身没有清空整个工作区的 API。
 
 文本不再因超过 1 MiB 整份拒读；`/file/text` 返回 `total_bytes` 和 `next_offset`，UTF-8 字符不会被切断。`sandbox.transfer_max_bytes` 统一二进制传输和文本写入的单次预算，默认 50 MB，大文本可以分段追加。追加也按修改已有文件授权，不能绕过群策略对 `overwrite` 的限制。
 

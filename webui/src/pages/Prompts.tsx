@@ -1,4 +1,4 @@
-import { BookOpen, FilePlus, FileText, UserRound } from "lucide-react";
+import { BookOpen, FilePlus, FileText, Sparkles, UserRound } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { FileEditor } from "../components/FileEditor";
@@ -14,13 +14,14 @@ import { conversationEntries } from "../schema/fields";
 
 const enc = encodeURIComponent;
 const isText = (path: string) => /\.(md|txt)$/i.test(path);
+const isSkillFile = (path: string) => /^skills\/([^/]+\.md|[^/]+\/SKILL\.md)$/i.test(path);
 
 async function createFile(existing: string[]) {
   const path = await prompt({
-    title: "新建文本文件",
-    message: "文件保存在配置目录中，可在任意会话中选作人格或知识库。",
-    label: "文件名",
-    placeholder: "例如 knowledge/faq.md",
+    title: "新建提示词或技能文件",
+    message: "保存在配置目录中；放在 skills/ 下的 .md 文件可作为按需加载的技能规范（Skill）。",
+    label: "相对路径",
+    placeholder: "例如 knowledge/faq.md 或 skills/gif-check.md",
     initial: ".md",
     confirmLabel: "创建",
     validate: (value) => {
@@ -40,8 +41,12 @@ async function createFile(existing: string[]) {
     },
   });
   if (!path) return;
+  const stem = (path.split("/").at(-1) ?? "skill").replace(/\.(md|txt)$/i, "");
+  const initialContent = isSkillFile(path)
+    ? `---\nname: ${stem.toLowerCase() === "skill" ? (path.split("/").at(-2) ?? "my-skill") : stem}\ndescription: 简明描述该技能适用场景（注入目录索引）\n---\n\n在这里编写详细 SOP 与操作规范（Agent 按需通过 skill__load 读取）。\n`
+    : "";
   try {
-    await put("/api/files", { path, content: "", sha: null });
+    await put("/api/files", { path, content: initialContent, sha: null });
   } catch (error) {
     toast(
       error instanceof ApiError && error.status === 409
@@ -124,11 +129,17 @@ export function PromptsPage({ path }: { path: string }) {
 
   const text = query.trim().toLowerCase();
   const visibleFiles = allFiles.filter((file) => !text || file.toLowerCase().includes(text));
-  const inUseFiles = visibleFiles.filter((file) => (usageMap.get(file)?.length ?? 0) > 0);
-  const unusedFiles = visibleFiles.filter((file) => (usageMap.get(file)?.length ?? 0) === 0);
+  const skillFiles = visibleFiles.filter((file) => isSkillFile(file));
+  const inUseFiles = visibleFiles.filter(
+    (file) => !isSkillFile(file) && (usageMap.get(file)?.length ?? 0) > 0,
+  );
+  const unusedFiles = visibleFiles.filter(
+    (file) => !isSkillFile(file) && (usageMap.get(file)?.length ?? 0) === 0,
+  );
   const defaultFile =
     allFiles.find((file) => (usageMap.get(file)?.length ?? 0) > 0) ?? allFiles[0] ?? "";
   const selected = path || (wide ? defaultFile : "");
+  const selectedIsSkill = selected ? isSkillFile(selected) : false;
   const uses = selected ? (usageMap.get(selected) ?? promptUsage(state.draft, selected, groups)) : [];
   const usedAsPersona = uses.some((use) => use.parts.includes("人格"));
   const usedAsKnowledge = uses.some((use) => use.parts.includes("知识库"));
@@ -170,6 +181,20 @@ export function PromptsPage({ path }: { path: string }) {
             ) : (
               <li className="md-empty muted">暂无会话绑定提示词文件</li>
             )}
+            <li className="md-section">技能规范（Skills） · {skillFiles.length}</li>
+            {skillFiles.length ? (
+              skillFiles.map((file) => (
+                <FileItem
+                  key={file}
+                  path={file}
+                  selected={selected === file}
+                  icon={Sparkles}
+                  sub="按需加载技能 · 启用「技能规范」分类后生效"
+                />
+              ))
+            ) : (
+              <li className="md-empty muted">暂无技能文件（可新建 skills/xxx.md）</li>
+            )}
             <li className="md-section">未绑定文件 · {unusedFiles.length}</li>
             {unusedFiles.map((file) => (
               <FileItem
@@ -195,14 +220,24 @@ export function PromptsPage({ path }: { path: string }) {
               avatar={
                 <QQAvatar
                   kind="icon"
-                  icon={usedAsPersona ? UserRound : usedAsKnowledge ? BookOpen : FileText}
+                  icon={
+                    selectedIsSkill
+                      ? Sparkles
+                      : usedAsPersona
+                        ? UserRound
+                        : usedAsKnowledge
+                          ? BookOpen
+                          : FileText
+                  }
                   name={selected}
                   size="md"
                 />
               }
               title={selected}
               subtitle={
-                uses.length ? (
+                selectedIsSkill ? (
+                  "按需加载的技能规范（开放会话「技能规范」能力后，仅向上下文注入名称与简述，详细正文由 skill__load 按需读取）"
+                ) : uses.length ? (
                   <span className="row wrap">
                     <span className="muted">使用会话：</span>
                     {uses.map((use) => (
@@ -222,9 +257,10 @@ export function PromptsPage({ path }: { path: string }) {
               }
               badges={
                 <>
+                  {selectedIsSkill && <Badge tone="accent">技能规范</Badge>}
                   {usedAsPersona && <Badge tone="accent">人格</Badge>}
                   {usedAsKnowledge && <Badge tone="accent">知识库</Badge>}
-                  {!usedAsPersona && !usedAsKnowledge && <Badge>未绑定</Badge>}
+                  {!selectedIsSkill && !usedAsPersona && !usedAsKnowledge && <Badge>未绑定</Badge>}
                 </>
               }
               actions={
@@ -241,9 +277,11 @@ export function PromptsPage({ path }: { path: string }) {
               showPath={false}
               kind={selected.toLowerCase().endsWith(".md") ? "markdown" : "text"}
               note={
-                !uses.length
-                  ? "这个文件目前未被任何会话绑定。"
-                  : "保存后从下一轮对话开始生效。" + (usedAsPersona ? "被选作人格的文件不能为空。" : "")
+                selectedIsSkill
+                  ? "保存后从下一轮对话开始生效。可用顶部 --- Frontmatter 声明 name 与 description。"
+                  : !uses.length
+                    ? "这个文件目前未被任何会话绑定。"
+                    : "保存后从下一轮对话开始生效。" + (usedAsPersona ? "被选作人格的文件不能为空。" : "")
               }
             />
           </div>

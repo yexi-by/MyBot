@@ -3,6 +3,7 @@
 import asyncio
 import copy
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as SchemaError
@@ -147,11 +148,19 @@ class ToolRegistry:
                 continue
             if tool.deferred:
                 has_deferred = True
-                if name not in context.discovered_tools:
-                    continue
+                continue
             result.append(self.definition(tool, context.scope))
         if has_deferred and _SEARCH_TOOL_NAME not in self.tools:
             result.append(copy.deepcopy(_SEARCH_TOOL_DEFINITION))
+        # 按需解锁的工具保持首次解锁顺序追加在常驻列表末尾，避免打断提示缓存前缀。
+        seen_discovered: set[str] = set()
+        for name in context.discovered_tools:
+            if name in seen_discovered:
+                continue
+            seen_discovered.add(name)
+            tool = self.tools.get(name)
+            if tool is not None and tool.deferred and self.permitted(context.scope, tool)[0]:
+                result.append(self.definition(tool, context.scope))
         return result
 
     def _search_tools(self, context: ToolContext, arguments: JsonObject) -> ToolResult:
@@ -431,26 +440,28 @@ class ToolRegistry:
                 return ToolResult.failure("子查询参数无效", "InvalidArguments")
             return self.authorize(context.scope, child, child_args, target)
 
-        context.target_scope = target
-        context.recheck = recheck
-        previous_check_tool = context.check_tool
-        context.check_tool = check_tool
+        call_context = replace(
+            context,
+            target_scope=target,
+            recheck=recheck,
+            check_tool=check_tool,
+        )
         try:
-            result = await prepared.invoke(context)
+            result = await prepared.invoke(call_context)
+            context.send_attempts = call_context.send_attempts
         except asyncio.CancelledError:
+            context.send_attempts = call_context.send_attempts
             raise
         except ValueError as exc:
+            context.send_attempts = call_context.send_attempts
             result = ToolResult.failure(str(exc), "InvalidArguments")
         except TimeoutError, ConnectionError, OSError:
+            context.send_attempts = call_context.send_attempts
             result = ToolResult(
                 status="error",
                 message="工具连接中断或请求超时",
                 error_type="TransportError",
             )
-        finally:
-            context.target_scope = None
-            context.recheck = lambda: None
-            context.check_tool = previous_check_tool
         return result
 
     def catalog(self, scope: ConversationScope) -> JsonObject:

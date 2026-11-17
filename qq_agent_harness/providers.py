@@ -1,10 +1,11 @@
-"""Chat Completions 和 Responses 的协议适配，无供应商品牌分支。"""
+"""Chat Completions 和 Responses 的协议适配（支持 SSE 流式接收、空闲超时与前置上下文减压），无供应商品牌分支。"""
 
 import asyncio
+import codecs
 import json
 import math
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -17,9 +18,10 @@ from .context import (
     ContextLimitError,
     ContextWindowExceeded,
     ProviderError,
+    UsageDetails,
     estimate_tokens,
     is_context_overflow,
-    usage_totals,
+    usage_details,
     visible_data,
 )
 from .contracts import JSON_OBJECT, JsonObject, JsonValue, ToolResult
@@ -47,8 +49,15 @@ SUMMARY_SYSTEM = """将输入的 QQ 会话记录整理为简明的上下文摘�
 - 输出要求：不推测未确认的结果，不输出推理过程。直接输出摘要正文，不要调用工具，不要大段摘抄原文或 JSON。"""
 SUMMARY_PREFIX = "历史背景摘要：\n"
 
+PRUNE_THRESHOLD_CHARS = 8192
+PRUNE_HEAD_CHARS = 4096
+PRUNE_TAIL_CHARS = 1024
+
 type Send = Callable[[JsonObject], Awaitable[ModelResponse]]
 RequestKind = Literal["model", "compaction", "idle_compaction"]
+
+# 记录明确拒绝 stream_options 的接口根地址，避免后续请求每次多一次无谓探测。
+_NO_STREAM_OPTIONS_ENDPOINTS: set[str] = set()
 
 
 class ModelRequestError(ProviderError):
@@ -120,6 +129,17 @@ def permanent_request_error(data: JsonObject) -> bool:
     return any(isinstance(error.get(key), str) and error[key] in codes for key in ("code", "type"))
 
 
+def _rejected_stream_options(data: JsonObject) -> bool:
+    error = data.get("error")
+    if not isinstance(error, dict):
+        return False
+    param = error.get("param")
+    if isinstance(param, str) and "stream_options" in param:
+        return True
+    msg = error.get("message")
+    return isinstance(msg, str) and "stream_options" in msg[:512]
+
+
 def output_text(content: JsonValue) -> str:
     """只提取可见正文和明确拒绝；推理项目不能代替实际输出。"""
     if isinstance(content, str):
@@ -167,6 +187,8 @@ class ModelResponse:
     output: list[JsonObject]
     input_tokens: int | None
     output_tokens: int | None
+    cached_tokens: int | None = None
+    reasoning_tokens: int | None = None
     summary: str = ""
 
 
@@ -219,6 +241,281 @@ def parse_call(call_id: JsonValue, name: JsonValue, arguments: JsonValue) -> Too
     return ToolCall(call_id, name, parsed)
 
 
+async def _iter_chunks_with_idle(
+    response: httpx.Response, idle_timeout: float
+) -> AsyncIterator[bytes]:
+    iterator = response.aiter_bytes()
+    while True:
+        try:
+            async with asyncio.timeout(idle_timeout):
+                chunk = await anext(iterator)
+        except StopAsyncIteration:
+            return
+        if chunk:
+            yield chunk
+
+
+async def _iter_sse_data(response: httpx.Response, idle_timeout: float) -> AsyncIterator[str]:
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    buffer = ""
+    data_lines: list[str] = []
+
+    def drain_lines(complete: bool) -> list[str]:
+        nonlocal buffer
+        events_out: list[str] = []
+        while True:
+            newline = buffer.find("\n")
+            if newline < 0:
+                break
+            line = buffer[:newline].rstrip("\r")
+            buffer = buffer[newline + 1 :]
+            if not line:
+                if data_lines:
+                    events_out.append("\n".join(data_lines))
+                    data_lines.clear()
+            elif line.startswith("data:"):
+                payload = line[5:]
+                if payload.startswith(" "):
+                    payload = payload[1:]
+                data_lines.append(payload)
+        if complete:
+            tail = buffer.rstrip("\r")
+            buffer = ""
+            if tail.startswith("data:"):
+                payload = tail[5:]
+                if payload.startswith(" "):
+                    payload = payload[1:]
+                data_lines.append(payload)
+            if data_lines:
+                events_out.append("\n".join(data_lines))
+                data_lines.clear()
+        return events_out
+
+    async for chunk in _iter_chunks_with_idle(response, idle_timeout):
+        buffer += decoder.decode(chunk, final=False)
+        for item in drain_lines(False):
+            yield item
+    buffer += decoder.decode(b"", final=True)
+    for item in drain_lines(True):
+        yield item
+
+
+async def _consume_chat_sse(response: httpx.Response, idle_timeout: float) -> JsonObject:
+    content_parts: list[str] = []
+    refusal_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    reasoning_details: list[JsonValue] = []
+    tool_calls: dict[int, dict[str, str]] = {}
+    finish_reason: str | None = None
+    usage: JsonObject | None = None
+    saw_done = False
+
+    async for raw in _iter_sse_data(response, idle_timeout):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped == "[DONE]":
+            saw_done = True
+            break
+        event = JSON_OBJECT.validate_json(stripped)
+        if event.get("error"):
+            return event
+        if isinstance(u := event.get("usage"), dict):
+            usage = u
+        choices = event.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            continue
+        if isinstance(fr := choice.get("finish_reason"), str) and fr:
+            finish_reason = fr
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            if isinstance(choice.get("message"), dict):
+                result: JsonObject = {"choices": [choice]}
+                if usage is not None:
+                    result["usage"] = usage
+                return result
+            continue
+        if isinstance(text := delta.get("content"), str):
+            content_parts.append(text)
+        if isinstance(ref := delta.get("refusal"), str):
+            refusal_parts.append(ref)
+        if isinstance(rc := delta.get("reasoning_content"), str):
+            reasoning_parts.append(rc)
+        if isinstance(rd := delta.get("reasoning_details"), list):
+            reasoning_details.extend(rd)
+        tcs = delta.get("tool_calls")
+        if isinstance(tcs, list):
+            for entry in tcs:
+                if not isinstance(entry, dict):
+                    continue
+                raw_idx = entry.get("index", 0)
+                idx = raw_idx if isinstance(raw_idx, int) and not isinstance(raw_idx, bool) else 0
+                slot = tool_calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                if isinstance(cid := entry.get("id"), str) and cid:
+                    slot["id"] = slot["id"] + cid if not slot["id"] else slot["id"]
+                fn = entry.get("function")
+                if isinstance(fn, dict):
+                    if isinstance(fname := fn.get("name"), str) and fname:
+                        slot["name"] += fname
+                    if isinstance(fargs := fn.get("arguments"), str) and fargs:
+                        slot["arguments"] += fargs
+
+    if not saw_done and finish_reason is None:
+        raise ModelRequestError("模型流式响应提前中断", reason="incomplete_stream", retryable=True)
+
+    message_obj: JsonObject = {
+        "role": "assistant",
+        "content": "".join(content_parts) if (content_parts or not tool_calls) else None,
+    }
+    if refusal_parts:
+        message_obj["refusal"] = "".join(refusal_parts)
+    if reasoning_parts:
+        message_obj["reasoning_content"] = "".join(reasoning_parts)
+    if reasoning_details:
+        message_obj["reasoning_details"] = reasoning_details
+    if tool_calls:
+        assembled_calls: list[JsonValue] = []
+        for _, slot in sorted(tool_calls.items()):
+            assembled_calls.append(
+                {
+                    "id": slot["id"],
+                    "type": "function",
+                    "function": {"name": slot["name"], "arguments": slot["arguments"]},
+                }
+            )
+        message_obj["tool_calls"] = assembled_calls
+
+    effective_finish = finish_reason or ("tool_calls" if tool_calls else "stop")
+    payload: JsonObject = {"choices": [{"finish_reason": effective_finish, "message": message_obj}]}
+    if usage is not None:
+        payload["usage"] = usage
+    return payload
+
+
+async def _consume_responses_sse(response: httpx.Response, idle_timeout: float) -> JsonObject:
+    final_response: JsonObject | None = None
+    items_by_index: dict[int, JsonObject] = {}
+    text_deltas: dict[int, list[str]] = {}
+    arg_deltas: dict[int, list[str]] = {}
+    usage: JsonObject | None = None
+    status_seen: str | None = None
+    saw_done = False
+
+    async for raw in _iter_sse_data(response, idle_timeout):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped == "[DONE]":
+            saw_done = True
+            break
+        event = JSON_OBJECT.validate_json(stripped)
+        etype = event.get("type")
+        if etype == "error" or (etype is None and event.get("error")):
+            err = event.get("error")
+            return {"status": "failed", "error": err if isinstance(err, dict) else event}
+        if etype in ("response.completed", "response.failed", "response.incomplete"):
+            resp = event.get("response")
+            if isinstance(resp, dict):
+                final_response = resp
+                status_seen = str(resp.get("status") or "")
+        elif etype in ("response.output_item.added", "response.output_item.done"):
+            raw_idx = event.get("output_index", len(items_by_index))
+            idx = raw_idx if isinstance(raw_idx, int) and not isinstance(raw_idx, bool) else 0
+            if isinstance(item := event.get("item"), dict):
+                items_by_index[idx] = item
+        elif etype == "response.output_text.delta":
+            raw_idx = event.get("output_index", 0)
+            idx = raw_idx if isinstance(raw_idx, int) and not isinstance(raw_idx, bool) else 0
+            if isinstance(delta := event.get("delta"), str):
+                text_deltas.setdefault(idx, []).append(delta)
+        elif etype == "response.function_call_arguments.delta":
+            raw_idx = event.get("output_index", 0)
+            idx = raw_idx if isinstance(raw_idx, int) and not isinstance(raw_idx, bool) else 0
+            if isinstance(delta := event.get("delta"), str):
+                arg_deltas.setdefault(idx, []).append(delta)
+        elif etype is None and isinstance(event.get("output"), list):
+            return event
+
+    if final_response is not None:
+        return final_response
+    if not saw_done and status_seen is None:
+        raise ModelRequestError("模型流式响应提前中断", reason="incomplete_stream", retryable=True)
+
+    output_list: list[JsonValue] = []
+    all_indices = sorted(set(items_by_index) | set(text_deltas) | set(arg_deltas))
+    for idx in all_indices:
+        base = dict(items_by_index.get(idx, {}))
+        if not base and idx in text_deltas:
+            base = {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "".join(text_deltas[idx])}],
+            }
+        elif base.get("type") == "message" and idx in text_deltas:
+            parts = base.get("content")
+            if not isinstance(parts, list) or not parts:
+                base["content"] = [{"type": "output_text", "text": "".join(text_deltas[idx])}]
+        elif (
+            base.get("type") == "function_call" and idx in arg_deltas and not base.get("arguments")
+        ):
+            base["arguments"] = "".join(arg_deltas[idx])
+        if base:
+            output_list.append(base)
+
+    assembled: JsonObject = {"status": "completed", "output": output_list}
+    if usage is not None:
+        assembled["usage"] = usage
+    return assembled
+
+
+def _prune_tool_serialized(serialized: str) -> str | None:
+    """将超长历史工具结果的中间段裁剪为合法 ToolResult JSON，保留头部与尾部关键信息。"""
+    if len(serialized) <= PRUNE_THRESHOLD_CHARS:
+        return None
+    try:
+        parsed = JSON_OBJECT.validate_json(serialized)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict) and parsed.get("truncated") is True and "data" not in parsed:
+        return None
+    source_text = serialized
+    status = "ok"
+    error_type: JsonValue = None
+    message = ""
+    if isinstance(parsed, dict):
+        if isinstance(s := parsed.get("status"), str):
+            status = s
+        error_type = parsed.get("error_type")
+        if isinstance(m := parsed.get("message"), str):
+            message = m
+        data_val = parsed.get("data")
+        if data_val is not None:
+            source_text = (
+                data_val if isinstance(data_val, str) else json.dumps(data_val, ensure_ascii=False)
+            )
+    if len(source_text) <= PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS + 128:
+        return None
+    omitted = len(source_text) - PRUNE_HEAD_CHARS - PRUNE_TAIL_CHARS
+    preview = (
+        source_text[:PRUNE_HEAD_CHARS]
+        + f"\n\n[... 历史工具结果已省略中间 {omitted} 字符 ...]\n\n"
+        + source_text[-PRUNE_TAIL_CHARS:]
+    )
+    replacement: JsonObject = {
+        "status": status,
+        "data": None,
+        "error_type": error_type,
+        "message": message or "历史大体积工具结果已保留首尾并裁剪中间部分",
+        "truncated": True,
+        "preview": preview,
+    }
+    encoded = json.dumps(replacement, ensure_ascii=False)
+    return encoded if len(encoded) < len(serialized) else None
+
+
 class ModelSession:
     def __init__(
         self,
@@ -254,9 +551,13 @@ class ModelSession:
         self._pending_group: ResponseGroup | None = None
         self._media_group: ResponseGroup | None = None
         self._usage_anchor: tuple[int, int] | None = None
+        self._last_usage = UsageDetails()
+        self._cached_tokens_total = 0
+        self._prompt_tokens_total = 0
         # 最近一次请求中工具定义的估算量；闲置时没有本轮工具定义，用它补足上下文用量。
         self._tools_tokens = 0
         self._compactions = 0
+        self._prunes = 0
         self._current_input: JsonObject | None = self.items[1]
         # 轮次从 1 开始；version 随条目增删递增，控制台据此判断是否需要重新取全部条目。
         self.turn = 1
@@ -354,6 +655,12 @@ class ModelSession:
             "retry_count": 0,
         }
 
+    def append_mid_turn_wake(self, conversation: str) -> None:
+        """在轮次步骤边界并入新到达的唤醒消息，使正在运行的智能体实时感知用户补充或叫停。"""
+        item: JsonObject = {"role": "user", "content": conversation}
+        self.items.append(item)
+        self._note(item, "wake")
+
     def end_turn(self, outcome: str, interrupted_call: str | None = None) -> None:
         """中断也必须闭合协议；未开始的调用不执行，进行中的调用不伪称失败。"""
         for group in self._groups:
@@ -394,7 +701,7 @@ class ModelSession:
         self._note(item, kind)
 
     def add_notice(self, text: str) -> None:
-        """运行器补充的本轮说明（如媒体读取失败）；与当前输入一样，本轮内不参与压缩。"""
+        """运行器补充的本轮说明（如媒体读取失败或循环提醒）；与当前输入一样，本轮内不参与压缩。"""
         item: JsonObject = {"role": "user", "content": text}
         self.items.append(item)
         self._note(item, "notice")
@@ -490,6 +797,8 @@ class ModelSession:
         body: JsonObject = {"model": config.model}
         if config.store_supported:
             body["store"] = False
+        if config.stream:
+            body["stream"] = True
         if config.protocol == "chat_completions":
             body["messages"] = list(items)
             if tools is not None:
@@ -528,6 +837,13 @@ class ModelSession:
             return estimate
         actual, anchor_estimate = self._usage_anchor
         return actual + max(0, estimate - anchor_estimate)
+
+    def _scale_anchor_after_shrink(self, before_estimate: int, after_estimate: int) -> None:
+        if self._usage_anchor is None or before_estimate <= 0 or after_estimate >= before_estimate:
+            return
+        actual, _ = self._usage_anchor
+        scaled_actual = max(1, actual * after_estimate // before_estimate)
+        self._usage_anchor = (scaled_actual, after_estimate)
 
     def _pressure(self, body: JsonObject) -> int:
         return self._calibrated(estimate_tokens(body))
@@ -569,17 +885,26 @@ class ModelSession:
         return max(1, (current - base) * before // (current + self._tools_tokens))
 
     def _event(self, phase: str, tokens: int, **extra: JsonValue) -> None:
-        self.context_state = {
+        state: JsonObject = {
             "input_tokens": tokens,
             "max_tokens": self.settings.max_context_tokens,
             "trigger_tokens": self.settings.max_context_tokens * 80 // 100,
             "compactions": self._compactions,
+            "prunes": self._prunes,
             "usage_source": "api_calibrated" if self._usage_anchor else "estimate",
             "request_count": self.request_count,
             "model_request_count": self.model_request_count,
             "compaction_request_count": self.compaction_request_count,
             "retry_count": self.retry_count,
         }
+        if self._last_usage.cached_tokens is not None:
+            state["cached_tokens"] = self._last_usage.cached_tokens
+        if self._last_usage.reasoning_tokens is not None:
+            state["reasoning_tokens"] = self._last_usage.reasoning_tokens
+        if self._prompt_tokens_total > 0:
+            state["cached_tokens_total"] = self._cached_tokens_total
+            state["prompt_tokens_total"] = self._prompt_tokens_total
+        self.context_state = state
         if self.on_context_event is not None:
             self.on_context_event({"phase": phase, **self.context_state, **extra})
 
@@ -644,7 +969,15 @@ class ModelSession:
                         reason="empty_response",
                         retryable=True,
                     )
-                response = ModelResponse(reply, output, *usage_totals(data, config.protocol))
+                details = usage_details(data, config.protocol)
+                response = ModelResponse(
+                    reply,
+                    output,
+                    details.input_tokens,
+                    details.output_tokens,
+                    details.cached_tokens,
+                    details.reasoning_tokens,
+                )
                 if kind != "model":
                     response.summary = self._summary_text(config, data)
             except ModelRequestError as error:
@@ -669,38 +1002,85 @@ class ModelSession:
     async def _post(
         client: httpx.AsyncClient, config: ModelEndpoint, body: JsonObject
     ) -> JsonObject:
+        base_url = config.base_url.rstrip("/")
         endpoint = "/chat/completions" if config.protocol == "chat_completions" else "/responses"
+        url = base_url + endpoint
+        idle_limit = min(config.timeout, config.idle_timeout)
+        use_stream_opts = (
+            config.protocol == "chat_completions"
+            and bool(body.get("stream"))
+            and "stream_options" not in body
+            and base_url not in _NO_STREAM_OPTIONS_ENDPOINTS
+        )
+        wire_body = {**body, "stream_options": {"include_usage": True}} if use_stream_opts else body
         try:
-            # HTTPX 的分阶段超时不能限制缓慢持续传输；每次完整请求也受同一时限约束。
             async with asyncio.timeout(config.timeout):
-                response = await client.post(
-                    config.base_url.rstrip("/") + endpoint,
-                    headers=config.request_headers(),
-                    json=body,
-                    timeout=config.timeout,
-                )
-            if response.is_error:
-                error: JsonObject = {}
-                if len(response.content) <= 65_536:
-                    try:
-                        error = JSON_OBJECT.validate_json(response.content)
-                    except ValueError:
-                        error = {}
-                    if response.status_code in (400, 422) and is_context_overflow(error):
-                        raise ContextWindowExceeded("模型接口报告输入上下文超过窗口")
-                details = remote_error_metadata(error)
-                raise ModelRequestError(
-                    f"模型接口返回 HTTP {response.status_code}"
-                    + (f"；{details}" if details else ""),
-                    reason="http_error",
-                    retryable=(
-                        response.status_code in (408, 409, 429) or response.status_code >= 500
-                    )
-                    and not permanent_request_error(error),
-                    http_status=response.status_code,
-                    retry_after=retry_after_seconds(response.headers.get("retry-after")),
-                )
-            data = JSON_OBJECT.validate_json(response.content)
+                for _ in range(2):
+                    async with client.stream(
+                        "POST",
+                        url,
+                        headers=config.request_headers(),
+                        json=wire_body,
+                        timeout=config.timeout,
+                    ) as response:
+                        if response.is_error:
+                            err_chunks: list[bytes] = []
+                            err_size = 0
+                            async for chunk in _iter_chunks_with_idle(response, idle_limit):
+                                err_size += len(chunk)
+                                if err_size <= 65_536:
+                                    err_chunks.append(chunk)
+                            raw_err = b"".join(err_chunks)
+                            error: JsonObject = {}
+                            if err_size <= 65_536 and raw_err:
+                                try:
+                                    error = JSON_OBJECT.validate_json(raw_err)
+                                except ValueError:
+                                    error = {}
+                                if response.status_code in (400, 422) and is_context_overflow(
+                                    error
+                                ):
+                                    raise ContextWindowExceeded("模型接口报告输入上下文超过窗口")
+                                if (
+                                    use_stream_opts
+                                    and response.status_code in (400, 422)
+                                    and _rejected_stream_options(error)
+                                ):
+                                    _NO_STREAM_OPTIONS_ENDPOINTS.add(base_url)
+                                    use_stream_opts = False
+                                    wire_body = body
+                                    continue
+                            details = remote_error_metadata(error)
+                            raise ModelRequestError(
+                                f"模型接口返回 HTTP {response.status_code}"
+                                + (f"；{details}" if details else ""),
+                                reason="http_error",
+                                retryable=(
+                                    response.status_code in (408, 409, 429)
+                                    or response.status_code >= 500
+                                )
+                                and not permanent_request_error(error),
+                                http_status=response.status_code,
+                                retry_after=retry_after_seconds(
+                                    response.headers.get("retry-after")
+                                ),
+                            )
+                        ctype = response.headers.get("content-type", "").lower()
+                        if "text/event-stream" in ctype:
+                            data = (
+                                await _consume_chat_sse(response, idle_limit)
+                                if config.protocol == "chat_completions"
+                                else await _consume_responses_sse(response, idle_limit)
+                            )
+                        else:
+                            chunks = [
+                                chunk
+                                async for chunk in _iter_chunks_with_idle(response, idle_limit)
+                            ]
+                            data = JSON_OBJECT.validate_json(b"".join(chunks))
+                        break
+                else:
+                    raise ModelRequestError("模型请求准备失败", reason="request_abort")
             if data.get("status") == "failed" and is_context_overflow(data):
                 raise ContextWindowExceeded("模型接口报告输入上下文超过窗口")
             if data.get("status") == "failed" or data.get("error"):
@@ -709,15 +1089,15 @@ class ModelSession:
                     "模型接口返回失败结果" + (f"；{details}" if details else ""),
                     reason="failed_response",
                     retryable=not permanent_request_error(data),
-                    http_status=response.status_code,
-                    retry_after=retry_after_seconds(response.headers.get("retry-after")),
+                    http_status=200,
+                    retry_after=None,
                 )
             if data.get("status") not in (None, "completed"):
                 raise ModelRequestError("模型接口未返回完整成功结果", reason="incomplete_response")
             return data
         except TimeoutError:
             raise ModelRequestError(
-                "模型接口请求超时", reason="RequestTimeout", retryable=True
+                "模型接口请求或流式响应超时", reason="RequestTimeout", retryable=True
             ) from None
         except httpx.HTTPError as transport_error:
             reason = type(transport_error).__name__
@@ -760,14 +1140,19 @@ class ModelSession:
         for item in output:
             self._note(item, "output")
         self._groups.append(group)
-        actual_input, actual_output = data.input_tokens, data.output_tokens
-        if actual_input is not None:
+        self._last_usage = UsageDetails(
+            data.input_tokens, data.output_tokens, data.cached_tokens, data.reasoning_tokens
+        )
+        if data.input_tokens is not None:
+            self._prompt_tokens_total += data.input_tokens
+            if data.cached_tokens is not None:
+                self._cached_tokens_total += data.cached_tokens
             # 输出含推理 token；缺失输出统计时仍估算完整返回，不把缺失视为零。
             output_tokens = (
-                actual_output if actual_output is not None else estimate_tokens([*output])
+                data.output_tokens if data.output_tokens is not None else estimate_tokens([*output])
             )
             self._usage_anchor = (
-                actual_input + output_tokens,
+                data.input_tokens + output_tokens,
                 estimate_tokens(self._normal_body(tools)),
             )
         self._event("checking", self._pressure(self._normal_body(tools)))
@@ -847,6 +1232,122 @@ class ModelSession:
                 reply.text += output_text(parts)
         return reply, output_items
 
+    def _prune_before_compact(self, tools: list[JsonObject]) -> bool:
+        """零模型开销前置减压：先裁剪旧大工具回执头尾，再按需卸载旧轮次内联媒体。"""
+        before_body = self._normal_body(tools)
+        before_est = estimate_tokens(before_body)
+        before_tokens = self._calibrated(before_est)
+        trigger = self.settings.max_context_tokens * 80 // 100
+        current_tool_groups = [
+            group
+            for group in self._groups
+            if group.calls
+            and group.complete
+            and any(
+                (note := self.note(item)) is not None and note.turn >= self.turn
+                for item in group.items
+            )
+        ]
+        protected_items = {id(item) for group in current_tool_groups[-2:] for item in group.items}
+        changed = False
+
+        # 第一级：裁剪历史轮次及本轮更早步骤（保留本轮最近 2 组）的超大工具文本回执。
+        for group in self._groups:
+            if not group.complete or not group.calls:
+                continue
+            for item in group.items:
+                if id(item) in protected_items:
+                    continue
+                field_name = (
+                    "content"
+                    if item.get("role") == "tool"
+                    else "output"
+                    if item.get("type") == "function_call_output"
+                    else ""
+                )
+                if not field_name:
+                    continue
+                raw_val = item.get(field_name)
+                if not isinstance(raw_val, str):
+                    continue
+                pruned = _prune_tool_serialized(raw_val)
+                if pruned is not None:
+                    item[field_name] = pruned
+                    changed = True
+
+        if changed:
+            mid_est = estimate_tokens(self._normal_body(tools))
+            self._scale_anchor_after_shrink(before_est, mid_est)
+            before_est = mid_est
+
+        # 第二级：若仍超触发线，卸载旧轮次的原生图片/音频内联 base64。
+        if self._calibrated(before_est) >= trigger:
+            text_type = "text" if self.settings.protocol == "chat_completions" else "input_text"
+            offloaded = False
+            for item in self.items[1:]:
+                if id(item) in protected_items:
+                    continue
+                note = self.note(item)
+                if note is None or note.kind != "media" or note.turn >= self.turn:
+                    continue
+                parts = item.get("content")
+                if not isinstance(parts, list):
+                    continue
+                new_parts: list[JsonValue] = []
+                item_changed = False
+                for part in parts:
+                    if not isinstance(part, dict):
+                        new_parts.append(part)
+                        continue
+                    pkind = part.get("type")
+                    if pkind in ("image_url", "input_image"):
+                        url = part.get("image_url")
+                        if isinstance(url, dict):
+                            url = url.get("url")
+                        encoded = (url if isinstance(url, str) else "").partition(",")[2]
+                        kb = max(1, (len(encoded) * 3 // 4) // 1024)
+                        new_parts.append(
+                            {
+                                "type": text_type,
+                                "text": f"[历史图片（约 {kb} KB）已从上下文卸载；需要时可重新读取]",
+                            }
+                        )
+                        item_changed = True
+                    elif pkind == "input_audio" and isinstance(
+                        aud := part.get("input_audio"), dict
+                    ):
+                        encoded = aud.get("data")
+                        kb = (
+                            max(1, (len(encoded) * 3 // 4) // 1024)
+                            if isinstance(encoded, str)
+                            else 1
+                        )
+                        new_parts.append(
+                            {
+                                "type": text_type,
+                                "text": f"[历史音频（约 {kb} KB）已从上下文卸载；需要时可重新读取]",
+                            }
+                        )
+                        item_changed = True
+                    else:
+                        new_parts.append(part)
+                if item_changed:
+                    item["content"] = new_parts
+                    self._turn_media.pop(id(item), None)
+                    offloaded = True
+            if offloaded:
+                after_est = estimate_tokens(self._normal_body(tools))
+                self._scale_anchor_after_shrink(before_est, after_est)
+                changed = True
+
+        if not changed:
+            return False
+        self._prunes += 1
+        self.version += 1
+        after_tokens = self._pressure(self._normal_body(tools))
+        self._event("pruned", after_tokens, before_tokens=before_tokens, after_tokens=after_tokens)
+        return after_tokens < trigger and after_tokens < self.settings.max_context_tokens
+
     async def _ensure_budget(self, tools: list[JsonObject]) -> None:
         body = self._normal_body(tools)
         # 闲置时按这里记下的工具定义占用估算下次唤醒；超出预算的一轮也要记下。
@@ -854,9 +1355,13 @@ class ModelSession:
         tokens = self._pressure(body)
         self._event("checking", tokens)
         hard_limit = self.settings.max_context_tokens
-        if tokens >= hard_limit or (
-            not self._compaction_failed and tokens >= hard_limit * 80 // 100
-        ):
+        trigger = hard_limit * 80 // 100
+        if tokens >= hard_limit or (not self._compaction_failed and tokens >= trigger):
+            if self._prune_before_compact(tools):
+                return
+            tokens = self._pressure(self._normal_body(tools))
+            if tokens < hard_limit and (self._compaction_failed or tokens < trigger):
+                return
             try:
                 await self._compact(tools)
             except (CompactionError, ContextLimitError) as error:
@@ -949,6 +1454,8 @@ class ModelSession:
         return text
 
     async def _compact(self, tools: list[JsonObject], *, force: bool = False) -> None:
+        if force:
+            self._prune_before_compact(tools)
         current = estimate_tokens(self._normal_body(tools))
         before = self._calibrated(current)
         if force:

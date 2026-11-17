@@ -93,9 +93,11 @@ class ProviderSettings(Model):
     api_key: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     timeout: float = Field(default=600, gt=0)
+    idle_timeout: float = Field(default=120, gt=0)
     max_retries: int = Field(default=10, ge=0)
     proxy: str | None = None
     store_supported: bool = True
+    stream: bool = True
 
     def endpoint_base(self) -> str:
         stripped = self.base_url.strip().rstrip("/")
@@ -163,6 +165,7 @@ class SandboxSettings(Model):
     cpus: float = Field(default=2, gt=0)
     memory_bytes: int = Field(default=4_294_967_296, ge=134_217_728)
     pids_limit: int = Field(default=256, ge=16)
+    concurrent_executions: int = Field(default=2, ge=1, le=16)
     command_timeout: float = Field(default=1800, gt=0)
     output_limit: int = Field(default=1_048_576, ge=1)
     transfer_max_bytes: int = Field(default=50_000_000, ge=1)
@@ -243,6 +246,7 @@ class TTSSettings(Model):
 class ServerSettings(Model):
     host: str = "0.0.0.0"
     port: int = Field(default=6055, ge=1, le=65535)
+    auth_token: str = ""
 
 
 class HarnessSettings(Model):

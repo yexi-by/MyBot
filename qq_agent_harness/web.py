@@ -1,13 +1,16 @@
-"""配置控制台和反向 WebSocket 接入，同端口提供 API 与前端。"""
+"""配置控制台和反向 WebSocket 接入，同端口提供 API、可选控制台鉴权与前端。"""
 
 import asyncio
 import base64
 import binascii
+import hashlib
+import hmac
 import os
 import re
+import secrets
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Literal
@@ -29,10 +32,17 @@ from .napcat import build_tools as napcat_tools
 from .napcat.tools import CATEGORY_LABELS as NAPCAT_CATEGORIES
 from .registry import ToolRegistry
 from .runtime import AgentRuntime, SessionBusy
-from .sandbox.client import RunnerClient
+from .sandbox.client import CleanupMode, RunnerClient
 from .sandbox.tools import CATEGORY_LABELS as SANDBOX_CATEGORIES
 from .sandbox.tools import build_tools as sandbox_tools
 from .settings import TTSSettings
+from .skills import CATEGORY_LABELS as SKILLS_CATEGORIES
+from .skills import build_tools as skills_tools
+from .subagent import CATEGORY_LABELS as SUBAGENT_CATEGORIES
+from .subagent import build_tools as subagent_tools
+from .timers import CATEGORY_LABELS as TIMER_CATEGORIES
+from .timers import TimerManager
+from .timers import build_tools as timer_tools
 from .tts import CATEGORY_LABELS as TTS_CATEGORIES
 from .tts import (
     VOICE_PATTERN,
@@ -49,6 +59,11 @@ from .tts import (
     voice_sample,
 )
 from .tts import build_tools as tts_tools
+
+SESSION_COOKIE = "qah_console_session"
+PUBLIC_API_PATHS = frozenset(
+    {"/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/logout"}
+)
 
 
 class SaveConfig(Model):
@@ -74,9 +89,17 @@ class ResetSession(Model):
 
 
 class Cleanup(Model):
-    mode: Literal["cache", "selected", "all"]
+    mode: CleanupMode
     paths: list[str] = Field(default_factory=list)
     confirmed: bool = False
+
+
+class LoginRequest(Model):
+    token: str = Field(min_length=1)
+
+
+class CancelTimerRequest(Model):
+    timer_id: str = Field(min_length=1)
 
 
 class PreviewSpeech(Model):
@@ -103,6 +126,7 @@ class ManageTTSModel(Model):
 def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     store = ConfigStore(config_path, allow_invalid=True)
     boot_id = uuid.uuid4().hex
+    cookie_secret = secrets.token_bytes(32)
     started_at = time.time()
     startup = store.settings.model_copy(deep=True)
     registry = ToolRegistry(lambda: store.settings)
@@ -110,6 +134,9 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     registry.describe_categories(IMAGE_CATEGORIES)
     registry.describe_categories(TTS_CATEGORIES)
     registry.describe_categories(SANDBOX_CATEGORIES)
+    registry.describe_categories(SKILLS_CATEGORIES)
+    registry.describe_categories(SUBAGENT_CATEGORIES)
+    registry.describe_categories(TIMER_CATEGORIES)
     for tool in napcat_tools(startup.napcat):
         registry.add(tool)
     hub = NapCatHub(startup.napcat)
@@ -121,12 +148,34 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     runtime.write_workspace = runner.write_bytes
     media = MediaReader(startup.napcat)
     runtime.read_media = media.read_many
+    timers = TimerManager(runtime.wake_timer)
     for tool in image_tools(lambda: store.settings.image, startup.napcat, reader=media):
         registry.add(tool)
     for tool in tts_tools(lambda: store.settings.tts, startup.napcat):
         registry.add(tool)
+    for tool in skills_tools(lambda: store):
+        registry.add(tool)
+    for tool in subagent_tools(lambda: store, registry, session_factory=runtime.session_factory):
+        registry.add(tool)
+    for tool in timer_tools(timers):
+        registry.add(tool)
     mcp = MCPManager(startup.mcp, registry)
     sandbox_pending = startup.sandbox.enabled
+
+    def session_signature(auth_token: str) -> str:
+        return hmac.new(cookie_secret, auth_token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def is_authenticated(request: Request) -> bool:
+        expected = store.settings.server.auth_token
+        if not expected:
+            return True
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer ") and secrets.compare_digest(auth_header[7:], expected):
+            return True
+        cookie = request.cookies.get(SESSION_COOKIE, "")
+        if cookie and secrets.compare_digest(cookie, session_signature(expected)):
+            return True
+        return False
 
     async def watch_config() -> None:
         invalid = False
@@ -156,6 +205,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
             watcher.cancel()
             with suppress(asyncio.CancelledError):
                 await watcher
+            await timers.close()
             await runtime.close()
             await hub.close()
             await mcp.close()
@@ -167,7 +217,24 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     app.state.registry = registry
     app.state.hub = hub
     app.state.runner = runner
+    app.state.timers = timers
     app.state.shutdown = None
+
+    @app.middleware("http")
+    async def console_auth_guard(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        path = request.url.path
+        if (
+            path.startswith("/api/")
+            and path not in PUBLIC_API_PATHS
+            and not is_authenticated(request)
+        ):
+            return JSONResponse(
+                {"detail": "控制台已启用访问口令，请先解锁", "auth_required": True},
+                status_code=401,
+            )
+        return await call_next(request)
 
     @app.exception_handler(ConfigError)
     async def config_error(_request: Request, error: ConfigError) -> JSONResponse:
@@ -220,14 +287,44 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     async def remote_error(_request: Request, _error: httpx.HTTPError) -> JSONResponse:
         return JSONResponse({"detail": "远端服务暂不可用"}, status_code=502)
 
+    @app.get("/api/auth/status")
+    async def auth_status(request: Request) -> JsonObject:
+        protected = bool(store.settings.server.auth_token)
+        return {"protected": protected, "authenticated": is_authenticated(request)}
+
+    @app.post("/api/auth/login")
+    async def auth_login(payload: LoginRequest) -> JSONResponse:
+        expected = store.settings.server.auth_token
+        if not expected:
+            return JSONResponse({"authenticated": True, "protected": False})
+        if not secrets.compare_digest(payload.token, expected):
+            raise HTTPException(401, "访问口令错误")
+        response = JSONResponse({"authenticated": True, "protected": True})
+        response.set_cookie(
+            key=SESSION_COOKIE,
+            value=session_signature(expected),
+            httponly=True,
+            samesite="lax",
+            path="/",
+            max_age=30 * 86_400,
+        )
+        return response
+
+    @app.post("/api/auth/logout")
+    async def auth_logout() -> JSONResponse:
+        response = JSONResponse({"authenticated": False})
+        response.delete_cookie(key=SESSION_COOKIE, path="/")
+        return response
+
     def restart_sections() -> list[str]:
         """启动时固定下来的设置里，当前配置已改动、需要重启进程才生效的部分。"""
         current = store.settings
-        sections = [
-            name
-            for name in ("server", "napcat", "mcp", "sandbox")
-            if getattr(startup, name) != getattr(current, name)
-        ]
+        sections: list[str] = []
+        if (startup.server.host, startup.server.port) != (current.server.host, current.server.port):
+            sections.append("server")
+        for name in ("napcat", "mcp", "sandbox"):
+            if getattr(startup, name) != getattr(current, name):
+                sections.append(name)
         # 并发信号量和活动队列长度在创建运行器时确定。
         for name in ("concurrent_conversations", "activity_limit"):
             if getattr(startup.runtime, name) != getattr(current.runtime, name):
@@ -251,13 +348,38 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
         return result
 
     @app.get("/api/config")
-    async def read_config() -> JsonObject:
-        return snapshot()
+    async def read_config(response: Response) -> JsonObject:
+        snap = snapshot()
+        expected = store.settings.server.auth_token
+        if expected:
+            # 修改 auth_token 保存后自动续签当前浏览器会话 Cookie，避免操作者把自己踢出控制台。
+            response.set_cookie(
+                key=SESSION_COOKIE,
+                value=session_signature(expected),
+                httponly=True,
+                samesite="lax",
+                path="/",
+                max_age=30 * 86_400,
+            )
+        return snap
 
     @app.put("/api/config")
-    async def save_config(request: SaveConfig) -> JsonObject:
+    async def save_config(request: SaveConfig, response: Response) -> JsonObject:
         store.save(request.config, request.sha)
-        return snapshot()
+        snap = snapshot()
+        expected = store.settings.server.auth_token
+        if expected:
+            response.set_cookie(
+                key=SESSION_COOKIE,
+                value=session_signature(expected),
+                httponly=True,
+                samesite="lax",
+                path="/",
+                max_age=30 * 86_400,
+            )
+        else:
+            response.delete_cookie(key=SESSION_COOKIE, path="/")
+        return snap
 
     @app.get("/api/files/list")
     async def list_files() -> JsonObject:
@@ -310,6 +432,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     async def status() -> JsonObject:
         result = runtime.snapshot()
         result["started_at"] = started_at
+        result["timers"] = timers.snapshot()
         result["napcat"] = {**hub.status(), "expected_bot_id": startup.napcat.expected_bot_id}
         servers: JsonObject = {}
         for name, config in store.settings.mcp.items():
@@ -320,6 +443,10 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
                 servers[name] = {"state": "pending_restart" if config.enabled else "disabled"}
         result["mcp"] = servers
         return result
+
+    @app.post("/api/timers/cancel")
+    async def cancel_timer(request: CancelTimerRequest) -> JsonObject:
+        return {"cancelled": timers.cancel(request.timer_id)}
 
     def console_bot() -> str:
         """控制台展示的机器人：优先配置的账号，否则取第一个在线连接。"""

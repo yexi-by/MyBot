@@ -2,6 +2,7 @@
 
 import json
 import math
+from dataclasses import dataclass
 
 from .contracts import JsonObject, JsonValue
 
@@ -20,6 +21,14 @@ class CompactionError(ProviderError):
 
 class ContextWindowExceeded(ProviderError):
     pass
+
+
+@dataclass(frozen=True)
+class UsageDetails:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_tokens: int | None = None
+    reasoning_tokens: int | None = None
 
 
 def estimate_tokens(value: JsonValue) -> int:
@@ -66,24 +75,48 @@ def visible_data(value: JsonValue) -> JsonValue:
     return value
 
 
-def usage_totals(data: JsonObject, protocol: str) -> tuple[int | None, int | None]:
+def _nonneg_int(source: JsonObject, key: str) -> int | None:
+    value = source.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def usage_details(data: JsonObject, protocol: str) -> UsageDetails:
     usage = data.get("usage")
     if not isinstance(usage, dict):
-        return None, None
-    input_name, output_name = (
-        ("prompt_tokens", "completion_tokens")
-        if protocol == "chat_completions"
-        else ("input_tokens", "output_tokens")
-    )
-
-    def count(name: str) -> int | None:
-        value = usage.get(name)
-        return (
-            value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+        return UsageDetails()
+    if protocol == "chat_completions":
+        input_tokens = _nonneg_int(usage, "prompt_tokens")
+        output_tokens = _nonneg_int(usage, "completion_tokens")
+        prompt_details = usage.get("prompt_tokens_details")
+        cached = (
+            _nonneg_int(prompt_details, "cached_tokens")
+            if isinstance(prompt_details, dict)
+            else None
         )
+        if cached is None:
+            cached = _nonneg_int(usage, "prompt_cache_hit_tokens")
+        comp_details = usage.get("completion_tokens_details")
+        reasoning = (
+            _nonneg_int(comp_details, "reasoning_tokens")
+            if isinstance(comp_details, dict)
+            else None
+        )
+        return UsageDetails(input_tokens, output_tokens, cached, reasoning)
+    input_tokens = _nonneg_int(usage, "input_tokens")
+    output_tokens = _nonneg_int(usage, "output_tokens")
+    in_details = usage.get("input_tokens_details")
+    cached = _nonneg_int(in_details, "cached_tokens") if isinstance(in_details, dict) else None
+    out_details = usage.get("output_tokens_details")
+    reasoning = (
+        _nonneg_int(out_details, "reasoning_tokens") if isinstance(out_details, dict) else None
+    )
+    return UsageDetails(input_tokens, output_tokens, cached, reasoning)
 
+
+def usage_totals(data: JsonObject, protocol: str) -> tuple[int | None, int | None]:
     # 两种协议的原始 input/prompt 总量已含缓存，output/completion 已含 reasoning。
-    return count(input_name), count(output_name)
+    details = usage_details(data, protocol)
+    return details.input_tokens, details.output_tokens
 
 
 def is_context_overflow(data: JsonObject) -> bool:

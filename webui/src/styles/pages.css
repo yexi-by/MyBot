@@ -982,6 +982,55 @@ button.file-name:hover {
   color: var(--accent-text);
 }
 
+/* ---------- 控制台解锁页 ---------- */
+.unlock-screen {
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  padding: 24px 16px;
+  background: var(--bg);
+}
+.unlock-card {
+  width: min(400px, 100%);
+  padding: 24px;
+  box-shadow: var(--shadow-pop);
+}
+.unlock-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.unlock-card h2 {
+  margin-bottom: 4px;
+  font-size: var(--fs-lg);
+}
+.unlock-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--control-h);
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r);
+  background: var(--surface-2);
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.unlock-field:focus-within {
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px var(--focus);
+}
+.unlock-field input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
 /* ---------- 设置 ---------- */
 .action-row {
   display: flex;

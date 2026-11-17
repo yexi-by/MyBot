@@ -33,7 +33,7 @@ class ExecInput(Model):
 
 
 class FileInput(Model):
-    path: str = Field(description="工作区内的相对文件路径")
+    path: str = Field(min_length=1, description="工作区内的相对文件路径")
 
 
 class WriteInput(FileInput):
@@ -49,6 +49,15 @@ class WriteInput(FileInput):
         return self
 
 
+class EditInput(FileInput):
+    old_string: str = Field(min_length=1, description="要替换的原文本片段（须包含精确缩进与换行）")
+    new_string: str = Field(description="替换后的新文本片段（传空字符串可删除匹配片段）")
+    replace_all: bool = Field(
+        default=False,
+        description="为 false 时要求 old_string 在文件中唯一出现；为 true 时替换全部匹配",
+    )
+
+
 class ReadInput(FileInput):
     offset: int = Field(
         default=0, ge=0, description="读取起始字节偏移，续读时传入上次返回的 next_offset"
@@ -62,15 +71,48 @@ class ListInput(Model):
     limit: int = Field(default=100, ge=1, description="单页返回数量")
 
 
+class SearchInput(Model):
+    query: str = Field(
+        default="",
+        description="要搜索的文本内容；留空则仅按 glob 模式列出匹配文件",
+    )
+    path: str = Field(default="", description="限定搜索的工作区相对子目录，留空表示整个工作区")
+    glob: str = Field(
+        default="*",
+        description="文件名或相对路径匹配模式（如 *.py、**/*.md、assets/*.png）",
+    )
+    regex: bool = Field(default=False, description="query 是否按正则表达式解析")
+    case_sensitive: bool = Field(default=False, description="是否区分大小写")
+    include_hidden: bool = Field(
+        default=False, description="是否包含 .scratch 等隐藏目录与缓存目录（默认跳过）"
+    )
+    max_results: int = Field(default=100, ge=1, le=500, description="最多返回的匹配项数")
+
+
+class DeleteInput(FileInput):
+    recursive: bool = Field(
+        default=False, description="目标为非空子目录时，是否连同内部所有文件递归删除"
+    )
+
+
+type SandboxRequest = (
+    ExecInput | ReadInput | WriteInput | EditInput | ListInput | SearchInput | DeleteInput
+)
+
+
 def build_tools(
     get_settings: Callable[[], SandboxSettings], client: RunnerClient | None = None
 ) -> list[ToolDefinition]:
-    async def dispatch(
-        context: ToolContext, request: ExecInput | ReadInput | WriteInput | ListInput
-    ) -> ToolResult:
-        operation = {ExecInput: "exec", ReadInput: "read", WriteInput: "write", ListInput: "list"}[
-            type(request)
-        ]
+    async def dispatch(context: ToolContext, request: SandboxRequest) -> ToolResult:
+        operation = {
+            ExecInput: "exec",
+            ReadInput: "read",
+            WriteInput: "write",
+            EditInput: "edit",
+            ListInput: "list",
+            SearchInput: "search",
+            DeleteInput: "delete",
+        }[type(request)]
         owned = client is None
         connection = client or RunnerClient(get_settings)
         if context.cancelled():
@@ -106,6 +148,35 @@ def build_tools(
                         request.path, request.content, request.overwrite, request.append
                     )
                 )
+            if isinstance(request, EditInput):
+                if denied := context.recheck():
+                    return denied
+                return ToolResult.success(
+                    await connection.edit_file(
+                        request.path,
+                        request.old_string,
+                        request.new_string,
+                        replace_all=request.replace_all,
+                    )
+                )
+            if isinstance(request, SearchInput):
+                return ToolResult.success(
+                    await connection.search_files(
+                        request.query,
+                        path=request.path,
+                        glob=request.glob,
+                        regex=request.regex,
+                        case_sensitive=request.case_sensitive,
+                        include_hidden=request.include_hidden,
+                        max_results=request.max_results,
+                    )
+                )
+            if isinstance(request, DeleteInput):
+                if denied := context.recheck():
+                    return denied
+                return ToolResult.success(
+                    await connection.delete_path(request.path, recursive=request.recursive)
+                )
             return ToolResult.success(
                 await connection.files(request.path, request.offset, request.limit)
             )
@@ -124,6 +195,8 @@ def build_tools(
             except ValueError:
                 pass
             code = payload.get("error_type")
+            if code == "InvalidOperation" and isinstance(detail := payload.get("detail"), str):
+                return ToolResult.failure(detail, "InvalidOperation")
             known = {
                 "FileNotFound": "文件或目录不存在",
                 "FileExists": "目标已存在，如需修改请开启 overwrite 或 append",
@@ -147,30 +220,62 @@ def build_tools(
     return [
         ToolDefinition(
             "sandbox__exec",
-            "在隔离沙箱中运行 bash 命令，适合计算、数据处理、脚本执行与文件转换。预装 Python 3.14（uv、requests/httpx/bs4/lxml/pyyaml、numpy/pandas/scipy/sympy、matplotlib/seaborn/pillow/qrcode/imageio、pymupdf/pypdf/pdfplumber/openpyxl/python-docx/python-pptx/reportlab）、Node.js 24（npm/npx）、git/rg/fd/jq/sqlite3、zip/7z/tar、ffmpeg/imagemagick/poppler/qpdf/pandoc/graphviz/tesseract（中英）及中文字体；根目录只读，额外依赖可用 uv 装入工作区。",
+            (
+                "在隔离沙箱中运行 bash 命令，适合计算、数据处理、脚本执行与文件转换。"
+                "预装 Python 3.14（uv、requests/httpx/bs4/lxml/pyyaml、numpy/pandas/scipy/sympy、"
+                "matplotlib/seaborn/pillow/qrcode/imageio/cairosvg/resvg_py、pymupdf/pypdf/pdfplumber/"
+                "openpyxl/python-docx/python-pptx/reportlab）、Node.js 24（npm/npx）、git/rg/fd/jq/sqlite3、"
+                "zip/7z/tar、ffmpeg/imagemagick/poppler/qpdf/pandoc/graphviz/tesseract（中英）及中文字体。"
+                "目录规范：单次命令内用完即弃的中间文件（如抽帧切片、临时编译产物）直接写 /tmp（命令结束自动销毁）；"
+                "跨步骤临时文件放 .scratch/；仅需长期复用的脚本与最终成果按主题建子目录存放，勿将散碎临时文件堆在工作区根目录。"
+            ),
             "sandbox",
             model_binding(ExecInput, dispatch),
             title="执行代码",
         ),
         ToolDefinition(
             "sandbox__read_file",
-            "读取沙箱工作区中的 UTF-8 文本文件。",
+            "读取沙箱工作区中的 UTF-8 文本文件（支持按字节偏移分段读取）。",
             "sandbox",
             model_binding(ReadInput, dispatch),
+            concurrency_safe=True,
             title="读取工作区文件",
         ),
         ToolDefinition(
             "sandbox__write_file",
-            "向沙箱工作区写入或追加 UTF-8 文本文件。",
+            "向沙箱工作区新建、覆盖或追加 UTF-8 文本文件；局部修改已有文件请优先用 sandbox__edit_file。",
             "sandbox",
             model_binding(WriteInput, dispatch),
             title="写入工作区文件",
         ),
         ToolDefinition(
+            "sandbox__edit_file",
+            "精确替换沙箱工作区 UTF-8 文本文件中的指定片段，无需整份重写或启动容器。",
+            "sandbox",
+            model_binding(EditInput, dispatch),
+            title="编辑工作区文件",
+        ),
+        ToolDefinition(
             "sandbox__list_files",
-            "列出沙箱工作区目录中的文件与子目录。",
+            "列出沙箱工作区指定目录中的文件与子目录。",
             "sandbox",
             model_binding(ListInput, dispatch),
+            concurrency_safe=True,
             title="列出工作区文件",
+        ),
+        ToolDefinition(
+            "sandbox__search_files",
+            "在沙箱工作区递归查找匹配文件（glob）或检索文本内容（grep），默认跳过缓存与依赖环境目录。",
+            "sandbox",
+            model_binding(SearchInput, dispatch),
+            concurrency_safe=True,
+            title="搜索工作区文件",
+        ),
+        ToolDefinition(
+            "sandbox__delete_path",
+            "删除沙箱工作区内的指定文件或子目录（用于清理不再需要的中间文件或旧目录）。",
+            "sandbox",
+            model_binding(DeleteInput, dispatch),
+            title="删除工作区文件",
         ),
     ]

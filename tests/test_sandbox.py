@@ -76,6 +76,7 @@ def make_runner(
     quota: FakeQuota | None = None,
     engine: FakeEngine | None = None,
     timeout: float = 2,
+    concurrent_executions: int = 2,
 ) -> Runner:
     return Runner(
         workspace=Workspace(path),
@@ -83,7 +84,12 @@ def make_runner(
         network_guard=FakeGuard(),
         engine=engine or FakeEngine(),
         host_workspace="/test/workspace",
-        settings=SandboxSettings(enabled=True, command_timeout=timeout, output_limit=1024),
+        settings=SandboxSettings(
+            enabled=True,
+            command_timeout=timeout,
+            output_limit=1024,
+            concurrent_executions=concurrent_executions,
+        ),
     )
 
 

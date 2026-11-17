@@ -311,7 +311,7 @@ async def test_large_text_and_directory_continue_without_hiding_files(tmp_path):
 async def test_queued_execution_cancel_does_not_start_it_and_reads_bypass_exec_lock(tmp_path):
     (tmp_path / "ready.txt").write_text("ready", encoding="utf-8")
     engine = FakeEngine(block=True)
-    runner = make_runner(tmp_path, engine=engine)
+    runner = make_runner(tmp_path, engine=engine, concurrent_executions=1)
     runner.settings.max_pending_operations = 2
     settings = SandboxSettings(enabled=True, runner_token="t" * 24)
     client = RunnerClient(
@@ -324,7 +324,7 @@ async def test_queued_execution_cancel_does_not_start_it_and_reads_bypass_exec_l
     queued_two = asyncio.create_task(client.execute("third", owner="third"))
     try:
         async with asyncio.timeout(2):
-            while len(runner.waiting) < 3:
+            while len(runner.waiting) < 2:
                 await asyncio.sleep(0)
             # 文件读取不等待活动执行容器锁，即使排队槽位已满也立即可读。
             assert (await client.read_text("ready.txt"))["content"] == "ready"
@@ -338,7 +338,7 @@ async def test_queued_execution_cancel_does_not_start_it_and_reads_bypass_exec_l
             assert len(engine.created) == 1
             await client.cancel("first")
             assert (await running)["status"] == "cancelled"
-        assert not runner.lock.locked() and not runner.waiting
+        assert not runner.is_busy and not runner.waiting
     finally:
         await client.cancel()
         await asyncio.gather(running, queued, queued_two, return_exceptions=True)
@@ -377,7 +377,7 @@ async def test_cancel_during_log_drain_releases_workspace_immediately(tmp_path):
         await runner.cancel("draining")
         result = await task
     assert result["status"] == "cancelled" and result["output_complete"] is False
-    assert len(engine.removed) == 1 and not runner.lock.locked()
+    assert len(engine.removed) == 1 and not runner.is_busy
 
 
 async def test_proxy_address_failover_custom_port_and_active_stream_survive_idle_budget():

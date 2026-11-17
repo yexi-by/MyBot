@@ -256,7 +256,7 @@ async def test_deferred_tools_discovery_and_direct_execution_respect_policy() ->
     denied = await registry.execute(context, "qq__forbidden_kick", {"user_id": "20"})
     assert denied.error_type == "PermissionDenied"
 
-    # 通过 qq__search_tools 按关键词检索后，匹配工具加入本会话可见工具定义列表。
+    # 通过 qq__search_tools 按关键词检索后，匹配工具按解锁顺序追加在固定前缀之后（保护 KV Cache）。
     searched = await registry.execute(context, "qq__search_tools", {"query": "禁言"})
     assert (
         searched.status == "ok"
@@ -265,7 +265,7 @@ async def test_deferred_tools_discovery_and_direct_execution_respect_policy() ->
     )
     assert [item["name"] for item in matched if isinstance(item, dict)] == ["qq__rare_ban"]
     after_names = [item["name"] for item in registry.definitions(context)]
-    assert after_names == ["qq__common_action", "qq__rare_ban", "qq__search_tools"]
+    assert after_names == ["qq__common_action", "qq__search_tools", "qq__rare_ban"]
 
     # 搜索未开放工具不会泄露，撤权后已发现的工具也会立即从 definitions 中移除。
     forbidden_search = await registry.execute(context, "qq__search_tools", {"query": "踢出"})
@@ -294,5 +294,5 @@ async def test_search_tools_returns_and_unlocks_all_matches_beyond_fifteen() -> 
     assert searched.data["total_matched"] == 22
     matched = searched.data["matched"]
     assert isinstance(matched, list) and len(matched) == 22
-    expected = [f"qq__ext_{index:02d}" for index in range(22)] + ["qq__search_tools"]
+    expected = ["qq__search_tools"] + [f"qq__ext_{index:02d}" for index in range(22)]
     assert [item["name"] for item in registry.definitions(context)] == expected

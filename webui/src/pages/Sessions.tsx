@@ -668,6 +668,12 @@ function SessionSummary({ detail, botId }: { detail: SessionDetail; botId: strin
   const max = context.max_tokens ?? 0;
   const used = context.input_tokens ?? 0;
   const available = detail.available_tools;
+  const hitRatio =
+    context.prompt_tokens_total && context.prompt_tokens_total > 0 && context.cached_tokens_total
+      ? Math.round((context.cached_tokens_total / context.prompt_tokens_total) * 100)
+      : context.input_tokens && context.input_tokens > 0 && context.cached_tokens
+        ? Math.round((context.cached_tokens / context.input_tokens) * 100)
+        : 0;
   return (
     <section className="card session-overview">
       {max > 0 && (
@@ -681,6 +687,8 @@ function SessionSummary({ detail, botId }: { detail: SessionDetail; botId: strin
           />
           <span className="tiny muted num">
             上下文 {formatNumber(used)} / {formatNumber(max)} token
+            {context.cached_tokens ? ` · 本次命中缓存 ${formatNumber(context.cached_tokens)}` : ""}
+            {context.reasoning_tokens ? ` · 推理 ${formatNumber(context.reasoning_tokens)}` : ""}
             {context.usage_source ? " · " + (usageSources[context.usage_source] ?? context.usage_source) : ""}
           </span>
         </div>
@@ -702,9 +710,20 @@ function SessionSummary({ detail, botId }: { detail: SessionDetail; botId: strin
           </dd>
         </div>
         <div>
-          <dt>上下文压缩</dt>
-          <dd className="num">{context.compactions ?? 0} 次</dd>
+          <dt>上下文减压 / 压缩</dt>
+          <dd className="num">
+            {context.compactions ?? 0} 次摘要
+            {(context.prunes ?? 0) > 0 && (
+              <span className="stat-note">预裁剪 {context.prunes} 次</span>
+            )}
+          </dd>
         </div>
+        {hitRatio > 0 && (
+          <div>
+            <dt>累计缓存命中率</dt>
+            <dd className="num">{hitRatio}%</dd>
+          </div>
+        )}
         <div>
           <dt>内存占用</dt>
           <dd className="num">{formatBytes(detail.retained_bytes, "binary")}</dd>

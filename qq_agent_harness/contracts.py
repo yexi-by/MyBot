@@ -1,7 +1,7 @@
 """协议边界和共享工具契约。"""
 
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
@@ -92,6 +92,41 @@ def remember_generated(store: OrderedDict[str, GeneratedMedia], item: GeneratedM
         total -= len(oldest.content)
 
 
+class OrderedSet:
+    """按首次加入顺序保存的字符串集合，避免动态发现工具改变已有前缀顺序。"""
+
+    def __init__(self, items: Iterable[str] = ()) -> None:
+        self._items: dict[str, None] = dict.fromkeys(items)
+
+    def add(self, item: str) -> None:
+        self._items[item] = None
+
+    def discard(self, item: str) -> None:
+        self._items.pop(item, None)
+
+    def clear(self) -> None:
+        self._items.clear()
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._items
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __bool__(self) -> bool:
+        return bool(self._items)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, OrderedSet):
+            return list(self._items) == list(other._items)
+        if isinstance(other, set):
+            return set(self._items) == other
+        return NotImplemented
+
+
 @dataclass
 class ToolContext:
     scope: ConversationScope
@@ -104,9 +139,9 @@ class ToolContext:
     unknown_sends: list[tuple[str, JsonObject]] = field(default_factory=list)
     unknown_actions: list[tuple[str, JsonObject]] = field(default_factory=list)
     generated_media: OrderedDict[str, GeneratedMedia] = field(default_factory=OrderedDict)
-    discovered_tools: set[str] = field(default_factory=set)
+    discovered_tools: OrderedSet | set[str] = field(default_factory=OrderedSet)
     read_workspace: Callable[[str], Awaitable[bytes]] | None = None
-    write_workspace: Callable[[str, bytes], Awaitable[None]] | None = None
+    write_workspace: Callable[..., Awaitable[None]] | None = None
     recheck: Callable[[], ToolResult | None] = lambda: None
     check_tool: Callable[[str, JsonObject], ToolResult | None] = lambda _name, _args: (
         ToolResult.failure("当前会话未开放该工具", "PermissionDenied")
@@ -115,6 +150,16 @@ class ToolContext:
     @property
     def target(self) -> ConversationScope:
         return self.target_scope or self.scope
+
+    async def save_workspace_bytes(
+        self, path: str, data: bytes, *, overwrite: bool = False
+    ) -> None:
+        if self.write_workspace is None:
+            raise ValueError("沙箱文件写入服务不可用")
+        if overwrite:
+            await self.write_workspace(path, data, overwrite=True)
+        else:
+            await self.write_workspace(path, data)
 
 
 ToolHandler = Callable[[ToolContext, JsonObject], Awaitable[ToolResult]]
@@ -141,6 +186,7 @@ class ToolDefinition:
     scope: Literal["both", "group", "private", "account"] = "both"
     cross_scope: bool = False
     deferred: bool = False
+    concurrency_safe: bool = False
     requires: tuple[str, ...] = ()
     # 面向控制台的简短名称；模型看到的仍是 description。
     title: str = ""

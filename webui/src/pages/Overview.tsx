@@ -9,6 +9,7 @@ import {
   ChevronUp,
   CircleAlert,
   CircleStop,
+  Clock,
   Gauge,
   MessageSquare,
   MessagesSquare,
@@ -19,11 +20,13 @@ import {
   Settings2,
   Shrink,
   Sparkles,
+  Trash2,
   Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge, Button, EmptyState, Meter, Segmented, StatusDot } from "../components/primitives";
 import { DetailHeader, MasterDetail, QQAvatar, SearchInput } from "../components/shell";
+import { errorMessage, post } from "../lib/api";
 import { useConfig } from "../lib/config";
 import { scopeLabel } from "../lib/conversations";
 import { conversationRefs, hasSessionModel } from "../lib/models";
@@ -48,7 +51,8 @@ import {
 } from "../lib/resource";
 import { sessionRoute, stopTurn } from "../lib/sessions";
 import { getAt, object } from "../lib/types";
-import type { Activity, RetainedSession, Turn, TurnContext } from "../lib/types";
+import type { Activity, RetainedSession, TimerItem, Turn, TurnContext } from "../lib/types";
+import { toast } from "../lib/ui";
 import type { Tone } from "../lib/ui";
 
 function Tile({
@@ -192,11 +196,17 @@ function StatusTiles() {
   );
 }
 
-/** 上下文用量：进度条 + 数字，正在运行和已保留的会话共用同一种呈现。 */
+/** 上下文用量：进度条 + 数字 + 缓存命中率，正在运行和已保留的会话共用同一种呈现。 */
 function ContextMeter({ context, showSource = false }: { context: TurnContext; showSource?: boolean }) {
   const max = context.max_tokens ?? 0;
   const used = context.input_tokens ?? 0;
   if (max <= 0) return null;
+  const hitRatio =
+    context.prompt_tokens_total && context.prompt_tokens_total > 0 && context.cached_tokens_total
+      ? Math.round((context.cached_tokens_total / context.prompt_tokens_total) * 100)
+      : context.input_tokens && context.input_tokens > 0 && context.cached_tokens
+        ? Math.round((context.cached_tokens / context.input_tokens) * 100)
+        : 0;
   return (
     <div className="turn-context">
       <Meter
@@ -208,6 +218,7 @@ function ContextMeter({ context, showSource = false }: { context: TurnContext; s
       />
       <span className="tiny muted num">
         上下文 {formatNumber(used)} / {formatNumber(max)} token
+        {hitRatio > 0 ? ` · 缓存 ${hitRatio}%` : ""}
         {showSource && context.usage_source
           ? " · " + (usageSources[context.usage_source] ?? context.usage_source)
           : ""}
@@ -249,6 +260,71 @@ function TurnRow({ turn }: { turn: Turn }) {
         停止
       </Button>
     </li>
+  );
+}
+
+function ActiveTimers({ timers }: { timers: TimerItem[] }) {
+  const groups = useGroupNames();
+  if (!timers.length) return null;
+  const cancel = async (timerId: string) => {
+    try {
+      await post("/api/timers/cancel", { timer_id: timerId });
+      toast("已取消定时提醒", "success");
+      void runtimeResource.refresh();
+    } catch (error) {
+      toast(errorMessage(error), "danger");
+    }
+  };
+  return (
+    <section className="card">
+      <header className="card-header">
+        <div className="grow">
+          <h2>活动定时提醒</h2>
+          <p className="card-subtitle">到期后自动唤醒对应会话（仅保存在内存中，进程重启后清空）。</p>
+        </div>
+        <Badge tone="accent">{timers.length} 个等待中</Badge>
+      </header>
+      <ul className="turns">
+        {timers.map((item) => {
+          const scopeKey = item.scope_key ?? "";
+          const scope = parseScopeKey(scopeKey);
+          const title = scopeKey ? scopeLabel(scopeKey, groups) : "会话提醒";
+          const route = scopeKey ? sessionRoute(scopeKey) : "/";
+          return (
+            <li className="turn is-link" key={item.timer_id}>
+              <QQAvatar
+                kind="icon"
+                icon={Clock}
+                name={title}
+                size="md"
+                tone="accent"
+              />
+              <div className="turn-main">
+                <div className="turn-title">
+                  <a href={route} onClick={linkHandler(route)}>
+                    {title}
+                  </a>
+                  <Badge>剩余 {formatDuration(item.remaining_seconds)}</Badge>
+                </div>
+                <div className="turn-meta muted">
+                  {item.note}
+                  {scope ? ` · 延迟 ${formatDuration(item.delay_seconds)}` : ""}
+                </div>
+              </div>
+              <span />
+              <Button
+                size="sm"
+                variant="danger-ghost"
+                icon={Trash2}
+                onClick={() => void cancel(item.timer_id)}
+              >
+                取消
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 
@@ -589,6 +665,7 @@ export function OverviewPage() {
               <p className="card-empty">当前没有进行中的对话。被唤醒的会话会在这里显示进度和上下文用量。</p>
             )}
           </section>
+          <ActiveTimers timers={data?.timers ?? []} />
           <RetainedSessions sessions={data?.sessions ?? []} />
           <ActivityFeed activity={data?.activity ?? []} />
         </div>

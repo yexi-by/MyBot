@@ -1,9 +1,10 @@
-import { useEffect } from "react";
-import { CircleAlert, Menu, Monitor, Moon, Search, Settings, Sun, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CircleAlert, KeyRound, LogOut, Menu, Monitor, Moon, Search, Settings, Sun, X } from "lucide-react";
 import { CommandPalette } from "./components/CommandPalette";
 import { GlobalDialog, Toasts } from "./components/Overlays";
 import { ConflictDialog, GlobalBanners, PowerOverlay, QQAvatar } from "./components/shell";
 import { Button, EmptyState, IconButton, Spinner, StatusDot } from "./components/primitives";
+import { errorMessage, loginConsole, logoutConsole, refreshAuthGate, useAuthGate } from "./lib/api";
 import { getConfig, loadConfig, pollConfig, save, useConfig } from "./lib/config";
 import { linkHandler, navigate, useLocation } from "./lib/navigation";
 import { accountResource, runtimeResource, useResource } from "./lib/resource";
@@ -102,6 +103,7 @@ function SidebarAccount() {
 
 function Sidebar({ route }: { route: Route }) {
   const theme = useTheme();
+  const auth = useAuthGate();
   const runtime = useResource(runtimeResource, 10_000).data;
   const busyTurns = runtime?.turns.length ?? 0;
   const ThemeIcon = themeIcons[theme];
@@ -169,8 +171,88 @@ function Sidebar({ route }: { route: Route }) {
           <Settings size={19} aria-hidden="true" />
           <span className="nav-label">设置</span>
         </a>
+        {auth.protected && (
+          <button
+            type="button"
+            className="nav-item"
+            title="锁定并退出当前浏览器登录"
+            aria-label="锁定退出"
+            onClick={() => void logoutConsole()}
+          >
+            <LogOut size={19} aria-hidden="true" />
+            <span className="nav-label">锁定退出</span>
+          </button>
+        )}
       </div>
     </aside>
+  );
+}
+
+function UnlockScreen() {
+  const theme = useTheme();
+  const ThemeIcon = themeIcons[theme];
+  const [token, setToken] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const trimmed = token.trim();
+    if (!trimmed || submitting) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      await loginConsole(trimmed);
+      setToken("");
+      await loadConfig();
+      void runtimeResource.refresh();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return (
+    <div className="unlock-screen">
+      <form className="card unlock-card" onSubmit={(event) => void submit(event)}>
+        <div className="unlock-head">
+          <span className="brand">
+            <Logo />
+            <span className="brand-name">QQ Agent Harness</span>
+          </span>
+          <IconButton
+            icon={ThemeIcon}
+            label={"切换主题（当前：" + themeLabels[theme] + "）"}
+            onClick={cycleTheme}
+          />
+        </div>
+        <div className="stack">
+          <div>
+            <h2>控制台已锁定</h2>
+            <p className="muted small">请输入控制台访问口令（server.auth_token）以继续管理。</p>
+          </div>
+          <label className="unlock-field">
+            <span className="sr-only">访问口令</span>
+            <KeyRound size={16} className="muted" aria-hidden="true" />
+            <input
+              type="password"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+              placeholder="输入访问口令"
+              autoFocus
+              autoComplete="current-password"
+            />
+          </label>
+          {error && (
+            <p className="danger-text small" role="alert">
+              {error}
+            </p>
+          )}
+          <Button type="submit" variant="primary" loading={submitting} disabled={!token.trim()}>
+            解锁控制台
+          </Button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -257,12 +339,19 @@ function Page({ route }: { route: Route }) {
 
 export default function App() {
   const location = useLocation();
+  const auth = useAuthGate();
   const state = useConfig();
   const ui = useUi();
   const route = parseRoute(location);
 
   useEffect(() => {
-    void loadConfig();
+    void refreshAuthGate().then((gate) => {
+      if (!gate.locked) void loadConfig();
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!auth.checked || auth.locked) return;
     const timer = setInterval(() => {
       if (!document.hidden) void pollConfig();
     }, 5000);
@@ -274,7 +363,7 @@ export default function App() {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", visible);
     };
-  }, []);
+  }, [auth.checked, auth.locked]);
 
   useEffect(() => {
     if (state.repairPath) void navigate("/settings/config-file", { replace: true });
@@ -309,6 +398,22 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  if (!auth.checked) {
+    return (
+      <div className="page-center">
+        <Spinner label="正在连接控制台…" />
+      </div>
+    );
+  }
+  if (auth.locked) {
+    return (
+      <>
+        <UnlockScreen />
+        <Toasts />
+      </>
+    );
+  }
 
   return (
     <div className={"app" + (ui.nav ? " nav-open" : "")}>

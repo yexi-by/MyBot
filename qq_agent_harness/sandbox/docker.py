@@ -6,7 +6,7 @@ from typing import Protocol
 
 import httpx
 
-from ..contracts import JSON_OBJECT, JsonObject
+from ..contracts import JSON_OBJECT, JsonObject, JsonValue
 from ..settings import SandboxSettings
 from .quota import SandboxUnavailable
 
@@ -116,7 +116,13 @@ def container_config(
     network: str,
     proxy: str,
     settings: SandboxSettings,
+    exec_tmp_host: str | None = None,
 ) -> JsonObject:
+    binds: list[JsonValue] = [f"{host_workspace}:/workspace:rw"]
+    tmpdir = "/workspace/.tmp"
+    if exec_tmp_host:
+        binds.append(f"{exec_tmp_host}:/tmp:rw")
+        tmpdir = "/tmp"
     return {
         "Image": image,
         "User": "1000:1000",
@@ -134,7 +140,7 @@ def container_config(
             "UV_CACHE_DIR=/workspace/.cache/uv",
             "UV_PYTHON_DOWNLOADS=never",
             "MPLCONFIGDIR=/workspace/.cache/matplotlib",
-            "TMPDIR=/workspace/.tmp",
+            f"TMPDIR={tmpdir}",
             "npm_config_cache=/workspace/.cache/npm",
             "npm_config_prefix=/workspace/.home/.npm",
             "NODE_USE_ENV_PROXY=1",
@@ -161,7 +167,7 @@ def container_config(
             "ReadonlyRootfs": True,
             "CapDrop": ["ALL"],
             "SecurityOpt": ["no-new-privileges:true"],
-            "Binds": [f"{host_workspace}:/workspace:rw"],
+            "Binds": binds,
             "NetworkMode": network,
             "Dns": ["127.0.0.1"],
             "Memory": settings.memory_bytes,

@@ -1,4 +1,5 @@
-import type { Json } from "./types";
+import { useSyncExternalStore } from "react";
+import type { AuthStatus, Json } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -10,6 +11,32 @@ export class ApiError extends Error {
   }
 }
 
+export interface AuthGateState {
+  checked: boolean;
+  protected: boolean;
+  locked: boolean;
+}
+
+let authGate: AuthGateState = {
+  checked: false,
+  protected: false,
+  locked: false,
+};
+const authListeners = new Set<() => void>();
+function emitAuth(next: Partial<AuthGateState>) {
+  authGate = { ...authGate, ...next };
+  authListeners.forEach((fn) => fn());
+}
+export function useAuthGate(): AuthGateState {
+  return useSyncExternalStore(
+    (cb) => {
+      authListeners.add(cb);
+      return () => authListeners.delete(cb);
+    },
+    () => authGate,
+  );
+}
+
 type Data = Record<string, unknown>;
 const record = (value: unknown): value is Data =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -19,6 +46,10 @@ const arrayOf = (value: unknown, check: (entry: unknown) => boolean) =>
 
 // 只校验页面直接依赖的字段，用于尽早发现前后端版本不一致。
 const shapes: [RegExp, (value: Data) => boolean][] = [
+  [
+    /^\/api\/auth\/status$/,
+    (v) => typeof v.protected === "boolean" && typeof v.authenticated === "boolean",
+  ],
   [
     /^\/api\/config$/,
     (v) =>
@@ -167,6 +198,9 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const payload: unknown = await response.json().catch(() => ({}));
   if (!response.ok) {
     const data = record(payload) ? payload : {};
+    if (response.status === 401 && data.auth_required === true) {
+      emitAuth({ checked: true, protected: true, locked: true });
+    }
     const detail =
       typeof data.detail === "string"
         ? data.detail
@@ -184,6 +218,39 @@ export const post = <T>(url: string, body: Json = {}) =>
   request<T>(url, { method: "POST", body: JSON.stringify(body) });
 export const put = <T>(url: string, body: Json) =>
   request<T>(url, { method: "PUT", body: JSON.stringify(body) });
+
+export async function refreshAuthGate(): Promise<AuthGateState> {
+  try {
+    const status = await get<AuthStatus>("/api/auth/status");
+    emitAuth({
+      checked: true,
+      protected: status.protected,
+      locked: status.protected && !status.authenticated,
+    });
+  } catch {
+    emitAuth({ checked: true });
+  }
+  return authGate;
+}
+
+export async function loginConsole(token: string): Promise<void> {
+  const res = await post<AuthStatus>("/api/auth/login", { token });
+  emitAuth({
+    checked: true,
+    protected: res.protected,
+    locked: false,
+  });
+}
+
+export async function logoutConsole(): Promise<void> {
+  await post<{ authenticated: boolean }>("/api/auth/logout");
+  const status = await get<AuthStatus>("/api/auth/status");
+  emitAuth({
+    checked: true,
+    protected: status.protected,
+    locked: status.protected && !status.authenticated,
+  });
+}
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

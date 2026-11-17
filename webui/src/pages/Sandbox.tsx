@@ -1,22 +1,25 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   ChevronRight,
   CircleAlert,
   CircleStop,
   Eraser,
+  Eye,
+  EyeOff,
   File,
   Folder,
   FolderOpen,
   RefreshCw,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import { ConfigSection, FieldShell } from "../components/form";
-import { Badge, Banner, Button, EmptyState, Meter, Spinner, StatusDot, Switch, Tabs } from "../components/primitives";
+import { Badge, Banner, Button, EmptyState, Meter, Segmented, Spinner, StatusDot, Switch, Tabs } from "../components/primitives";
 import { DetailHeader, MasterDetail, QQAvatar } from "../components/shell";
 import { errorMessage, get, post } from "../lib/api";
 import { change, useConfig } from "../lib/config";
-import { formatBytes } from "../lib/format";
+import { formatBytes, formatRelative } from "../lib/format";
 import { linkHandler, navigate } from "../lib/navigation";
 import { sandboxResource, useResource } from "../lib/resource";
 import { object } from "../lib/types";
@@ -24,14 +27,20 @@ import type { SandboxFile } from "../lib/types";
 import { confirm, toast } from "../lib/ui";
 import { fieldId, sandboxSection } from "../schema/fields";
 
-type Mode = "cache" | "selected" | "all";
+type Mode = "temp" | "cache" | "selected" | "all";
+type SortBy = "name" | "mtime" | "size";
 
 async function cleanup(mode: Mode, paths: string[] = []): Promise<boolean> {
   const names = paths.map((path) => path.split("/").pop() || path);
   const text = {
+    temp: {
+      title: "清理临时文件与执行日志？",
+      message: "删除 .tmp、.scratch（临时媒体与中间帧）及 .outputs（旧命令输出日志）。用户目录文件与依赖缓存均保留。",
+      label: "清理临时文件",
+    },
     cache: {
       title: "清理依赖缓存？",
-      message: "删除共享工作区里的依赖缓存，之后安装依赖可能需要重新下载。代码和产物保留。",
+      message: "删除共享工作区里的依赖缓存（.cache），之后安装依赖可能需要重新下载。代码和产物保留。",
       label: "清理缓存",
     },
     selected: {
@@ -53,7 +62,16 @@ async function cleanup(mode: Mode, paths: string[] = []): Promise<boolean> {
     return false;
   try {
     await post("/api/sandbox/cleanup", { mode, paths, confirmed: true });
-    toast(mode === "cache" ? "已清理依赖缓存" : mode === "all" ? "已清空共享工作区" : "已删除", "success");
+    toast(
+      mode === "temp"
+        ? "已清理临时文件与执行日志"
+        : mode === "cache"
+          ? "已清理依赖缓存"
+          : mode === "all"
+            ? "已清空共享工作区"
+            : "已删除",
+      "success",
+    );
     void sandboxResource.refresh();
     return true;
   } catch (error) {
@@ -70,6 +88,8 @@ function Files({ busy }: { busy: boolean }) {
   const [loading, setLoading] = useState(false);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [total, setTotal] = useState(0);
+  const [hideSystem, setHideSystem] = useState(true);
+  const [sortBy, setSortBy] = useState<SortBy>("mtime");
   const sequence = useRef(0);
   const load = useCallback(async (offset = 0) => {
     const request = ++sequence.current;
@@ -99,7 +119,19 @@ function Files({ busy }: { busy: boolean }) {
     return () => { sequence.current++; };
   }, [load]);
   const parts = path ? path.split("/") : [];
-  const all = files ?? [];
+  const rawAll = files ?? [];
+  const isSysItem = (file: SandboxFile) =>
+    Boolean(file.is_system) || (!path && file.name.startsWith("."));
+  const hiddenCount = !path && hideSystem ? rawAll.filter(isSysItem).length : 0;
+  const all = useMemo(() => {
+    const filtered = !path && hideSystem ? rawAll.filter((file) => !isSysItem(file)) : [...rawAll];
+    return filtered.sort((a, b) => {
+      if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+      if (sortBy === "mtime") return (b.mtime ?? 0) - (a.mtime ?? 0) || a.name.localeCompare(b.name);
+      if (sortBy === "size") return b.size - a.size || a.name.localeCompare(b.name);
+      return a.name.localeCompare(b.name);
+    });
+  }, [rawAll, path, hideSystem, sortBy]);
   const allSelected = all.length > 0 && all.every((file) => selected.has(file.path));
   const toggle = (file: string) =>
     setSelected((current) => {
@@ -128,6 +160,30 @@ function Files({ busy }: { busy: boolean }) {
             </span>
           ))}
         </nav>
+        {!path && (
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={hideSystem ? EyeOff : Eye}
+            onClick={() => setHideSystem((v) => !v)}
+            title={hideSystem ? "点击显示 .cache / .scratch / .outputs 等系统目录" : "折叠隐藏系统目录"}
+          >
+            {hideSystem
+              ? "系统目录已折叠" + (hiddenCount > 0 ? `（${hiddenCount}）` : "")
+              : "隐藏系统目录"}
+          </Button>
+        )}
+        <Segmented
+          size="sm"
+          label="文件排序"
+          value={sortBy}
+          onChange={setSortBy}
+          options={[
+            { value: "mtime", label: "最近修改" },
+            { value: "size", label: "大小" },
+            { value: "name", label: "名称" },
+          ]}
+        />
         {selected.size > 0 && (
           <Button
             size="sm"
@@ -167,8 +223,16 @@ function Files({ busy }: { busy: boolean }) {
           <Spinner label="正在读取文件" />
         </div>
       ) : all.length === 0 ? (
-        <EmptyState icon={FolderOpen} title={path ? "这个目录是空的" : "工作区还是空的"} compact>
-          {path ? "" : "Agent 执行代码时写入的文件会出现在这里。"}
+        <EmptyState
+          icon={FolderOpen}
+          title={path ? "这个目录是空的" : hiddenCount > 0 ? "暂无用户文件" : "工作区还是空的"}
+          compact
+        >
+          {path
+            ? ""
+            : hiddenCount > 0
+              ? `已自动折叠 ${hiddenCount} 个系统与缓存目录；Agent 创建的长期课题目录与文件会显示在这里。`
+              : "Agent 执行代码时写入的文件会出现在这里。"}
         </EmptyState>
       ) : (
         <div className="table-wrap">
@@ -184,6 +248,7 @@ function Files({ busy }: { busy: boolean }) {
                   />
                 </th>
                 <th>名称</th>
+                <th className="num-cell">修改时间</th>
                 <th className="num-cell">大小</th>
               </tr>
             </thead>
@@ -221,6 +286,9 @@ function Files({ busy }: { busy: boolean }) {
                         {file.name}
                       </span>
                     )}
+                  </td>
+                  <td className="num-cell num muted small">
+                    {file.mtime ? formatRelative(file.mtime) : "—"}
                   </td>
                   <td className="num-cell num secondary">{file.is_dir ? "—" : formatBytes(file.size)}</td>
                 </tr>
@@ -262,7 +330,13 @@ function SandboxOverview() {
   const state = !data.available
     ? { text: "不可用", tone: "danger" as const }
     : data.busy
-      ? { text: "执行中", tone: "accent" as const }
+      ? {
+          text:
+            data.active_count && data.active_count > 1
+              ? `执行中（${data.active_count}）`
+              : "执行中",
+          tone: "accent" as const,
+        }
       : { text: "可用", tone: "success" as const };
   return (
     <div className="stack">
@@ -319,6 +393,9 @@ function SandboxOverview() {
                 停止执行
               </Button>
             )}
+            <Button icon={Sparkles} disabled={data.busy} onClick={() => void cleanup("temp")}>
+              清理临时与日志
+            </Button>
             <Button icon={Eraser} disabled={data.busy} onClick={() => void cleanup("cache")}>
               清理依赖缓存
             </Button>
