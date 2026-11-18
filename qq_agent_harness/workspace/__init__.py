@@ -7,7 +7,7 @@ from .executor import (
     WorkspaceOverloadedError,
     WorkspaceService,
 )
-from .storage import CleanupMode, Workspace, WorkspaceUnavailable
+from .storage import CleanupMode, Workspace, WorkspaceUnavailable, workspace_exec_ids
 from .tools import CATEGORY_LABELS, build_tools
 
 __all__ = [
@@ -21,4 +21,5 @@ __all__ = [
     "WorkspaceService",
     "WorkspaceUnavailable",
     "build_tools",
+    "workspace_exec_ids",
 ]

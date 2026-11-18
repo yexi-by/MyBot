@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import time
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal
@@ -36,6 +37,24 @@ USAGE_CACHE_TTL = 5.0
 
 class WorkspaceUnavailable(RuntimeError):
     """工作区目录不可用或达到配置的空间上限。"""
+
+
+def workspace_exec_ids() -> tuple[int, int] | None:
+    """容器主进程以 uid 0 隔离配置目录时，返回工作区低权限降权 (uid, gid)。"""
+    if sys.platform == "win32" or os.geteuid() != 0:
+        return None
+    raw_uid = os.environ.get("HARNESS_WORKSPACE_UID", "").strip()
+    if not raw_uid:
+        return None
+    try:
+        uid = int(raw_uid)
+        raw_gid = os.environ.get("HARNESS_WORKSPACE_GID", "").strip()
+        gid = int(raw_gid) if raw_gid else uid
+    except ValueError as error:
+        raise ValueError("HARNESS_WORKSPACE_UID/GID 必须为整数") from error
+    if uid <= 0 or gid <= 0:
+        raise ValueError("HARNESS_WORKSPACE_UID/GID 必须为大于 0 的低权限账号")
+    return uid, gid
 
 
 def _remove_tree_force(target: Path) -> None:
@@ -77,6 +96,20 @@ class Workspace:
 
     def invalidate_usage(self) -> None:
         self._cached_bytes = None
+
+    def _chown_path(self, target: Path) -> None:
+        if sys.platform != "win32" and (ids := workspace_exec_ids()) is not None:
+            os.chown(target, ids[0], ids[1], follow_symlinks=False)
+
+    def _chown_fd(self, fd: int) -> None:
+        if sys.platform != "win32" and (ids := workspace_exec_ids()) is not None:
+            os.fchown(fd, ids[0], ids[1])
+
+    def _ensure_root_dir(self) -> None:
+        created = not self.root.exists()
+        self.root.mkdir(parents=True, exist_ok=True)
+        if created or (sys.platform != "win32" and self.root.stat().st_uid == 0):
+            self._chown_path(self.root)
 
     def ensure_distinct_from(self, config_root: Path | None) -> None:
         if config_root is None:
@@ -221,7 +254,7 @@ class Workspace:
     def write(
         self, relative: str, content: bytes, *, overwrite: bool = False, append: bool = False
     ) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
+        self._ensure_root_dir()
         path = self.path(relative)
         if path.exists() and not stat.S_ISREG(path.lstat().st_mode):
             raise ValueError("只能写入普通文件")
@@ -230,11 +263,12 @@ class Workspace:
         flags |= os.O_APPEND if append else os.O_TRUNC if overwrite else os.O_EXCL
         fd = os.open(path, flags, 0o600)
         with os.fdopen(fd, "wb") as stream:
+            self._chown_fd(stream.fileno())
             stream.write(content)
         self.invalidate_usage()
 
     def open_exclusive_binary(self, relative: str) -> BinaryIO:
-        self.root.mkdir(parents=True, exist_ok=True)
+        self._ensure_root_dir()
         path = self.path(relative)
         self.make_parents(relative)
         flags = (
@@ -246,6 +280,7 @@ class Workspace:
         )
         fd = os.open(path, flags, 0o600)
         try:
+            self._chown_fd(fd)
             return os.fdopen(fd, "wb")
         except Exception:
             os.close(fd)
@@ -439,12 +474,14 @@ class Workspace:
             parent = parent / component
             if not parent.exists():
                 parent.mkdir(mode=0o700)
+                self._chown_path(parent)
 
     def create_exec_tmp(self, execution_id: str) -> Path:
         self.prepare_dirs()
         rel = f".tmp/exec-{execution_id}"
         target = self.path(rel)
         target.mkdir(mode=0o700, exist_ok=True)
+        self._chown_path(target)
         return target
 
     def remove_exec_tmp(self, execution_id: str) -> None:
@@ -510,10 +547,13 @@ class Workspace:
         return removed
 
     def prepare_dirs(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
+        self._ensure_root_dir()
         for relative in RESERVED_ROOTS:
             path = self.path(relative)
+            existed = path.exists()
             path.mkdir(mode=0o700, exist_ok=True)
+            if not existed or (sys.platform != "win32" and path.lstat().st_uid == 0):
+                self._chown_path(path)
 
     def prepare(self, *, clean_stale_exec_tmp: bool = False) -> None:
         self.prepare_dirs()

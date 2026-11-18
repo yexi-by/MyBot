@@ -16,7 +16,7 @@ from pydantic import Field
 
 from ..contracts import JSON_OBJECT, JsonObject, Model
 from ..settings import WorkspaceSettings
-from .storage import CleanupMode, Workspace, WorkspaceUnavailable
+from .storage import CleanupMode, Workspace, WorkspaceUnavailable, workspace_exec_ids
 
 
 class WorkspaceBusyError(RuntimeError):
@@ -242,6 +242,10 @@ class LocalSpawner:
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
         else:
+            ids = workspace_exec_ids()
+            extra: dict[str, object] = (
+                {"user": ids[0], "group": ids[1], "extra_groups": []} if ids is not None else {}
+            )
             proc = await asyncio.create_subprocess_exec(
                 "/bin/bash",
                 "--noprofile",
@@ -254,6 +258,7 @@ class LocalSpawner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
+                **extra,  # pyright: ignore[reportArgumentType]
             )
         return _LocalProcess(proc)
 

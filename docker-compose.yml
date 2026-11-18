@@ -5,6 +5,17 @@ services:
     image: ${HARNESS_IMAGE:?use an explicit application image tag}
     command: ["qq-agent-harness", "--config", "/app/config/harness.toml"]
     network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ./config:/app/config:rw
       - ${WORKSPACE_DIR:-./workspace}:/workspace:rw

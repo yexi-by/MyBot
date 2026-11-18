@@ -81,7 +81,7 @@ WebUI 的“上下文”页列出内存中保留的会话，可查看每个会�
 
 ## 共享工作区与单容器部署
 
-单镜像同时包含后端、WebUI 与实用工作区工具链（Python 3.14、`uv`、Node.js 24、Git、FFmpeg、ripgrep/fd/jq、Noto CJK/Emoji 字体及常用数据/文档/绘图库），以非特权 `1000:1000` 用户单容器运行，不挂载 Docker socket，也不依赖 Btrfs 专用子卷或宿主机防火墙脚本。
+单镜像同时包含后端、WebUI 与实用工作区工具链（Python 3.14、`uv`、Node.js 24、Git、FFmpeg、ripgrep/fd/jq、Noto CJK/Emoji 字体及常用数据/文档/绘图库），单容器运行并采用双 UID 内核权限隔离（主服务仅持最小能力集并独占 `0700 /app` 及 `/app/config`，`workspace__exec` 子进程以 `no-new-privileges` 降权至独立 `1000:1000` 低权限用户），不挂载 Docker socket，也不依赖 Btrfs 专用子卷或宿主机防火墙脚本。
 
 ```powershell
 docker build -t qq-agent-harness:1.0.0 .

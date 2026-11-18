@@ -5,7 +5,9 @@ QQ Agent Harness 采用单容器持久化共享工作区（`[workspace]`），�
 ## 目录结构与隔离边界
 
 - **工作区根目录（`workspace.root`）**：默认 `./workspace`，容器部署时挂载宿主机独立目录至 `/workspace`（`WORKSPACE_DIR=/path/to/workspace`）。
-- **配置目录严格分离**：启动与操作时自动校验 `workspace.root` 与 `config/` 互不重叠、互不包含；任何指向工作区外的路径穿越、外链符号链接或命名管道/设备文件都会被拒绝。
+- **配置目录严格分离与双 UID 内核隔离**：
+  - 启动与操作时自动校验 `workspace.root` 与 `config/` 互不重叠、互不包含；任何指向工作区外的路径穿越、外链符号链接或命名管道/设备文件都会被拒绝。
+  - 容器部署时启用内核双 UID 隔离：主服务以最小能力集（`SETUID`/`SETGID`/`CHOWN`/`DAC_OVERRIDE`/`FOWNER`/`KILL`）独占 `0700` 的 `/app`（含 `/app/config`），而 `workspace__exec` 拉起的所有子进程均通过内核降权运行在独立低权限用户 `1000:1000`（`HARNESS_WORKSPACE_UID=1000`、`no-new-privileges:true`、空 capability），从内核层彻底阻断子进程读取配置/密钥或触碰主进程 `/proc/1`；主进程在 `/workspace` 写入的文件和目录会自动 `chown` 至 `1000:1000`，保证双向读写畅通。
 - **内置系统目录（WebUI 默认折叠）**：
   - `.home/`：命令子进程的 `HOME` 与 npm 全局前缀目录。
   - `.cache/`：`uv`、`npm`、`matplotlib` 与 `XDG_CACHE_HOME` 缓存目录，可通过控制台「清理依赖缓存」一键释放。

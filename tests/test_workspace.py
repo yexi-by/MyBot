@@ -1,7 +1,10 @@
 """持久化共享工作区（Workspace）行为验证：路径边界、软容量预算、真实本地子进程、洁净环境与 Web 接口。"""
 
+import asyncio
 import os
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,8 +20,10 @@ from qq_agent_harness.workspace import (
     Workspace,
     WorkspaceService,
     WorkspaceUnavailable,
+    workspace_exec_ids,
 )
 from qq_agent_harness.workspace import build_tools as workspace_tools
+from qq_agent_harness.workspace.executor import LocalSpawner
 
 
 def test_workspace_path_boundaries_and_config_overlap(tmp_path: Path) -> None:
@@ -198,3 +203,72 @@ def test_web_workspace_endpoints_status_files_and_cleanup(tmp_path: Path) -> Non
         assert cleaned.status_code == 200
         assert (ws_dir / "report.md").exists()
         assert list((ws_dir / ".cache").iterdir()) == []
+
+
+async def test_workspace_dual_uid_privilege_drop_and_chown_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from qq_agent_harness.workspace import executor as executor_mod
+    from qq_agent_harness.workspace import storage as storage_mod
+
+    # 1. 校验非法/特权 UID 被明确拒绝（模拟 POSIX root 环境）
+    monkeypatch.setattr(storage_mod.sys, "platform", "linux")
+    monkeypatch.setattr(storage_mod.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setenv("HARNESS_WORKSPACE_UID", "0")
+    with pytest.raises(ValueError, match="必须为大于 0"):
+        workspace_exec_ids()
+
+    monkeypatch.setenv("HARNESS_WORKSPACE_UID", "1000")
+    monkeypatch.setenv("HARNESS_WORKSPACE_GID", "1000")
+    assert workspace_exec_ids() == (1000, 1000)
+
+    # 2. POSIX LocalSpawner.spawn 在双 UID 启用时必须传递 user/group/extra_groups=[]
+    captured: list[tuple[tuple[object, ...], dict[str, Any]]] = []
+
+    class FakeProc:
+        stdout = None
+        returncode = 0
+        pid = 12345
+
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_exec(*args: object, **kwargs: Any) -> FakeProc:
+        captured.append((args, kwargs))
+        return FakeProc()
+
+    with monkeypatch.context() as mp:
+        mp.setattr(executor_mod.os, "name", "posix")
+        mp.setattr(executor_mod, "workspace_exec_ids", lambda: (1000, 1000))
+        mp.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+        await LocalSpawner().spawn("id", tmp_path, {"PATH": "/usr/bin"})
+    assert len(captured) == 1
+    spawn_kwargs = captured[0][1]
+    assert spawn_kwargs["user"] == 1000
+    assert spawn_kwargs["group"] == 1000
+    assert spawn_kwargs["extra_groups"] == []
+    assert spawn_kwargs["start_new_session"] is True
+
+    # 3. 验证 Workspace 写入文件和创建目录时在双 UID 模式下同步触发 _chown_path / _chown_fd
+    chown_paths: list[tuple[Path, int, int]] = []
+    chown_fds: list[tuple[int, int, int]] = []
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        storage_mod.os,
+        "chown",
+        lambda path, uid, gid, **_kw: chown_paths.append((Path(path), uid, gid)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        storage_mod.os,
+        "fchown",
+        lambda fd, uid, gid: chown_fds.append((fd, uid, gid)),
+        raising=False,
+    )
+    ws = Workspace(tmp_path / "dual_ws")
+    ws.write("sub/data.txt", b"hello")
+    assert any(p == ws.root and u == 1000 and g == 1000 for p, u, g in chown_paths)
+    assert any(p == ws.root / "sub" and u == 1000 and g == 1000 for p, u, g in chown_paths)
+    assert len(chown_fds) == 1 and chown_fds[0][1:] == (1000, 1000)
