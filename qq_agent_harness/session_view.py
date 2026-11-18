@@ -7,7 +7,7 @@ from pydantic import TypeAdapter
 
 from .context import visible_data
 from .contracts import JSON_OBJECT, JsonObject, JsonValue
-from .providers import ModelSession
+from .providers import SUMMARY_CLOSE_TAG, SUMMARY_OPEN_TAG, ModelSession
 
 ANY_JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 # 消息段、工具参数或结果里可能夹带 base64；只保留前缀，数据本身不进入接口响应。
@@ -194,11 +194,20 @@ def _output(item: JsonObject, base: JsonObject) -> list[JsonObject]:
     return [{**base, "kind": "other", "label": str(kind), "text": ""}]
 
 
+def _summary_view_text(content: JsonValue) -> str:
+    value = _text(content)
+    start = value.find(SUMMARY_OPEN_TAG)
+    end = value.rfind(SUMMARY_CLOSE_TAG)
+    if start != -1 and end != -1 and end > start:
+        return value[start + len(SUMMARY_OPEN_TAG) : end].strip()
+    return _body(value)
+
+
 def _entry(kind: str, content: JsonValue) -> JsonObject:
     if kind == "system":
         return {"kind": "system", "text": _text(content)}
     if kind == "summary":
-        return {"kind": kind, "text": _body(content)}
+        return {"kind": kind, "text": _summary_view_text(content)}
     if kind == "transfer":
         return {"kind": kind, "text": _transfer(content)}
     if kind == "media":

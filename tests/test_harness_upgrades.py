@@ -32,7 +32,7 @@ from qq_agent_harness.contracts import (
     schema,
 )
 from qq_agent_harness.napcat.media import MediaReader
-from qq_agent_harness.prompts import SILENT_RESPONSE
+from qq_agent_harness.prompts import SILENT_RESPONSE, compose_prompt
 from qq_agent_harness.providers import MediaInput, ModelSession
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime
@@ -41,6 +41,7 @@ from qq_agent_harness.sandbox.runner import ExecuteRequest, Runner
 from qq_agent_harness.sandbox.runner import create_app as runner_app
 from qq_agent_harness.sandbox.tools import build_tools as sandbox_tools
 from qq_agent_harness.sandbox.workspace import Workspace
+from qq_agent_harness.session_view import project
 from qq_agent_harness.settings import ModelEndpoint, SandboxSettings
 from qq_agent_harness.skills import build_tools as skill_tools
 from qq_agent_harness.subagent import build_tools as subagent_tools
@@ -847,3 +848,54 @@ async def test_skills_subagent_timer_and_console_auth(tmp_path: Path) -> None:
             ).status_code
             == 200
         )
+
+
+@pytest.mark.parametrize("protocol", ["chat_completions", "responses"])
+async def test_compaction_first_person_memory_prompt_and_envelope_projection(
+    protocol: Literal["chat_completions", "responses"],
+) -> None:
+    summary_requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        serialized = json.dumps(body, ensure_ascii=False)
+        if "待整理为第一人称前情记忆的本会话记录" in serialized:
+            summary_requests.append(serialized)
+            return httpx.Response(
+                200,
+                json=answer(
+                    protocol,
+                    "<session_memory>\n权限狗（2172959822）晒出满格额度图，我顺着绿条夸他粮仓爆满。\n</session_memory>",
+                ),
+            )
+        return httpx.Response(200, json=answer(protocol, "闲聊内容_" * 300))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        endpoint = ModelEndpoint(
+            protocol=protocol,
+            model="test-compact",
+            max_context_tokens=8192,
+            stream=False,
+        )
+        session = ModelSession(
+            endpoint,
+            compose_prompt("你是耄耋，说话干脆利落。"),
+            "唤醒消息_" * 200,
+            client=client,
+        )
+        await session.step([])
+        session.end_turn("completed")
+        await session.compact_idle(endpoint)
+
+    assert len(summary_requests) == 1
+    assert "第一人称前情记忆笔记" in summary_requests[0]
+    assert "你是耄耋" not in summary_requests[0]
+
+    raw_summary_item = str(session.items[1]["content"])
+    assert raw_summary_item.count("<session_memory>") == 1
+    assert raw_summary_item.count("</session_memory>") == 1
+    assert "自身前情记忆" in raw_summary_item
+
+    projected = project(session)
+    assert projected[1]["kind"] == "summary"
+    assert projected[1]["text"] == "权限狗（2172959822）晒出满格额度图，我顺着绿条夸他粮仓爆满。"
