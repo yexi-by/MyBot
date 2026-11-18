@@ -24,8 +24,8 @@ export function evaluate(
   catalog: Map<string, Tool>,
 ): Access {
   if (conversation.enabled !== true) return { allowed: false, reason: "会话未启用" };
-  if (tool.name.startsWith("sandbox__") && object(config.sandbox).enabled !== true)
-    return { allowed: false, reason: "共享沙箱未启用" };
+  if (tool.name.startsWith("workspace__") && object(config.workspace).enabled !== true)
+    return { allowed: false, reason: "共享工作区未启用" };
   if (tool.name.startsWith("image__")) {
     const image = object(config.image);
     if (image.enabled !== true) return { allowed: false, reason: "尚未启用图像生成" };

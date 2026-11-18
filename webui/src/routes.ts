@@ -1,6 +1,6 @@
 import {
-  Box,
   FileText,
+  FolderOpen,
   LayoutDashboard,
   MessagesSquare,
   ScrollText,
@@ -40,7 +40,7 @@ export type Route =
   | { page: "providers"; id: string }
   | { page: "prompts"; path: string }
   | { page: "tools"; view: "catalog" | "image" | "tts" | "mcp" | "napcat"; id: string; tool: string }
-  | { page: "sandbox"; view: "overview" | "settings" }
+  | { page: "workspace"; view: "overview" | "settings" }
   | { page: "settings"; section: SettingsSection }
   | { page: "missing" };
 
@@ -82,9 +82,9 @@ export function parseRoute(location: string): Route {
     if (second === "napcat" && parts.length === 2)
       return { page: "tools", view: "napcat", id: "", tool };
   }
-  if (head === "sandbox") {
-    if (!second) return { page: "sandbox", view: "overview" };
-    if (second === "settings" && parts.length === 2) return { page: "sandbox", view: "settings" };
+  if (head === "workspace") {
+    if (!second) return { page: "workspace", view: "overview" };
+    if (second === "settings" && parts.length === 2) return { page: "workspace", view: "settings" };
   }
   if (head === "settings") {
     const section = settingsSections.find((item) => item.id === (second ?? "napcat"));
@@ -106,7 +106,7 @@ export const navItems: NavItem[] = [
   { path: "/providers", label: "服务商", icon: Sparkles, page: "providers" },
   { path: "/prompts", label: "提示词", icon: FileText, page: "prompts" },
   { path: "/tools", label: "工具", icon: Wrench, page: "tools" },
-  { path: "/sandbox", label: "沙箱", icon: Box, page: "sandbox" },
+  { path: "/workspace", label: "工作区", icon: FolderOpen, page: "workspace" },
   { path: "/settings", label: "设置", icon: Settings, page: "settings" },
 ];
 

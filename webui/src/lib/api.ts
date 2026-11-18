@@ -113,15 +113,16 @@ const shapes: [RegExp, (value: Data) => boolean][] = [
   ],
   [/^\/api\/napcat\/account$/, (v) => text(v.bot_id) && text(v.nickname)],
   [
-    /^\/api\/sandbox\/status$/,
+    /^\/api\/workspace\/status$/,
     (v) =>
       typeof v.available === "boolean" &&
       typeof v.busy === "boolean" &&
-      typeof v.quota_bytes === "number" &&
+      text(v.root) &&
+      typeof v.max_bytes === "number" &&
       (v.used_bytes === null || typeof v.used_bytes === "number"),
   ],
   [
-    /^\/api\/sandbox\/files$/,
+    /^\/api\/workspace\/files$/,
     (v) =>
       text(v.path) &&
       arrayOf(

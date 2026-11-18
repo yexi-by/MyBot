@@ -736,7 +736,7 @@ class AgentRuntime:
         key = scope.key
 
         async def read_workspace(path: str) -> bytes:
-            tool = self.registry.tools.get("sandbox__read_file")
+            tool = self.registry.tools.get("workspace__read_file")
             if not tool or not self.read_workspace:
                 raise ValueError("当前群未开放共享工作区读取能力")
             denied = self.registry.authorize(
@@ -745,7 +745,7 @@ class AgentRuntime:
                 {
                     "path": path,
                     "offset": 0,
-                    "limit": self.store.settings.sandbox.transfer_max_bytes,
+                    "limit": self.store.settings.workspace.transfer_max_bytes,
                 },
             )
             if denied:
@@ -753,7 +753,7 @@ class AgentRuntime:
             return await self.read_workspace(path)
 
         async def write_workspace(path: str, data: bytes, *, overwrite: bool = False) -> None:
-            tool = self.registry.tools.get("sandbox__write_file")
+            tool = self.registry.tools.get("workspace__write_file")
             if not tool or not self.write_workspace:
                 raise ValueError("当前群未开放共享工作区写入能力")
             denied = self.registry.authorize(

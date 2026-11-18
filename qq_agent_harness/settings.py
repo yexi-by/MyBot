@@ -157,14 +157,10 @@ class MCPSettings(Model):
     timeout: float = Field(default=300, gt=0)
 
 
-class SandboxSettings(Model):
+class WorkspaceSettings(Model):
     enabled: bool = False
-    runner_url: str = "http://127.0.0.1:6060"
-    runner_token: str = ""
-    quota_bytes: int = Field(default=50_000_000_000, ge=1_000_000)
-    cpus: float = Field(default=2, gt=0)
-    memory_bytes: int = Field(default=4_294_967_296, ge=134_217_728)
-    pids_limit: int = Field(default=256, ge=16)
+    root: str = Field(default="./workspace", min_length=1)
+    max_bytes: int = Field(default=50_000_000_000, ge=1_000_000)
     concurrent_executions: int = Field(default=2, ge=1, le=16)
     command_timeout: float = Field(default=1800, gt=0)
     output_limit: int = Field(default=1_048_576, ge=1)
@@ -257,7 +253,7 @@ class HarnessSettings(Model):
     groups: dict[str, ConversationSettings] = Field(default_factory=dict)
     private: ConversationSettings = Field(default_factory=ConversationSettings)
     mcp: dict[str, MCPSettings] = Field(default_factory=dict)
-    sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
+    workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     image: ImageSettings = Field(default_factory=ImageSettings)
     tts: TTSSettings = Field(default_factory=TTSSettings)
 

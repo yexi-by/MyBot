@@ -688,81 +688,71 @@ export const ttsRequestSection: SectionDef = {
   ],
 };
 
-export const sandboxSection: SectionDef = {
-  id: "sandbox",
-  title: "资源与连接",
-  description: "修改后需重建沙箱 Runner 容器并重启服务。",
+export const workspaceSection: SectionDef = {
+  id: "workspace",
+  title: "目录与限制",
+  description: "持久化共享工作区与本地子进程执行限制；预算与超时保存后立即生效，目录与并发数修改后需重启生效。",
   fields: [
     {
-      key: "runner_url",
-      label: "Runner 地址",
+      key: "root",
+      label: "工作区目录",
       type: "text",
-      help: "沙箱 Runner 服务的连接地址。",
+      restart: true,
+      placeholder: "./workspace",
+      help: "持久化工作区路径（不能与配置目录重叠）。容器部署建议挂载独立宿主机目录到 /workspace。",
     },
     {
-      key: "runner_token",
-      label: "Runner 密钥",
-      type: "secret",
-      generate: true,
-      help: "连接沙箱 Runner 的认证密钥。",
-    },
-    {
-      key: "quota_bytes",
-      label: "共享空间配额",
+      key: "max_bytes",
+      label: "空间预算上限",
       type: "bytes",
       bytes: "decimal",
       min: 1_000_000,
       integer: true,
-      help: "工作区磁盘容量上限（需与底层卷配额一致）。",
-    },
-    {
-      key: "memory_bytes",
-      label: "内存上限",
-      type: "bytes",
-      bytes: "binary",
-      min: 134_217_728,
-      integer: true,
-      help: "代码执行可用的内存上限。",
-    },
-    {
-      key: "cpus",
-      label: "CPU 上限",
-      type: "number",
-      gt: 0,
-      step: 0.1,
-      unit: "核",
-      help: "沙箱容器可用的 CPU 核数。",
-    },
-    {
-      key: "pids_limit",
-      label: "进程数上限",
-      type: "number",
-      min: 16,
-      integer: true,
-      help: "限制一次执行中可以创建的进程数。",
+      help: "工作区软容量上限；超出后暂停新写入与命令执行，文件读取与清理不受影响。",
     },
     {
       key: "command_timeout",
-      label: "单次执行时限",
+      label: "单次命令时限",
       type: "number",
       ...seconds,
-      help: "超时会终止执行，已写入的文件保留。",
+      help: "单次子进程执行的最长等待时间；超时会终止进程树，已写入工作区的文件保留。",
     },
     {
       key: "output_limit",
-      label: "输出上限",
+      label: "输出预览上限",
       type: "bytes",
       bytes: "binary",
       min: 1,
       integer: true,
-      help: "单次命令返回的输出预览上限；超出部分保存在工作区。",
+      help: "单次命令直接返回给模型的输出上限；超出时保留首尾摘要并将完整日志写入 .outputs/。",
     },
-    { key: "transfer_max_bytes", label: "单次文件传输预算", type: "bytes", bytes: "decimal", min: 1, integer: true,
-      help: "单次读写或传输文件的大小上限。" },
-    { key: "concurrent_executions", label: "并发执行容器数", type: "number", min: 1, max: 16, integer: true,
-      help: "允许同时运行的沙箱命令容器上限；不同会话可并行执行代码。" },
-    { key: "max_pending_operations", label: "工作区等待操作上限", type: "number", min: 1, integer: true,
-      help: "沙箱并发排队操作的最大数量。" },
+    {
+      key: "transfer_max_bytes",
+      label: "单次文件读写上限",
+      type: "bytes",
+      bytes: "decimal",
+      min: 1,
+      integer: true,
+      help: "单次读写文件或保存媒体到工作区的大小上限。",
+    },
+    {
+      key: "concurrent_executions",
+      label: "并发命令数",
+      type: "number",
+      min: 1,
+      max: 16,
+      integer: true,
+      restart: true,
+      help: "允许同时运行的命令子进程上限；不同会话可并行执行命令。",
+    },
+    {
+      key: "max_pending_operations",
+      label: "排队操作上限",
+      type: "number",
+      min: 1,
+      integer: true,
+      help: "并发繁忙时允许排队等待的命令数量上限。",
+    },
   ],
 };
 
@@ -863,7 +853,7 @@ export function fieldInstances(config: ObjectValue): FieldInstance[] {
   add(napcatSection, ["napcat"], "/settings/napcat");
   add(runtimeSection, ["runtime"], "/settings/runtime");
   add(serverSection, ["server"], "/settings/server");
-  add(sandboxSection, ["sandbox"], "/sandbox/settings");
+  add(workspaceSection, ["workspace"], "/workspace/settings");
   add(imageConnectionSection, ["image"], "/tools/image");
   add(imageRequestSection, ["image"], "/tools/image");
   add(ttsVoiceSection, ["tts"], "/tools/tts");
@@ -904,7 +894,7 @@ export function routeForPath(path: Path): string {
   if (head === "image") return "/tools/image";
   if (head === "tts") return "/tools/tts";
   if (head === "mcp" && id !== undefined) return "/tools/mcp/" + enc(String(id));
-  if (head === "sandbox") return "/sandbox/settings";
+  if (head === "workspace") return "/workspace/settings";
   if (head === "napcat") return "/settings/napcat";
   if (head === "runtime") return "/settings/runtime";
   if (head === "server") return "/settings/server";
@@ -951,6 +941,7 @@ export function fieldLabel(config: ObjectValue, path: Path): string {
   if (head === "providers") return scoped("服务商 " + id, path.slice(2), name);
   if (head === "image") return scoped("图像生成", path.slice(1), name);
   if (head === "tts") return name ? "语音合成 · " + name : "语音合成";
+  if (head === "workspace") return name ? "工作区 · " + name : "工作区";
   if (head === "mcp") return scoped("MCP " + id, path.slice(2), name);
   if (name) return name;
   return path.join(".");
@@ -977,6 +968,9 @@ export function validateClient(config: ObjectValue): { path: Path; message: stri
       message = "最大为 " + limit(field, field.max);
     if (message) errors.push({ path, message });
   }
+  const wsRoot = getAt(config, ["workspace", "root"]);
+  if (wsRoot !== undefined && (typeof wsRoot !== "string" || !wsRoot.trim()))
+    errors.push({ path: ["workspace", "root"], message: "请填写工作区目录" });
   const policies: [Path, Json | undefined][] = [
     [["private", "policy"], object(config.private).policy],
     ...Object.entries(object(config.groups)).map(

@@ -41,6 +41,7 @@ secrets/
 plugins_config/
 
 # 运行产物与调试产物
+/workspace/
 logs/
 debug/
 data/

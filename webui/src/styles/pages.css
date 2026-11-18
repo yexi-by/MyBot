@@ -916,7 +916,7 @@ a.activity-scope:hover {
   border-top: 1px solid var(--border);
 }
 
-/* ---------- 沙箱 ---------- */
+/* ---------- 工作区 ---------- */
 .usage {
   display: flex;
   flex-direction: column;

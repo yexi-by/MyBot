@@ -14,7 +14,6 @@ export interface Meta {
   config_file: string;
   restart_required: boolean;
   restart_sections: string[];
-  sandbox_restart_required: boolean;
 }
 export interface ConfigEnvelope {
   config: ObjectValue;
@@ -56,12 +55,14 @@ export interface FileEnvelope {
   content: string;
   sha: string;
 }
-export interface SandboxStatus {
+export interface WorkspaceStatus {
   enabled: boolean;
   available: boolean;
+  over_limit?: boolean;
   busy: boolean;
   active_count?: number;
-  quota_bytes: number;
+  root: string;
+  max_bytes: number;
   used_bytes: number | null;
   reason: string;
   restart_required: boolean;
@@ -69,7 +70,7 @@ export interface SandboxStatus {
   execution_id?: string | null;
   queued?: number;
 }
-export interface SandboxFile {
+export interface WorkspaceFile {
   path: string;
   name: string;
   size: number;

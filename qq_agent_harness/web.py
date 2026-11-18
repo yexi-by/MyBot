@@ -32,9 +32,6 @@ from .napcat import build_tools as napcat_tools
 from .napcat.tools import CATEGORY_LABELS as NAPCAT_CATEGORIES
 from .registry import ToolRegistry
 from .runtime import AgentRuntime, SessionBusy
-from .sandbox.client import CleanupMode, RunnerClient
-from .sandbox.tools import CATEGORY_LABELS as SANDBOX_CATEGORIES
-from .sandbox.tools import build_tools as sandbox_tools
 from .settings import TTSSettings
 from .skills import CATEGORY_LABELS as SKILLS_CATEGORIES
 from .skills import build_tools as skills_tools
@@ -59,6 +56,10 @@ from .tts import (
     voice_sample,
 )
 from .tts import build_tools as tts_tools
+from .workspace import CATEGORY_LABELS as WORKSPACE_CATEGORIES
+from .workspace import CleanupMode, WorkspaceService, WorkspaceUnavailable
+from .workspace import build_tools as workspace_tools
+from .workspace.executor import WorkspaceBusyError, WorkspaceOverloadedError
 
 SESSION_COOKIE = "qah_console_session"
 PUBLIC_API_PATHS = frozenset(
@@ -133,19 +134,19 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     registry.describe_categories(NAPCAT_CATEGORIES)
     registry.describe_categories(IMAGE_CATEGORIES)
     registry.describe_categories(TTS_CATEGORIES)
-    registry.describe_categories(SANDBOX_CATEGORIES)
+    registry.describe_categories(WORKSPACE_CATEGORIES)
     registry.describe_categories(SKILLS_CATEGORIES)
     registry.describe_categories(SUBAGENT_CATEGORIES)
     registry.describe_categories(TIMER_CATEGORIES)
     for tool in napcat_tools(startup.napcat):
         registry.add(tool)
     hub = NapCatHub(startup.napcat)
-    runner = RunnerClient(lambda: startup.sandbox)
-    for tool in sandbox_tools(lambda: startup.sandbox, runner):
+    workspace_service = WorkspaceService(lambda: store.settings.workspace, config_root=store.root)
+    for tool in workspace_tools(workspace_service):
         registry.add(tool)
     runtime = AgentRuntime(store, registry, hub)
-    runtime.read_workspace = runner.read_file
-    runtime.write_workspace = runner.write_bytes
+    runtime.read_workspace = workspace_service.read_file
+    runtime.write_workspace = workspace_service.write_bytes
     media = MediaReader(startup.napcat)
     runtime.read_media = media.read_many
     timers = TimerManager(runtime.wake_timer)
@@ -160,7 +161,6 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     for tool in timer_tools(timers):
         registry.add(tool)
     mcp = MCPManager(startup.mcp, registry)
-    sandbox_pending = startup.sandbox.enabled
 
     def session_signature(auth_token: str) -> str:
         return hmac.new(cookie_secret, auth_token.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -209,14 +209,14 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
             await runtime.close()
             await hub.close()
             await mcp.close()
-            await runner.close()
+            await workspace_service.close()
 
     app = FastAPI(title="QQ Agent Harness", lifespan=lifespan)
     app.state.store = store
     app.state.runtime = runtime
     app.state.registry = registry
     app.state.hub = hub
-    app.state.runner = runner
+    app.state.workspace = workspace_service
     app.state.timers = timers
     app.state.shutdown = None
 
@@ -271,17 +271,19 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     async def missing_file(_request: Request, _error: FileNotFoundError) -> JSONResponse:
         return JSONResponse({"detail": "文件不存在"}, status_code=404)
 
-    @app.exception_handler(httpx.HTTPStatusError)
-    async def runner_status(_request: Request, error: httpx.HTTPStatusError) -> JSONResponse:
-        status = error.response.status_code
-        return JSONResponse(
-            {
-                "detail": "沙箱正在执行，请先停止后清理"
-                if status == 409
-                else "沙箱请求被拒绝，请检查运行状态"
-            },
-            status_code=status if 400 <= status < 500 else 502,
-        )
+    @app.exception_handler(WorkspaceBusyError)
+    async def workspace_busy(_request: Request, error: WorkspaceBusyError) -> JSONResponse:
+        return JSONResponse({"detail": str(error)}, status_code=409)
+
+    @app.exception_handler(WorkspaceOverloadedError)
+    async def workspace_overloaded(
+        _request: Request, error: WorkspaceOverloadedError
+    ) -> JSONResponse:
+        return JSONResponse({"detail": str(error)}, status_code=429)
+
+    @app.exception_handler(WorkspaceUnavailable)
+    async def workspace_unavailable(_request: Request, error: WorkspaceUnavailable) -> JSONResponse:
+        return JSONResponse({"detail": str(error)}, status_code=503)
 
     @app.exception_handler(httpx.HTTPError)
     async def remote_error(_request: Request, _error: httpx.HTTPError) -> JSONResponse:
@@ -322,15 +324,15 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
         sections: list[str] = []
         if (startup.server.host, startup.server.port) != (current.server.host, current.server.port):
             sections.append("server")
-        for name in ("napcat", "mcp", "sandbox"):
+        for name in ("napcat", "mcp"):
             if getattr(startup, name) != getattr(current, name):
                 sections.append(name)
+        if workspace_service.restart_required:
+            sections.append("workspace")
         # 并发信号量和活动队列长度在创建运行器时确定。
         for name in ("concurrent_conversations", "activity_limit"):
             if getattr(startup.runtime, name) != getattr(current.runtime, name):
                 sections.append(f"runtime.{name}")
-        if sandbox_pending and "sandbox" not in sections:
-            sections.append("sandbox")
         return sections
 
     def snapshot() -> JsonObject:
@@ -343,7 +345,6 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
             "config_file": store.path.name,
             "restart_required": bool(sections),
             "restart_sections": [name for name in sections],
-            "sandbox_restart_required": sandbox_pending,
         }
         return result
 
@@ -541,52 +542,26 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
         except SessionBusy as error:
             raise HTTPException(409, str(error)) from None
 
-    @app.get("/api/sandbox/status")
-    async def sandbox_status() -> JsonObject:
-        nonlocal sandbox_pending
-        settings = store.settings.sandbox
-        try:
-            result = await runner.status()
-            expected = settings.model_dump(mode="json", exclude={"runner_token", "runner_url"})
-            applied = result.get("applied_settings")
-            sandbox_pending = settings.enabled and (
-                applied != expected
-                or startup.sandbox.runner_token != settings.runner_token
-                or startup.sandbox.runner_url != settings.runner_url
-            )
-            # runner 各分支返回的字段不完全相同，这里补齐控制台依赖的字段。
-            result.setdefault("used_bytes", None)
-            result.setdefault("reason", "")
-            result["enabled"] = settings.enabled
-            result["restart_required"] = sandbox_pending
-            if sandbox_pending:
-                result["configuration_notice"] = "沙箱配置已改动，需重建沙箱容器后生效"
-            return result
-        except httpx.HTTPError, ValueError:
-            sandbox_pending = settings.enabled
-            return {
-                "enabled": settings.enabled,
-                "available": False,
-                "reason": "无法连接沙箱服务或沙箱尚未就绪",
-                "quota_bytes": settings.quota_bytes,
-                "used_bytes": None,
-                "busy": False,
-                "restart_required": sandbox_pending,
-            }
+    @app.get("/api/workspace/status")
+    async def workspace_status() -> JsonObject:
+        result = await workspace_service.status()
+        if result.get("restart_required"):
+            result["configuration_notice"] = "工作区目录或并发上限已改动，重启服务后完全生效"
+        return result
 
-    @app.get("/api/sandbox/files")
-    async def sandbox_files(
+    @app.get("/api/workspace/files")
+    async def workspace_files(
         path: str = "", offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1)
     ) -> JsonObject:
-        return await runner.files(path, offset, limit)
+        return await workspace_service.files(path, offset, limit)
 
-    @app.post("/api/sandbox/cleanup")
-    async def sandbox_cleanup(request: Cleanup) -> JsonObject:
-        return await runner.cleanup(request.mode, request.paths, request.confirmed)
+    @app.post("/api/workspace/cleanup")
+    async def workspace_cleanup(request: Cleanup) -> JsonObject:
+        return await workspace_service.cleanup(request.mode, request.paths, request.confirmed)
 
-    @app.post("/api/sandbox/cancel")
-    async def sandbox_cancel() -> JsonObject:
-        return await runner.cancel()
+    @app.post("/api/workspace/cancel")
+    async def workspace_cancel() -> JsonObject:
+        return await workspace_service.cancel()
 
     model_cache: dict[str, tuple[float, object, list[str]]] = {}
 

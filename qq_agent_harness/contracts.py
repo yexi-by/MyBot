@@ -155,7 +155,7 @@ class ToolContext:
         self, path: str, data: bytes, *, overwrite: bool = False
     ) -> None:
         if self.write_workspace is None:
-            raise ValueError("沙箱文件写入服务不可用")
+            raise ValueError("工作区文件写入服务不可用")
         if overwrite:
             await self.write_workspace(path, data, overwrite=True)
         else:

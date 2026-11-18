@@ -3,6 +3,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import cast
 
 import httpx
@@ -12,7 +13,6 @@ from mcp.shared.exceptions import McpError
 from mcp.types import CallToolResult, ErrorData, ListToolsResult, Tool, ToolAnnotations
 from test_napcat import Bot, message, registry
 from test_provider_context import answer, call_answer
-from test_sandbox import FakeEngine, FakeQuota, make_runner
 
 from qq_agent_harness.context import ProviderError
 from qq_agent_harness.contracts import (
@@ -27,18 +27,20 @@ from qq_agent_harness.contracts import (
 from qq_agent_harness.mcp_tools import MCPManager
 from qq_agent_harness.napcat.media import MediaReader
 from qq_agent_harness.providers import ModelSession
-from qq_agent_harness.sandbox.client import RunnerClient
-from qq_agent_harness.sandbox.egress import PublicProxy
-from qq_agent_harness.sandbox.runner import ExecuteRequest
-from qq_agent_harness.sandbox.runner import create_app as runner_app
-from qq_agent_harness.sandbox.tools import build_tools as sandbox_tools
 from qq_agent_harness.settings import (
     MCPSettings,
     ModelEndpoint,
     NapCatSettings,
     ParameterRule,
-    SandboxSettings,
+    WorkspaceSettings,
 )
+from qq_agent_harness.workspace import (
+    ExecuteRequest,
+    WorkspaceOverloadedError,
+    WorkspaceService,
+)
+from qq_agent_harness.workspace import build_tools as workspace_tools
+from qq_agent_harness.workspace.executor import RunningProcess
 
 
 @pytest.mark.parametrize("protocol", ["responses", "chat_completions"])
@@ -271,180 +273,191 @@ async def test_forward_page_after_two_hundred_nodes_is_readable():
     assert page.data["total"] == 205 and page.data["next_offset"] is None
 
 
-async def test_large_text_and_directory_continue_without_hiding_files(tmp_path):
-    runner = make_runner(tmp_path)
-    settings = SandboxSettings(enabled=True, runner_token="t" * 24)
-    client = RunnerClient(
-        lambda: settings,
-        transport=httpx.ASGITransport(app=runner_app(runner, settings.runner_token)),
-    )
+async def test_large_text_and_directory_continue_without_hiding_files(tmp_path: Path):
+    settings = WorkspaceSettings(enabled=True, root=str(tmp_path))
+    service = WorkspaceService(lambda: settings)
     content = "中文abc" * 220_000
-    try:
-        await client.write_file("nested/big.txt", content)
-        await client.write_file("nested/big.txt", "END", append=True)
-        offset, chunks = 0, []
-        while True:
-            page = await client.read_text("nested/big.txt", offset, 65_537)
-            chunks.append(str(page["content"]))
-            next_offset = page["next_offset"]
-            if next_offset is None:
-                break
-            assert isinstance(next_offset, int) and next_offset > offset
-            offset = next_offset
-        assert "".join(chunks) == content + "END"
-        for index in range(1001):
-            (tmp_path / f"{index:04}.txt").touch()
-        page = await client.files("", 1000, 100)
-        assert page["total"] == 1002 and page["next_offset"] is None
-        assert len(cast(list[JsonValue], page["files"])) == 2
-        runner.quota = FakeQuota(True)
-        assert (await client.status())["available"] is False
-        assert (await client.files("nested"))["total"] == 1
-        await client.cleanup("selected", ["nested/big.txt"], True)
-        assert not (tmp_path / "nested/big.txt").exists()
-        await client.cleanup("selected", [f"{index:04}.txt" for index in range(1001)], True)
-        assert (await client.files())["total"] == 1
-    finally:
-        await client.close()
+    await service.write_file("nested/big.txt", content)
+    await service.write_file("nested/big.txt", "END", append=True)
+    offset, chunks = 0, []
+    while True:
+        page = await service.read_text("nested/big.txt", offset, 65_537)
+        chunks.append(str(page["content"]))
+        next_offset = page["next_offset"]
+        if next_offset is None:
+            break
+        assert isinstance(next_offset, int) and next_offset > offset
+        offset = next_offset
+    assert "".join(chunks) == content + "END"
+    for index in range(1001):
+        (tmp_path / f"{index:04}.txt").touch()
+    page = await service.files("", 1000, 100)
+    # 含 prepare 创建的 5 个系统目录 + nested + 1001 个文件 = 1007 项
+    assert page["total"] == 1007 and page["next_offset"] is None
+    assert len(cast(list[JsonValue], page["files"])) == 7
+    # 超出空间预算时，status 标明 over_limit，但目录浏览与删除清理仍正常可用
+    settings.max_bytes = 1_000_000
+    st = await service.status()
+    assert st["available"] is True and st["over_limit"] is True
+    assert (await service.files("nested"))["total"] == 1
+    await service.cleanup("selected", ["nested/big.txt"], True)
+    assert not (tmp_path / "nested/big.txt").exists()
+    await service.cleanup("selected", [f"{index:04}.txt" for index in range(1001)], True)
+    assert (await service.files())["total"] == 6
 
 
-async def test_queued_execution_cancel_does_not_start_it_and_reads_bypass_exec_lock(tmp_path):
+async def test_queued_execution_cancel_does_not_start_it_and_reads_bypass_exec_lock(
+    tmp_path: Path,
+):
     (tmp_path / "ready.txt").write_text("ready", encoding="utf-8")
-    engine = FakeEngine(block=True)
-    runner = make_runner(tmp_path, engine=engine, concurrent_executions=1)
-    runner.settings.max_pending_operations = 2
-    settings = SandboxSettings(enabled=True, runner_token="t" * 24)
-    client = RunnerClient(
-        lambda: settings,
-        transport=httpx.ASGITransport(app=runner_app(runner, settings.runner_token)),
+    started = asyncio.Event()
+    spawned: list[str] = []
+
+    class BlockedProc:
+        def __init__(self) -> None:
+            self.stopped = asyncio.Event()
+
+        def output(self) -> AsyncIterator[bytes]:
+            async def _gen() -> AsyncIterator[bytes]:
+                if False:
+                    yield b""
+                await self.stopped.wait()
+
+            return _gen()
+
+        async def wait(self) -> int:
+            await self.stopped.wait()
+            return -9
+
+        async def terminate(self) -> None:
+            self.stopped.set()
+
+    class BlockedSpawner:
+        async def spawn(self, command: str, cwd: Path, env: dict[str, str]) -> RunningProcess:
+            spawned.append(command)
+            started.set()
+            return BlockedProc()
+
+    settings = WorkspaceSettings(
+        enabled=True,
+        root=str(tmp_path),
+        concurrent_executions=1,
+        max_pending_operations=2,
     )
-    running = asyncio.create_task(client.execute("first", owner="first"))
-    await engine.started.wait()
-    queued = asyncio.create_task(client.execute("second", owner="second"))
-    queued_two = asyncio.create_task(client.execute("third", owner="third"))
+    service = WorkspaceService(lambda: settings, spawner=BlockedSpawner())
+    running = asyncio.create_task(service.execute(ExecuteRequest(command="first", owner="first")))
+    await started.wait()
+    queued = asyncio.create_task(service.execute(ExecuteRequest(command="second", owner="second")))
+    queued_two = asyncio.create_task(
+        service.execute(ExecuteRequest(command="third", owner="third"))
+    )
     try:
         async with asyncio.timeout(2):
-            while len(runner.waiting) < 2:
+            while len(service.waiting) < 2:
                 await asyncio.sleep(0)
-            # 文件读取不等待活动执行容器锁，即使排队槽位已满也立即可读。
-            assert (await client.read_text("ready.txt"))["content"] == "ready"
-            with pytest.raises(httpx.HTTPStatusError) as overflow:
-                await client.execute("overflow", owner="overflow")
-            assert overflow.value.response.status_code == 429
-            await client.cancel("second")
+            # 文件读取不等待活动执行锁，即使排队槽位已满也立即可读。
+            assert (await service.read_text("ready.txt"))["content"] == "ready"
+            with pytest.raises(WorkspaceOverloadedError):
+                await service.execute(ExecuteRequest(command="overflow", owner="overflow"))
+            await service.cancel("second")
             assert (await queued)["status"] == "cancelled"
-            await client.cancel("third")
+            await service.cancel("third")
             assert (await queued_two)["status"] == "cancelled"
-            assert len(engine.created) == 1
-            await client.cancel("first")
+            assert spawned == ["first"]
+            await service.cancel("first")
             assert (await running)["status"] == "cancelled"
-        assert not runner.is_busy and not runner.waiting
+        assert not service.is_busy and not service.waiting
     finally:
-        await client.cancel()
+        await service.cancel()
         await asyncio.gather(running, queued, queued_two, return_exceptions=True)
-        await client.close()
 
 
-async def test_log_tail_after_five_seconds_is_complete(tmp_path):
-    class SlowLogs(FakeEngine):
-        async def logs(self, container_id: str) -> AsyncIterator[bytes]:
-            yield b"begin\n"
-            await asyncio.sleep(5.1)
-            yield b"TAIL\n"
+async def test_log_tail_after_five_seconds_is_complete(tmp_path: Path):
+    class SlowProc:
+        def output(self) -> AsyncIterator[bytes]:
+            async def _gen() -> AsyncIterator[bytes]:
+                yield b"begin\n"
+                await asyncio.sleep(5.1)
+                yield b"TAIL\n"
 
-    result = await make_runner(tmp_path, engine=SlowLogs(), timeout=7).execute(
-        ExecuteRequest(command="fake")
-    )
+            return _gen()
+
+        async def wait(self) -> int:
+            return 0
+
+        async def terminate(self) -> None:
+            return None
+
+    class SlowSpawner:
+        async def spawn(self, command: str, cwd: Path, env: dict[str, str]) -> RunningProcess:
+            return SlowProc()
+
+    settings = WorkspaceSettings(enabled=True, root=str(tmp_path), command_timeout=7)
+    service = WorkspaceService(lambda: settings, spawner=SlowSpawner())
+    result = await service.execute(ExecuteRequest(command="fake"))
     assert result["output"] == "begin\nTAIL\n"
     assert result["output_complete"] is True and result["truncated"] is False
 
 
-async def test_cancel_during_log_drain_releases_workspace_immediately(tmp_path):
+async def test_cancel_during_log_drain_releases_workspace_immediately(tmp_path: Path):
     draining = asyncio.Event()
+    terminated = False
 
-    class BlockedLogs(FakeEngine):
-        async def logs(self, container_id: str) -> AsyncIterator[bytes]:
-            yield b"partial"
-            draining.set()
-            await asyncio.Event().wait()
+    class DrainBlockedProc:
+        def __init__(self) -> None:
+            self.stopped = asyncio.Event()
 
-    engine = BlockedLogs()
-    runner = make_runner(tmp_path, engine=engine, timeout=30)
-    task = asyncio.create_task(runner.execute(ExecuteRequest(command="fake", owner="draining")))
+        def output(self) -> AsyncIterator[bytes]:
+            async def _gen() -> AsyncIterator[bytes]:
+                yield b"partial"
+                draining.set()
+                await self.stopped.wait()
+
+            return _gen()
+
+        async def wait(self) -> int:
+            return 0
+
+        async def terminate(self) -> None:
+            nonlocal terminated
+            terminated = True
+            self.stopped.set()
+
+    class DrainBlockedSpawner:
+        async def spawn(self, command: str, cwd: Path, env: dict[str, str]) -> RunningProcess:
+            return DrainBlockedProc()
+
+    settings = WorkspaceSettings(enabled=True, root=str(tmp_path), command_timeout=30)
+    service = WorkspaceService(lambda: settings, spawner=DrainBlockedSpawner())
+    task = asyncio.create_task(service.execute(ExecuteRequest(command="fake", owner="draining")))
     async with asyncio.timeout(2):
         await draining.wait()
-        assert (await runner.status())["queued"] == 0
-        await runner.cancel("draining")
+        assert (await service.status())["queued"] == 0
+        await service.cancel("draining")
         result = await task
     assert result["status"] == "cancelled" and result["output_complete"] is False
-    assert len(engine.removed) == 1 and not runner.is_busy
+    assert terminated and not service.is_busy
 
 
-async def test_proxy_address_failover_custom_port_and_active_stream_survive_idle_budget():
-    attempts = []
-
-    async def endpoint(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        for _ in range(4):
-            writer.write(b"part\n")
-            await writer.drain()
-            await asyncio.sleep(0.04)
-        writer.close()
-        await writer.wait_closed()
-
-    origin = await asyncio.start_server(endpoint, "127.0.0.1", 0)
-    origin_port = origin.sockets[0].getsockname()[1]
-
-    async def resolve(_host: str, _port: int) -> list[str]:
-        return ["2001:4860:4860::8888", "8.8.8.8"]
-
-    async def connect(ip: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        attempts.append((ip, port))
-        if ":" in ip:
-            raise OSError("unavailable route")
-        return await asyncio.open_connection("127.0.0.1", origin_port)
-
-    proxy = PublicProxy(resolve, connect, allowed_ports={8443}, idle_timeout=0.1)
-    server = await asyncio.start_server(proxy.handle, "127.0.0.1", 0)
-    async with origin, server, asyncio.timeout(2):
-        reader, writer = await asyncio.open_connection(
-            "127.0.0.1", server.sockets[0].getsockname()[1]
-        )
-        writer.write(b"CONNECT public.example:8443 HTTP/1.1\r\n\r\n")
-        await writer.drain()
-        assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"HTTP/1.1 200")
-        assert await reader.read() == b"part\n" * 4
-        writer.close()
-        await writer.wait_closed()
-    assert attempts == [("2001:4860:4860::8888", 8443), ("8.8.8.8", 8443)]
-
-
-async def test_append_respects_existing_file_modification_policy(tmp_path):
+async def test_append_respects_existing_file_modification_policy(tmp_path: Path):
     (tmp_path / "keep.txt").write_text("before", encoding="utf-8")
     tools, context, settings = registry(Bot())
-    settings.sandbox.enabled = True
-    settings.sandbox.runner_token = "t" * 24
+    settings.workspace.enabled = True
+    settings.workspace.root = str(tmp_path)
     policy = settings.groups["10"].policy
-    policy.categories["sandbox"] = True
+    policy.categories["workspace"] = True
     rule = ParameterRule(allowed=[False])
-    policy.parameters["sandbox__write_file"] = {"overwrite": rule}
-    client = RunnerClient(
-        lambda: settings.sandbox,
-        transport=httpx.ASGITransport(
-            app=runner_app(make_runner(tmp_path), settings.sandbox.runner_token)
-        ),
-    )
-    for tool in sandbox_tools(lambda: settings.sandbox, client):
+    policy.parameters["workspace__write_file"] = {"overwrite": rule}
+    service = WorkspaceService(lambda: settings.workspace)
+    for tool in workspace_tools(service):
         tools.add(tool)
     arguments: JsonObject = {"path": "keep.txt", "content": "after", "append": True}
-    try:
-        result = await tools.execute(context, "sandbox__write_file", arguments)
-        assert result.error_type == "PermissionDenied"
-        assert (tmp_path / "keep.txt").read_text(encoding="utf-8") == "before"
-        rule.allowed = [True]
-        assert (await tools.execute(context, "sandbox__write_file", arguments)).status == "ok"
-        assert (tmp_path / "keep.txt").read_text(encoding="utf-8") == "beforeafter"
-    finally:
-        await client.close()
+    result = await tools.execute(context, "workspace__write_file", arguments)
+    assert result.error_type == "PermissionDenied"
+    assert (tmp_path / "keep.txt").read_text(encoding="utf-8") == "before"
+    rule.allowed = [True]
+    assert (await tools.execute(context, "workspace__write_file", arguments)).status == "ok"
+    assert (tmp_path / "keep.txt").read_text(encoding="utf-8") == "beforeafter"
 
 
 async def test_provider_error_exposes_cause_without_echoing_upstream_body():

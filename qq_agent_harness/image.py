@@ -68,7 +68,7 @@ class ReferenceImage(Model):
         description="引用 QQ 官方图床 URL（qpic.cn、qlogo.cn、nt.qq.com.cn）",
     )
     workspace_path: str | None = Field(
-        default=None, min_length=1, description="引用共享沙箱工作区内的图片相对路径"
+        default=None, min_length=1, description="引用共享工作区内的图片相对路径"
     )
     generated_id: str | None = Field(
         default=None, min_length=1, description="引用当前会话已生成的图片 ID"
@@ -137,7 +137,7 @@ class GenerateImageInput(Model):
     workspace_path: str | None = Field(
         default=None,
         min_length=1,
-        description="可选：将生成的图片同时保存到共享沙箱工作区的相对路径",
+        description="可选：将生成的图片同时保存到共享工作区的相对路径",
     )
     inspect: bool = Field(
         default=False,
@@ -185,7 +185,7 @@ async def _load_reference(
         return generated.content, mime, ext
     if ref.workspace_path is not None:
         denied = context.check_tool(
-            "sandbox__read_file", {"path": ref.workspace_path, "offset": 0, "limit": 65_536}
+            "workspace__read_file", {"path": ref.workspace_path, "offset": 0, "limit": 65_536}
         )
         if denied is not None:
             raise PermissionError(denied.message or "当前会话未开放共享工作区读取权限")
@@ -371,7 +371,7 @@ def build_tools(
             return ToolResult.failure("生图服务尚未启用或未完成配置", "PermissionDenied")
         if request.workspace_path is not None:
             denied = context.check_tool(
-                "sandbox__write_file",
+                "workspace__write_file",
                 {
                     "path": request.workspace_path,
                     "content": "",
@@ -382,7 +382,7 @@ def build_tools(
             if denied is not None:
                 return denied
             if context.write_workspace is None:
-                return ToolResult.failure("沙箱文件写入服务不可用", "SandboxError")
+                return ToolResult.failure("工作区文件写入服务不可用", "WorkspaceError")
 
         references: list[tuple[bytes, str, str]] = []
         try:

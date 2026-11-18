@@ -388,7 +388,7 @@ class AIVoicePart(Model):
 
 class MediaPart(Model):
     type: Literal["image", "record", "video", "file"]
-    workspace_path: str | None = Field(default=None, description="共享沙箱内的相对文件路径")
+    workspace_path: str | None = Field(default=None, description="共享工作区内的相对文件路径")
     url: str | None = Field(default=None, description="待发送媒体的公网 HTTP/HTTPS URL")
     generated_id: str | None = Field(
         default=None,

@@ -1,4 +1,4 @@
-"""Agent Harness 升级回归：沙箱治理、流式协议、零 LLM 预裁剪、并发只读、打断、死循环、技能/子代理/定时器与控制台鉴权。"""
+"""Agent Harness 升级回归：工作区治理、流式协议、零 LLM 预裁剪、并发只读、打断、死循环、技能/子代理/定时器与控制台鉴权。"""
 
 import asyncio
 import base64
@@ -15,7 +15,6 @@ from test_harness_core import Empty, FakeHub, make_store
 from test_napcat import Bot
 from test_napcat import registry as napcat_registry
 from test_provider_context import answer
-from test_sandbox import FakeEngine, make_runner
 
 from qq_agent_harness.contracts import (
     ConversationScope,
@@ -36,57 +35,83 @@ from qq_agent_harness.prompts import SILENT_RESPONSE, compose_prompt
 from qq_agent_harness.providers import MediaInput, ModelSession
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import AgentRuntime
-from qq_agent_harness.sandbox.client import RunnerClient
-from qq_agent_harness.sandbox.runner import ExecuteRequest, Runner
-from qq_agent_harness.sandbox.runner import create_app as runner_app
-from qq_agent_harness.sandbox.tools import build_tools as sandbox_tools
-from qq_agent_harness.sandbox.workspace import Workspace
 from qq_agent_harness.session_view import project
-from qq_agent_harness.settings import ModelEndpoint, SandboxSettings
+from qq_agent_harness.settings import ModelEndpoint, WorkspaceSettings
 from qq_agent_harness.skills import build_tools as skill_tools
 from qq_agent_harness.subagent import build_tools as subagent_tools
 from qq_agent_harness.timers import TimerManager
 from qq_agent_harness.timers import build_tools as timer_tools
 from qq_agent_harness.web import create_app
+from qq_agent_harness.workspace import ExecuteRequest, WorkspaceService
+from qq_agent_harness.workspace import build_tools as workspace_tools
+from qq_agent_harness.workspace.executor import RunningProcess
 
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII="
 )
 
 
-async def test_sandbox_exec_tmp_head_tail_zero_log_and_concurrent_owners(tmp_path: Path) -> None:
-    # 1. 超时且无输出时不残留 0B 日志，且每次执行的 .tmp/exec-* 自动清理
-    class SilentTimeoutEngine(FakeEngine):
-        async def logs(self, container_id: str) -> AsyncIterator[bytes]:
-            if False:
-                yield b""
-            await asyncio.Event().wait()
+async def test_workspace_exec_tmp_head_tail_zero_log_and_concurrent_owners(tmp_path: Path) -> None:
+    # 1. 超时且无输出时不残留 0B 日志，且每次执行的 .tmp/exec-* 自动创建并清理
+    seen_envs: list[dict[str, str]] = []
 
-        async def wait(self, container_id: str) -> int:
+    class SilentTimeoutProc:
+        def output(self) -> AsyncIterator[bytes]:
+            async def _gen() -> AsyncIterator[bytes]:
+                if False:
+                    yield b""
+                await asyncio.Event().wait()
+
+            return _gen()
+
+        async def wait(self) -> int:
             await asyncio.Event().wait()
             return 0
 
-    silent_engine = SilentTimeoutEngine()
-    silent_runner = make_runner(tmp_path, engine=silent_engine, timeout=0.02)
-    timeout_res = await silent_runner.execute(ExecuteRequest(command="sleep 99", owner="g1"))
+        async def terminate(self) -> None:
+            return None
+
+    class SilentSpawner:
+        async def spawn(self, command: str, cwd: Path, env: dict[str, str]) -> RunningProcess:
+            seen_envs.append(env)
+            assert Path(env["TMPDIR"]).is_dir()
+            return SilentTimeoutProc()
+
+    silent_ws = tmp_path / "ws1"
+    silent_cfg = WorkspaceSettings(
+        enabled=True, root=str(silent_ws), command_timeout=0.02, output_limit=1024
+    )
+    silent_service = WorkspaceService(lambda: silent_cfg, spawner=SilentSpawner())
+    timeout_res = await silent_service.execute(ExecuteRequest(command="sleep 99", owner="g1"))
     assert timeout_res["status"] == "timeout"
     assert timeout_res["output_path"] is None
-    assert list((tmp_path / ".outputs").glob("*.log")) == []
-    assert list((tmp_path / ".tmp").glob("exec-*")) == []
-    created_cfg = silent_engine.created[0]
-    assert isinstance(host_cfg := created_cfg.get("HostConfig"), dict)
-    assert isinstance(binds := host_cfg.get("Binds"), list)
-    assert any(isinstance(b, str) and b.endswith(":/tmp:rw") for b in binds)
-    assert isinstance(envs := created_cfg.get("Env"), list)
-    assert "TMPDIR=/tmp" in envs
+    assert list((silent_ws / ".outputs").glob("*.log")) == []
+    assert list((silent_ws / ".tmp").glob("exec-*")) == []
+    assert seen_envs and seen_envs[0]["TMPDIR"].startswith(str((silent_ws / ".tmp").resolve()))
 
     # 2. 超限多字节 UTF-8 输出保留头尾且不破坏字符边界
-    class Utf8OverflowEngine(FakeEngine):
-        async def logs(self, container_id: str) -> AsyncIterator[bytes]:
-            yield ("头部开始_" + "中" * 400 + "_尾部结束").encode()
+    class Utf8OverflowProc:
+        def output(self) -> AsyncIterator[bytes]:
+            async def _gen() -> AsyncIterator[bytes]:
+                yield ("头部开始_" + "中" * 400 + "_尾部结束").encode()
 
-    utf8_runner = make_runner(tmp_path, engine=Utf8OverflowEngine())
-    utf8_res = await utf8_runner.execute(ExecuteRequest(command="emit", owner="g1"))
+            return _gen()
+
+        async def wait(self) -> int:
+            return 0
+
+        async def terminate(self) -> None:
+            return None
+
+    class Utf8Spawner:
+        async def spawn(self, command: str, cwd: Path, env: dict[str, str]) -> RunningProcess:
+            return Utf8OverflowProc()
+
+    utf8_cfg = WorkspaceSettings(
+        enabled=True, root=str(silent_ws), command_timeout=5, output_limit=1024
+    )
+    utf8_service = WorkspaceService(lambda: utf8_cfg, spawner=Utf8Spawner())
+    utf8_res = await utf8_service.execute(ExecuteRequest(command="emit", owner="g1"))
     assert utf8_res["status"] == "ok" and utf8_res["truncated"] is True
     output_text = str(utf8_res["output"])
     assert output_text.startswith("头部开始_")
@@ -100,54 +125,53 @@ async def test_sandbox_exec_tmp_head_tail_zero_log_and_concurrent_owners(tmp_pat
     both_started = asyncio.Event()
     finish_b = asyncio.Event()
 
-    class DualEngine(FakeEngine):
-        def __init__(self) -> None:
-            super().__init__()
-            self.started_count = 0
-            self.cmd_by_id: dict[str, str] = {}
+    class DualProc:
+        def __init__(self, cmd: str) -> None:
+            self.cmd = cmd
+            self.stopped = asyncio.Event()
 
-        async def create(self, name: str, config: JsonObject) -> str:
-            await super().create(name, config)
-            cmd_list = config.get("Cmd")
-            cmd = str(cmd_list[-1]) if isinstance(cmd_list, list) and cmd_list else ""
-            self.cmd_by_id[name] = cmd
-            return name
+        def output(self) -> AsyncIterator[bytes]:
+            async def _gen() -> AsyncIterator[bytes]:
+                if self.cmd == "a":
+                    yield b"from-a"
+                    await self.stopped.wait()
+                else:
+                    await finish_b.wait()
+                    yield b"from-b-ok"
 
-        async def start(self, container_id: str) -> None:
-            self.started_count += 1
-            if self.started_count >= 2:
-                both_started.set()
+            return _gen()
 
-        async def logs(self, container_id: str) -> AsyncIterator[bytes]:
-            if self.cmd_by_id.get(container_id) == "a":
-                yield b"from-a"
-                await asyncio.Event().wait()
-            else:
-                await finish_b.wait()
-                yield b"from-b-ok"
-
-        async def wait(self, container_id: str) -> int:
-            if self.cmd_by_id.get(container_id) == "a":
-                await asyncio.Event().wait()
+        async def wait(self) -> int:
+            if self.cmd == "a":
+                await self.stopped.wait()
+                return -9
             await finish_b.wait()
             return 0
 
-    dual_engine = DualEngine()
-    dual_runner = Runner(
-        workspace=Workspace(tmp_path),
-        quota=silent_runner.quota,
-        network_guard=silent_runner.network_guard,
-        engine=dual_engine,
-        host_workspace="/test/workspace",
-        settings=SandboxSettings(enabled=True, command_timeout=5, concurrent_executions=2),
+        async def terminate(self) -> None:
+            self.stopped.set()
+
+    class DualSpawner:
+        def __init__(self) -> None:
+            self.started_count = 0
+
+        async def spawn(self, command: str, cwd: Path, env: dict[str, str]) -> RunningProcess:
+            self.started_count += 1
+            if self.started_count >= 2:
+                both_started.set()
+            return DualProc(command)
+
+    dual_cfg = WorkspaceSettings(
+        enabled=True, root=str(tmp_path / "ws2"), command_timeout=5, concurrent_executions=2
     )
-    task_a = asyncio.create_task(dual_runner.execute(ExecuteRequest(command="a", owner="owner-a")))
-    task_b = asyncio.create_task(dual_runner.execute(ExecuteRequest(command="b", owner="owner-b")))
+    dual_service = WorkspaceService(lambda: dual_cfg, spawner=DualSpawner())
+    task_a = asyncio.create_task(dual_service.execute(ExecuteRequest(command="a", owner="owner-a")))
+    task_b = asyncio.create_task(dual_service.execute(ExecuteRequest(command="b", owner="owner-b")))
     async with asyncio.timeout(2):
         await both_started.wait()
-        status_mid = await dual_runner.status()
+        status_mid = await dual_service.status()
         assert status_mid["active_count"] == 2
-        cancel_res = await dual_runner.cancel("owner-a")
+        cancel_res = await dual_service.cancel("owner-a")
         assert cancel_res["cancelled"] is True
         res_a = await task_a
         assert res_a["status"] == "cancelled"
@@ -156,83 +180,74 @@ async def test_sandbox_exec_tmp_head_tail_zero_log_and_concurrent_owners(tmp_pat
         assert res_b["status"] == "ok" and res_b["output"] == "from-b-ok"
 
 
-async def test_sandbox_edit_search_delete_and_temp_cleanup(tmp_path: Path) -> None:
+async def test_workspace_edit_search_delete_and_temp_cleanup(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
-    runner = make_runner(work_dir)
-    settings = SandboxSettings(enabled=True, runner_token="t" * 24, runner_url="http://runner")
-    client = RunnerClient(
-        lambda: settings,
-        transport=httpx.ASGITransport(app=runner_app(runner, settings.runner_token)),
-    )
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir(parents=True, exist_ok=True)
     store = make_store(cfg_dir)
-    store.settings.sandbox.enabled = True
-    store.settings.groups["a"].policy.categories["sandbox"] = True
+    store.settings.workspace.enabled = True
+    store.settings.workspace.root = str(work_dir)
+    store.settings.groups["a"].policy.categories["workspace"] = True
+    service = WorkspaceService(lambda: store.settings.workspace, config_root=cfg_dir)
     registry = ToolRegistry(lambda: store.settings)
-    for tool in sandbox_tools(lambda: settings, client):
+    for tool in workspace_tools(service):
         registry.add(tool)
     scope = ConversationScope(bot_id="b", kind="group", peer_id="a")
     ctx = ToolContext(scope=scope, turn_id="t1", napcat=Bot())
 
-    try:
-        (work_dir / "notes").mkdir(parents=True, exist_ok=True)
-        (work_dir / "notes/todo.py").write_text("x = 1\ny = 1\nz = 2\n", encoding="utf-8")
-        (work_dir / ".cache/uv").mkdir(parents=True, exist_ok=True)
-        (work_dir / ".cache/uv/pkg.txt").write_text("x = 1 hidden cache\n", encoding="utf-8")
-        (work_dir / ".scratch").mkdir(parents=True, exist_ok=True)
-        (work_dir / ".scratch/frame.png").write_bytes(PNG_BYTES)
-        (work_dir / ".outputs").mkdir(parents=True, exist_ok=True)
-        (work_dir / ".outputs/old.log").write_text("log", encoding="utf-8")
+    (work_dir / "notes").mkdir(parents=True, exist_ok=True)
+    (work_dir / "notes/todo.py").write_text("x = 1\ny = 1\nz = 2\n", encoding="utf-8")
+    (work_dir / ".cache/uv").mkdir(parents=True, exist_ok=True)
+    (work_dir / ".cache/uv/pkg.txt").write_text("x = 1 hidden cache\n", encoding="utf-8")
+    (work_dir / ".scratch").mkdir(parents=True, exist_ok=True)
+    (work_dir / ".scratch/frame.png").write_bytes(PNG_BYTES)
+    (work_dir / ".outputs").mkdir(parents=True, exist_ok=True)
+    (work_dir / ".outputs/old.log").write_text("log", encoding="utf-8")
 
-        dup_err = await registry.execute(
-            ctx,
-            "sandbox__edit_file",
-            {"path": "notes/todo.py", "old_string": "= 1", "new_string": "= 10"},
-        )
-        assert dup_err.status == "error" and dup_err.error_type == "InvalidOperation"
+    dup_err = await registry.execute(
+        ctx,
+        "workspace__edit_file",
+        {"path": "notes/todo.py", "old_string": "= 1", "new_string": "= 10"},
+    )
+    assert dup_err.status == "error" and dup_err.error_type == "InvalidOperation"
 
-        ok_edit = await registry.execute(
-            ctx,
-            "sandbox__edit_file",
-            {
-                "path": "notes/todo.py",
-                "old_string": "= 1",
-                "new_string": "= 10",
-                "replace_all": True,
-            },
-        )
-        assert ok_edit.status == "ok" and isinstance(ok_edit.data, dict)
-        assert ok_edit.data["replacements"] == 2
-        assert "x = 10\ny = 10\n" in (work_dir / "notes/todo.py").read_text(encoding="utf-8")
+    ok_edit = await registry.execute(
+        ctx,
+        "workspace__edit_file",
+        {
+            "path": "notes/todo.py",
+            "old_string": "= 1",
+            "new_string": "= 10",
+            "replace_all": True,
+        },
+    )
+    assert ok_edit.status == "ok" and isinstance(ok_edit.data, dict)
+    assert ok_edit.data["replacements"] == 2
+    assert "x = 10\ny = 10\n" in (work_dir / "notes/todo.py").read_text(encoding="utf-8")
 
-        found = await registry.execute(ctx, "sandbox__search_files", {"query": "= 10"})
-        assert found.status == "ok" and isinstance(found.data, dict)
-        assert isinstance(matches := found.data["matches"], list) and len(matches) == 2
+    found = await registry.execute(ctx, "workspace__search_files", {"query": "= 10"})
+    assert found.status == "ok" and isinstance(found.data, dict)
+    assert isinstance(matches := found.data["matches"], list) and len(matches) == 2
 
-        hidden_skip = await registry.execute(
-            ctx, "sandbox__search_files", {"query": "hidden cache"}
-        )
-        assert hidden_skip.status == "ok" and isinstance(hidden_skip.data, dict)
-        assert hidden_skip.data["matches"] == []
+    hidden_skip = await registry.execute(ctx, "workspace__search_files", {"query": "hidden cache"})
+    assert hidden_skip.status == "ok" and isinstance(hidden_skip.data, dict)
+    assert hidden_skip.data["matches"] == []
 
-        (work_dir / "drafts/sub").mkdir(parents=True, exist_ok=True)
-        (work_dir / "drafts/sub/a.txt").write_text("hi", encoding="utf-8")
-        del_fail = await registry.execute(ctx, "sandbox__delete_path", {"path": "drafts"})
-        assert del_fail.status == "error" and del_fail.error_type == "InvalidOperation"
-        del_ok = await registry.execute(
-            ctx, "sandbox__delete_path", {"path": "drafts", "recursive": True}
-        )
-        assert del_ok.status == "ok" and not (work_dir / "drafts").exists()
+    (work_dir / "drafts/sub").mkdir(parents=True, exist_ok=True)
+    (work_dir / "drafts/sub/a.txt").write_text("hi", encoding="utf-8")
+    del_fail = await registry.execute(ctx, "workspace__delete_path", {"path": "drafts"})
+    assert del_fail.status == "error" and del_fail.error_type == "InvalidOperation"
+    del_ok = await registry.execute(
+        ctx, "workspace__delete_path", {"path": "drafts", "recursive": True}
+    )
+    assert del_ok.status == "ok" and not (work_dir / "drafts").exists()
 
-        await client.cleanup("temp", [], True)
-        assert (work_dir / "notes/todo.py").exists()
-        assert (work_dir / ".cache/uv/pkg.txt").exists()
-        assert list((work_dir / ".scratch").iterdir()) == []
-        assert list((work_dir / ".outputs").iterdir()) == []
-    finally:
-        await client.close()
+    await service.cleanup("temp", [], True)
+    assert (work_dir / "notes/todo.py").exists()
+    assert (work_dir / ".cache/uv/pkg.txt").exists()
+    assert list((work_dir / ".scratch").iterdir()) == []
+    assert list((work_dir / ".outputs").iterdir()) == []
 
 
 async def test_save_media_defaults_to_scratch_and_supports_overwrite(
@@ -254,13 +269,13 @@ async def test_save_media_defaults_to_scratch_and_supports_overwrite(
         monkeypatch.setattr("qq_agent_harness.napcat.tools.MediaReader", lambda _: reader)
         bot = Bot()
         tools, context, settings = napcat_registry(bot)
-        settings.sandbox.enabled = True
-        settings.groups["10"].policy.categories["sandbox"] = True
+        settings.workspace.enabled = True
+        settings.groups["10"].policy.categories["workspace"] = True
         tools.add(
             ToolDefinition(
-                "sandbox__write_file",
+                "workspace__write_file",
                 "写入文件桩",
-                "sandbox",
+                "workspace",
                 model_binding(Empty, lambda _c, _a: asyncio.sleep(0, ToolResult.success())),
             )
         )

@@ -44,7 +44,6 @@ let state: ConfigState = {
     config_file: "",
     restart_required: false,
     restart_sections: [],
-    sandbox_restart_required: false,
   },
   saving: false,
   error: "",

@@ -887,7 +887,7 @@ class SaveMedia(a.ReadMedia):
     destination: str = Field(
         default="",
         description=(
-            "共享沙箱中的目标相对路径；留空（推荐用于一次性查看/处理）时自动存入 .scratch/ 临时目录并返回生成路径"
+            "共享工作区中的目标相对路径；留空（推荐用于一次性查看/处理）时自动存入 .scratch/ 临时目录并返回生成路径"
         ),
     )
     overwrite: bool = Field(
@@ -1228,7 +1228,7 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
 
     async def save_media(context: ToolContext, request: SaveMedia) -> ToolResult:
         if context.write_workspace is None:
-            raise ValueError("沙箱文件写入服务不可用")
+            raise ValueError("共享工作区文件写入服务不可用")
         selection = await media_segments(context, request)
         if len(selection.segments) != 1:
             raise ValueError("保存媒体必须通过 indexes 明确选择一个资源")
@@ -1326,13 +1326,13 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
         ToolDefinition(
             "qq__save_media_to_workspace",
             (
-                "将消息附件、QQ 头像、群头像或官方图床图片保存到沙箱工作区供代码处理"
+                "将消息附件、QQ 头像、群头像或官方图床图片保存到共享工作区供脚本或工具处理"
                 "（与 read_media 共用四选一来源，每次保存单个资源；省略 destination 时自动存入 .scratch/ 临时目录）。"
             ),
             "media",
             model_binding(SaveMedia, save_media),
             cross_scope=True,
-            requires=("sandbox__write_file",),
+            requires=("workspace__write_file",),
             title="保存媒体到共享工作区",
         )
     )

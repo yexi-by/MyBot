@@ -6,9 +6,9 @@ import type {
   GroupDirectory,
   GroupInfo,
   RuntimeEnvelope,
-  SandboxStatus,
   ToolAccess,
   ToolsEnvelope,
+  WorkspaceStatus,
 } from "./types";
 
 export interface ResourceState<T> {
@@ -104,8 +104,8 @@ export function useResource<T>(
 export const runtimeResource = new Resource(() =>
   get<RuntimeEnvelope>("/api/runtime"),
 );
-export const sandboxResource = new Resource(() =>
-  get<SandboxStatus>("/api/sandbox/status"),
+export const workspaceResource = new Resource(() =>
+  get<WorkspaceStatus>("/api/workspace/status"),
 );
 export const toolsResource = new Resource(() =>
   get<ToolsEnvelope>("/api/tools"),

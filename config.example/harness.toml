@@ -84,18 +84,14 @@ members = true
 
 [mcp]
 
-[sandbox]
+[workspace]
 enabled = false
-runner_url = "http://127.0.0.1:6060"
-runner_token = ""
-quota_bytes = 50000000000
-cpus = 2.0
-memory_bytes = 4294967296
-pids_limit = 256
+root = "./workspace"
+max_bytes = 50000000000
+concurrent_executions = 2
 command_timeout = 1800.0
 output_limit = 1048576
 transfer_max_bytes = 50000000
-concurrent_executions = 2
 max_pending_operations = 32
 
 [image]

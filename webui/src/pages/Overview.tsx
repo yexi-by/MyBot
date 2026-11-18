@@ -3,13 +3,13 @@ import type { ReactNode } from "react";
 import {
   Activity as ActivityIcon,
   Bell,
-  Box,
   ChevronDown,
   ChevronRight,
   ChevronUp,
   CircleAlert,
   CircleStop,
   Clock,
+  FolderOpen,
   Gauge,
   MessageSquare,
   MessagesSquare,
@@ -44,10 +44,10 @@ import { activityKind, mcpState, resultStatus, turnState, usageSources } from ".
 import { linkHandler } from "../lib/navigation";
 import {
   runtimeResource,
-  sandboxResource,
   toolsResource,
   useGroupNames,
   useResource,
+  workspaceResource,
 } from "../lib/resource";
 import { sessionRoute, stopTurn } from "../lib/sessions";
 import { getAt, object } from "../lib/types";
@@ -101,8 +101,8 @@ export function napcatAddress(port?: unknown) {
 function StatusTiles() {
   const { draft } = useConfig();
   const runtime = useResource(runtimeResource, 3000).data;
-  const sandboxEnabled = object(draft.sandbox).enabled === true;
-  const sandbox = useResource(sandboxResource, sandboxEnabled ? 15_000 : 0).data;
+  const workspaceEnabled = object(draft.workspace).enabled === true;
+  const workspace = useResource(workspaceResource, workspaceEnabled ? 15_000 : 0).data;
   const napcat = object(draft.napcat);
   const bots = runtime?.napcat.connected ?? [];
   const names = useGroupNames();
@@ -149,17 +149,23 @@ function StatusTiles() {
     "私聊" + (privateEnabled ? "已启用" : "未启用"),
     enabledGroups || privateEnabled ? "success" : "warning",
   ];
-  const box: [string, ReactNode, Tone] = !sandboxEnabled
-    ? ["未启用", "代码执行和共享工作区不可用", "neutral"]
-    : !sandbox
-      ? ["读取中", "正在检查沙箱状态", "neutral"]
-      : !sandbox.available
-        ? ["不可用", sandbox.reason || "沙箱控制器没有响应", "danger"]
-        : [
-            sandbox.busy ? "执行中" : "可用",
-            "已用 " + formatBytes(sandbox.used_bytes) + " / " + formatBytes(sandbox.quota_bytes),
-            sandbox.busy ? "accent" : "success",
-          ];
+  const box: [string, ReactNode, Tone] = !workspaceEnabled
+    ? ["未启用", "持久化文件读写与命令执行未开启", "neutral"]
+    : !workspace
+      ? ["读取中", "正在检查工作区状态", "neutral"]
+      : !workspace.available
+        ? ["不可用", workspace.reason || "工作区目录不可用", "danger"]
+        : workspace.over_limit
+          ? [
+              "空间已满",
+              "已用 " + formatBytes(workspace.used_bytes) + " / " + formatBytes(workspace.max_bytes),
+              "warning",
+            ]
+          : [
+              workspace.busy ? "执行中" : "可用",
+              "已用 " + formatBytes(workspace.used_bytes) + " / " + formatBytes(workspace.max_bytes),
+              workspace.busy ? "accent" : "success",
+            ];
   const mcp: [string, ReactNode, Tone] = !servers.length
     ? ["未配置", "可在工具页添加 MCP 服务", "neutral"]
     : !enabledServers.length
@@ -190,7 +196,7 @@ function StatusTiles() {
         tone={sessions[2]}
         to="/conversations"
       />
-      <Tile icon={Box} label="共享沙箱" value={box[0]} detail={box[1]} tone={box[2]} to="/sandbox" />
+      <Tile icon={FolderOpen} label="共享工作区" value={box[0]} detail={box[1]} tone={box[2]} to="/workspace" />
       <Tile icon={Plug} label="MCP 服务" value={mcp[0]} detail={mcp[1]} tone={mcp[2]} to="/tools/mcp" />
     </div>
   );

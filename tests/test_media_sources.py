@@ -187,10 +187,10 @@ async def test_save_public_image_obeys_cancellation_before_workspace_write(
         reader = MediaReader(client=client, resolver=public_ip)
         monkeypatch.setattr("qq_agent_harness.napcat.tools.MediaReader", lambda _: reader)
         tools, context, settings = registry(Bot())
-        settings.sandbox.enabled = True
+        settings.workspace.enabled = True
         tools.add(
             ToolDefinition(
-                "sandbox__write_file", "写文件", "media", json_binding(schema(Empty), unused)
+                "workspace__write_file", "写文件", "media", json_binding(schema(Empty), unused)
             )
         )
         context.write_workspace = write

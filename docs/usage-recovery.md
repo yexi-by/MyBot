@@ -22,7 +22,7 @@
 | 14. 大文本整份拒读 | UTF-8 文本按字节游标连续读取，写入支持追加；修改已有文件仍受 overwrite 策略约束。 |
 | 15. 目录只显示 1000 项 | 返回 total/next_offset，模型与 WebUI 均能继续翻页。 |
 | 16. 固定 5 秒丢日志尾部 | 使用命令剩余时限收尾；回执标明输出完整性。超过预览预算的完整输出写入工作区并返回路径。 |
-| 17. 沙箱检查失败隐藏文件管理 | 执行状态与文件管理分开；隔离/配额异常仍可查看与清理文件。 |
+| 17. 工作区超额不隐藏文件管理 | 执行状态与文件管理分开；空间预算超出时仍可浏览与清理文件。 |
 | 18. 自动保存失败不恢复 | 临时网络和服务错误退避重试，冲突与字段错误仍要求处理；回执丢失但内容已写入时识别成功。 |
 | 19. 文件名含两点被误拒 | 按路径分段识别父目录引用，允许合法文件名中的连续点。 |
 | 20. 错误信息过度泛化 | 保留安全的协议错误类别、校验位置、文件错误码与异常栈位置，不回显参数值、正文或密钥。 |
@@ -53,11 +53,10 @@ QQ 上限核对基于锁定的 NapCat `859eb530c5801577633c2c3ae871d23586edf281`
 | `runtime.max_retained_sessions` | 新增可选；省略采用原来的 100。 |
 | `runtime.max_retained_bytes` | 新增可选；省略采用原来的 268435456。 |
 | `runtime.config_text_max_bytes` | 新增可选；省略采用原来的 2000000。 |
-| `sandbox.transfer_max_bytes` | 新增可选；省略采用原来的 50000000。 |
-| `sandbox.max_pending_operations` | 新增可选；省略允许最多 32 项操作在内存中等待。 |
+| `[workspace]` | 原 `[sandbox]` 替换为持久化单容器 `[workspace]`（含 `enabled`、`root`、`max_bytes`、`concurrent_executions`、`command_timeout`、`output_limit`、`transfer_max_bytes`、`max_pending_operations`）。 |
 | `mcp.<服务>.effect_tools`、`mcp.<服务>.read_only_tools` | 已删除；旧配置如含这些字段，需取得授权后移除。 |
-| `policy.categories` | 使用 `messages`、`groups`、`sandbox` 等业务分类，不再使用读写后缀；旧策略需逐项核对并结合工具覆盖保留原有授权范围，不能直接合并开关扩大权限。 |
-| egress 环境变量 | Compose 提供 `HARNESS_EGRESS_PORTS=80,443`、`HARNESS_EGRESS_IDLE_TIMEOUT=180`、`HARNESS_EGRESS_CONNECTIONS=32` 默认值；改变端口等取值须另行授权。 |
+| `policy.categories` | 使用 `messages`、`groups`、`workspace` 等业务分类，不再使用读写后缀；旧策略需逐项核对并结合工具覆盖保留原有授权范围，不能直接合并开关扩大权限。 |
+| `WORKSPACE_DIR` 环境变量 | Compose 通过 `WORKSPACE_DIR` 将宿主机工作区目录挂载到单容器 `/workspace`，不再需要 `runner` 或 `egress` 容器。 |
 | 其他业务与连接字段 | 保持原值，包括模型、群配置、人格、知识库、密钥与路径。 |
 
-新镜像还改变了无配置字段的运行行为，例如按需工具加载、分页、排队和失败恢复；这些变化及新字段应随同一完整应用镜像发布，runner/egress 使用同一应用版本。测试过程不修改独立部署配置。
+新镜像还改变了无配置字段的运行行为，例如按需工具加载、分页、排队和失败恢复；这些变化及新字段随统一应用镜像发布。测试过程不修改独立部署配置。

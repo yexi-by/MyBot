@@ -7,60 +7,10 @@ services:
     network_mode: host
     volumes:
       - ./config:/app/config:rw
+      - ${WORKSPACE_DIR:-./workspace}:/workspace:rw
     restart: unless-stopped
     logging:
       driver: local
       options:
         max-size: 5m
         max-file: "3"
-  runner:
-    container_name: mybot-runner
-    user: "0:0"
-    image: ${HARNESS_IMAGE:?use an explicit application image tag}
-    command: ["qq-harness-runner"]
-    network_mode: host
-    cap_add: [SYS_ADMIN, NET_ADMIN]
-    environment:
-      HARNESS_CONFIG: /app/config/harness.toml
-      HARNESS_WORKSPACE: /workspace-data
-      HARNESS_WORKSPACE_HOST: ${SANDBOX_WORKSPACE:?dedicated Btrfs subvolume required}
-      HARNESS_SANDBOX_IMAGE: ${SANDBOX_IMAGE:-qq-agent-harness-sandbox:1.0.0}
-    volumes:
-      - ./config:/app/config:ro
-      - ${SANDBOX_WORKSPACE}:/workspace-data:rw
-      - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped
-  egress:
-    container_name: mybot-egress
-    image: ${HARNESS_IMAGE:?use an explicit application image tag}
-    command: ["python", "-m", "qq_agent_harness.sandbox.egress"]
-    environment:
-      HARNESS_EGRESS_PORTS: ${HARNESS_EGRESS_PORTS:-80,443}
-      HARNESS_EGRESS_IDLE_TIMEOUT: ${HARNESS_EGRESS_IDLE_TIMEOUT:-180}
-      HARNESS_EGRESS_CONNECTIONS: ${HARNESS_EGRESS_CONNECTIONS:-128}
-    user: "1000:1000"
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    mem_limit: 256m
-    cpus: 0.5
-    pids_limit: 128
-    networks:
-      sandbox:
-        ipv4_address: 172.30.240.2
-      internet:
-        gw_priority: 1
-    restart: unless-stopped
-networks:
-  sandbox:
-    name: qah-sandbox
-    driver: bridge
-    internal: true
-    enable_ipv6: false
-    driver_opts:
-      com.docker.network.bridge.name: br-qah-sbx
-    ipam:
-      config:
-        - subnet: 172.30.240.0/24
-  internet:
-    driver: bridge

@@ -33,18 +33,18 @@ from qq_agent_harness.contracts import (
 )
 from qq_agent_harness.napcat import build_tools as build_qq_tools
 from qq_agent_harness.registry import ToolRegistry
-from qq_agent_harness.sandbox import RunnerClient
-from qq_agent_harness.sandbox import build_tools as build_sandbox_tools
 from qq_agent_harness.settings import (
     ConversationSettings,
     HarnessSettings,
     Policy,
-    SandboxSettings,
     TTSSettings,
+    WorkspaceSettings,
 )
 from qq_agent_harness.tts import build_tools as build_tts_tools
 from qq_agent_harness.tts import list_voices, upload_voice
 from qq_agent_harness.web import create_app
+from qq_agent_harness.workspace import WorkspaceService
+from qq_agent_harness.workspace import build_tools as build_workspace_tools
 
 SECRET_TEXT = "只该出现在请求正文里的敏感台词"
 
@@ -210,11 +210,11 @@ def setup_tts(
             voice="elaina_calm",
             max_retries=2,
         ),
-        sandbox=SandboxSettings(enabled=True),
+        workspace=WorkspaceSettings(enabled=True),
     )
     tools = [
         *build_qq_tools(),
-        *build_sandbox_tools(lambda: settings.sandbox, RunnerClient(lambda: settings.sandbox)),
+        *build_workspace_tools(WorkspaceService(lambda: settings.workspace)),
         *build_tts_tools(lambda: settings.tts, client=client),
     ]
     policy = Policy(categories={tool.category: True for tool in tools})
@@ -508,7 +508,7 @@ async def test_tool_is_gated_by_config_and_checks_workspace_and_cancellation_fir
         assert "tts__synthesize" not in registry.available(GROUP)
         settings.groups["10"].policy.categories["tts"] = True
 
-        settings.groups["10"].policy.tools["sandbox__write_file"] = False
+        settings.groups["10"].policy.tools["workspace__write_file"] = False
         denied = await registry.execute(
             context, "tts__synthesize", {"text": "存一份", "workspace_path": "voice/a.wav"}
         )
@@ -520,7 +520,7 @@ async def test_tool_is_gated_by_config_and_checks_workspace_and_cancellation_fir
         assert not requests
 
         context.cancelled = lambda: False
-        settings.groups["10"].policy.tools["sandbox__write_file"] = True
+        settings.groups["10"].policy.tools["workspace__write_file"] = True
         written: dict[str, bytes] = {}
 
         async def write(path: str, content: bytes) -> None:

@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ArrowLeft,
-  Box,
   Check,
   CircleAlert,
   Copy,
@@ -434,9 +433,7 @@ export function GlobalBanners() {
   const meta = state.meta;
   // 配置文件页自身会说明错误，不重复显示。
   const repairing = location.startsWith("/settings/config-file");
-  const sections = meta.restart_sections.filter(
-    (name) => !(name === "sandbox" && meta.sandbox_restart_required),
-  );
+  const sections = meta.restart_sections;
   return (
     <div className="global-banners">
       {state.offline ? (
@@ -469,20 +466,6 @@ export function GlobalBanners() {
           }
         >
           {sections.map((name) => restartSections[name] ?? name).join("、")}
-        </Banner>
-      )}
-      {state.loaded && meta.sandbox_restart_required && (
-        <Banner
-          tone="warning"
-          icon={Box}
-          title="沙箱设置尚未生效"
-          actions={
-            <Button size="sm" onClick={() => void navigate("/sandbox")}>
-              查看沙箱
-            </Button>
-          }
-        >
-          请重新创建 Runner 容器，然后重启 Harness。
         </Banner>
       )}
     </div>

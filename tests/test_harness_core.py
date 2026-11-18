@@ -438,8 +438,8 @@ def test_tool_access_follows_each_conversation_policy(tmp_path):
     assert "qq__get_history" in scopes["group:a"] and "qq__send_message" not in scopes["group:a"]
     assert scopes["group:b"] == ["qq__get_history"]
     assert scopes["private"] == []
-    # 沙箱在本部署未启用，不能出现在开放列表里。
-    assert not any(name.startswith("sandbox__") for names in scopes.values() for name in names)
+    # 共享工作区在本部署未启用，不能出现在开放列表里。
+    assert not any(name.startswith("workspace__") for names in scopes.values() for name in names)
 
 
 def test_napcat_group_directory_handles_offline_and_upstream_failure(tmp_path):
@@ -625,9 +625,9 @@ async def test_send_workspace_bridge_respects_read_parameter_policy(tmp_path):
     from qq_agent_harness.settings import ParameterRule
 
     store = make_store(tmp_path)
-    store.settings.sandbox.enabled = True
-    store.settings.private.policy.tools["sandbox__read_file"] = True
-    store.settings.private.policy.parameters["sandbox__read_file"] = {
+    store.settings.workspace.enabled = True
+    store.settings.private.policy.tools["workspace__read_file"] = True
+    store.settings.private.policy.parameters["workspace__read_file"] = {
         "path": ParameterRule(allowed=["public.png"])
     }
     registry = ToolRegistry(lambda: store.settings)
@@ -641,7 +641,9 @@ async def test_send_workspace_bridge_respects_read_parameter_policy(tmp_path):
         pytest.fail("回调不得通过重新执行工具绕过授权")
 
     registry.add(
-        ToolDefinition("sandbox__read_file", "读文件", "sandbox", model_binding(ReadFile, unused))
+        ToolDefinition(
+            "workspace__read_file", "读文件", "workspace", model_binding(ReadFile, unused)
+        )
     )
     hub = FakeHub()
 
@@ -972,42 +974,34 @@ def test_null_enum_is_rejected_without_overwriting_toml(tmp_path):
     assert store.path.read_bytes() == original
 
 
-def test_sandbox_pending_is_based_on_runner_applied_settings(tmp_path):
+def test_workspace_restart_required_only_for_root_or_concurrency_changes(tmp_path):
     store = make_store(tmp_path)
     data = store.settings.model_dump(mode="json")
-    data["sandbox"]["enabled"] = True
-    data["sandbox"]["runner_token"] = "fixture-credential-not-a-real-secret"
+    data["workspace"]["enabled"] = True
+    data["workspace"]["root"] = str(tmp_path / "ws-a")
     store.save(data, store.last_sha)
-    original = store.settings.sandbox.model_copy(deep=True)
     app = create_app(store.path, connect_mcp=False)
 
-    async def applied():
-        return {
-            "available": True,
-            "applied_settings": original.model_dump(
-                mode="json", exclude={"runner_token", "runner_url"}
-            ),
-        }
-
-    app.state.runner.status = applied
     with TestClient(app) as client:
-        assert client.get("/api/sandbox/status").json()["restart_required"] is False
+        assert client.get("/api/workspace/status").json()["restart_required"] is False
         current = client.get("/api/config").json()
-        current["config"]["sandbox"]["cpus"] = 3
-        current["config"]["sandbox"]["runner_token"] = "another-fixture-credential-long-enough"
-        assert (
-            client.put(
-                "/api/config", json={"config": current["config"], "sha": current["sha"]}
-            ).status_code
-            == 200
-        )
-        assert app.state.runner.get_settings().runner_token == original.runner_token
-        assert client.get("/api/sandbox/status").json()["restart_required"] is True
-        meta = client.get("/api/config").json()["meta"]
-        assert meta["sandbox_restart_required"] is True and "sandbox" in meta["restart_sections"]
+        # 修改动态参数（如 max_bytes、command_timeout）立即生效，无需重启
+        current["config"]["workspace"]["max_bytes"] = 20_000_000
+        current["config"]["workspace"]["command_timeout"] = 600
+        saved = client.put("/api/config", json={"config": current["config"], "sha": current["sha"]})
+        assert saved.status_code == 200
+        assert client.get("/api/workspace/status").json()["restart_required"] is False
+        assert "workspace" not in saved.json()["meta"]["restart_sections"]
 
-    restarted = create_app(store.path, connect_mcp=False)
-    restarted.state.runner.status = applied
-    with TestClient(restarted) as client:
-        assert client.get("/api/sandbox/status").json()["restart_required"] is True
-        assert client.get("/api/config").json()["meta"]["restart_required"] is True
+        # 修改并发上限或目录路径时标记 workspace 需重启
+        next_cfg = saved.json()
+        next_cfg["config"]["workspace"]["concurrent_executions"] = 4
+        updated = client.put(
+            "/api/config", json={"config": next_cfg["config"], "sha": next_cfg["sha"]}
+        )
+        assert updated.status_code == 200
+        status_payload = client.get("/api/workspace/status").json()
+        assert status_payload["restart_required"] is True
+        assert "configuration_notice" in status_payload
+        meta = client.get("/api/config").json()["meta"]
+        assert meta["restart_required"] is True and "workspace" in meta["restart_sections"]

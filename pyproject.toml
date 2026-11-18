@@ -13,7 +13,6 @@ dependencies = [
 ]
 [project.scripts]
 qq-agent-harness = "qq_agent_harness.main:main"
-qq-harness-runner = "qq_agent_harness.sandbox.runner:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

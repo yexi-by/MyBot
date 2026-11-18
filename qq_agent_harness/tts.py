@@ -144,7 +144,7 @@ class SynthesizeSpeech(Model):
     workspace_path: str | None = Field(
         default=None,
         min_length=1,
-        description="可选：同时把 WAV 保存到共享沙箱工作区的相对路径",
+        description="可选：同时把 WAV 保存到共享工作区的相对路径",
     )
 
     @model_validator(mode="after")
@@ -787,7 +787,7 @@ def build_tools(
             return ToolResult.failure(reason, "PermissionDenied")
         if request.workspace_path is not None:
             denied = context.check_tool(
-                "sandbox__write_file",
+                "workspace__write_file",
                 {
                     "path": request.workspace_path,
                     "content": "",
@@ -798,7 +798,7 @@ def build_tools(
             if denied is not None:
                 return denied
             if context.write_workspace is None:
-                return ToolResult.failure("沙箱文件写入服务不可用", "SandboxError")
+                return ToolResult.failure("工作区文件写入服务不可用", "WorkspaceError")
         # 说话音色由管理员在配置中固定，Agent 不能更换；情绪控制方式由 Agent 自行选择。
         audio = await synthesize_speech(
             config,

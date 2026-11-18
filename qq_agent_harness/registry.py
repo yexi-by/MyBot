@@ -119,8 +119,8 @@ class ToolRegistry:
         conversation = self.settings().conversation(scope)
         if not conversation.enabled:
             return False, "当前会话未启用"
-        if tool.name.startswith("sandbox__") and not self.settings().sandbox.enabled:
-            return False, "此部署尚未启用共享沙箱"
+        if tool.name.startswith("workspace__") and not self.settings().workspace.enabled:
+            return False, "尚未启用共享工作区"
         if tool.name.startswith("image__"):
             image = self.settings().image
             if not image.enabled:

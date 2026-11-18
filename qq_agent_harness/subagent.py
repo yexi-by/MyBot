@@ -24,9 +24,9 @@ from .registry import ToolRegistry
 CATEGORY_LABELS = {"subagent": "子任务委派"}
 MAX_SUBAGENT_STEPS = 24
 
-SUBAGENT_SYSTEM_PREFIX = """你是主会话派生的内部执行子智能体，负责在独立上下文中完成指定的繁重分析、检索、媒体处理或沙箱计算任务。
+SUBAGENT_SYSTEM_PREFIX = """你是主会话派生的内部执行子智能体，负责在独立上下文中完成指定的繁重分析、检索、媒体处理或工作区计算任务。
 - 你没有直接向 QQ 发送消息或执行群管写入的工具；请专注于调查、运行验证并产出清晰结论。
-- 沙箱中单次命令临时文件写 /tmp，跨步骤临时素材放 .scratch/，需要交回主会话复用的文件或生成媒体请明确记录其 workspace_path 或 generated_id。
+- 工作区中单次命令临时文件写 $TMPDIR，跨步骤临时素材放 .scratch/，需要交回主会话复用的文件或生成媒体请明确记录其 workspace_path 或 generated_id。
 - 任务完成后，直接输出结构清晰、事实准确的总结报告供主会话使用；未确认的结果严禁臆测。"""
 
 
@@ -44,7 +44,7 @@ class SubagentInput(Model):
 
 
 def _allowed_for_subagent(tool: ToolDefinition) -> bool:
-    """子智能体仅可使用当前群已授权的沙箱、MCP、技能、媒体生成及只读 QQ 查询工具。"""
+    """子智能体仅可使用当前群已授权的工作区、MCP、技能、媒体生成及只读 QQ 查询工具。"""
     name = tool.name
     if name.startswith("subagent__") or name.startswith("timer__"):
         return False
@@ -219,7 +219,7 @@ def build_tools(
         ToolDefinition(
             "subagent__run",
             (
-                "派生一个独立上下文的子智能体去执行繁重的多步调查、长文档阅读、MCP 批量检索或沙箱计算，"
+                "派生一个独立上下文的子智能体去执行繁重的多步调查、长文档阅读、MCP 批量检索或工作区计算，"
                 "仅将精炼结论和生成的资源 ID 带回当前会话，避免大量中间输出污染群聊上下文。"
             ),
             "subagent",

@@ -89,7 +89,7 @@ export const restartSections: Record<string, string> = {
   server: "控制台服务",
   napcat: "NapCat 接入",
   mcp: "MCP 服务",
-  sandbox: "共享沙箱",
+  workspace: "共享工作区",
   "runtime.concurrent_conversations": "并发会话数",
   "runtime.activity_limit": "活动记录条数",
 };

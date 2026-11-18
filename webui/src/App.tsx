@@ -14,10 +14,10 @@ import { ConversationsPage } from "./pages/Conversations";
 import { OverviewPage } from "./pages/Overview";
 import { PromptsPage } from "./pages/Prompts";
 import { ProvidersPage } from "./pages/Providers";
-import { SandboxPage } from "./pages/Sandbox";
 import { SessionsPage } from "./pages/Sessions";
 import { SettingsPage } from "./pages/Settings";
 import { ToolsPage } from "./pages/Tools";
+import { WorkspacePage } from "./pages/Workspace";
 import { navItems, parseRoute } from "./routes";
 import type { Route } from "./routes";
 
@@ -318,8 +318,8 @@ function Page({ route }: { route: Route }) {
       return <PromptsPage path={route.path} />;
     case "tools":
       return <ToolsPage route={route} />;
-    case "sandbox":
-      return <SandboxPage view={route.view} />;
+    case "workspace":
+      return <WorkspacePage view={route.view} />;
     case "settings":
       return <SettingsPage section={route.section} />;
     default:

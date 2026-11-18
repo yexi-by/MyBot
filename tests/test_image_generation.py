@@ -17,17 +17,17 @@ from qq_agent_harness.napcat import build_tools as build_qq_tools
 from qq_agent_harness.providers import ModelSession, ResponseGroup, ToolCall
 from qq_agent_harness.registry import ToolRegistry
 from qq_agent_harness.runtime import ConversationSession
-from qq_agent_harness.sandbox import RunnerClient
-from qq_agent_harness.sandbox import build_tools as build_sandbox_tools
 from qq_agent_harness.settings import (
     ConversationSettings,
     HarnessSettings,
     ImageSettings,
     ModelEndpoint,
     Policy,
-    SandboxSettings,
+    WorkspaceSettings,
 )
 from qq_agent_harness.web import create_app
+from qq_agent_harness.workspace import WorkspaceService
+from qq_agent_harness.workspace import build_tools as build_workspace_tools
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII="
@@ -58,16 +58,16 @@ def setup_image_harness(
             max_retries=1,
             headers={"X-Custom-Source": "mybot"},
         ),
-        sandbox=SandboxSettings(enabled=True),
+        workspace=WorkspaceSettings(enabled=True),
     )
     qq_tools = build_qq_tools()
-    sb_tools = build_sandbox_tools(lambda: settings.sandbox, RunnerClient(lambda: settings.sandbox))
+    ws_tools = build_workspace_tools(WorkspaceService(lambda: settings.workspace))
     img_tools = build_image_tools(
         lambda: settings.image,
         reader=reader or MediaReader(resolver=public_ip),
         client=client,
     )
-    all_tools = [*qq_tools, *sb_tools, *img_tools]
+    all_tools = [*qq_tools, *ws_tools, *img_tools]
     categories = {tool.category: True for tool in all_tools}
     policy = Policy(categories=categories)
     settings.groups["10"] = ConversationSettings(enabled=True, policy=policy)
@@ -121,8 +121,8 @@ async def test_text_to_image_forwards_parameters_attaches_multimodal_and_sends_t
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as http_client:
         reg, context, settings, bot = setup_image_harness(client=http_client)
-        # 沙箱禁用时也不影响纯内存生图与直发
-        settings.sandbox.enabled = False
+        # 工作区禁用时也不影响纯内存生图与直发
+        settings.workspace.enabled = False
         result = await reg.execute(
             context,
             "image__generate",
@@ -183,7 +183,7 @@ async def test_text_to_image_forwards_parameters_attaches_multimodal_and_sends_t
     assert len(tool_items) == 1
     assert base64.b64encode(PNG).decode("ascii") not in str(tool_items[0].get("content"))
 
-    # 无需开启沙箱即可通过 generated_id 直接发送到 QQ 和设置头像
+    # 无需开启工作区即可通过 generated_id 直接发送到 QQ 和设置头像
     send_res = await reg.execute(
         context,
         "qq__send_message",
@@ -321,8 +321,8 @@ async def test_reference_and_workspace_permissions_are_enforced_before_upstream_
         )
         assert denied_qq.error_type == "PermissionDenied" and not called
 
-        # 禁用 sandbox__read_file 时禁止读取工作区参考图
-        settings.groups["10"].policy.tools["sandbox__read_file"] = False
+        # 禁用 workspace__read_file 时禁止读取工作区参考图
+        settings.groups["10"].policy.tools["workspace__read_file"] = False
         denied_ws_read = await reg.execute(
             context,
             "image__generate",
@@ -330,8 +330,8 @@ async def test_reference_and_workspace_permissions_are_enforced_before_upstream_
         )
         assert denied_ws_read.error_type == "PermissionDenied" and not called
 
-        # 禁用 sandbox__write_file 时禁止传入 workspace_path 保存
-        settings.groups["10"].policy.tools["sandbox__write_file"] = False
+        # 禁用 workspace__write_file 时禁止传入 workspace_path 保存
+        settings.groups["10"].policy.tools["workspace__write_file"] = False
         denied_ws_write = await reg.execute(
             context,
             "image__generate",
