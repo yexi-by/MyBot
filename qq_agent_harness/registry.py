@@ -139,11 +139,18 @@ class ToolRegistry:
                 return False, f"还需开放 {dependency}"
         return allowed, "" if allowed else "当前会话未开放此能力"
 
-    def definitions(self, context: ToolContext) -> list[JsonObject]:
+    def definitions(
+        self,
+        context: ToolContext,
+        *,
+        tool_filter: Callable[[ToolDefinition], bool] | None = None,
+    ) -> list[JsonObject]:
         result: list[JsonObject] = []
         has_deferred = False
         for name in sorted(self.tools):
             tool = self.tools[name]
+            if tool_filter is not None and not tool_filter(tool):
+                continue
             if not self.permitted(context.scope, tool)[0]:
                 continue
             if tool.deferred:
@@ -159,11 +166,22 @@ class ToolRegistry:
                 continue
             seen_discovered.add(name)
             tool = self.tools.get(name)
-            if tool is not None and tool.deferred and self.permitted(context.scope, tool)[0]:
+            if (
+                tool is not None
+                and tool.deferred
+                and (tool_filter is None or tool_filter(tool))
+                and self.permitted(context.scope, tool)[0]
+            ):
                 result.append(self.definition(tool, context.scope))
         return result
 
-    def _search_tools(self, context: ToolContext, arguments: JsonObject) -> ToolResult:
+    def _search_tools(
+        self,
+        context: ToolContext,
+        arguments: JsonObject,
+        *,
+        tool_filter: Callable[[ToolDefinition], bool] | None = None,
+    ) -> ToolResult:
         if context.cancelled():
             return ToolResult(status="cancelled", message="本轮已停止")
         unknown_keys = set(arguments) - {"query", "category"}
@@ -190,7 +208,8 @@ class ToolRegistry:
         permitted_tools = [
             self.tools[name]
             for name in sorted(self.tools)
-            if self.permitted(context.scope, self.tools[name])[0]
+            if (tool_filter is None or tool_filter(self.tools[name]))
+            and self.permitted(context.scope, self.tools[name])[0]
         ]
         deferred_tools = [tool for tool in permitted_tools if tool.deferred]
         if not query and not category:
@@ -353,12 +372,24 @@ class ToolRegistry:
             },
         )
 
-    async def execute(self, context: ToolContext, name: str, arguments: JsonObject) -> ToolResult:
+    async def execute(
+        self,
+        context: ToolContext,
+        name: str,
+        arguments: JsonObject,
+        *,
+        tool_filter: Callable[[ToolDefinition], bool] | None = None,
+    ) -> ToolResult:
         if name == _SEARCH_TOOL_NAME and name not in self.tools:
-            return self._search_tools(context, arguments)
+            return self._search_tools(context, arguments, tool_filter=tool_filter)
         tool = self.tools.get(name)
         if not tool:
             return ToolResult.failure("工具不存在，请使用当前提供的工具", "ToolNotFound")
+        if tool_filter is not None and not tool_filter(tool):
+            return ToolResult.failure(
+                "当前执行上下文不允许调用该工具（对外发送或群管请交回主会话执行）",
+                "PermissionDenied",
+            )
         permitted, reason = self.permitted(context.scope, tool)
         if not permitted:
             return ToolResult.failure(reason, "PermissionDenied")

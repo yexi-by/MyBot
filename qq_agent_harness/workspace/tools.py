@@ -150,6 +150,11 @@ def build_tools(service: WorkspaceService) -> list[ToolDefinition]:
                 watcher = asyncio.create_task(_watch_cancel(context, service, task))
                 try:
                     result = await task
+                except asyncio.CancelledError:
+                    await service.cancel(context.turn_id)
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    raise
                 finally:
                     watcher.cancel()
                     await asyncio.gather(watcher, return_exceptions=True)

@@ -36,6 +36,15 @@ from .settings import TTSSettings
 from .skills import CATEGORY_LABELS as SKILLS_CATEGORIES
 from .skills import build_tools as skills_tools
 from .subagent import CATEGORY_LABELS as SUBAGENT_CATEGORIES
+from .subagent import (
+    MAX_MAX_STEPS,
+    MAX_TIMEOUT_SECONDS,
+    MIN_MAX_STEPS,
+    MIN_TIMEOUT_SECONDS,
+    SubagentBusyError,
+    SubagentManager,
+    SubagentNotFound,
+)
 from .subagent import build_tools as subagent_tools
 from .timers import CATEGORY_LABELS as TIMER_CATEGORIES
 from .timers import TimerManager
@@ -103,6 +112,20 @@ class CancelTimerRequest(Model):
     timer_id: str = Field(min_length=1)
 
 
+class CancelSubagentRequest(Model):
+    subagent_id: str = Field(min_length=1, max_length=64)
+    reason: str = Field(default="", max_length=300)
+
+
+class SendSubagentRequest(Model):
+    subagent_id: str = Field(min_length=1, max_length=64)
+    message: str = Field(min_length=1, max_length=6000)
+    extra_steps: int | None = Field(default=None, ge=MIN_MAX_STEPS, le=MAX_MAX_STEPS)
+    timeout_seconds: float | None = Field(
+        default=None, ge=MIN_TIMEOUT_SECONDS, le=MAX_TIMEOUT_SECONDS
+    )
+
+
 class PreviewSpeech(Model):
     text: str = Field(min_length=1, max_length=1000)
     language: SpeechLanguage = "zh"
@@ -150,13 +173,24 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     media = MediaReader(startup.napcat)
     runtime.read_media = media.read_many
     timers = TimerManager(runtime.wake_timer)
+    subagents = SubagentManager(
+        lambda: store,
+        registry,
+        session_factory=lambda *args, **kwargs: runtime.session_factory(*args, **kwargs),
+        get_napcat=hub.bot_connection,
+        on_wake=runtime.wake_subagent,
+        on_record=runtime.record,
+        on_media=runtime.attach_generated_media,
+        get_parent_session_id=runtime.session_id_for,
+    )
+    runtime.subagents = subagents
     for tool in image_tools(lambda: store.settings.image, startup.napcat, reader=media):
         registry.add(tool)
     for tool in tts_tools(lambda: store.settings.tts, startup.napcat):
         registry.add(tool)
     for tool in skills_tools(lambda: store):
         registry.add(tool)
-    for tool in subagent_tools(lambda: store, registry, session_factory=runtime.session_factory):
+    for tool in subagent_tools(subagents):
         registry.add(tool)
     for tool in timer_tools(timers):
         registry.add(tool)
@@ -206,6 +240,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
             with suppress(asyncio.CancelledError):
                 await watcher
             await timers.close()
+            await subagents.close()
             await runtime.close()
             await hub.close()
             await mcp.close()
@@ -218,6 +253,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     app.state.hub = hub
     app.state.workspace = workspace_service
     app.state.timers = timers
+    app.state.subagents = subagents
     app.state.shutdown = None
 
     @app.middleware("http")
@@ -434,6 +470,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
         result = runtime.snapshot()
         result["started_at"] = started_at
         result["timers"] = timers.snapshot()
+        result["subagents"] = subagents.snapshot()
         result["napcat"] = {**hub.status(), "expected_bot_id": startup.napcat.expected_bot_id}
         servers: JsonObject = {}
         for name, config in store.settings.mcp.items():
@@ -448,6 +485,36 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
     @app.post("/api/timers/cancel")
     async def cancel_timer(request: CancelTimerRequest) -> JsonObject:
         return {"cancelled": timers.cancel(request.timer_id)}
+
+    @app.get("/api/subagents/detail")
+    async def subagent_detail(id: str, since: int | None = None) -> JsonObject:
+        detail = subagents.inspect_detail(id, since=since)
+        if detail is None:
+            raise HTTPException(404, "子代理不存在或已被回收")
+        return detail
+
+    @app.post("/api/subagents/cancel")
+    async def cancel_subagent(request: CancelSubagentRequest) -> JsonObject:
+        sub_id = request.subagent_id.strip()
+        if sub_id not in subagents.records:
+            raise HTTPException(404, "子代理不存在或已被回收")
+        cancelled = await subagents.cancel(sub_id, reason=request.reason, source="operator")
+        return {"cancelled": cancelled, "subagent_id": sub_id}
+
+    @app.post("/api/subagents/send")
+    async def send_subagent(request: SendSubagentRequest) -> JsonObject:
+        try:
+            return await subagents.send_message(
+                request.subagent_id.strip(),
+                request.message,
+                source="operator",
+                extra_steps=request.extra_steps,
+                timeout_seconds=request.timeout_seconds,
+            )
+        except SubagentNotFound as error:
+            raise HTTPException(404, str(error)) from None
+        except SubagentBusyError as error:
+            raise HTTPException(409, str(error)) from None
 
     def console_bot() -> str:
         """控制台展示的机器人：优先配置的账号，否则取第一个在线连接。"""

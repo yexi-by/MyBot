@@ -38,6 +38,7 @@ from qq_agent_harness.runtime import AgentRuntime
 from qq_agent_harness.session_view import project
 from qq_agent_harness.settings import ModelEndpoint, WorkspaceSettings
 from qq_agent_harness.skills import build_tools as skill_tools
+from qq_agent_harness.subagent import SubagentManager
 from qq_agent_harness.subagent import build_tools as subagent_tools
 from qq_agent_harness.timers import TimerManager
 from qq_agent_harness.timers import build_tools as timer_tools
@@ -781,14 +782,29 @@ async def test_skills_subagent_timer_and_console_auth(tmp_path: Path) -> None:
             )
         return httpx.Response(200, json=answer("chat_completions", "子代理已完成图表生成"))
 
+    sub_wakes: list[tuple[str, str]] = []
+
+    async def on_sub_wake(
+        _scope: ConversationScope,
+        _parent_sid: str,
+        _event_id: str,
+        event_type: str,
+        _title: str,
+        text: str,
+    ) -> bool:
+        sub_wakes.append((event_type, text))
+        return True
+
     async with httpx.AsyncClient(transport=httpx.MockTransport(sub_transport)) as client:
-        for t in subagent_tools(
+        sub_manager = SubagentManager(
             lambda: store,
             registry,
             session_factory=lambda settings, system, conv: ModelSession(
                 settings, system, conv, client=client
             ),
-        ):
+            on_wake=on_sub_wake,
+        )
+        for t in subagent_tools(sub_manager):
             registry.add(t)
 
         scope = ConversationScope(bot_id="bot", kind="group", peer_id="a")
@@ -799,21 +815,32 @@ async def test_skills_subagent_timer_and_console_auth(tmp_path: Path) -> None:
         assert loaded.status == "ok" and isinstance(loaded.data, dict)
         assert "放入 /tmp" in str(loaded.data["instructions"])
 
-        # 2. Subagent 隔离执行：剥离 qq__send_message / timer__* / subagent__*，共享 generated_media
-        sub_res = await registry.execute(
+        # 2. Subagent 异步隔离执行：剥离 qq__send_message / timer__* / subagent__*，完成后唤醒并回传 generated_media
+        spawn_res = await registry.execute(
             ctx,
-            "subagent__run",
-            {"task": "生成图表并汇报"},
+            "subagent__spawn",
+            {"title": "生成图表", "task": "生成图表并汇报"},
         )
-        assert sub_res.status == "ok" and isinstance(sub_res.data, dict)
-        assert sub_res.data["report"] == "子代理已完成图表生成"
-        assert sub_res.data["generated_ids"] == ["gen-chart"]
+        assert spawn_res.status == "ok" and isinstance(spawn_res.data, dict)
+        sub_id = str(spawn_res.data["subagent_id"])
+        assert spawn_res.data["state"] == "running"
+        task_handle = sub_manager.records[sub_id].task_handle
+        if task_handle is not None:
+            await task_handle
+        inspected = await registry.execute(ctx, "subagent__inspect", {"subagent_id": sub_id})
+        assert inspected.status == "ok" and isinstance(inspected.data, dict)
+        assert inspected.data["state"] == "completed"
+        assert inspected.data["report_chunk"] == "子代理已完成图表生成"
+        assert inspected.data["generated_ids"] == ["gen-chart"]
         assert "gen-chart" in ctx.generated_media
+        assert sub_wakes and sub_wakes[-1][0] == "completed"
+        assert "子代理已完成图表生成" in sub_wakes[-1][1]
         exposed = sub_tool_names[0]
         assert "image__mock_gen" in exposed
         assert "qq__send_message" not in exposed
-        assert "subagent__run" not in exposed
+        assert "subagent__spawn" not in exposed
         assert "timer__schedule" not in exposed
+        await sub_manager.close()
 
         # 3. Timer 工具注册/列举/取消 + 极短延迟到期触发验证
         sched = await registry.execute(

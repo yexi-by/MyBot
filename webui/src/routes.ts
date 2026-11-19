@@ -31,7 +31,7 @@ export const settingsSections: { id: SettingsSection; label: string }[] = [
 
 export type Route =
   | { page: "overview" }
-  | { page: "sessions"; key: string }
+  | { page: "sessions"; key: string; subagent?: string }
   | {
       page: "conversations";
       kind: "group" | "private" | null;
@@ -56,10 +56,14 @@ export function parseRoute(location: string): Route {
   const url = new URL(location, window.location.origin);
   const parts = url.pathname.split("/").filter(Boolean);
   const query = url.searchParams;
-  const [head, second, third] = parts;
+  const [head, second, third, fourth] = parts;
   if (!head) return { page: "overview" };
-  // 会话键形如 `机器人:group:群号`，整体编码为一段路径。
-  if (head === "sessions" && parts.length <= 2) return { page: "sessions", key: decode(second) };
+  // 会话键形如 `机器人:group:群号`，整体编码为一段路径；子代理挂载在 `/sessions/<key>/subagents/<id>`。
+  if (head === "sessions") {
+    if (parts.length <= 2) return { page: "sessions", key: decode(second) };
+    if (parts.length === 4 && third === "subagents" && second && fourth)
+      return { page: "sessions", key: decode(second), subagent: decode(fourth) };
+  }
   if (head === "conversations") {
     if (second === "private" && parts.length === 2)
       return { page: "conversations", kind: "private", id: "" };

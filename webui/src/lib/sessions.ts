@@ -2,14 +2,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, errorMessage, get, post } from "./api";
 import { runtimeResource } from "./resource";
 import { object } from "./types";
-import type { Json, QQMessage, SessionDetail, SessionEntry } from "./types";
+import type { Json, ObjectValue, QQMessage, SessionDetail, SessionEntry, SubagentDetail } from "./types";
 import { confirm, toast } from "./ui";
 
 export const sessionRoute = (key: string) => "/sessions/" + encodeURIComponent(key);
+export const subagentRoute = (key: string, id: string) =>
+  sessionRoute(key) + "/subagents/" + encodeURIComponent(id);
 
 /** 排队、运行、重试或压缩中的会话不能直接重置，查看器也按更短间隔刷新。 */
 export const isBusy = (state: string | undefined) =>
   state === "queued" || state === "running" || state === "compacting" || state === "retrying";
+
+export const isSubagentActive = (state: string | undefined) =>
+  state === "running" || state === "retrying" || state === "compacting";
 
 /**
  * QQ 消息段或发送参数中的一段转成可读文字。NapCat 消息段的字段在 data 里，
@@ -157,7 +162,10 @@ export function useSessionDetail(key: string, signal: string) {
           setState({ detail: null, missing: true, error: "", loading: false });
         } else setState((current) => ({ ...current, error: errorMessage(error), loading: false }));
       }
-      timer = setTimeout(() => void load(), isBusy(held?.state) ? 2000 : 10_000);
+      timer = setTimeout(
+        () => void load(),
+        isBusy(held?.state) || (held?.active_subagents ?? 0) > 0 ? 2000 : 10_000,
+      );
     };
     reload.current = () => void load();
     const visible = () => {
@@ -180,11 +188,74 @@ export function useSessionDetail(key: string, signal: string) {
   return { ...state, refresh };
 }
 
-/** 停止会话当前一轮；已发出的消息和执行过的操作不会撤回，上下文保留。 */
+interface SubagentDetailState {
+  detail: SubagentDetail | null;
+  missing: boolean;
+  error: string;
+  loading: boolean;
+}
+const blankSubagent: SubagentDetailState = { detail: null, missing: false, error: "", loading: true };
+
+/** 轮询单个子代理详情：运行中每 2 秒、结束后每 10 秒，带版本号避免重复传输全部条目。 */
+export function useSubagentDetail(id: string, signal: string) {
+  const [state, setState] = useState<SubagentDetailState>(blankSubagent);
+  const reload = useRef<() => void>(() => {});
+  const lastSignal = useRef(signal);
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let held: SubagentDetail | null = null;
+    let sequence = 0;
+    setState(blankSubagent);
+    const load = async () => {
+      clearTimeout(timer);
+      if (cancelled || document.hidden) return;
+      const request = ++sequence;
+      const params = new URLSearchParams({ id });
+      if (held) params.set("since", String(held.version));
+      try {
+        const next = await get<SubagentDetail>("/api/subagents/detail?" + params.toString());
+        if (cancelled || request !== sequence) return;
+        held =
+          next.entries === null && held?.subagent_id === next.subagent_id
+            ? { ...next, entries: held.entries }
+            : next;
+        setState({ detail: held, missing: false, error: "", loading: false });
+      } catch (error) {
+        if (cancelled || request !== sequence) return;
+        if (error instanceof ApiError && error.status === 404) {
+          held = null;
+          setState({ detail: null, missing: true, error: "", loading: false });
+        } else setState((current) => ({ ...current, error: errorMessage(error), loading: false }));
+      }
+      timer = setTimeout(() => void load(), isSubagentActive(held?.state) ? 2000 : 10_000);
+    };
+    reload.current = () => void load();
+    const visible = () => {
+      if (!document.hidden) void load();
+    };
+    document.addEventListener("visibilitychange", visible);
+    void load();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, [id]);
+  useEffect(() => {
+    if (lastSignal.current === signal) return;
+    lastSignal.current = signal;
+    reload.current();
+  }, [signal]);
+  const refresh = useCallback(() => reload.current(), []);
+  return { ...state, refresh };
+}
+
+/** 停止会话当前一轮；已发出的消息和执行过的操作不会撤回，后台子代理不受影响。 */
 export async function stopTurn(key: string): Promise<boolean> {
   const accepted = await confirm({
     title: "停止这一轮对话？",
-    message: "已经发出的消息和执行过的操作不会撤回，会话上下文会保留。",
+    message: "已经发出的消息和执行过的操作不会撤回，会话上下文与后台子代理会继续保留。",
     confirmLabel: "停止",
     danger: true,
   });
@@ -201,24 +272,79 @@ export async function stopTurn(key: string): Promise<boolean> {
   }
 }
 
-/** 清空会话的模型上下文；处理中的会话先停止本轮。 */
-export async function resetSession(key: string, busy: boolean): Promise<boolean> {
+/** 清空会话的模型上下文；处理中的会话或运行中的子代理先停止再重置。 */
+export async function resetSession(key: string, busy: boolean, activeSubagents = 0): Promise<boolean> {
+  const needStop = busy || activeSubagents > 0;
   const accepted = await confirm({
-    title: busy ? "停止并重置这个会话？" : "重置这个会话的上下文？",
+    title: needStop ? "停止并重置这个会话？" : "重置这个会话的上下文？",
     message:
       (busy ? "正在处理的一轮会先停止。" : "") +
+      (activeSubagents > 0 ? `当前会话关联的 ${activeSubagents} 个后台子代理也会一并停止并清理。` : "") +
       "清空当前会话的对话上下文、工具调用记录和摘要，下次唤醒时从近期 QQ 历史重新开始。已发出的消息不会撤回。",
-    confirmLabel: busy ? "停止并重置" : "重置",
+    confirmLabel: needStop ? "停止并重置" : "重置",
     danger: true,
   });
   if (!accepted) return false;
   try {
-    await post<{ session_id: string }>("/api/sessions/reset", { scope_key: key, stop: busy });
+    await post<{ session_id: string }>("/api/sessions/reset", { scope_key: key, stop: needStop });
     toast("会话上下文已重置", "success");
     return true;
   } catch (error) {
     toast("重置失败：" + errorMessage(error), "danger");
     return false;
+  } finally {
+    void runtimeResource.refresh();
+  }
+}
+
+/** 停止运行中的指定子代理（不会自动触发主会话对外发言）。 */
+export async function stopSubagent(subagentId: string, title?: string): Promise<boolean> {
+  const accepted = await confirm({
+    title: "停止这个后台子代理？",
+    message:
+      (title ? `将立即终止子代理「${title}」（${subagentId}）` : `将立即终止子代理 ${subagentId}`) +
+      " 及其正在执行的工作区命令。已保留的轨迹可在控制台继续查看，也可以随时续跑。",
+    confirmLabel: "停止子代理",
+    danger: true,
+  });
+  if (!accepted) return false;
+  try {
+    const result = await post<{ cancelled: boolean }>("/api/subagents/cancel", {
+      subagent_id: subagentId,
+    });
+    toast(result.cancelled ? "子代理已停止" : "该子代理已经结束", result.cancelled ? "success" : "neutral");
+    return result.cancelled;
+  } catch (error) {
+    toast("停止子代理失败：" + errorMessage(error), "danger");
+    return false;
+  } finally {
+    void runtimeResource.refresh();
+  }
+}
+
+/** 管理员向子代理发送纠偏指令（运行中）或续跑指令（已结束）。 */
+export async function sendSubagentInstruction(
+  subagentId: string,
+  message: string,
+  options?: { extraSteps?: number; isResume?: boolean },
+): Promise<{ mode: "steered" | "resumed"; state: string } | null> {
+  try {
+    const payload: ObjectValue = {
+      subagent_id: subagentId,
+      message,
+    };
+    if (options?.isResume && options.extraSteps) payload.extra_steps = options.extraSteps;
+    const result = await post<{ mode: "steered" | "resumed"; state: string }>("/api/subagents/send", payload);
+    toast(
+      result.mode === "steered"
+        ? "纠偏指令已入队，将在子代理下一步生效"
+        : "子代理已按新指令继续运行",
+      "success",
+    );
+    return result;
+  } catch (error) {
+    toast("发送指令失败：" + errorMessage(error), "danger");
+    return null;
   } finally {
     void runtimeResource.refresh();
   }

@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import {
   Activity as ActivityIcon,
   Bell,
+  Bot,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -40,7 +41,7 @@ import {
   formatRelative,
   parseScopeKey,
 } from "../lib/format";
-import { activityKind, mcpState, resultStatus, turnState, usageSources } from "../lib/labels";
+import { activityKind, mcpState, resultStatus, subagentState, turnState, usageSources } from "../lib/labels";
 import { linkHandler } from "../lib/navigation";
 import {
   runtimeResource,
@@ -49,9 +50,9 @@ import {
   useResource,
   workspaceResource,
 } from "../lib/resource";
-import { sessionRoute, stopTurn } from "../lib/sessions";
+import { isSubagentActive, sessionRoute, stopSubagent, stopTurn, subagentRoute } from "../lib/sessions";
 import { getAt, object } from "../lib/types";
-import type { Activity, RetainedSession, TimerItem, Turn, TurnContext } from "../lib/types";
+import type { Activity, RetainedSession, SubagentSummary, TimerItem, Turn, TurnContext } from "../lib/types";
 import { toast } from "../lib/ui";
 import type { Tone } from "../lib/ui";
 
@@ -269,6 +270,74 @@ function TurnRow({ turn }: { turn: Turn }) {
   );
 }
 
+function ActiveSubagents({ subagents }: { subagents: SubagentSummary[] }) {
+  const groups = useGroupNames();
+  if (!subagents.length) return null;
+  const activeCount = subagents.filter((item) => isSubagentActive(item.state)).length;
+  const shown = subagents.slice(0, 8);
+  return (
+    <section className="card">
+      <header className="card-header">
+        <div className="grow">
+          <h2>后台子代理</h2>
+          <p className="card-subtitle">
+            在独立上下文中异步运行，不阻塞主对话；点击可查看实时轨迹、纠偏或续跑。
+          </p>
+        </div>
+        {activeCount > 0 ? (
+          <Badge tone="accent">{activeCount} 个运行中</Badge>
+        ) : (
+          <span className="muted small">共 {subagents.length} 条记录</span>
+        )}
+      </header>
+      <ul className="turns">
+        {shown.map((item) => {
+          const st = subagentState(item.state);
+          const active = isSubagentActive(item.state);
+          const route = subagentRoute(item.scope_key, item.subagent_id);
+          const scopeTitle = scopeLabel(item.scope_key, groups);
+          return (
+            <li className="turn is-link" key={item.subagent_id}>
+              <QQAvatar kind="icon" icon={Bot} name={item.title} size="md" tone={st.tone} />
+              <div className="turn-main">
+                <div className="turn-title">
+                  <a href={route} onClick={linkHandler(route)}>
+                    {item.title}
+                  </a>
+                  <Badge tone={st.tone}>{st.text}</Badge>
+                  <span className="tiny muted num">
+                    {item.step}/{item.max_steps} 步
+                  </span>
+                </div>
+                <div className="turn-meta muted">
+                  {scopeTitle}
+                  {" · 耗时 "}
+                  {formatDuration(item.elapsed_seconds)}
+                  {active && item.current_tool ? ` · 正在执行 ${item.current_tool}` : ""}
+                  {!active && item.finished_at ? ` · 结束于 ${formatRelative(item.finished_at)}` : ""}
+                  {active && item.idle_seconds >= 30 ? ` · 静默 ${formatDuration(item.idle_seconds)}` : ""}
+                </div>
+              </div>
+              {item.context?.max_tokens ? <ContextMeter context={item.context} /> : <span />}
+              {active ? (
+                <Button
+                  size="sm"
+                  icon={CircleStop}
+                  onClick={() => void stopSubagent(item.subagent_id, item.title)}
+                >
+                  停止
+                </Button>
+              ) : (
+                <ChevronRight size={16} className="turn-arrow" aria-hidden="true" />
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 function ActiveTimers({ timers }: { timers: TimerItem[] }) {
   const groups = useGroupNames();
   if (!timers.length) return null;
@@ -370,6 +439,9 @@ function RetainedSessions({ sessions }: { sessions: RetainedSession[] }) {
                       {title}
                     </a>
                     <Badge tone={state.tone}>{state.text}</Badge>
+                    {(session.active_subagents ?? 0) > 0 && (
+                      <Badge tone="accent">{session.active_subagents} 个子代理</Badge>
+                    )}
                     {session.cleared && <Badge>已重置</Badge>}
                   </div>
                   <div className="turn-meta muted">
@@ -403,6 +475,7 @@ const NEXT_PAGE = 50;
 const kindIcons: Record<string, LucideIcon> = {
   turn: MessageSquare,
   tool: Wrench,
+  subagent: Bot,
   model: Sparkles,
   compaction: Shrink,
   session: Recycle,
@@ -439,13 +512,21 @@ function ActivityFeed({ activity }: { activity: Activity[] }) {
   }, [ordered]);
   const counts = {
     all: ordered.length,
-    turn: ordered.filter((item) => item.kind === "turn" || item.kind === "compaction").length,
+    turn: ordered.filter(
+      (item) => item.kind === "turn" || item.kind === "compaction" || item.kind === "subagent",
+    ).length,
     tool: ordered.filter((item) => item.kind === "tool").length,
     problem: ordered.filter(isProblem).length,
   };
   const text = query.trim().toLowerCase();
   const visible = ordered.filter((item) => {
-    if (filter === "turn" && item.kind !== "turn" && item.kind !== "compaction") return false;
+    if (
+      filter === "turn" &&
+      item.kind !== "turn" &&
+      item.kind !== "compaction" &&
+      item.kind !== "subagent"
+    )
+      return false;
     if (filter === "tool" && item.kind !== "tool") return false;
     if (filter === "problem" && !isProblem(item)) return false;
     if (!text) return true;
@@ -579,7 +660,10 @@ function QuickSessionList({ sessions, turns }: { sessions: RetainedSession[]; tu
           const title = scopeLabel(session.scope_key, groups);
           const to = sessionRoute(session.scope_key);
           const state = turnState(session.state);
-          const busy = busySet.has(session.scope_key);
+          const busy =
+            busySet.has(session.scope_key) ||
+            ("active_subagents" in session && (session.active_subagents ?? 0) > 0);
+          const activeSubs = "active_subagents" in session ? (session.active_subagents ?? 0) : 0;
           const count = "turns" in session ? session.turns : 0;
           const updatedAt = "updated_at" in session ? session.updated_at : session.started_at;
           return (
@@ -595,10 +679,11 @@ function QuickSessionList({ sessions, turns }: { sessions: RetainedSession[]; tu
                   <span className="qq-item-top">
                     <span className="md-item-title">{title}</span>
                     <span className="qq-item-badges">
+                      {activeSubs > 0 && <span className="qq-pill is-busy num">{activeSubs}子</span>}
                       {count > 0 && (
                         <span className={"qq-pill num" + (busy ? " is-busy" : "")}>{count}轮</span>
                       )}
-                      <StatusDot tone={state.tone} label={state.text} />
+                      <StatusDot tone={activeSubs > 0 && state.tone === "neutral" ? "accent" : state.tone} label={state.text} />
                     </span>
                   </span>
                   <span className="qq-item-bottom">
@@ -671,6 +756,7 @@ export function OverviewPage() {
               <p className="card-empty">当前没有进行中的对话。被唤醒的会话会在这里显示进度和上下文用量。</p>
             )}
           </section>
+          <ActiveSubagents subagents={data?.subagents ?? []} />
           <ActiveTimers timers={data?.timers ?? []} />
           <RetainedSessions sessions={data?.sessions ?? []} />
           <ActivityFeed activity={data?.activity ?? []} />

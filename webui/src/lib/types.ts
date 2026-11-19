@@ -106,6 +106,48 @@ export interface Turn {
   idle?: boolean;
 }
 export type SessionState = "idle" | "queued" | "running" | "compacting" | "retrying";
+export type SubagentState =
+  | "running"
+  | "retrying"
+  | "compacting"
+  | "completed"
+  | "step_limit"
+  | "timeout"
+  | "failed"
+  | "cancelled";
+export interface QueuedSteer {
+  source: string;
+  text: string;
+}
+export interface SubagentSummary {
+  subagent_id: string;
+  scope_key: string;
+  title: string;
+  state: SubagentState;
+  turns: number;
+  step: number;
+  total_steps: number;
+  max_steps: number;
+  created_at: number;
+  started_at: number;
+  updated_at: number;
+  finished_at: number | null;
+  last_activity_at: number;
+  elapsed_seconds: number;
+  idle_seconds: number;
+  timeout_seconds: number;
+  check_in_seconds: number | null;
+  current_tool: string;
+  current_tool_started_at: number | null;
+  last_tool: string;
+  model: string;
+  context: TurnContext;
+  retained_bytes: number;
+  generated_ids: string[];
+  pending_steers: number;
+  error: string;
+  can_resume: boolean;
+}
 export interface RetainedSession {
   scope_key: string;
   session_id: string;
@@ -116,6 +158,8 @@ export interface RetainedSession {
   idle?: boolean;
   /** 排队等待下一轮的唤醒消息数。 */
   pending: number;
+  /** 当前会话正在后台运行的子代理数量。 */
+  active_subagents?: number;
   last_outcome: string;
   context: TurnContext;
   retained_bytes: number;
@@ -157,6 +201,8 @@ export type SessionEntry = EntryBase &
     | { kind: "knowledge"; files: { path: string; text: string }[] }
     | { kind: "history"; message: QQMessage }
     | { kind: "wake"; messages: QQMessage[]; notice: string }
+    | { kind: "task"; title: string; task: string; context_hint: string }
+    | { kind: "steer"; resume?: boolean; messages: QueuedSteer[] }
     | { kind: "media"; items: { type: string; mime: string; bytes: number }[] }
     | { kind: "notice"; messages: string[] }
     | { kind: "assistant"; text: string }
@@ -180,8 +226,18 @@ export type SessionEntry = EntryBase &
 export interface SessionDetail extends RetainedSession {
   version: number;
   pending_messages: QQMessage[];
+  subagents?: SubagentSummary[];
   available_tools: string[];
   /** 与上次读取的会话和版本相同时为 null，沿用已有条目。 */
+  entries: SessionEntry[] | null;
+}
+export interface SubagentDetail extends SubagentSummary {
+  task: string;
+  context_hint: string;
+  report: string;
+  version: number;
+  queued_steers: QueuedSteer[];
+  /** 与上次读取的版本相同时为 null，沿用已有条目。 */
   entries: SessionEntry[] | null;
 }
 export interface Activity {
@@ -220,6 +276,7 @@ export interface RuntimeEnvelope {
   capacity: SessionCapacity;
   activity: Activity[];
   timers?: TimerItem[];
+  subagents?: SubagentSummary[];
   napcat: {
     connected: string[];
     expected_bot_id: string;

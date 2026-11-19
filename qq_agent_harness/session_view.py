@@ -222,6 +222,37 @@ def _entry(kind: str, content: JsonValue) -> JsonObject:
                 "messages": [_message(message) for message in messages],
                 "notice": data.get("历史限制") or "",
             }
+        if kind == "wake" and isinstance(task_text := data.get("委派任务"), str):
+            return {
+                "kind": "task",
+                "title": str(data.get("任务标题") or ""),
+                "task": task_text,
+                "context_hint": str(data.get("补充背景") or ""),
+            }
+        if kind == "wake" and isinstance(steers := data.get("子代理插话"), list):
+            return {
+                "kind": "steer",
+                "resume": False,
+                "messages": [
+                    {
+                        "source": str(item.get("来源") or "主会话"),
+                        "text": str(item.get("内容") or ""),
+                    }
+                    for item in steers
+                    if isinstance(item, dict)
+                ],
+            }
+        if kind == "wake" and isinstance(resume_text := data.get("子代理续跑指令"), str):
+            return {
+                "kind": "steer",
+                "resume": True,
+                "messages": [
+                    {
+                        "source": str(data.get("来源") or "主会话"),
+                        "text": resume_text,
+                    }
+                ],
+            }
         if kind == "knowledge" and isinstance(files := data.get("当前知识库"), list):
             return {
                 "kind": "knowledge",
@@ -233,6 +264,8 @@ def _entry(kind: str, content: JsonValue) -> JsonObject:
             }
         if kind == "notice" and isinstance(errors := data.get("media_errors"), list):
             return {"kind": "notice", "messages": errors}
+    if kind == "notice" and isinstance(content, str) and content.strip():
+        return {"kind": "notice", "messages": [content.strip()]}
     # 格式不符或未登记类别的条目只给可见文本，标签保留原类别便于辨认。
     return {
         "kind": "other",

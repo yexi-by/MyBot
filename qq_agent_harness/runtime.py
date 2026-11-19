@@ -24,6 +24,7 @@ from .contracts import (
     OrderedSet,
     ToolContext,
     ToolResult,
+    remember_generated,
 )
 from .napcat.arguments import ReadMedia
 from .napcat.media import MediaBatch
@@ -105,6 +106,16 @@ class Hub(Protocol):
     async def get_history(self, scope: ConversationScope, count: int) -> list[Message]: ...
 
 
+class SubagentHost(Protocol):
+    def has_active(self, scope_key: str) -> bool: ...
+    def active_count(self, scope_key: str) -> int: ...
+    def action_summary(self, scope: ConversationScope) -> list[JsonValue]: ...
+    def list_for_scope(
+        self, scope_key: str, *, include_finished: bool = True
+    ) -> list[JsonValue]: ...
+    async def clear_scope(self, scope_key: str) -> None: ...
+
+
 SessionFactory = Callable[..., ModelSession]
 type ExecutedCalls = dict[str, tuple[str, JsonObject, ToolResult]]
 
@@ -136,6 +147,7 @@ class AgentRuntime:
         self.rejected_messages = 0
         self.idle_task: asyncio.Task[None] | None = None
         self.closing = False
+        self.subagents: SubagentHost | None = None
         self.read_workspace: Callable[[str], Awaitable[bytes]] | None = None
         self.write_workspace: Callable[..., Awaitable[None]] | None = None
         self.read_media: (
@@ -286,6 +298,67 @@ class AgentRuntime:
         if self._enqueue_message(timer_msg):
             self.record(scope.key, "wake", f"定时提醒已到期唤醒（{timer_id}）", status="ok")
 
+    def _has_active_subagents(self, key: str) -> bool:
+        return self.subagents is not None and self.subagents.has_active(key)
+
+    def session_id_for(self, key: str) -> str:
+        retained = self.sessions.get(key)
+        if retained is None or retained.model is None:
+            return ""
+        return retained.session_id
+
+    def attach_generated_media(
+        self, key: str, parent_session_id: str, item: GeneratedMedia
+    ) -> bool:
+        retained = self.sessions.get(key)
+        if retained is None or retained.model is None:
+            return False
+        if parent_session_id and retained.session_id != parent_session_id:
+            return False
+        remember_generated(retained.generated_media, item)
+        retained.retained_bytes = retained.measure()
+        return True
+
+    async def wake_subagent(
+        self,
+        scope: ConversationScope,
+        parent_session_id: str,
+        event_id: str,
+        event_type: str,
+        title: str,
+        text: str,
+    ) -> bool:
+        if self.closing or not self.store.settings.conversation(scope).enabled:
+            return False
+        retained = self.sessions.get(scope.key)
+        if parent_session_id and (
+            retained is None or retained.model is None or retained.session_id != parent_session_id
+        ):
+            return False
+        sender_name = (
+            "[子代理巡检]" if event_type in ("check_in", "stall_warning") else "[子代理回执]"
+        )
+        sub_msg = Message(
+            scope=scope,
+            message_id=f"subagent:{event_id}",
+            sender_id=scope.bot_id,
+            sender_name=sender_name,
+            time=int(time.time()),
+            segments=[{"type": "text", "data": {"text": text}}],
+        )
+        if self._enqueue_message(sub_msg):
+            label = {
+                "completed": "已完成并唤醒主会话",
+                "step_limit": "达步数上限并唤醒主会话",
+                "timeout": "超时停止并唤醒主会话",
+                "failed": "失败并唤醒主会话",
+                "check_in": "定时巡检通知主会话",
+                "stall_warning": "停滞告警唤醒主会话",
+            }.get(event_type, "事件唤醒主会话")
+            self.record(scope.key, "wake", f"子代理「{title}」{label}", status="ok")
+            return True
+        return False
+
     def _interrupt_idle(self, key: str) -> None:
         self.idle_interrupts.discard(key)
         self.compacting.discard(key)
@@ -357,7 +430,14 @@ class AgentRuntime:
             or sum(value.retained_bytes for value in self.sessions.values())
             > self.store.settings.runtime.max_retained_bytes
         ):
-            idle = next((key for key in self.sessions if key not in self.workers), None)
+            idle = next(
+                (
+                    key
+                    for key in self.sessions
+                    if key not in self.workers and not self._has_active_subagents(key)
+                ),
+                None,
+            )
             if idle is None:
                 return
             retained = self.sessions.pop(idle)
@@ -384,7 +464,12 @@ class AgentRuntime:
         for key, retained in self.sessions.items():
             if len(self.compacting) >= MAX_IDLE_COMPACTIONS:
                 break
-            if key in self.workers or retained.model is None or retained.idle_compacted:
+            if (
+                key in self.workers
+                or retained.model is None
+                or retained.idle_compacted
+                or self._has_active_subagents(key)
+            ):
                 continue
             settings = self.store.settings.conversation(retained.scope).idle_compaction
             if (
@@ -791,7 +876,7 @@ class AgentRuntime:
                     if isinstance(identifier := data.get(name), (str, int)):
                         safe_receipt[name] = str(identifier)
             receipts.append(safe_receipt)
-        session.action_state = {
+        action_state: JsonObject = {
             "sent_receipts": receipts,
             "send_attempts": context.send_attempts,
             "executed_calls": [
@@ -799,6 +884,11 @@ class AgentRuntime:
                 for call_id, (name, _arguments, result) in executed.items()
             ],
         }
+        if self.subagents is not None:
+            active_subs = self.subagents.action_summary(context.scope)
+            if active_subs:
+                action_state["active_subagents"] = active_subs
+        session.action_state = action_state
 
     def _context_event(self, key: str, session: ModelSession, event: JsonObject) -> None:
         phase = event.get("phase")
@@ -986,14 +1076,24 @@ class AgentRuntime:
         retained = self.sessions.get(key)
         if retained is None:
             raise KeyError(key)
-        if key in self.workers:
+        has_subs = self._has_active_subagents(key)
+        if key in self.workers or has_subs:
             if not stop:
-                raise SessionBusy("会话正在处理，请先停止本轮")
-            await self.cancel(key)
+                raise SessionBusy(
+                    "会话正在处理，请先停止本轮"
+                    if key in self.workers
+                    else "会话仍有后台子代理运行，请先停止或选择停止并重置"
+                )
+            if key in self.workers:
+                await self.cancel(key)
+            if self.subagents is not None:
+                await self.subagents.clear_scope(key)
             if self.sessions.get(key) is not retained:
                 raise KeyError(key)
             if key in self.workers:
                 raise SessionBusy("停止期间会话又被唤醒，请稍后再试")
+        elif self.subagents is not None:
+            await self.subagents.clear_scope(key)
         model, retained.model = retained.model, None
         retained.session_id = uuid.uuid4().hex
         retained.knowledge = []
@@ -1038,6 +1138,7 @@ class AgentRuntime:
             "state": self._state(key),
             "idle": bool((turn := self.turns.get(key)) and turn.get("idle")),
             "pending": len(self.pending.get(key, [])),
+            "active_subagents": self.subagents.active_count(key) if self.subagents else 0,
             "last_outcome": retained.outcome,
             "context": model.context_state if model else {},
             "retained_bytes": retained.retained_bytes,
@@ -1064,6 +1165,7 @@ class AgentRuntime:
                 scrub(message.model_dump(mode="json", exclude={"scope"}))
                 for message in self.pending.get(key, [])
             ],
+            "subagents": self.subagents.list_for_scope(key) if self.subagents else [],
             "available_tools": [name for name in self.registry.available(retained.scope)],
             "entries": entries,
         }

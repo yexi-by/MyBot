@@ -12,6 +12,7 @@ function lookup(table: Record<string, Label>, key: string | undefined): Label {
 const activityKinds: Record<string, Label> = {
   turn: { text: "对话", tone: "neutral" },
   tool: { text: "工具调用", tone: "neutral" },
+  subagent: { text: "子代理", tone: "accent" },
   model: { text: "模型请求", tone: "neutral" },
   compaction: { text: "上下文压缩", tone: "neutral" },
   session: { text: "会话回收", tone: "warning" },
@@ -31,15 +32,31 @@ const results: Record<string, Label> = {
   warning: { text: "提示", tone: "warning" },
   running: { text: "进行中", tone: "accent" },
   retrying: { text: "等待重试", tone: "warning" },
+  compacting: { text: "压缩中", tone: "warning" },
   error: { text: "失败", tone: "danger" },
+  failed: { text: "失败", tone: "danger" },
   unknown: { text: "结果未知", tone: "warning" },
   cancelled: { text: "已停止", tone: "neutral" },
   limit: { text: "达到上限", tone: "warning" },
+  step_limit: { text: "达步数上限", tone: "warning" },
   timeout: { text: "超时", tone: "warning" },
   reset: { text: "已重置", tone: "neutral" },
 };
 export const resultStatus = (status: string | undefined) =>
   lookup(results, status);
+
+const subagentStates: Record<string, Label> = {
+  running: { text: "运行中", tone: "accent" },
+  retrying: { text: "等待重试", tone: "warning" },
+  compacting: { text: "压缩中", tone: "warning" },
+  completed: { text: "已完成", tone: "success" },
+  step_limit: { text: "步数已满", tone: "warning" },
+  timeout: { text: "已超时", tone: "warning" },
+  failed: { text: "运行失败", tone: "danger" },
+  cancelled: { text: "已停止", tone: "neutral" },
+};
+export const subagentState = (state: string | undefined): Label =>
+  lookup(subagentStates, state);
 
 const turnStates: Record<string, Label> = {
   idle: { text: "等待唤醒", tone: "neutral" },

@@ -2,12 +2,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ArrowDown,
+  Bot,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   CircleAlert,
   CircleStop,
+  Play,
   RotateCcw,
   ScrollText,
+  Send,
   SlidersHorizontal,
 } from "lucide-react";
 import { Badge, Banner, Button, EmptyState, Meter, Spinner, StatusDot } from "../components/primitives";
@@ -21,20 +25,25 @@ import {
   formatRelative,
   parseScopeKey,
 } from "../lib/format";
-import { resultStatus, turnState, usageSources } from "../lib/labels";
+import { resultStatus, subagentState, turnState, usageSources } from "../lib/labels";
 import { linkHandler, navigate, prefersReducedMotion } from "../lib/navigation";
 import { runtimeResource, toolsResource, useGroupNames, useResource } from "../lib/resource";
 import {
   groupEntries,
   isBusy,
+  isSubagentActive,
   messageText,
   pretty,
   resetSession,
   sendPreview,
+  sendSubagentInstruction,
   senderLabel,
   sessionRoute,
+  stopSubagent,
   stopTurn,
+  subagentRoute,
   useSessionDetail,
+  useSubagentDetail,
 } from "../lib/sessions";
 import type { TimelineBlock } from "../lib/sessions";
 import { object } from "../lib/types";
@@ -45,6 +54,8 @@ import type {
   SessionCapacity,
   SessionDetail,
   SessionEntry,
+  SubagentDetail,
+  SubagentSummary,
   ToolOutcome,
 } from "../lib/types";
 import type { Tone } from "../lib/ui";
@@ -61,6 +72,7 @@ interface Row {
   updatedAt: number;
   tokens: number;
   cleared: boolean;
+  activeSubagents: number;
   /** 首次唤醒正在准备，会话对象还没有建立。 */
   preparing: boolean;
 }
@@ -75,6 +87,7 @@ function rowsOf(data: RuntimeEnvelope | null): Row[] {
     updatedAt: session.updated_at,
     tokens: session.context.input_tokens ?? 0,
     cleared: session.cleared,
+    activeSubagents: session.active_subagents ?? 0,
     preparing: false,
   }));
   const known = new Set(rows.map((row) => row.key));
@@ -88,10 +101,13 @@ function rowsOf(data: RuntimeEnvelope | null): Row[] {
         updatedAt: turn.started_at,
         tokens: 0,
         cleared: false,
+        activeSubagents: 0,
         preparing: true,
       });
   return rows.sort(
-    (a, b) => Number(isBusy(b.state)) - Number(isBusy(a.state)) || b.updatedAt - a.updatedAt,
+    (a, b) =>
+      Number(isBusy(b.state) || b.activeSubagents > 0) -
+        Number(isBusy(a.state) || a.activeSubagents > 0) || b.updatedAt - a.updatedAt,
   );
 }
 
@@ -137,8 +153,8 @@ function SessionList({
   const visible = rows.filter(
     (row) => !text || (scopeLabel(row.key, groups) + " " + row.key).toLowerCase().includes(text),
   );
-  const busy = visible.filter((row) => isBusy(row.state));
-  const idle = visible.filter((row) => !isBusy(row.state));
+  const busy = visible.filter((row) => isBusy(row.state) || row.activeSubagents > 0);
+  const idle = visible.filter((row) => !isBusy(row.state) && row.activeSubagents === 0);
   // 只有一个机器人时不重复显示机器人账号。
   const bots = new Set(rows.map((row) => parseScopeKey(row.key)?.bot));
   const item = (row: Row) => {
@@ -182,10 +198,20 @@ function SessionList({
                 {sub}
               </span>
               <span className="qq-item-badges">
+                {row.activeSubagents > 0 && (
+                  <span className="qq-pill is-busy num">{row.activeSubagents}子</span>
+                )}
                 {row.turns > 0 && (
                   <span className={"qq-pill num" + (isBusy(row.state) ? " is-busy" : "")}>{row.turns}轮</span>
                 )}
-                <StatusDot tone={stateTone(row.state)} label={turnState(row.state, row.idle).text} />
+                <StatusDot
+                  tone={row.activeSubagents > 0 && !isBusy(row.state) ? "accent" : stateTone(row.state)}
+                  label={
+                    row.activeSubagents > 0 && !isBusy(row.state)
+                      ? `${row.activeSubagents} 个后台子代理运行中`
+                      : turnState(row.state, row.idle).text
+                  }
+                />
               </span>
             </span>
           </span>
@@ -279,13 +305,20 @@ function CallEntry({
   entry,
   botId,
   tools,
+  scopeKey,
+  subagentsById,
+  onSubagentChanged,
 }: {
   entry: EntryOf<"call">;
   botId: string;
   tools: Map<string, string>;
+  scopeKey?: string;
+  subagentsById?: Map<string, SubagentSummary>;
+  onSubagentChanged?: () => void;
 }) {
   const preview = sendPreview(entry.name, entry.arguments);
   const args = object(entry.arguments);
+  const resultData = object(entry.result?.data);
   const target =
     typeof args.target_group_id === "string"
       ? "群 " + args.target_group_id
@@ -294,6 +327,17 @@ function CallEntry({
         : "";
   const elapsed = entry.result_at !== null && entry.at !== null ? entry.result_at - entry.at : null;
   const status = entry.result ? resultStatus(entry.result.status) : null;
+  const linkedSubId = entry.name.startsWith("subagent__")
+    ? typeof resultData.subagent_id === "string"
+      ? resultData.subagent_id
+      : typeof args.subagent_id === "string"
+        ? args.subagent_id
+        : ""
+    : "";
+  const linkedSub = linkedSubId ? subagentsById?.get(linkedSubId) : undefined;
+  const linkedState = linkedSub ? subagentState(linkedSub.state) : null;
+  const linkedActive = linkedSub ? isSubagentActive(linkedSub.state) : false;
+  const linkedHref = linkedSubId && scopeKey ? subagentRoute(scopeKey, linkedSubId) : "";
   return (
     <li className="qq-chat-item is-bot">
       <QQAvatar kind="user" id={botId} name="Bot" size="md" />
@@ -313,6 +357,45 @@ function CallEntry({
           </div>
           {preview !== null && <p className="entry-text entry-quote">{preview || "（空消息）"}</p>}
           {target && <p className="tiny muted">目标：{target}</p>}
+          {linkedSubId && linkedHref && (
+            <div className="subagent-inline-card">
+              <div className="subagent-inline-main">
+                <span className="subagent-inline-title">
+                  <Bot size={14} aria-hidden="true" />
+                  <span>{linkedSub?.title || linkedSubId}</span>
+                  {linkedState && <Badge tone={linkedState.tone}>{linkedState.text}</Badge>}
+                </span>
+                <span className="tiny muted num">
+                  {linkedSub ? (
+                    <>
+                      {linkedSub.step}/{linkedSub.max_steps} 步 · 耗时 {formatDuration(linkedSub.elapsed_seconds)}
+                      {linkedActive && linkedSub.current_tool ? ` · 执行 ${linkedSub.current_tool}` : ""}
+                    </>
+                  ) : (
+                    `${linkedSubId}（可能已被回收）`
+                  )}
+                </span>
+              </div>
+              <div className="subagent-inline-actions">
+                <a className="btn btn-sm btn-default" href={linkedHref} onClick={linkHandler(linkedHref)}>
+                  查看会话
+                </a>
+                {linkedSub && linkedActive && (
+                  <Button
+                    size="sm"
+                    variant="danger-ghost"
+                    icon={CircleStop}
+                    onClick={async () => {
+                      await stopSubagent(linkedSub.subagent_id, linkedSub.title);
+                      onSubagentChanged?.();
+                    }}
+                  >
+                    停止
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
           <JsonBlock label="参数" value={entry.arguments} />
           {entry.result && <Outcome result={entry.result} />}
         </div>
@@ -345,10 +428,16 @@ function EntryView({
   entry,
   botId,
   tools,
+  scopeKey,
+  subagentsById,
+  onSubagentChanged,
 }: {
   entry: SessionEntry;
   botId: string;
   tools: Map<string, string>;
+  scopeKey?: string;
+  subagentsById?: Map<string, SubagentSummary>;
+  onSubagentChanged?: () => void;
 }) {
   switch (entry.kind) {
     case "wake":
@@ -366,6 +455,31 @@ function EntryView({
           </ul>
           {entry.notice && <p className="small session-warning-text">{entry.notice}</p>}
         </li>
+      );
+    case "task":
+      return (
+        <Entry label="委派任务" note={entry.title || undefined} tone="accent" at={entry.at}>
+          <p className="entry-text">{entry.task}</p>
+          {entry.context_hint && (
+            <details className="entry-details">
+              <summary>补充背景</summary>
+              <pre className="entry-pre">{entry.context_hint}</pre>
+            </details>
+          )}
+        </Entry>
+      );
+    case "steer":
+      return (
+        <Entry label={entry.resume ? "续跑指令" : "运行中纠偏"} tone="accent" at={entry.at}>
+          <div className="subagent-steer-list">
+            {entry.messages.map((item, index) => (
+              <div key={index} className="subagent-steer-item">
+                <span className="qq-role-tag">{item.source || "主会话"}</span>
+                <p className="entry-text">{item.text}</p>
+              </div>
+            ))}
+          </div>
+        </Entry>
       );
     case "history":
       return (
@@ -429,7 +543,16 @@ function EntryView({
         </li>
       );
     case "call":
-      return <CallEntry entry={entry} botId={botId} tools={tools} />;
+      return (
+        <CallEntry
+          entry={entry}
+          botId={botId}
+          tools={tools}
+          scopeKey={scopeKey}
+          subagentsById={subagentsById}
+          onSubagentChanged={onSubagentChanged}
+        />
+      );
     case "result":
       return (
         <Entry label="工具结果" at={entry.at}>
@@ -463,14 +586,22 @@ function TurnSection({
   current,
   botId,
   tools,
+  scopeKey,
+  subagentsById,
+  onSubagentChanged,
 }: {
   block: Extract<TimelineBlock, { type: "turn" }>;
   current: boolean;
   botId: string;
   tools: Map<string, string>;
+  scopeKey?: string;
+  subagentsById?: Map<string, SubagentSummary>;
+  onSubagentChanged?: () => void;
 }) {
   const boundary = block.entries.find((entry): entry is EntryOf<"boundary"> => entry.kind === "boundary");
-  const wake = block.entries.find((entry) => entry.kind === "wake");
+  const wake = block.entries.find(
+    (entry) => entry.kind === "wake" || entry.kind === "task" || entry.kind === "steer",
+  );
   const started = wake?.at ?? block.entries[0]?.at ?? null;
   const status = boundary ? resultStatus(boundary.outcome) : null;
   const items: TurnItem[] = [];
@@ -511,7 +642,15 @@ function TurnSection({
               </details>
             </li>
           ) : (
-            <EntryView key={index} entry={item.entry} botId={botId} tools={tools} />
+            <EntryView
+              key={index}
+              entry={item.entry}
+              botId={botId}
+              tools={tools}
+              scopeKey={scopeKey}
+              subagentsById={subagentsById}
+              onSubagentChanged={onSubagentChanged}
+            />
           ),
         )}
       </ol>
@@ -523,10 +662,16 @@ function StandaloneEntry({
   entry,
   botId,
   tools,
+  scopeKey,
+  subagentsById,
+  onSubagentChanged,
 }: {
   entry: SessionEntry;
   botId: string;
   tools: Map<string, string>;
+  scopeKey?: string;
+  subagentsById?: Map<string, SubagentSummary>;
+  onSubagentChanged?: () => void;
 }) {
   if (entry.kind === "system")
     return (
@@ -566,7 +711,14 @@ function StandaloneEntry({
     );
   return (
     <ol className="session-entries">
-      <EntryView entry={entry} botId={botId} tools={tools} />
+      <EntryView
+        entry={entry}
+        botId={botId}
+        tools={tools}
+        scopeKey={scopeKey}
+        subagentsById={subagentsById}
+        onSubagentChanged={onSubagentChanged}
+      />
     </ol>
   );
 }
@@ -576,9 +728,32 @@ function blockKey(block: TimelineBlock, index: number) {
   return (block.type === "turn" ? "turn:" + block.turn : first.kind) + ":" + (first.at ?? index);
 }
 
-function Timeline({ detail, botId }: { detail: SessionDetail; botId: string }) {
+function Timeline({
+  entries,
+  marker,
+  active,
+  cleared = false,
+  botId,
+  scopeKey,
+  subagentsById,
+  onSubagentChanged,
+  title = "保留的上下文",
+  emptyTitle,
+  emptyDetail,
+}: {
+  entries: SessionEntry[];
+  marker: string;
+  active: boolean;
+  cleared?: boolean;
+  botId: string;
+  scopeKey?: string;
+  subagentsById?: Map<string, SubagentSummary>;
+  onSubagentChanged?: () => void;
+  title?: string;
+  emptyTitle?: string;
+  emptyDetail?: string;
+}) {
   const tools = useToolTitles();
-  const entries = useMemo(() => detail.entries ?? [], [detail.entries]);
   const hasEntries = entries.length > 0;
   const blocks = useMemo(() => groupEntries(entries), [entries]);
   const end = useRef<HTMLDivElement>(null);
@@ -610,7 +785,6 @@ function Timeline({ detail, botId }: { detail: SessionDetail; botId: string }) {
     setFresh(false);
   };
   // 有新条目时：已在底部附近就跟随到最新；否则提示，不打断正在阅读的位置。
-  const marker = detail.session_id + ":" + detail.version;
   useEffect(() => {
     const previous = seen.current;
     seen.current = marker;
@@ -621,15 +795,20 @@ function Timeline({ detail, botId }: { detail: SessionDetail; botId: string }) {
   }, [marker]);
   if (!hasEntries)
     return (
-      <EmptyState icon={ScrollText} title={detail.cleared ? "上下文已清空" : "还没有内容"} compact>
-        {detail.cleared ? "下次唤醒时会从近期 QQ 历史重新建立上下文。" : "会话建立后，这里会按轮次显示保留的内容。"}
+      <EmptyState
+        icon={ScrollText}
+        title={emptyTitle ?? (cleared ? "上下文已清空" : "还没有内容")}
+        compact
+      >
+        {emptyDetail ??
+          (cleared ? "下次唤醒时会从近期 QQ 历史重新建立上下文。" : "会话建立后，这里会按轮次显示保留的内容。")}
       </EmptyState>
     );
   const lastTurn = blocks.findLast((block) => block.type === "turn");
   return (
-    <section className="session-timeline" aria-label="会话上下文">
+    <section className="session-timeline" aria-label={title}>
       <div className="session-timeline-head">
-        <h3 className="grow">保留的上下文</h3>
+        <h3 className="grow">{title}</h3>
         <Button size="sm" variant="ghost" icon={ArrowDown} onClick={jump}>
           跳到最新
         </Button>
@@ -641,14 +820,25 @@ function Timeline({ detail, botId }: { detail: SessionDetail; botId: string }) {
             block={block}
             botId={botId}
             tools={tools}
+            scopeKey={scopeKey}
+            subagentsById={subagentsById}
+            onSubagentChanged={onSubagentChanged}
             current={
-              isBusy(detail.state) &&
+              active &&
               block === lastTurn &&
               !block.entries.some((entry) => entry.kind === "boundary")
             }
           />
         ) : (
-          <StandaloneEntry key={blockKey(block, index)} entry={block.entry} botId={botId} tools={tools} />
+          <StandaloneEntry
+            key={blockKey(block, index)}
+            entry={block.entry}
+            botId={botId}
+            tools={tools}
+            scopeKey={scopeKey}
+            subagentsById={subagentsById}
+            onSubagentChanged={onSubagentChanged}
+          />
         ),
       )}
       <div ref={end} className="session-end" />
@@ -662,12 +852,91 @@ function Timeline({ detail, botId }: { detail: SessionDetail; botId: string }) {
   );
 }
 
-function SessionSummary({ detail, botId }: { detail: SessionDetail; botId: string }) {
+function SessionSubagents({
+  scopeKey,
+  subagents,
+  onChanged,
+}: {
+  scopeKey: string;
+  subagents: SubagentSummary[];
+  onChanged: () => void;
+}) {
+  if (!subagents.length) return null;
+  const activeCount = subagents.filter((item) => isSubagentActive(item.state)).length;
+  return (
+    <div className="session-block">
+      <h3>
+        后台子代理
+        <span className="count">{subagents.length}</span>
+        {activeCount > 0 && <Badge tone="accent">{activeCount} 个运行中</Badge>}
+      </h3>
+      <ul className="subagent-list">
+        {subagents.map((item) => {
+          const st = subagentState(item.state);
+          const active = isSubagentActive(item.state);
+          const href = subagentRoute(scopeKey, item.subagent_id);
+          return (
+            <li key={item.subagent_id} className="subagent-list-row">
+              <QQAvatar kind="icon" icon={Bot} name={item.title} size="md" tone={st.tone} />
+              <div className="subagent-list-main">
+                <div className="subagent-list-title">
+                  <a href={href} onClick={linkHandler(href)}>
+                    {item.title}
+                  </a>
+                  <Badge tone={st.tone}>{st.text}</Badge>
+                  <span className="tiny muted num">
+                    {item.step}/{item.max_steps} 步
+                  </span>
+                </div>
+                <div className="subagent-list-meta tiny muted num">
+                  <span className="mono">{item.subagent_id}</span>
+                  {" · 耗时 "}
+                  {formatDuration(item.elapsed_seconds)}
+                  {active && item.current_tool ? ` · 执行 ${item.current_tool}` : ""}
+                  {!active && item.finished_at ? ` · 结束于 ${formatRelative(item.finished_at)}` : ""}
+                  {item.context?.input_tokens ? ` · ${formatNumber(item.context.input_tokens)} token` : ""}
+                </div>
+              </div>
+              {active ? (
+                <Button
+                  size="sm"
+                  variant="danger-ghost"
+                  icon={CircleStop}
+                  onClick={async () => {
+                    await stopSubagent(item.subagent_id, item.title);
+                    onChanged();
+                  }}
+                >
+                  停止
+                </Button>
+              ) : (
+                <ChevronRight size={16} className="turn-arrow" aria-hidden="true" />
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function SessionSummary({
+  detail,
+  botId,
+  scopeKey,
+  onSubagentChanged,
+}: {
+  detail: SessionDetail;
+  botId: string;
+  scopeKey: string;
+  onSubagentChanged: () => void;
+}) {
   const tools = useToolTitles();
   const context = detail.context;
   const max = context.max_tokens ?? 0;
   const used = context.input_tokens ?? 0;
   const available = detail.available_tools;
+  const subagents = detail.subagents ?? [];
   const hitRatio =
     context.prompt_tokens_total && context.prompt_tokens_total > 0 && context.cached_tokens_total
       ? Math.round((context.cached_tokens_total / context.prompt_tokens_total) * 100)
@@ -737,6 +1006,9 @@ function SessionSummary({ detail, botId }: { detail: SessionDetail; botId: strin
           </dd>
         </div>
       </dl>
+      {subagents.length > 0 && (
+        <SessionSubagents scopeKey={scopeKey} subagents={subagents} onChanged={onSubagentChanged} />
+      )}
       {detail.pending_messages.length > 0 && (
         <div className="session-block">
           <h3>排队中的唤醒消息 · {detail.pending_messages.length}</h3>
@@ -790,10 +1062,31 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
   const groups = useGroupNames();
   const summary = runtime?.sessions.find((item) => item.scope_key === scopeKey);
   const preparing = runtime?.turns.some((turn) => turn.scope_key === scopeKey) ?? false;
+  const runtimeSubs = useMemo(
+    () => (runtime?.subagents ?? []).filter((item) => item.scope_key === scopeKey),
+    [runtime?.subagents, scopeKey],
+  );
+  const subSignal = runtimeSubs
+    .map((item) => `${item.subagent_id}:${item.state}:${item.step}:${item.updated_at}`)
+    .join(",");
   const { detail, missing, error, refresh } = useSessionDetail(
     scopeKey,
-    [summary?.session_id, summary?.updated_at, summary?.state, summary?.pending, preparing].join("|"),
+    [
+      summary?.session_id,
+      summary?.updated_at,
+      summary?.state,
+      summary?.pending,
+      summary?.active_subagents,
+      preparing,
+      subSignal,
+    ].join("|"),
   );
+  const subagentsById = useMemo(() => {
+    const map = new Map<string, SubagentSummary>();
+    for (const item of runtimeSubs) map.set(item.subagent_id, item);
+    for (const item of detail?.subagents ?? []) map.set(item.subagent_id, item);
+    return map;
+  }, [runtimeSubs, detail?.subagents]);
   const scope = parseScopeKey(scopeKey);
   const back = { to: "/sessions", label: "会话列表" };
   const title = scopeLabel(scopeKey, groups);
@@ -839,6 +1132,8 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
       </div>
     );
   const busy = isBusy(detail.state);
+  const activeSubs = detail.active_subagents ?? 0;
+  const needStop = busy || activeSubs > 0;
   return (
     <div className="detail">
       <div className="detail-sticky">
@@ -849,6 +1144,7 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
           badges={
             <>
               <Badge tone={stateTone(detail.state)}>{turnState(detail.state, detail.idle).text}</Badge>
+              {activeSubs > 0 && <Badge tone="accent">{activeSubs} 个子代理运行中</Badge>}
               {detail.cleared && <Badge>已重置</Badge>}
             </>
           }
@@ -878,13 +1174,13 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
               <Button
                 variant="danger-ghost"
                 icon={RotateCcw}
-                disabled={detail.cleared && !busy}
+                disabled={detail.cleared && !needStop}
                 onClick={async () => {
-                  await resetSession(scopeKey, busy);
+                  await resetSession(scopeKey, busy, activeSubs);
                   refresh();
                 }}
               >
-                {busy ? "停止并重置" : "重置上下文"}
+                {needStop ? "停止并重置" : "重置上下文"}
               </Button>
               <Button icon={SlidersHorizontal} onClick={() => void navigate(settings)}>
                 会话设置
@@ -904,8 +1200,340 @@ function SessionView({ scopeKey, runtime }: { scopeKey: string; runtime: Runtime
             刷新失败：{error}。下面是上次读取的内容。
           </p>
         )}
-        <SessionSummary detail={detail} botId={botId} />
-        <Timeline detail={detail} botId={botId} />
+        <SessionSummary
+          detail={detail}
+          botId={botId}
+          scopeKey={scopeKey}
+          onSubagentChanged={refresh}
+        />
+        <Timeline
+          entries={detail.entries ?? []}
+          marker={detail.session_id + ":" + detail.version}
+          active={busy}
+          cleared={detail.cleared}
+          botId={botId}
+          scopeKey={scopeKey}
+          subagentsById={subagentsById}
+          onSubagentChanged={refresh}
+        />
+      </div>
+    </div>
+  );
+}
+
+function SubagentSummaryCard({ detail }: { detail: SubagentDetail }) {
+  const context = detail.context;
+  const max = context.max_tokens ?? 0;
+  const used = context.input_tokens ?? 0;
+  const active = isSubagentActive(detail.state);
+  const hitRatio =
+    context.prompt_tokens_total && context.prompt_tokens_total > 0 && context.cached_tokens_total
+      ? Math.round((context.cached_tokens_total / context.prompt_tokens_total) * 100)
+      : context.input_tokens && context.input_tokens > 0 && context.cached_tokens
+        ? Math.round((context.cached_tokens / context.input_tokens) * 100)
+        : 0;
+  return (
+    <section className="card session-overview">
+      {max > 0 && (
+        <div className="session-meter">
+          <Meter
+            label="子代理上下文用量"
+            value={used}
+            max={max}
+            marker={context.trigger_tokens}
+            tone={used / max >= 0.8 ? "warning" : "accent"}
+          />
+          <span className="tiny muted num">
+            上下文 {formatNumber(used)} / {formatNumber(max)} token
+            {context.cached_tokens ? ` · 本次命中缓存 ${formatNumber(context.cached_tokens)}` : ""}
+            {context.reasoning_tokens ? ` · 推理 ${formatNumber(context.reasoning_tokens)}` : ""}
+            {context.usage_source ? " · " + (usageSources[context.usage_source] ?? context.usage_source) : ""}
+          </span>
+        </div>
+      )}
+      <dl className="session-stats">
+        <div>
+          <dt>步数进度</dt>
+          <dd className="num">
+            {detail.step} / {detail.max_steps} 步
+            {detail.total_steps > detail.step && (
+              <span className="stat-note">累计 {detail.total_steps} 步</span>
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>运行时长</dt>
+          <dd className="num">
+            {formatDuration(detail.elapsed_seconds)}
+            {active && detail.idle_seconds >= 5 && (
+              <span className="stat-note">静默 {formatDuration(detail.idle_seconds)}</span>
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{active ? "当前执行" : "最近工具"}</dt>
+          <dd className="mono">{active ? detail.current_tool || "模型推理中" : detail.last_tool || "—"}</dd>
+        </div>
+        <div>
+          <dt>模型请求</dt>
+          <dd className="num">
+            {context.model_request_count ?? 0} 次
+            {(context.compaction_request_count ?? 0) + (context.retry_count ?? 0) > 0 && (
+              <span className="stat-note">
+                压缩 {context.compaction_request_count ?? 0} · 重试 {context.retry_count ?? 0}
+              </span>
+            )}
+          </dd>
+        </div>
+        {hitRatio > 0 && (
+          <div>
+            <dt>累计缓存命中率</dt>
+            <dd className="num">{hitRatio}%</dd>
+          </div>
+        )}
+        <div>
+          <dt>内存占用</dt>
+          <dd className="num">{formatBytes(detail.retained_bytes, "binary")}</dd>
+        </div>
+      </dl>
+      {detail.generated_ids.length > 0 && (
+        <div className="session-block">
+          <h3>
+            已回传生成媒体 <span className="count">{detail.generated_ids.length}</span>
+          </h3>
+          <span className="chips">
+            {detail.generated_ids.map((gid) => (
+              <span key={gid} className="chip mono">
+                {gid}
+              </span>
+            ))}
+          </span>
+        </div>
+      )}
+      {detail.queued_steers.length > 0 && (
+        <div className="session-block">
+          <h3>待注入的纠偏指令 · {detail.queued_steers.length}</h3>
+          <div className="subagent-steer-list">
+            {detail.queued_steers.map((item, idx) => (
+              <div key={idx} className="subagent-steer-item">
+                <span className="qq-role-tag">{item.source}</span>
+                <p className="entry-text">{item.text}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SubagentControlCard({
+  detail,
+  onSubmitted,
+}: {
+  detail: SubagentDetail;
+  onSubmitted: () => void;
+}) {
+  const active = isSubagentActive(detail.state);
+  const [message, setMessage] = useState("");
+  const [extraSteps, setExtraSteps] = useState(20);
+  const [submitting, setSubmitting] = useState(false);
+
+  if (!active && !detail.can_resume) return null;
+
+  const submit = async () => {
+    const trimmed = message.trim();
+    if (!trimmed || submitting) return;
+    setSubmitting(true);
+    try {
+      const result = await sendSubagentInstruction(detail.subagent_id, trimmed, {
+        isResume: !active,
+        extraSteps: !active ? extraSteps : undefined,
+      });
+      if (result) {
+        setMessage("");
+        onSubmitted();
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="card subagent-control">
+      <div className="subagent-control-head">
+        <h3>{active ? "发送纠偏 / 补充指令" : "在原上下文中续跑子代理"}</h3>
+        <span className="tiny muted">
+          {active
+            ? "将在子代理下一步推理边界注入，用于纠正方向或补充约束（Ctrl+Enter 发送）"
+            : "保留子代理已有历史与缓存，按新指令继续调查并自动唤醒主会话（Ctrl+Enter 发送）"}
+        </span>
+      </div>
+      <textarea
+        className="subagent-control-input"
+        rows={3}
+        value={message}
+        disabled={submitting}
+        placeholder={
+          active
+            ? "例如：不要再分析无关分支了，直接检查 manga_translator 核心链路并汇报…"
+            : "例如：补充核对一下无框文字擦除的掩码阈值逻辑，再给出结论…"
+        }
+        onChange={(event) => setMessage(event.target.value)}
+        onKeyDown={(event) => {
+          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+            event.preventDefault();
+            void submit();
+          }
+        }}
+      />
+      <div className="subagent-control-foot">
+        {!active && (
+          <label className="subagent-steps-field tiny muted">
+            <span>续跑步数上限</span>
+            <input
+              type="number"
+              min={5}
+              max={60}
+              value={extraSteps}
+              disabled={submitting}
+              onChange={(event) => {
+                const parsed = Number.parseInt(event.target.value, 10);
+                if (!Number.isNaN(parsed)) setExtraSteps(Math.min(60, Math.max(5, parsed)));
+              }}
+            />
+          </label>
+        )}
+        <span className="grow" />
+        <Button
+          variant="primary"
+          size="sm"
+          icon={active ? Send : Play}
+          loading={submitting}
+          disabled={!message.trim()}
+          onClick={() => void submit()}
+        >
+          {active ? "发送纠偏" : "续跑子代理"}
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+function SubagentView({
+  scopeKey,
+  subagentId,
+  runtime,
+}: {
+  scopeKey: string;
+  subagentId: string;
+  runtime: RuntimeEnvelope | null;
+}) {
+  const groups = useGroupNames();
+  const summary = runtime?.subagents?.find((item) => item.subagent_id === subagentId);
+  const { detail, missing, error, refresh } = useSubagentDetail(
+    subagentId,
+    [summary?.state, summary?.step, summary?.updated_at, summary?.pending_steers].join("|"),
+  );
+  const scope = parseScopeKey(detail?.scope_key ?? scopeKey);
+  const effectiveScopeKey = detail?.scope_key ?? scopeKey;
+  const parentTitle = scopeLabel(effectiveScopeKey, groups);
+  const back = { to: sessionRoute(effectiveScopeKey), label: parentTitle };
+  const botId = scope?.bot ?? "";
+  const st = subagentState(detail?.state ?? summary?.state);
+  const active = isSubagentActive(detail?.state ?? summary?.state);
+  const avatar = <QQAvatar kind="icon" icon={Bot} name={detail?.title ?? subagentId} size="md" tone={st.tone} />;
+
+  if (!detail)
+    return (
+      <div className="detail">
+        <div className="detail-sticky">
+          <DetailHeader back={back} avatar={avatar} title={summary?.title ?? subagentId} />
+        </div>
+        <div className="detail-body">
+          {missing ? (
+            <EmptyState
+              icon={CircleAlert}
+              title="这个子代理记录不存在或已被回收"
+              action={<Button onClick={() => void navigate(sessionRoute(effectiveScopeKey))}>返回主会话</Button>}
+            >
+              子代理仅保留在有界运行内存中；主会话重置、容量淘汰或 Harness 重启后会清空。
+            </EmptyState>
+          ) : error ? (
+            <EmptyState icon={CircleAlert} title="无法读取子代理详情" action={<Button onClick={refresh}>重试</Button>}>
+              {error}
+            </EmptyState>
+          ) : (
+            <div className="page-center">
+              <Spinner label="正在读取子代理会话…" />
+            </div>
+          )}
+        </div>
+      </div>
+    );
+
+  return (
+    <div className="detail">
+      <div className="detail-sticky">
+        <DetailHeader
+          back={back}
+          avatar={avatar}
+          title={detail.title}
+          badges={
+            <>
+              <Badge tone={st.tone}>{st.text}</Badge>
+              <Badge>{`${detail.step}/${detail.max_steps} 步`}</Badge>
+            </>
+          }
+          subtitle={
+            <span className="row wrap">
+              <span className="mono">{detail.subagent_id}</span>
+              <CopyButton text={detail.subagent_id} label="复制子代理 ID" />
+              <span className="muted">所属 {parentTitle}</span>
+              {detail.model && <span className="muted">模型 {detail.model}</span>}
+            </span>
+          }
+          actions={
+            <>
+              {active && (
+                <Button
+                  variant="danger-ghost"
+                  icon={CircleStop}
+                  onClick={async () => {
+                    await stopSubagent(detail.subagent_id, detail.title);
+                    refresh();
+                  }}
+                >
+                  停止子代理
+                </Button>
+              )}
+              <Button onClick={() => void navigate(sessionRoute(effectiveScopeKey))}>返回主会话</Button>
+            </>
+          }
+        />
+      </div>
+      <div className="detail-body">
+        {detail.error && (
+          <Banner tone={detail.state === "failed" ? "danger" : "warning"} icon={CircleAlert}>
+            {detail.error}
+          </Banner>
+        )}
+        {error && (
+          <p className="danger-text small" role="alert">
+            刷新失败：{error}。下面是上次读取的内容。
+          </p>
+        )}
+        <SubagentSummaryCard detail={detail} />
+        <SubagentControlCard detail={detail} onSubmitted={refresh} />
+        <Timeline
+          entries={detail.entries ?? []}
+          marker={detail.subagent_id + ":" + detail.version}
+          active={active}
+          botId={botId}
+          title="子代理会话轨迹"
+          emptyTitle="还没有执行记录"
+          emptyDetail="子代理启动后，任务输入、每步工具调用、纠偏指令与汇报会实时显示在这里。"
+        />
       </div>
     </div>
   );
@@ -920,14 +1548,21 @@ export function SessionsPage({ route }: { route: SessionsRoute }) {
       hasDetail={!!route.key}
       list={<SessionList route={route} rows={rows} capacity={runtime.data?.capacity} />}
     >
-      {route.key ? (
+      {route.key && route.subagent ? (
+        <SubagentView
+          key={route.subagent}
+          scopeKey={route.key}
+          subagentId={route.subagent}
+          runtime={runtime.data}
+        />
+      ) : route.key ? (
         <SessionView key={route.key} scopeKey={route.key} runtime={runtime.data} />
       ) : (
         <div className="detail">
           <div className="detail-sticky">
             <DetailHeader
               title="会话上下文"
-              subtitle="查看各会话当前保留在内存中的对话上下文与工具调用记录"
+              subtitle="查看各会话当前保留在内存中的对话上下文、工具调用与后台子代理记录"
             />
           </div>
           <div className="detail-body">
@@ -937,7 +1572,7 @@ export function SessionsPage({ route }: { route: SessionsRoute }) {
               </p>
             )}
             <EmptyState icon={ScrollText} title="选择一个会话">
-              查看它保留的上下文：唤醒消息、模型正文、工具调用与结果、压缩摘要。
+              查看它保留的上下文：唤醒消息、模型正文、工具调用与结果、后台子代理与压缩摘要。
             </EmptyState>
           </div>
         </div>

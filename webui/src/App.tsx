@@ -8,6 +8,7 @@ import { errorMessage, loginConsole, logoutConsole, refreshAuthGate, useAuthGate
 import { getConfig, loadConfig, pollConfig, save, useConfig } from "./lib/config";
 import { linkHandler, navigate, useLocation } from "./lib/navigation";
 import { accountResource, runtimeResource, useResource } from "./lib/resource";
+import { isSubagentActive } from "./lib/sessions";
 import { cycleTheme, themeLabels, useTheme } from "./lib/theme";
 import { activeSaver, setConflictDialog, setNav, setPalette, toast, useUi } from "./lib/ui";
 import { ConversationsPage } from "./pages/Conversations";
@@ -105,7 +106,9 @@ function Sidebar({ route }: { route: Route }) {
   const theme = useTheme();
   const auth = useAuthGate();
   const runtime = useResource(runtimeResource, 10_000).data;
-  const busyTurns = runtime?.turns.length ?? 0;
+  const busyTurns =
+    (runtime?.turns.length ?? 0) +
+    (runtime?.subagents?.filter((item) => isSubagentActive(item.state)).length ?? 0);
   const ThemeIcon = themeIcons[theme];
   const mainNav = navItems.filter((item) => item.page !== "settings");
   const settingsActive = route.page === "settings";

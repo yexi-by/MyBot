@@ -240,6 +240,9 @@ a.activity-scope:hover {
   gap: 10px 16px;
   margin: 0;
 }
+.session-stats > div {
+  min-width: 0;
+}
 .session-stats dt {
   color: var(--text-3);
   font-size: var(--fs-xs);
@@ -248,6 +251,7 @@ a.activity-scope:hover {
   margin: 2px 0 0;
   font-size: var(--fs-sm);
   font-weight: 500;
+  overflow-wrap: anywhere;
 }
 .stat-note {
   margin-left: 6px;
@@ -554,6 +558,174 @@ a.activity-scope:hover {
 }
 .session-fresh:hover {
   background: var(--accent-hover);
+}
+
+/* ---------- 后台子代理 ---------- */
+.subagent-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.subagent-list-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  transition: background-color var(--dur) var(--ease);
+}
+.subagent-list-row + .subagent-list-row {
+  border-top: 1px solid var(--border);
+}
+.subagent-list-row:hover {
+  background: var(--surface-hover);
+}
+.subagent-list-main {
+  min-width: 0;
+}
+.subagent-list-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+.subagent-list-title a {
+  color: var(--text);
+}
+.subagent-list-title a::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+}
+.subagent-list-title a:hover {
+  text-decoration: none;
+}
+.subagent-list-row .btn {
+  position: relative;
+  z-index: 1;
+}
+.subagent-list-meta {
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-inline-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-radius: var(--r);
+  background: var(--surface-2);
+}
+.subagent-inline-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 200px;
+}
+.subagent-inline-title {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.subagent-inline-title svg {
+  flex-shrink: 0;
+  color: var(--accent-text);
+}
+.subagent-inline-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.subagent-steer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.subagent-steer-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.subagent-control {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 20px;
+}
+.subagent-control-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.subagent-control-head h3 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.subagent-control-input {
+  width: 100%;
+  min-height: 76px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  resize: vertical;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.subagent-control-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px var(--focus);
+}
+.subagent-control-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.subagent-steps-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.subagent-steps-field input {
+  width: 72px;
+  height: var(--control-h-sm);
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+.subagent-steps-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface);
 }
 
 /* ---------- 会话与权限 ---------- */
@@ -1131,6 +1303,15 @@ button.file-name:hover {
   }
   .session-overview {
     padding: 14px 16px;
+  }
+  .subagent-control {
+    padding: 14px 16px;
+  }
+  .subagent-list-row {
+    padding: 10px 12px;
+  }
+  .subagent-list-meta {
+    white-space: normal;
   }
   .session-turn-head,
   .session-standalone {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AudioLines,
+  Bot,
   CornerDownLeft,
   FileText,
   Hash,
@@ -20,7 +21,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { getConfig, save, useConfig } from "../lib/config";
 import { groupTitle, scopeLabel } from "../lib/conversations";
-import { turnState } from "../lib/labels";
+import { subagentState, turnState } from "../lib/labels";
 import { navigate } from "../lib/navigation";
 import { restartHarness } from "../lib/power";
 import {
@@ -30,7 +31,7 @@ import {
   useGroupNames,
   useResource,
 } from "../lib/resource";
-import { sessionRoute } from "../lib/sessions";
+import { sessionRoute, subagentRoute } from "../lib/sessions";
 import { setSkin, setTheme } from "../lib/theme";
 import { object } from "../lib/types";
 import type { Path } from "../lib/types";
@@ -56,7 +57,9 @@ function useCommands(): Command[] {
   const groups = useGroupNames();
   const tools = useResource(toolsResource).data;
   const files = useResource(filesResource).data;
-  const sessions = useResource(runtimeResource).data?.sessions;
+  const runtime = useResource(runtimeResource).data;
+  const sessions = runtime?.sessions;
+  const subagents = runtime?.subagents;
   return useMemo(() => {
     const config = state.draft;
     const list: Command[] = [];
@@ -107,6 +110,20 @@ function useCommands(): Command[] {
         keywords: session.scope_key,
         icon: ScrollText,
         run: go(sessionRoute(session.scope_key)),
+      });
+    for (const sub of subagents ?? [])
+      list.push({
+        id: "subagent:" + sub.subagent_id,
+        group: "后台子代理",
+        title: sub.title,
+        detail:
+          scopeLabel(sub.scope_key, groups) +
+          " · " +
+          subagentState(sub.state).text +
+          ` · ${sub.step}/${sub.max_steps} 步`,
+        keywords: sub.subagent_id + " " + sub.scope_key,
+        icon: Bot,
+        run: go(subagentRoute(sub.scope_key, sub.subagent_id)),
       });
     for (const [id, value] of Object.entries(object(config.providers)))
       list.push({
@@ -183,7 +200,7 @@ function useCommands(): Command[] {
       { id: "action:restart", group: "操作", title: "重启 Harness", keywords: "restart", icon: RotateCw, run: () => void restartHarness() },
     );
     return list;
-  }, [state.draft, groups, tools, files, sessions]);
+  }, [state.draft, groups, tools, files, sessions, subagents]);
 }
 
 const defaultGroups = new Set(["页面", "操作"]);
