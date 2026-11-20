@@ -594,3 +594,63 @@ async def test_send_message_rejects_svg_as_image_before_napcat_call() -> None:
     assert result.status == "error"
     assert "SVG" in result.message and "PNG" in result.message
     assert bot.calls == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "满脑子只有“见好就收、活着出去就是赢”。\\n\\n也只有你这种揣着四千万现金的人才会这样玩。",
+            "满脑子只有“见好就收、活着出去就是赢”。\n\n也只有你这种揣着四千万现金的人才会这样玩。",
+        ),
+        ("他说“没问题”\\n\\n那我们开始吧", "他说“没问题”\n\n那我们开始吧"),
+        ("第一段结束。\\r\\n\\r\\n第二段开始。", "第一段结束。\n\n第二段开始。"),
+        ("早安喵\\n刚起床\\n今天吃啥", "早安喵\n刚起床\n今天吃啥"),
+        ("步骤如下\\n1. 先备份\\n2. 再更新", "步骤如下\n1. 先备份\n2. 再更新"),
+        (
+            "你这属于典型的猛攻恶霸思维喵喵喵\\n\\n也只有你这种揣着四千万现金的大佬才会这样玩",
+            "你这属于典型的猛攻恶霸思维喵喵喵\n\n也只有你这种揣着四千万现金的大佬才会这样玩",
+        ),
+        ("文件在 C:\\new.txt。\\n\\n请查收。", "文件在 C:\\new.txt。\n\n请查收。"),
+        ("先看 `foo`。\\n\\n再看 `bar`。", "先看 `foo`。\n\n再看 `bar`。"),
+        ("好耶🎉\\n\\n明天见", "好耶🎉\n\n明天见"),
+    ],
+)
+async def test_send_message_unescapes_double_escaped_paragraph_newlines(
+    raw: str, expected: str
+) -> None:
+    bot = Bot()
+    tools, context, _ = registry(bot)
+    result = await tools.execute(
+        context, "qq__send_message", {"parts": [{"type": "text", "text": raw}]}
+    )
+    assert result.status == "ok"
+    action, params = bot.calls[-1]
+    assert action == "send_group_msg"
+    assert params["message"] == [{"type": "text", "data": {"text": expected}}]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "今天排查发现：\n原因是模型吐出了\\n\\n字面量。",
+        "刚才那个 `\\n\\n` 是模型双重转义导致的",
+        'Python 里 "\\n" 表示换行',
+        "刚才那个“\\n\\n”是模型双重转义导致的",
+        "输出里多了个\\\\n\\\\n",
+        "看下这个 \\n\\n 是什么玩意",
+        "为什么最后会出现\\n\\n？",
+        "看下这个\\n\\n是什么玩意",
+        "路径是 C:\\new\\notes.txt 和 D:\\Users\\n1\\n2",
+    ],
+)
+async def test_send_message_preserves_intentional_literal_newlines(raw: str) -> None:
+    bot = Bot()
+    tools, context, _ = registry(bot)
+    result = await tools.execute(
+        context, "qq__send_message", {"parts": [{"type": "text", "text": raw}]}
+    )
+    assert result.status == "ok"
+    action, params = bot.calls[-1]
+    assert action == "send_group_msg"
+    assert params["message"] == [{"type": "text", "data": {"text": raw}}]

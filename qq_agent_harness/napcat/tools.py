@@ -3,6 +3,7 @@
 import base64
 import mimetypes
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -1351,6 +1352,77 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
     return tools
 
 
+_BACKTICK_SPAN = re.compile(r"(`+)[\s\S]*?\1")
+_ESCAPED_NEWLINE = re.compile(r"(?<!\\)(?:\\r\\n|\\n)+")
+_BREAK_BEFORE = frozenset("。！？…~～：:；;.!?”’」』)）]】》—")
+_BREAK_AFTER_BAD = frozenset("。，、！？；：.,!?;:)）]】}》+*\\")
+_QUOTE_OPEN = frozenset("\"'`“‘「『\\")
+_QUOTE_CLOSE = frozenset("\"'`”’」』\\")
+_LIST_START = re.compile(
+    r"^(?:[0-9]+[.)、]|[-*•·]\s|[（(][0-9一二三四五六七八九十]+[）)]|[一二三四五六七八九十]+、)"
+)
+
+
+def _normalize_escaped_newlines(text: str) -> str:
+    """将模型工具参数偶发双重转义的字面换行（\\n / \\r\\n）保守还原为真实换行。"""
+    if "\\n" not in text or "\n" in text or "\r" in text:
+        return text
+    protected = [match.span() for match in _BACKTICK_SPAN.finditer(text)]
+    candidates: list[re.Match[str]] = []
+    for match in _ESCAPED_NEWLINE.finditer(text):
+        start, end = match.span()
+        if start == 0 or end == len(text):
+            continue
+        if any(p_start <= start and end <= p_end for p_start, p_end in protected):
+            continue
+        before = text[start - 1]
+        after = text[end]
+        if before in _QUOTE_OPEN or after in _QUOTE_CLOSE or after in _BREAK_AFTER_BAD:
+            continue
+        if before.isspace() and after.isspace():
+            continue
+        count = match.group(0).count("n")
+        if count == 1:
+            if before in (":", "/", "\\"):
+                continue
+            token = text[:start].rsplit(None, 1)[-1] if not before.isspace() else ""
+            if (
+                before.isascii()
+                and (before.isalnum() or before in "._-")
+                and after.isascii()
+                and (after.islower() or after == "_" or ("\\" in token and after.isdigit()))
+            ):
+                continue
+        candidates.append(match)
+    if not candidates:
+        return text
+    multi = len(candidates) >= 2
+    out: list[str] = []
+    cursor = 0
+    for match in candidates:
+        start, end = match.span()
+        prev_text = text[:start].rstrip(" \t")
+        prev_ch = prev_text[-1] if prev_text else ""
+        tail = text[end:].lstrip(" \t")
+        count = match.group(0).count("n")
+        is_paragraph = (
+            multi
+            or prev_ch in _BREAK_BEFORE
+            or (bool(prev_ch) and unicodedata.category(prev_ch) == "So")
+            or bool(_LIST_START.match(tail))
+            or (count >= 2 and len(prev_text) >= 15 and len(tail) >= 15)
+        )
+        if not is_paragraph:
+            continue
+        out.append(text[cursor:start])
+        out.append("\n" * count)
+        cursor = end
+    if not out:
+        return text
+    out.append(text[cursor:])
+    return "".join(out)
+
+
 def _looks_like_svg(content: bytes, path: str | None = None) -> bool:
     if path and path.lower().endswith(".svg"):
         return True
@@ -1382,7 +1454,9 @@ async def send_message(
 
     for part in request.parts:
         if isinstance(part, a.TextPart):
-            segments.append({"type": "text", "data": {"text": part.text}})
+            segments.append(
+                {"type": "text", "data": {"text": _normalize_escaped_newlines(part.text)}}
+            )
         elif isinstance(part, a.AtPart):
             if target.kind != "group":
                 raise ValueError("私聊不支持艾特消息段")
