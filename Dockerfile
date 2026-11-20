@@ -71,11 +71,7 @@ COPY qq_agent_harness/ ./qq_agent_harness/
 RUN uv sync --locked --no-dev --no-editable && rm -rf /app/qq_agent_harness
 COPY --from=webui_build /webui/dist/ ./webui/dist/
 COPY config.example/ ./config.example/
-RUN chown -R 0:0 /app \
- && chmod 0700 /app \
- && chmod 0700 /workspace \
- && (find /usr /bin /sbin /lib -xdev -perm /6000 -type f -exec chmod a-s {} + || true)
-ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HARNESS_WEBUI_DIST=/app/webui/dist HARNESS_WORKSPACE_UID=1000 HARNESS_WORKSPACE_GID=1000
-USER 0:0
+ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HARNESS_WEBUI_DIST=/app/webui/dist
+USER 1000:1000
 EXPOSE 6055
 CMD ["qq-agent-harness", "--config", "/app/config/harness.toml"]

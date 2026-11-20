@@ -1351,6 +1351,13 @@ def build_tools(settings: NapCatSettings | None = None) -> list[ToolDefinition]:
     return tools
 
 
+def _looks_like_svg(content: bytes, path: str | None = None) -> bool:
+    if path and path.lower().endswith(".svg"):
+        return True
+    head = content[:512].lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+    return head.startswith(b"<svg") or (head.startswith(b"<?xml") and b"<svg" in head)
+
+
 async def send_message(
     context: ToolContext, request: a.SendMessage, reader: MediaReader
 ) -> ToolResult:
@@ -1435,6 +1442,10 @@ async def send_message(
                 content = await context.read_workspace(part.workspace_path)
             else:
                 content, _ = await reader.download(part.url or "")
+            if part.type == "image" and _looks_like_svg(content, part.workspace_path):
+                raise ValueError(
+                    "QQ 图片消息不支持 SVG 矢量格式；请先在工作区用 cairosvg 或 resvg-py 渲染为 PNG 后再发送，或改用 type='file' 发送 SVG 原文件"
+                )
             total_media_size += len(content)
             if total_media_size > reader.settings.media_max_bytes:
                 raise ValueError("本次发送的媒体总量超过配置上限")

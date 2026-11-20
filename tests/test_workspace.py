@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,6 @@ from qq_agent_harness.workspace import (
     Workspace,
     WorkspaceService,
     WorkspaceUnavailable,
-    workspace_exec_ids,
 )
 from qq_agent_harness.workspace import build_tools as workspace_tools
 from qq_agent_harness.workspace.executor import LocalSpawner
@@ -205,24 +203,11 @@ def test_web_workspace_endpoints_status_files_and_cleanup(tmp_path: Path) -> Non
         assert list((ws_dir / ".cache").iterdir()) == []
 
 
-async def test_workspace_dual_uid_privilege_drop_and_chown_hooks(
+async def test_workspace_posix_spawner_omits_uvloop_incompatible_uid_kwargs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from qq_agent_harness.workspace import executor as executor_mod
-    from qq_agent_harness.workspace import storage as storage_mod
 
-    # 1. 校验非法/特权 UID 被明确拒绝（模拟 POSIX root 环境）
-    monkeypatch.setattr(storage_mod.sys, "platform", "linux")
-    monkeypatch.setattr(storage_mod.os, "geteuid", lambda: 0, raising=False)
-    monkeypatch.setenv("HARNESS_WORKSPACE_UID", "0")
-    with pytest.raises(ValueError, match="必须为大于 0"):
-        workspace_exec_ids()
-
-    monkeypatch.setenv("HARNESS_WORKSPACE_UID", "1000")
-    monkeypatch.setenv("HARNESS_WORKSPACE_GID", "1000")
-    assert workspace_exec_ids() == (1000, 1000)
-
-    # 2. POSIX LocalSpawner.spawn 在双 UID 启用时必须传递 user/group/extra_groups=[]
     captured: list[tuple[tuple[object, ...], dict[str, Any]]] = []
 
     class FakeProc:
@@ -239,36 +224,12 @@ async def test_workspace_dual_uid_privilege_drop_and_chown_hooks(
 
     with monkeypatch.context() as mp:
         mp.setattr(executor_mod.os, "name", "posix")
-        mp.setattr(executor_mod, "workspace_exec_ids", lambda: (1000, 1000))
         mp.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        await LocalSpawner().spawn("echo ok", tmp_path, {"PATH": "/usr/bin"})
 
-        await LocalSpawner().spawn("id", tmp_path, {"PATH": "/usr/bin"})
     assert len(captured) == 1
     spawn_kwargs = captured[0][1]
-    assert spawn_kwargs["user"] == 1000
-    assert spawn_kwargs["group"] == 1000
-    assert spawn_kwargs["extra_groups"] == []
     assert spawn_kwargs["start_new_session"] is True
-
-    # 3. 验证 Workspace 写入文件和创建目录时在双 UID 模式下同步触发 _chown_path / _chown_fd
-    chown_paths: list[tuple[Path, int, int]] = []
-    chown_fds: list[tuple[int, int, int]] = []
-
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(
-        storage_mod.os,
-        "chown",
-        lambda path, uid, gid, **_kw: chown_paths.append((Path(path), uid, gid)),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        storage_mod.os,
-        "fchown",
-        lambda fd, uid, gid: chown_fds.append((fd, uid, gid)),
-        raising=False,
-    )
-    ws = Workspace(tmp_path / "dual_ws")
-    ws.write("sub/data.txt", b"hello")
-    assert any(p == ws.root and u == 1000 and g == 1000 for p, u, g in chown_paths)
-    assert any(p == ws.root / "sub" and u == 1000 and g == 1000 for p, u, g in chown_paths)
-    assert len(chown_fds) == 1 and chown_fds[0][1:] == (1000, 1000)
+    # uvloop 的 subprocess_exec 不支持 user/group/extra_groups，单 UID 模式下严禁传入。
+    for forbidden in ("user", "group", "extra_groups"):
+        assert forbidden not in spawn_kwargs

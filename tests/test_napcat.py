@@ -575,3 +575,22 @@ async def test_revoking_group_policy_after_first_receipt_blocks_remaining_parts(
     assert result.status == "error"
     assert [action for action, _ in bot.calls] == ["send_group_msg"]
     assert context.sent_messages[0]["data"] == {"message_id": "first"}
+
+
+async def test_send_message_rejects_svg_as_image_before_napcat_call() -> None:
+    bot = Bot()
+    tools, context, _ = registry(bot)
+
+    async def read_svg(path: str) -> bytes:
+        assert path == "exports/diagram.svg"
+        return b'<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+
+    context.read_workspace = read_svg
+    result = await tools.execute(
+        context,
+        "qq__send_message",
+        {"parts": [{"type": "image", "workspace_path": "exports/diagram.svg"}]},
+    )
+    assert result.status == "error"
+    assert "SVG" in result.message and "PNG" in result.message
+    assert bot.calls == []
