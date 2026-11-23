@@ -26,6 +26,7 @@ from .configuration import ConfigError, ConfigStore, ConflictError
 from .contracts import JSON_OBJECT, ConversationScope, JsonObject, JsonValue, Model, ToolResult
 from .image import CATEGORY_LABELS as IMAGE_CATEGORIES
 from .image import build_tools as image_tools
+from .image import preview_image
 from .mcp_tools import MCPManager
 from .napcat import MediaReader, NapCatError, NapCatHub, action_coverage
 from .napcat import build_tools as napcat_tools
@@ -124,6 +125,16 @@ class SendSubagentRequest(Model):
     timeout_seconds: float | None = Field(
         default=None, ge=MIN_TIMEOUT_SECONDS, le=MAX_TIMEOUT_SECONDS
     )
+
+
+class PreviewImageRequest(Model):
+    prompt: str = Field(
+        default="一只戴着草帽的橘猫，简约清新插画风格",
+        min_length=1,
+        max_length=500,
+    )
+    size: str | None = Field(default=None, min_length=1, max_length=64)
+    aspect_ratio: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class PreviewSpeech(Model):
@@ -730,6 +741,41 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
             ]
         model_cache["__image__"] = (time.monotonic() + 30, fingerprint, ids)
         return {"models": [model for model in ids]}
+
+    @app.post("/api/image/preview", response_model=None)
+    async def image_preview(request: PreviewImageRequest) -> JSONResponse:
+        # 按已保存的生图设置测试生成一张图，不要求先启用，不经过 QQ、不写日志或文件。
+        config = store.settings.image
+        if not config.endpoint_base():
+            raise HTTPException(400, "请先填写有效的生图接口地址")
+        if not config.model.strip():
+            raise HTTPException(400, "请先选择或填写生图模型名称")
+        result = await preview_image(
+            config,
+            request.prompt,
+            size=request.size,
+            aspect_ratio=request.aspect_ratio,
+            napcat_settings=startup.napcat,
+            reader=media,
+        )
+        if isinstance(result, ToolResult):
+            status_code = (
+                400 if result.error_type in ("InvalidConfiguration", "ValidationError") else 502
+            )
+            raise HTTPException(status_code, result.message)
+        body: JsonObject = {
+            "mime_type": result.mime_type,
+            "size": len(result.content),
+            "protocol": result.protocol,
+            "endpoint": result.endpoint,
+            "elapsed_ms": result.elapsed_ms,
+            "data_url": (
+                f"data:{result.mime_type};base64,{base64.b64encode(result.content).decode('ascii')}"
+            ),
+        }
+        if result.revised_prompt:
+            body["revised_prompt"] = result.revised_prompt
+        return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
     def speech_endpoint() -> TTSSettings:
         # 试听与音色管理按已保存的配置连接本机 IndexTTS，不要求先启用语音合成。

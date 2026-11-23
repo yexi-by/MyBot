@@ -1000,3 +1000,89 @@ def test_image_settings_omits_auth_headers_when_api_key_empty() -> None:
         headers={"Authorization": "Bearer custom-token"},
     )
     assert gemini_bearer.request_headers() == {"Authorization": "Bearer custom-token"}
+
+
+def test_webui_image_preview_endpoint_succeeds_when_disabled_and_diagnoses_protocol_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    png_b64 = base64.b64encode(PNG).decode("ascii")
+    mode = "ok"
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        if mode == "mismatch":
+            assert request.url == httpx.URL("https://cpa.example/v1/images/generations")
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "Model gemini-3.1-flash-image not supported sk-preview-secret",
+                    }
+                },
+            )
+        assert request.url == httpx.URL(
+            "https://cpa.example/v1beta/models/gemini-3.1-flash-image:generateContent"
+        )
+        assert request.headers["x-goog-api-key"] == "sk-preview-secret"
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "finishReason": "STOP",
+                        "content": {
+                            "parts": [{"inlineData": {"mimeType": "image/png", "data": png_b64}}]
+                        },
+                    }
+                ]
+            },
+        )
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "qq_agent_harness.image.httpx.AsyncClient",
+        lambda **kwargs: real_client(**{**kwargs, "transport": httpx.MockTransport(serve)}),
+    )
+
+    (tmp_path / "persona.md").write_text("测试人格", encoding="utf-8")
+    config_file = tmp_path / "harness.toml"
+    config_file.write_text(
+        """
+[image]
+enabled = false
+protocol = "gemini"
+base_url = "https://cpa.example"
+api_key = "sk-preview-secret"
+model = "gemini-3.1-flash-image"
+""".strip(),
+        encoding="utf-8",
+    )
+    app = create_app(config_file, connect_mcp=False)
+    with TestClient(app) as client:
+        # 未启用时也允许提前测试验证配置
+        ok = client.post("/api/image/preview", json={"prompt": "一只橘猫", "aspect_ratio": "1:1"})
+        assert ok.status_code == 200
+        assert ok.headers["cache-control"] == "no-store"
+        body = ok.json()
+        assert body["protocol"] == "gemini"
+        assert body["endpoint"] == "/models/{model}:generateContent"
+        assert body["mime_type"] == "image/png"
+        assert body["data_url"] == f"data:image/png;base64,{png_b64}"
+        assert body["elapsed_ms"] >= 1
+
+        # 切到错配协议时返回 502，诊断信息带出协议、端点与引导且不泄漏密钥
+        app.state.store.settings.image.protocol = "openai_images"
+        mode = "mismatch"
+        bad = client.post("/api/image/preview", json={"prompt": "一只橘猫"})
+        assert bad.status_code == 502
+        detail = bad.json()["detail"]
+        assert "openai_images" in detail
+        assert "/images/generations" in detail
+        assert "invalid_request_error" in detail
+        assert "接口协议" in detail
+        assert "sk-preview-secret" not in detail
+
+        # 未填模型时返回 400
+        app.state.store.settings.image.model = ""
+        missing = client.post("/api/image/preview", json={"prompt": "一只橘猫"})
+        assert missing.status_code == 400

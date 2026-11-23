@@ -35,6 +35,7 @@ import { ToolDrawer } from "../components/ToolDrawer";
 import { errorMessage, get, post, request } from "../lib/api";
 import { change, getConfig, save, useConfig } from "../lib/config";
 import { accessScope } from "../lib/conversations";
+import { formatBytes } from "../lib/format";
 import { coverageState, mcpState, toolScopes } from "../lib/labels";
 import { linkHandler, navigate } from "../lib/navigation";
 import {
@@ -584,15 +585,228 @@ function Coverage() {
   );
 }
 
+interface ImageProtocolMeta {
+  defaultSuffix: string;
+  generatePath: string;
+  editPath: string;
+  auth: string;
+  note: string;
+}
+
+const IMAGE_PROTOCOL_META: Record<string, ImageProtocolMeta> = {
+  openai_images: {
+    defaultSuffix: "/v1",
+    generatePath: "/images/generations",
+    editPath: "/images/edits（multipart）",
+    auth: "Authorization: Bearer",
+    note: "适用于 OpenAI 官方、CPA 的 GPT Image / Grok Imagine 及标准 OpenAI Images 兼容接口。",
+  },
+  chat_completions: {
+    defaultSuffix: "/v1",
+    generatePath: "/chat/completions",
+    editPath: "/chat/completions",
+    auth: "Authorization: Bearer",
+    note: "适用于 CPA Gemini / Antigravity、OpenRouter 及通过 Chat Completions 返回图片的聚合接口。",
+  },
+  responses: {
+    defaultSuffix: "/v1",
+    generatePath: "/responses",
+    editPath: "/responses",
+    auth: "Authorization: Bearer",
+    note: "适用于 OpenAI / Azure / CPA Responses API 内置 image_generation 工具。",
+  },
+  gemini: {
+    defaultSuffix: "/v1beta",
+    generatePath: "/models/{model}:generateContent",
+    editPath: "/models/{model}:generateContent",
+    auth: "x-goog-api-key",
+    note: "适用于 Google AI Studio 与 CPA /v1beta（如 gemini-3.1-flash-image、gemini-3-pro-image），无二次转译。",
+  },
+  xai_images: {
+    defaultSuffix: "/v1",
+    generatePath: "/images/generations",
+    editPath: "/images/edits（JSON）",
+    auth: "Authorization: Bearer",
+    note: "适用于 xAI Grok Imagine 官方直连（api.x.ai）。",
+  },
+  ark_images: {
+    defaultSuffix: "/api/v3",
+    generatePath: "/images/generations",
+    editPath: "/images/generations",
+    auth: "Authorization: Bearer",
+    note: "适用于火山方舟 / BytePlus Ark Seedream（文生图与图生图共用同一接口）。",
+  },
+  dashscope: {
+    defaultSuffix: "/api/v1",
+    generatePath: "/services/aigc/multimodal-generation/generation",
+    editPath: "/services/aigc/multimodal-generation/generation",
+    auth: "Authorization: Bearer",
+    note: "适用于阿里百炼 DashScope 原生同步多模态生图与改图（qwen-image / wan2.6+）。",
+  },
+};
+
+function resolveImageBasePreview(baseUrl: string, protocol: string): string {
+  const stripped = baseUrl.trim().replace(/\/+$/, "");
+  if (!stripped) return "";
+  try {
+    const parsed = new URL(stripped);
+    if (parsed.pathname === "" || parsed.pathname === "/") {
+      const suffix = IMAGE_PROTOCOL_META[protocol]?.defaultSuffix ?? "/v1";
+      return stripped + suffix;
+    }
+  } catch {
+    return stripped;
+  }
+  return stripped;
+}
+
+interface ImagePreviewResponse {
+  mime_type: string;
+  size: number;
+  protocol: string;
+  endpoint: string;
+  elapsed_ms: number;
+  data_url: string;
+  revised_prompt?: string;
+}
+
+/** 按已保存的设置测试生图接口；有未保存的图像生成修改时先保存。 */
+async function saveImageSettings(): Promise<boolean> {
+  return !getConfig().changed.some((path) => path[0] === "image") || (await save());
+}
+
+function ImagePreviewCard({ ready }: { ready: boolean }) {
+  const [testPrompt, setTestPrompt] = useState("一只戴着草帽的橘猫，简约清新插画风格");
+  const [aspectRatio, setAspectRatio] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<ImagePreviewResponse | null>(null);
+
+  const runPreview = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      if (!(await saveImageSettings())) {
+        setError("请先修正并保存图像生成设置");
+        return;
+      }
+      const payload: Record<string, string> = { prompt: testPrompt.trim() };
+      if (aspectRatio.trim()) payload.aspect_ratio = aspectRatio.trim();
+      const response = await post<ImagePreviewResponse>("/api/image/preview", payload);
+      setResult(response);
+    } catch (failure) {
+      setResult(null);
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="card form-section" id="section-image-preview">
+      <header className="section-header">
+        <div className="grow">
+          <h2>测试生图</h2>
+          <p>
+            按已保存的配置发起一次测试文生图（不要求先启用，不发送到 QQ，不写入工作区），用于当场验证接口地址、密钥、模型与协议是否匹配。
+          </p>
+        </div>
+      </header>
+      <div className="form-grid">
+        <FieldShell
+          id="image-preview-prompt"
+          label="测试提示词"
+          help="最多 500 字，仅用于本次连通性与协议验证。"
+        >
+          <input
+            id="image-preview-prompt"
+            className="input"
+            value={testPrompt}
+            maxLength={500}
+            onChange={(event) => setTestPrompt(event.target.value)}
+          />
+        </FieldShell>
+        <FieldShell
+          id="image-preview-ratio"
+          label="宽高比（可选）"
+          help="留空由接口默认；例如 1:1、16:9、3:4。"
+        >
+          <input
+            id="image-preview-ratio"
+            className="input mono"
+            value={aspectRatio}
+            maxLength={32}
+            placeholder="留空由接口默认"
+            onChange={(event) => setAspectRatio(event.target.value)}
+          />
+        </FieldShell>
+        <FieldShell id="image-preview-action" label="执行测试">
+          <div id="image-preview-action" className="stack-sm">
+            <div className="row wrap">
+              <Button
+                variant="primary"
+                icon={Play}
+                loading={busy}
+                disabled={!ready || busy || !testPrompt.trim()}
+                onClick={() => void runPreview()}
+              >
+                {busy ? "正在生图…" : "测试生图"}
+              </Button>
+              {!ready && <span className="muted">请先填写接口地址和模型名称</span>}
+            </div>
+            {error && (
+              <Banner tone="danger" icon={CircleAlert}>
+                {error}
+              </Banner>
+            )}
+            {result && (
+              <div className="image-preview-box">
+                <div className="row wrap">
+                  <Badge tone="success">测试成功</Badge>
+                  <Badge tone="neutral">{result.protocol}</Badge>
+                  <Badge tone="neutral">{result.mime_type}</Badge>
+                  <Badge tone="neutral">{formatBytes(result.size)}</Badge>
+                  <Badge tone="neutral">{result.elapsed_ms} ms</Badge>
+                </div>
+                <img
+                  src={result.data_url}
+                  alt="测试生图结果预览"
+                  className="image-preview-img"
+                />
+                {result.revised_prompt && (
+                  <p className="muted small">润色提示词：{result.revised_prompt}</p>
+                )}
+              </div>
+            )}
+          </div>
+        </FieldShell>
+      </div>
+    </section>
+  );
+}
+
 function ImageGeneration() {
   const state = useConfig();
   const image = object(state.draft.image);
   const enabled = image.enabled === true;
-  const hasEndpoint =
-    typeof image.base_url === "string" &&
-    image.base_url.trim() !== "" &&
-    typeof image.model === "string" &&
-    image.model.trim() !== "";
+  const protocol =
+    typeof image.protocol === "string" && image.protocol in IMAGE_PROTOCOL_META
+      ? image.protocol
+      : "openai_images";
+  const baseUrl = typeof image.base_url === "string" ? image.base_url.trim() : "";
+  const model = typeof image.model === "string" ? image.model.trim() : "";
+  const hasEndpoint = baseUrl !== "" && model !== "";
+  const meta = IMAGE_PROTOCOL_META[protocol];
+  const resolvedBase = resolveImageBasePreview(baseUrl, protocol);
+  const cleanModel = model.replace(/^models\//, "") || "{model}";
+  const generateUrl =
+    protocol === "dashscope" && resolvedBase.endsWith(meta.generatePath)
+      ? resolvedBase
+      : (resolvedBase || "<接口地址>") +
+        (protocol === "gemini"
+          ? "/models/" + cleanModel + ":generateContent"
+          : meta.generatePath);
+
   return (
     <div className="stack">
       {enabled && !hasEndpoint && (
@@ -600,8 +814,22 @@ function ImageGeneration() {
           请填写生图接口地址和模型名称，否则 Agent 无法调用生图工具。
         </Banner>
       )}
-      <ConfigSection def={imageConnectionSection} base={["image"]} />
+      <ConfigSection def={imageConnectionSection} base={["image"]}>
+        <FieldShell id="image-endpoint-preview" label="实际请求预览" help={meta.note}>
+          <div id="image-endpoint-preview" className="image-endpoint-preview">
+            <div className="image-endpoint-line">
+              <Badge tone="neutral">POST</Badge>
+              <code className="mono">{generateUrl}</code>
+            </div>
+            <div className="row wrap small muted">
+              <span>鉴权：{meta.auth}</span>
+              {meta.editPath !== meta.generatePath && <span>· 改图：{meta.editPath}</span>}
+            </div>
+          </div>
+        </FieldShell>
+      </ConfigSection>
       <ConfigSection def={imageRequestSection} base={["image"]} />
+      <ImagePreviewCard ready={hasEndpoint} />
     </div>
   );
 }

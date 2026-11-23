@@ -5,6 +5,7 @@ import base64
 import binascii
 import math
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -31,7 +32,7 @@ from .napcat.arguments import ReadMedia
 from .napcat.media import MediaReader
 from .napcat.tools import media_segments
 from .providers import permanent_request_error, retry_after_seconds, retry_delay
-from .settings import ImageSettings, NapCatSettings
+from .settings import ImageProtocol, ImageSettings, NapCatSettings
 
 CATEGORY_LABELS = {"image": "生成图片"}
 
@@ -120,6 +121,31 @@ class _ExtractedImage:
     b64: str | None = None
     url: str | None = None
     revised_prompt: str | None = None
+
+
+@dataclass(frozen=True)
+class ImagePreviewResult:
+    content: bytes
+    mime_type: str
+    protocol: ImageProtocol
+    endpoint: str
+    elapsed_ms: int
+    revised_prompt: str | None = None
+
+
+def protocol_endpoint_label(protocol: ImageProtocol, *, has_references: bool = False) -> str:
+    """返回不含密钥与动态输入的协议端点模板，用于错误诊断与控制台提示。"""
+    if protocol in ("openai_images", "xai_images"):
+        return "/images/edits" if has_references else "/images/generations"
+    if protocol == "chat_completions":
+        return "/chat/completions"
+    if protocol == "responses":
+        return "/responses"
+    if protocol == "gemini":
+        return "/models/{model}:generateContent"
+    if protocol == "ark_images":
+        return "/images/generations"
+    return "/services/aigc/multimodal-generation/generation"
 
 
 def detect_image_format(content: bytes) -> tuple[str, str]:
@@ -745,8 +771,22 @@ async def _post_image_request(
                 except ValueError:
                     error_obj = {}
             details = _image_error_metadata(error_obj)
+            endpoint_label = protocol_endpoint_label(
+                config.protocol, has_references=bool(references)
+            )
+            if response.status_code in (400, 404, 405, 422):
+                message = (
+                    f"生图接口返回 HTTP {response.status_code}"
+                    f"（协议 {config.protocol}，端点 {endpoint_label}）"
+                    + (f"；{details}" if details else "")
+                    + "；请确认当前模型与所选接口协议匹配"
+                )
+            else:
+                message = f"生图接口返回 HTTP {response.status_code}（协议 {config.protocol}）" + (
+                    f"；{details}" if details else ""
+                )
             raise _ImageRequestError(
-                f"生图接口返回 HTTP {response.status_code}" + (f"；{details}" if details else ""),
+                message,
                 retryable=(response.status_code in (408, 409, 429) or response.status_code >= 500)
                 and not _is_permanent_image_error(error_obj),
                 retry_after=retry_after_seconds(response.headers.get("retry-after")),
@@ -1002,6 +1042,86 @@ def _extract_images(config: ImageSettings, payload: JsonObject) -> list[_Extract
     return _extract_dashscope_images(payload)
 
 
+async def _decode_extracted_image(
+    entry: _ExtractedImage,
+    config: ImageSettings,
+    media_reader: MediaReader,
+    http_client: httpx.AsyncClient,
+    max_bytes: int,
+) -> tuple[bytes, str, str] | None:
+    if entry.b64 is not None:
+        content = _decode_base64_image(entry.b64, max_bytes)
+    elif entry.url is not None:
+        if entry.url.lower().startswith("data:"):
+            content = _decode_base64_image(_parse_data_url_b64(entry.url), max_bytes)
+        else:
+            content = await _download_generated_url(entry.url, config, media_reader, http_client)
+    else:
+        return None
+    if len(content) > max_bytes:
+        raise ValueError("生成的图片超过媒体大小上限")
+    mime, ext = detect_image_format(content)
+    return content, mime, ext
+
+
+async def preview_image(
+    config: ImageSettings,
+    prompt: str,
+    *,
+    size: str | None = None,
+    aspect_ratio: str | None = None,
+    napcat_settings: NapCatSettings | None = None,
+    reader: MediaReader | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> ImagePreviewResult | ToolResult:
+    """按已保存的生图设置发起一次测试文生图；不依赖 enabled 开关，不重试，不落盘。"""
+    if not config.endpoint_base():
+        return ToolResult.failure("请先填写有效的生图接口地址", "InvalidConfiguration")
+    if not config.model.strip():
+        return ToolResult.failure("请先选择或填写生图模型名称", "InvalidConfiguration")
+    clean_prompt = prompt.strip()
+    if not clean_prompt:
+        return ToolResult.failure("测试提示词不能为空", "ValidationError")
+
+    media_reader = reader or MediaReader(napcat_settings)
+    request = GenerateImageInput(prompt=clean_prompt, size=size, aspect_ratio=aspect_ratio)
+    owned_client = client is None
+    http_client = client or httpx.AsyncClient(
+        timeout=config.timeout, proxy=config.proxy, trust_env=False
+    )
+    started = time.monotonic()
+    try:
+        try:
+            payload = await _post_image_request(http_client, config, request, [])
+            extracted = _extract_images(config, payload)
+        except _ImageRequestError as error:
+            return ToolResult.failure(str(error), "ImageGenerationError")
+        if not extracted:
+            return ToolResult.failure("生图接口未返回有效图片数据", "ImageGenerationError")
+        max_bytes = media_reader.settings.media_max_bytes
+        for entry in extracted:
+            try:
+                decoded = await _decode_extracted_image(
+                    entry, config, media_reader, http_client, max_bytes
+                )
+            except ValueError as exc:
+                return ToolResult.failure(str(exc), "ImageGenerationError")
+            if decoded is not None:
+                content, mime, _ext = decoded
+                return ImagePreviewResult(
+                    content=content,
+                    mime_type=mime,
+                    protocol=config.protocol,
+                    endpoint=protocol_endpoint_label(config.protocol, has_references=False),
+                    elapsed_ms=max(1, int((time.monotonic() - started) * 1000)),
+                    revised_prompt=entry.revised_prompt,
+                )
+        return ToolResult.failure("生图接口未返回可解析的图片内容", "ImageGenerationError")
+    finally:
+        if owned_client:
+            await http_client.aclose()
+
+
 def build_tools(
     get_image_settings: Callable[[], ImageSettings],
     napcat_settings: NapCatSettings | None = None,
@@ -1094,24 +1214,16 @@ def build_tools(
                     if denied := context.recheck():
                         return denied
                     try:
-                        if entry.b64 is not None:
-                            content = _decode_base64_image(entry.b64, max_bytes)
-                        elif entry.url is not None:
-                            if entry.url.lower().startswith("data:"):
-                                content = _decode_base64_image(
-                                    _parse_data_url_b64(entry.url), max_bytes
-                                )
-                            else:
-                                content = await _download_generated_url(
-                                    entry.url, config, media_reader, http_client
-                                )
-                        else:
+                        decoded_one = await _decode_extracted_image(
+                            entry, config, media_reader, http_client, max_bytes
+                        )
+                        if decoded_one is None:
                             continue
-                        if len(content) > max_bytes or total_bytes + len(content) > max_bytes:
+                        content, mime, ext = decoded_one
+                        if total_bytes + len(content) > max_bytes:
                             return ToolResult.failure(
                                 "生成的图片超过媒体大小上限", "ImageGenerationError"
                             )
-                        mime, ext = detect_image_format(content)
                     except ValueError as exc:
                         return ToolResult.failure(str(exc), "ImageGenerationError")
                     total_bytes += len(content)

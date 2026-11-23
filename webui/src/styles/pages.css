@@ -1217,6 +1217,49 @@ button.file-name:hover {
   margin-bottom: 2px;
 }
 
+/* ---------- 图像生成预览 ---------- */
+.image-endpoint-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--surface-2);
+}
+.image-endpoint-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.image-endpoint-line code {
+  font-size: var(--fs-xs);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.image-preview-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--surface-2);
+}
+.image-preview-img {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: calc(var(--r) - 2px);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
 /* 权限列表按自身宽度排版：窄时生效状态放到三态选择下方，与工具名同一行。 */
 @container (max-width: 640px) {
   .perm-tool {
