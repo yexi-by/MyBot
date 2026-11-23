@@ -1,8 +1,12 @@
-"""OpenAI 标准图像生成与编辑工具；独立连接配置，与会话服务商解耦。"""
+"""多协议图像生成与编辑工具；独立连接配置，与会话服务商解耦。"""
 
 import asyncio
 import base64
+import binascii
+import math
+import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Literal
 from uuid import uuid4
@@ -31,6 +35,92 @@ from .settings import ImageSettings, NapCatSettings
 
 CATEGORY_LABELS = {"image": "生成图片"}
 
+_DATA_IMAGE_URL = re.compile(
+    r"^data:image/(?:png|jpe?g|gif|webp)(?:;[^,]*)?;base64,(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_MARKDOWN_IMAGE = re.compile(
+    r"!\[[^\]]*\]\(\s*(data:image/(?:png|jpe?g|gif|webp)(?:;[^,)]*)?;base64,[A-Za-z0-9+/=\s]+|https?://[^\s)]+)\s*\)",
+    re.IGNORECASE,
+)
+_INLINE_DATA_IMAGE = re.compile(
+    r"data:image/(?:png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+",
+    re.IGNORECASE,
+)
+_DIMENSIONS = re.compile(r"^(\d{2,5})\s*[xX*×]\s*(\d{2,5})$")
+_ASPECT_RATIO = re.compile(r"^(\d{1,2})\s*:\s*(\d{1,2})$")
+_RESOLUTION_TIER = re.compile(r"^(512|1k|2k|4k)$", re.IGNORECASE)
+_GEMINI_MODEL_ID = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+
+_KNOWN_RATIOS: tuple[tuple[int, int], ...] = (
+    (1, 1),
+    (16, 9),
+    (9, 16),
+    (4, 3),
+    (3, 4),
+    (3, 2),
+    (2, 3),
+    (21, 9),
+    (9, 21),
+    (5, 4),
+    (4, 5),
+    (20, 9),
+    (9, 20),
+)
+
+_SINGLE_OUTPUT_PROTOCOLS = frozenset({"chat_completions", "responses", "gemini", "ark_images"})
+
+_PERMANENT_STATUS_CODES = frozenset(
+    {
+        "INVALID_ARGUMENT",
+        "UNAUTHENTICATED",
+        "PERMISSION_DENIED",
+        "NOT_FOUND",
+        "FAILED_PRECONDITION",
+        "OUT_OF_RANGE",
+        "UNIMPLEMENTED",
+        "InvalidApiKey",
+        "InvalidParameter",
+        "AccessDenied",
+        "ModelNotFound",
+        "DataInspectionFailed",
+        "BadRequest.EmptyInput",
+        "BadRequest.TooLarge",
+    }
+)
+_KNOWN_ERROR_CODES = _PERMANENT_STATUS_CODES | frozenset(
+    {
+        "RESOURCE_EXHAUSTED",
+        "INTERNAL",
+        "UNAVAILABLE",
+        "DEADLINE_EXCEEDED",
+        "Throttling",
+        "Throttling.RateQuota",
+        "Throttling.AllocationQuota",
+        "InternalError",
+        "ServiceUnavailable",
+    }
+)
+_GEMINI_BLOCK_REASONS = frozenset(
+    {
+        "SAFETY",
+        "IMAGE_SAFETY",
+        "PROHIBITED_CONTENT",
+        "RECITATION",
+        "BLOCKLIST",
+        "SPII",
+        "OTHER",
+        "NO_IMAGE",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _ExtractedImage:
+    b64: str | None = None
+    url: str | None = None
+    revised_prompt: str | None = None
+
 
 def detect_image_format(content: bytes) -> tuple[str, str]:
     """按图片文件头识别 MIME 类型与扩展名，拒绝非图片数据。"""
@@ -43,6 +133,145 @@ def detect_image_format(content: bytes) -> tuple[str, str]:
     if len(content) >= 12 and content.startswith(b"RIFF") and content[8:12] == b"WEBP":
         return "image/webp", "webp"
     raise ValueError("仅支持 PNG、JPEG、GIF 或 WebP 格式的有效图片")
+
+
+def _encode_data_url(content: bytes, mime: str) -> str:
+    return f"data:{mime};base64,{base64.b64encode(content).decode('ascii')}"
+
+
+def _decode_base64_image(raw_b64: str, max_bytes: int) -> bytes:
+    compact = re.sub(r"\s+", "", raw_b64)
+    if not compact:
+        raise ValueError("生图接口返回的图片数据为空")
+    if len(compact) > max_bytes * 4 // 3 + 16:
+        raise ValueError("生成的图片超过媒体大小上限")
+    try:
+        return base64.b64decode(compact, validate=True)
+    except ValueError, binascii.Error:
+        raise ValueError("生图接口返回的 Base64 图片数据无效") from None
+
+
+def _parse_data_url_b64(source: str) -> str:
+    matched = _DATA_IMAGE_URL.match(source.strip())
+    if matched is None:
+        raise ValueError("生图接口返回的图片 data URL 格式无效")
+    return matched.group(1)
+
+
+def _ratio_from_dimensions(width: int, height: int) -> str | None:
+    if width <= 0 or height <= 0:
+        return None
+    divisor = math.gcd(width, height)
+    reduced = (width // divisor, height // divisor)
+    if reduced in _KNOWN_RATIOS:
+        return f"{reduced[0]}:{reduced[1]}"
+    actual = width / height
+    best: tuple[int, int] | None = None
+    best_diff = 0.05
+    for rw, rh in _KNOWN_RATIOS:
+        diff = abs(actual - rw / rh) / (rw / rh)
+        if diff <= best_diff:
+            best_diff = diff
+            best = (rw, rh)
+    if best is not None:
+        return f"{best[0]}:{best[1]}"
+    return None
+
+
+def _resolve_aspect_ratio(request: GenerateImageInput) -> str | None:
+    if request.aspect_ratio is not None:
+        raw = request.aspect_ratio.strip()
+        if raw and raw.lower() != "auto":
+            if matched := _ASPECT_RATIO.match(raw):
+                return f"{matched.group(1)}:{matched.group(2)}"
+            return raw
+    if request.size is not None:
+        raw = request.size.strip()
+        if matched := _ASPECT_RATIO.match(raw):
+            return f"{matched.group(1)}:{matched.group(2)}"
+        if dims := _DIMENSIONS.match(raw):
+            return _ratio_from_dimensions(int(dims.group(1)), int(dims.group(2)))
+    return None
+
+
+def _resolve_gemini_image_size(size: str | None) -> str | None:
+    if size is None:
+        return None
+    raw = size.strip()
+    if _RESOLUTION_TIER.match(raw):
+        return raw.upper()
+    return None
+
+
+def _resolve_xai_resolution(size: str | None) -> str | None:
+    if size is None:
+        return None
+    raw = size.strip()
+    lower = raw.lower()
+    if lower in ("1k", "2k"):
+        return lower
+    if dims := _DIMENSIONS.match(raw):
+        if max(int(dims.group(1)), int(dims.group(2))) >= 2048:
+            return "2k"
+    return None
+
+
+def _dashscope_size(size: str | None) -> str | None:
+    if size is None:
+        return None
+    if dims := _DIMENSIONS.match(size.strip()):
+        return f"{dims.group(1)}*{dims.group(2)}"
+    return None
+
+
+def _gemini_model_path(model: str) -> str:
+    cleaned = model.strip().removeprefix("models/")
+    if (
+        not cleaned
+        or not _GEMINI_MODEL_ID.fullmatch(cleaned)
+        or any(segment in (".", "..") for segment in cleaned.split("/"))
+    ):
+        raise _ImageRequestError("Gemini 生图模型名称包含非法字符", retryable=False)
+    return cleaned
+
+
+def _image_error_metadata(data: JsonObject) -> str:
+    parts: list[str] = []
+    if base := remote_error_metadata(data):
+        parts.append(base)
+    error = data.get("error")
+    if isinstance(error, dict):
+        status = error.get("status")
+        if isinstance(status, str) and status in _KNOWN_ERROR_CODES:
+            parts.append(status)
+    code = data.get("code")
+    if isinstance(code, str) and code in _KNOWN_ERROR_CODES:
+        parts.append(code)
+    output = data.get("output")
+    if isinstance(output, dict):
+        out_code = output.get("code")
+        if isinstance(out_code, str) and out_code in _KNOWN_ERROR_CODES:
+            parts.append(out_code)
+    return "；".join(dict.fromkeys(parts))
+
+
+def _is_permanent_image_error(data: JsonObject) -> bool:
+    if permanent_request_error(data):
+        return True
+    error = data.get("error")
+    if isinstance(error, dict):
+        status = error.get("status")
+        if isinstance(status, str) and status in _PERMANENT_STATUS_CODES:
+            return True
+    code = data.get("code")
+    if isinstance(code, str) and code in _PERMANENT_STATUS_CODES:
+        return True
+    output = data.get("output")
+    if isinstance(output, dict):
+        out_code = output.get("code")
+        if isinstance(out_code, str) and out_code in _PERMANENT_STATUS_CODES:
+            return True
+    return False
 
 
 class ReferenceImage(Model):
@@ -101,16 +330,18 @@ class GenerateImageInput(Model):
     images: list[ReferenceImage] = Field(
         default_factory=list,
         max_length=16,
-        description=(
-            "参考图列表；为空时调用 /images/generations 文生图，"
-            "非空时调用 /images/edits 图生图或改图"
-        ),
+        description="参考图列表；为空时文生图，非空时结合参考图改图或图生图",
     )
     n: int = Field(default=1, ge=1, le=10, description="生成图片张数")
     size: str | None = Field(
         default=None,
         min_length=1,
-        description="图片尺寸或比例，如 1024x1024、1536x1024、1024x1536、auto；省略时由接口默认",
+        description="图片尺寸或分辨率档位，如 1024x1024、1536x1024、1K、2K、4K、auto；省略时由接口默认",
+    )
+    aspect_ratio: str | None = Field(
+        default=None,
+        min_length=1,
+        description="画面宽高比，如 1:1、16:9、9:16、4:3、3:4、3:2、2:3；省略时由接口默认",
     )
     quality: str | None = Field(
         default=None,
@@ -254,61 +485,258 @@ async def _download_generated_url(
     raise ValueError("生图结果 URL 重定向次数超过限制")
 
 
+async def _send_protocol_request(
+    client: httpx.AsyncClient,
+    config: ImageSettings,
+    request: GenerateImageInput,
+    references: list[tuple[bytes, str, str]],
+) -> httpx.Response:
+    base = config.endpoint_base()
+    headers = config.request_headers()
+    protocol = config.protocol
+
+    if protocol == "openai_images":
+        optional_fields = (
+            ("size", request.size),
+            ("aspect_ratio", request.aspect_ratio),
+            ("quality", request.quality),
+            ("background", request.background),
+            ("output_format", request.output_format),
+            ("style", request.style),
+            ("response_format", request.response_format),
+        )
+        if not references:
+            body: JsonObject = {
+                "model": config.model,
+                "prompt": request.prompt,
+                "n": request.n,
+            }
+            for key, value in optional_fields:
+                if value is not None:
+                    body[key] = value
+            return await client.post(
+                f"{base}/images/generations",
+                headers=headers,
+                json=body,
+                timeout=config.timeout,
+            )
+        form_data: dict[str, str] = {
+            "model": config.model,
+            "prompt": request.prompt,
+            "n": str(request.n),
+        }
+        for key, value in optional_fields:
+            if value is not None:
+                form_data[key] = str(value)
+        multipart_headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
+        field_name = "image" if len(references) == 1 else "image[]"
+        files = [
+            (field_name, (f"image_{index}.{ext}", content, mime))
+            for index, (content, mime, ext) in enumerate(references)
+        ]
+        return await client.post(
+            f"{base}/images/edits",
+            headers=multipart_headers,
+            data=form_data,
+            files=files,
+            timeout=config.timeout,
+        )
+
+    if protocol == "chat_completions":
+        if not references:
+            content_value: JsonValue = request.prompt
+        else:
+            parts: list[JsonValue] = [{"type": "text", "text": request.prompt}]
+            for ref_bytes, mime, _ext in references:
+                parts.append(
+                    {"type": "image_url", "image_url": {"url": _encode_data_url(ref_bytes, mime)}}
+                )
+            content_value = parts
+        body = {
+            "model": config.model,
+            "stream": False,
+            "modalities": ["image", "text"],
+            "messages": [{"role": "user", "content": content_value}],
+        }
+        image_config: JsonObject = {}
+        if ratio := _resolve_aspect_ratio(request):
+            image_config["aspect_ratio"] = ratio
+        if image_size := _resolve_gemini_image_size(request.size):
+            image_config["image_size"] = image_size
+        if image_config:
+            body["image_config"] = image_config
+        return await client.post(
+            f"{base}/chat/completions",
+            headers=headers,
+            json=body,
+            timeout=config.timeout,
+        )
+
+    if protocol == "responses":
+        if not references:
+            input_value: JsonValue = request.prompt
+        else:
+            input_parts: list[JsonValue] = [{"type": "input_text", "text": request.prompt}]
+            for ref_bytes, mime, _ext in references:
+                input_parts.append(
+                    {"type": "input_image", "image_url": _encode_data_url(ref_bytes, mime)}
+                )
+            input_value = [{"role": "user", "content": input_parts}]
+        tool_spec: JsonObject = {
+            "type": "image_generation",
+            "action": "edit" if references else "generate",
+        }
+        for key, value in (
+            ("size", request.size),
+            ("quality", request.quality),
+            ("background", request.background),
+            ("output_format", request.output_format),
+        ):
+            if value is not None:
+                tool_spec[key] = value
+        body = {
+            "model": config.model,
+            "stream": False,
+            "store": False,
+            "input": input_value,
+            "tools": [tool_spec],
+            "tool_choice": {"type": "image_generation"},
+        }
+        return await client.post(
+            f"{base}/responses",
+            headers=headers,
+            json=body,
+            timeout=config.timeout,
+        )
+
+    if protocol == "gemini":
+        model_path = _gemini_model_path(config.model)
+        gemini_parts: list[JsonValue] = [{"text": request.prompt}]
+        for ref_bytes, mime, _ext in references:
+            gemini_parts.append(
+                {
+                    "inlineData": {
+                        "mimeType": mime,
+                        "data": base64.b64encode(ref_bytes).decode("ascii"),
+                    }
+                }
+            )
+        gen_config: JsonObject = {"responseModalities": ["TEXT", "IMAGE"]}
+        image_cfg: JsonObject = {}
+        if ratio := _resolve_aspect_ratio(request):
+            image_cfg["aspectRatio"] = ratio
+        if image_size := _resolve_gemini_image_size(request.size):
+            image_cfg["imageSize"] = image_size
+        if image_cfg:
+            gen_config["imageConfig"] = image_cfg
+        body = {
+            "contents": [{"role": "user", "parts": gemini_parts}],
+            "generationConfig": gen_config,
+        }
+        return await client.post(
+            f"{base}/models/{model_path}:generateContent",
+            headers=headers,
+            json=body,
+            timeout=config.timeout,
+        )
+
+    if protocol == "xai_images":
+        body = {
+            "model": config.model,
+            "prompt": request.prompt,
+            "n": request.n,
+        }
+        if ratio := _resolve_aspect_ratio(request):
+            body["aspect_ratio"] = ratio
+        if resolution := _resolve_xai_resolution(request.size):
+            body["resolution"] = resolution
+        if request.quality is not None:
+            body["quality"] = request.quality
+        if request.response_format is not None:
+            body["response_format"] = request.response_format
+        if not references:
+            return await client.post(
+                f"{base}/images/generations",
+                headers=headers,
+                json=body,
+                timeout=config.timeout,
+            )
+        if len(references) == 1:
+            ref_bytes, mime, _ext = references[0]
+            body["image"] = {"type": "image_url", "url": _encode_data_url(ref_bytes, mime)}
+        else:
+            body["images"] = [
+                {"type": "image_url", "url": _encode_data_url(ref_bytes, mime)}
+                for ref_bytes, mime, _ext in references
+            ]
+        return await client.post(
+            f"{base}/images/edits",
+            headers=headers,
+            json=body,
+            timeout=config.timeout,
+        )
+
+    if protocol == "ark_images":
+        body = {
+            "model": config.model,
+            "prompt": request.prompt,
+        }
+        if len(references) == 1:
+            ref_bytes, mime, _ext = references[0]
+            body["image"] = _encode_data_url(ref_bytes, mime)
+        elif len(references) > 1:
+            body["image"] = [
+                _encode_data_url(ref_bytes, mime) for ref_bytes, mime, _ext in references
+            ]
+        if request.size is not None:
+            body["size"] = request.size
+        if request.response_format is not None:
+            body["response_format"] = request.response_format
+        return await client.post(
+            f"{base}/images/generations",
+            headers=headers,
+            json=body,
+            timeout=config.timeout,
+        )
+
+    # dashscope 原生同步多模态生图 / 改图协议
+    ds_content: list[JsonValue] = [
+        {"image": _encode_data_url(ref_bytes, mime)} for ref_bytes, mime, _ext in references
+    ]
+    ds_content.append({"text": request.prompt})
+    body = {
+        "model": config.model,
+        "input": {"messages": [{"role": "user", "content": ds_content}]},
+    }
+    parameters: JsonObject = {}
+    if request.n > 1:
+        parameters["n"] = request.n
+    if ds_size := _dashscope_size(request.size):
+        parameters["size"] = ds_size
+    if parameters:
+        body["parameters"] = parameters
+    endpoint = (
+        base
+        if base.endswith("/services/aigc/multimodal-generation/generation")
+        else f"{base}/services/aigc/multimodal-generation/generation"
+    )
+    return await client.post(
+        endpoint,
+        headers=headers,
+        json=body,
+        timeout=config.timeout,
+    )
+
+
 async def _post_image_request(
     client: httpx.AsyncClient,
     config: ImageSettings,
     request: GenerateImageInput,
     references: list[tuple[bytes, str, str]],
 ) -> JsonObject:
-    base = config.endpoint_base()
-    optional_fields = (
-        ("size", request.size),
-        ("quality", request.quality),
-        ("background", request.background),
-        ("output_format", request.output_format),
-        ("style", request.style),
-        ("response_format", request.response_format),
-    )
     try:
         async with asyncio.timeout(config.timeout):
-            if not references:
-                body: JsonObject = {
-                    "model": config.model,
-                    "prompt": request.prompt,
-                    "n": request.n,
-                }
-                for key, value in optional_fields:
-                    if value is not None:
-                        body[key] = value
-                response = await client.post(
-                    f"{base}/images/generations",
-                    headers=config.request_headers(),
-                    json=body,
-                    timeout=config.timeout,
-                )
-            else:
-                form_data: dict[str, str] = {
-                    "model": config.model,
-                    "prompt": request.prompt,
-                    "n": str(request.n),
-                }
-                for key, value in optional_fields:
-                    if value is not None:
-                        form_data[key] = str(value)
-                headers = {
-                    k: v for k, v in config.request_headers().items() if k.lower() != "content-type"
-                }
-                files = [
-                    ("image", (f"image_{index}.{ext}", content, mime))
-                    for index, (content, mime, ext) in enumerate(references)
-                ]
-                response = await client.post(
-                    f"{base}/images/edits",
-                    headers=headers,
-                    data=form_data,
-                    files=files,
-                    timeout=config.timeout,
-                )
+            response = await _send_protocol_request(client, config, request, references)
         if response.is_error:
             error_obj: JsonObject = {}
             if len(response.content) <= 65_536:
@@ -316,22 +744,40 @@ async def _post_image_request(
                     error_obj = JSON_OBJECT.validate_json(response.content)
                 except ValueError:
                     error_obj = {}
-            details = remote_error_metadata(error_obj)
+            details = _image_error_metadata(error_obj)
             raise _ImageRequestError(
                 f"生图接口返回 HTTP {response.status_code}" + (f"；{details}" if details else ""),
                 retryable=(response.status_code in (408, 409, 429) or response.status_code >= 500)
-                and not permanent_request_error(error_obj),
+                and not _is_permanent_image_error(error_obj),
                 retry_after=retry_after_seconds(response.headers.get("retry-after")),
             )
         payload = JSON_OBJECT.validate_json(response.content)
         if payload.get("error"):
-            details = remote_error_metadata(payload)
+            details = _image_error_metadata(payload)
             raise _ImageRequestError(
                 "生图接口返回错误" + (f"；{details}" if details else ""),
-                retryable=not permanent_request_error(payload),
+                retryable=not _is_permanent_image_error(payload),
                 retry_after=retry_after_seconds(response.headers.get("retry-after")),
             )
+        if config.protocol == "responses" and payload.get("status") == "failed":
+            details = _image_error_metadata(payload)
+            raise _ImageRequestError(
+                "生图响应执行失败" + (f"；{details}" if details else ""),
+                retryable=not _is_permanent_image_error(payload),
+            )
+        if config.protocol == "dashscope":
+            output = payload.get("output")
+            has_top_code = isinstance(payload.get("code"), str) and bool(payload.get("code"))
+            failed_task = isinstance(output, dict) and output.get("task_status") == "FAILED"
+            if (has_top_code and not isinstance(output, dict)) or failed_task:
+                details = _image_error_metadata(payload)
+                raise _ImageRequestError(
+                    "生图接口返回错误" + (f"；{details}" if details else ""),
+                    retryable=not _is_permanent_image_error(payload),
+                )
         return payload
+    except _ImageRequestError:
+        raise
     except TimeoutError:
         raise _ImageRequestError("生图接口请求超时", retryable=True) from None
     except httpx.HTTPError as transport_error:
@@ -350,6 +796,210 @@ async def _post_image_request(
         ) from None
     except ValueError:
         raise _ImageRequestError("生图接口响应不是有效 JSON 对象", retryable=True) from None
+
+
+def _extract_image_entry(entry: JsonValue) -> _ExtractedImage | None:
+    if isinstance(entry, str) and entry.strip():
+        return _ExtractedImage(url=entry.strip())
+    if not isinstance(entry, dict):
+        return None
+    revised = entry.get("revised_prompt")
+    revised_prompt = revised if isinstance(revised, str) and revised else None
+
+    b64 = entry.get("b64_json") or entry.get("b64")
+    if isinstance(b64, str) and b64:
+        return _ExtractedImage(b64=b64, revised_prompt=revised_prompt)
+
+    image_url = entry.get("image_url")
+    if isinstance(image_url, str) and image_url.strip():
+        return _ExtractedImage(url=image_url.strip(), revised_prompt=revised_prompt)
+    if isinstance(image_url, dict):
+        nested_url = image_url.get("url")
+        if isinstance(nested_url, str) and nested_url.strip():
+            return _ExtractedImage(url=nested_url.strip(), revised_prompt=revised_prompt)
+
+    source = entry.get("source")
+    if isinstance(source, dict):
+        source_data = source.get("data")
+        if isinstance(source_data, str) and source_data:
+            return _ExtractedImage(b64=source_data, revised_prompt=revised_prompt)
+        source_url = source.get("url")
+        if isinstance(source_url, str) and source_url.strip():
+            return _ExtractedImage(url=source_url.strip(), revised_prompt=revised_prompt)
+
+    inline = entry.get("inlineData") or entry.get("inline_data")
+    if isinstance(inline, dict):
+        inline_data = inline.get("data")
+        if isinstance(inline_data, str) and inline_data:
+            return _ExtractedImage(b64=inline_data, revised_prompt=revised_prompt)
+
+    url = entry.get("url") or entry.get("image")
+    if isinstance(url, str) and url.strip():
+        return _ExtractedImage(url=url.strip(), revised_prompt=revised_prompt)
+    return None
+
+
+def _extract_openai_images(payload: JsonObject) -> list[_ExtractedImage]:
+    raw_items = payload.get("data")
+    if not isinstance(raw_items, list):
+        return []
+    extracted: list[_ExtractedImage] = []
+    for entry in raw_items:
+        item = _extract_image_entry(entry)
+        if item is not None:
+            extracted.append(item)
+    return extracted
+
+
+def _extract_chat_images(payload: JsonObject) -> list[_ExtractedImage]:
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return []
+    extracted: list[_ExtractedImage] = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            continue
+        found_structured = False
+        images = message.get("images")
+        if isinstance(images, list):
+            for entry in images:
+                item = _extract_image_entry(entry)
+                if item is not None:
+                    extracted.append(item)
+                    found_structured = True
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type in ("image_url", "image", "output_image") or (
+                    "inlineData" in part or "inline_data" in part
+                ):
+                    item = _extract_image_entry(part)
+                    if item is not None:
+                        extracted.append(item)
+                        found_structured = True
+        elif isinstance(content, str) and not found_structured:
+            markdown_urls = [match.group(1).strip() for match in _MARKDOWN_IMAGE.finditer(content)]
+            if markdown_urls:
+                for url in markdown_urls:
+                    extracted.append(_ExtractedImage(url=url))
+            else:
+                for match in _INLINE_DATA_IMAGE.finditer(content):
+                    extracted.append(_ExtractedImage(url=match.group(0)))
+    return extracted
+
+
+def _extract_responses_images(payload: JsonObject) -> list[_ExtractedImage]:
+    outputs = payload.get("output")
+    if not isinstance(outputs, list):
+        return []
+    extracted: list[_ExtractedImage] = []
+    for item in outputs:
+        if not isinstance(item, dict) or item.get("type") != "image_generation_call":
+            continue
+        result = item.get("result")
+        if not isinstance(result, str) or not result:
+            continue
+        revised = item.get("revised_prompt")
+        extracted.append(
+            _ExtractedImage(
+                b64=result,
+                revised_prompt=revised if isinstance(revised, str) and revised else None,
+            )
+        )
+    return extracted
+
+
+def _extract_gemini_images(payload: JsonObject) -> list[_ExtractedImage]:
+    extracted: list[_ExtractedImage] = []
+    block_reason: str | None = None
+    prompt_feedback = payload.get("promptFeedback")
+    if isinstance(prompt_feedback, dict):
+        raw_block = prompt_feedback.get("blockReason")
+        if isinstance(raw_block, str) and raw_block in _GEMINI_BLOCK_REASONS:
+            block_reason = raw_block
+
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            finish_reason = candidate.get("finishReason")
+            if (
+                block_reason is None
+                and isinstance(finish_reason, str)
+                and finish_reason in _GEMINI_BLOCK_REASONS
+            ):
+                block_reason = finish_reason
+            content = candidate.get("content")
+            if not isinstance(content, dict):
+                continue
+            parts = content.get("parts")
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict) or part.get("thought") is True:
+                    continue
+                inline = part.get("inlineData") or part.get("inline_data")
+                if not isinstance(inline, dict):
+                    continue
+                data = inline.get("data")
+                if isinstance(data, str) and data:
+                    extracted.append(_ExtractedImage(b64=data))
+    if not extracted and block_reason is not None:
+        raise _ImageRequestError(f"生图请求被上游安全策略拦截（{block_reason}）", retryable=False)
+    return extracted
+
+
+def _extract_dashscope_images(payload: JsonObject) -> list[_ExtractedImage]:
+    output = payload.get("output")
+    if not isinstance(output, dict):
+        return []
+    extracted: list[_ExtractedImage] = []
+    choices = output.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                image = part.get("image")
+                if isinstance(image, str) and image.strip():
+                    extracted.append(_ExtractedImage(url=image.strip()))
+    if extracted:
+        return extracted
+    results = output.get("results")
+    if isinstance(results, list):
+        for entry in results:
+            item = _extract_image_entry(entry)
+            if item is not None:
+                extracted.append(item)
+    return extracted
+
+
+def _extract_images(config: ImageSettings, payload: JsonObject) -> list[_ExtractedImage]:
+    protocol = config.protocol
+    if protocol in ("openai_images", "xai_images", "ark_images"):
+        return _extract_openai_images(payload)
+    if protocol == "chat_completions":
+        return _extract_chat_images(payload)
+    if protocol == "responses":
+        return _extract_responses_images(payload)
+    if protocol == "gemini":
+        return _extract_gemini_images(payload)
+    return _extract_dashscope_images(payload)
 
 
 def build_tools(
@@ -400,51 +1050,72 @@ def build_tools(
             timeout=config.timeout, proxy=config.proxy, trust_env=False
         )
         try:
-            payload: JsonObject | None = None
-            for retry in range(config.max_retries + 1):
-                if context.cancelled():
-                    return ToolResult(status="cancelled", message="当前轮次已停止")
-                if denied := context.recheck():
-                    return denied
-                try:
-                    payload = await _post_image_request(http_client, config, request, references)
-                    break
-                except _ImageRequestError as error:
-                    if not error.retryable or retry == config.max_retries:
-                        suffix = f"；已重试 {retry} 次" if retry else ""
-                        return ToolResult.failure(f"{error}{suffix}", "ImageGenerationError")
-                    await asyncio.sleep(retry_delay(retry + 1, error.retry_after))
-            assert payload is not None
-            raw_items = payload.get("data")
-            if not isinstance(raw_items, list) or not raw_items:
-                return ToolResult.failure("生图接口未返回有效图片数据", "ImageGenerationError")
-
             decoded: list[tuple[bytes, str, str, str | None]] = []
             total_bytes = 0
             max_bytes = media_reader.settings.media_max_bytes
-            for entry in raw_items[: request.n]:
-                if not isinstance(entry, dict):
-                    continue
-                b64 = entry.get("b64_json") or entry.get("b64")
-                url = entry.get("url")
-                if isinstance(b64, str) and b64:
-                    if len(b64) > max_bytes * 4 // 3 + 16:
-                        return ToolResult.failure(
-                            "生成的图片超过媒体大小上限", "ImageGenerationError"
+            max_rounds = request.n if config.protocol in _SINGLE_OUTPUT_PROTOCOLS else 1
+
+            for round_index in range(max_rounds):
+                if len(decoded) >= request.n:
+                    break
+                payload: JsonObject | None = None
+                for retry in range(config.max_retries + 1):
+                    if context.cancelled():
+                        return ToolResult(status="cancelled", message="当前轮次已停止")
+                    if denied := context.recheck():
+                        return denied
+                    try:
+                        payload = await _post_image_request(
+                            http_client, config, request, references
                         )
-                    content = base64.b64decode(b64, validate=True)
-                elif isinstance(url, str) and url:
-                    content = await _download_generated_url(url, config, media_reader, http_client)
-                else:
-                    continue
-                if len(content) > max_bytes or total_bytes + len(content) > max_bytes:
-                    return ToolResult.failure("生成的图片超过媒体大小上限", "ImageGenerationError")
-                total_bytes += len(content)
-                mime, ext = detect_image_format(content)
-                revised = entry.get("revised_prompt")
-                decoded.append(
-                    (content, mime, ext, revised if isinstance(revised, str) and revised else None)
-                )
+                        break
+                    except _ImageRequestError as error:
+                        if not error.retryable or retry == config.max_retries:
+                            suffix = f"；已重试 {retry} 次" if retry else ""
+                            return ToolResult.failure(f"{error}{suffix}", "ImageGenerationError")
+                        await asyncio.sleep(retry_delay(retry + 1, error.retry_after))
+                assert payload is not None
+
+                try:
+                    extracted = _extract_images(config, payload)
+                except _ImageRequestError as error:
+                    return ToolResult.failure(str(error), "ImageGenerationError")
+                if not extracted:
+                    if round_index == 0:
+                        return ToolResult.failure(
+                            "生图接口未返回有效图片数据", "ImageGenerationError"
+                        )
+                    break
+
+                remaining = request.n - len(decoded)
+                for entry in extracted[:remaining]:
+                    if context.cancelled():
+                        return ToolResult(status="cancelled", message="当前轮次已停止")
+                    if denied := context.recheck():
+                        return denied
+                    try:
+                        if entry.b64 is not None:
+                            content = _decode_base64_image(entry.b64, max_bytes)
+                        elif entry.url is not None:
+                            if entry.url.lower().startswith("data:"):
+                                content = _decode_base64_image(
+                                    _parse_data_url_b64(entry.url), max_bytes
+                                )
+                            else:
+                                content = await _download_generated_url(
+                                    entry.url, config, media_reader, http_client
+                                )
+                        else:
+                            continue
+                        if len(content) > max_bytes or total_bytes + len(content) > max_bytes:
+                            return ToolResult.failure(
+                                "生成的图片超过媒体大小上限", "ImageGenerationError"
+                            )
+                        mime, ext = detect_image_format(content)
+                    except ValueError as exc:
+                        return ToolResult.failure(str(exc), "ImageGenerationError")
+                    total_bytes += len(content)
+                    decoded.append((content, mime, ext, entry.revised_prompt))
 
             if not decoded:
                 return ToolResult.failure("生图接口未返回可解析的图片内容", "ImageGenerationError")

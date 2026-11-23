@@ -553,7 +553,7 @@ export const imageConnectionSection: SectionDef = {
   id: "image-connection",
   title: "生图接口与模型",
   description:
-    "配置 OpenAI 兼容的图像生成接口（支持文生图与图生图），保存后立即生效。",
+    "配置多协议图像生成接口（支持文生图与图生图），保存后立即生效。",
   fields: [
     {
       key: "enabled",
@@ -562,17 +562,53 @@ export const imageConnectionSection: SectionDef = {
       help: "启用并选好模型后，在会话的「能力权限」中开放「生成图片」即可使用。",
     },
     {
+      key: "protocol",
+      label: "接口协议",
+      type: "select",
+      options: [
+        {
+          value: "openai_images",
+          label: "OpenAI Images（/images/generations & /edits，含 CPA GPT/Grok）",
+        },
+        {
+          value: "chat_completions",
+          label: "Chat Completions（/chat/completions，含 CPA Gemini / OpenRouter）",
+        },
+        {
+          value: "responses",
+          label: "OpenAI Responses（/responses 内置生图工具）",
+        },
+        {
+          value: "gemini",
+          label: "Google Gemini 原生（:generateContent，含 CPA /v1beta）",
+        },
+        {
+          value: "xai_images",
+          label: "xAI Images（JSON /images/edits，Grok Imagine 直连）",
+        },
+        {
+          value: "ark_images",
+          label: "火山方舟 Ark（/api/v3/images/generations，Seedream）",
+        },
+        {
+          value: "dashscope",
+          label: "阿里百炼 DashScope（原生 multimodal-generation）",
+        },
+      ],
+      help: "按生图服务商或代理实际支持的接口协议选择；切换并保存后自动刷新模型列表。",
+    },
+    {
       key: "base_url",
       label: "接口地址",
       type: "text",
       placeholder: "https://api.openai.com/v1",
-      help: "OpenAI 兼容生图接口的根地址，通常以 /v1 结尾。",
+      help: "生图接口根地址；仅填域名时按协议自动补齐默认路径（/v1、/v1beta、/api/v3 或 /api/v1）。",
     },
     {
       key: "api_key",
       label: "API Key",
       type: "secret",
-      help: "生图服务商接口密钥。",
+      help: "生图服务商接口密钥；Gemini 原生协议默认使用 x-goog-api-key，其余协议使用 Bearer 鉴权。",
     },
     {
       key: "model",

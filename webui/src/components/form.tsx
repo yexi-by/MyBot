@@ -622,7 +622,9 @@ export function ModelPicker({
   // 接口地址、密钥等保存后重新读取（跳过服务端缓存），新建的服务商保存后也会自动读取。
   const savedKey = JSON.stringify(
     imageMode
-      ? ["base_url", "api_key", "proxy", "timeout"].map((key) => getAt(saved, ["image", key]))
+      ? ["protocol", "base_url", "api_key", "proxy", "timeout"].map((key) =>
+          getAt(saved, ["image", key]),
+        )
       : ["protocol", "base_url", "api_key", "proxy", "timeout"].map((key) =>
           getAt(saved, ["providers", providerId, key]),
         ),

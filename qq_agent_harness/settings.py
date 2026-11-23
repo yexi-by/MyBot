@@ -37,6 +37,15 @@ class Policy(Model):
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 Modality = Literal["text", "image", "audio", "video"]
+ImageProtocol = Literal[
+    "openai_images",
+    "chat_completions",
+    "responses",
+    "gemini",
+    "xai_images",
+    "ark_images",
+    "dashscope",
+]
 
 
 class ModelChoice(Model):
@@ -172,6 +181,7 @@ class ImageSettings(Model):
     """独立于会话服务商的生图接口配置。"""
 
     enabled: bool = False
+    protocol: ImageProtocol = "openai_images"
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = ""
@@ -186,13 +196,25 @@ class ImageSettings(Model):
             return ""
         parsed = urlsplit(stripped)
         if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
-            return f"{stripped}/v1"
+            suffix = {
+                "gemini": "/v1beta",
+                "ark_images": "/api/v3",
+                "dashscope": "/api/v1",
+            }.get(self.protocol, "/v1")
+            return f"{stripped}{suffix}"
         return stripped
 
     def request_headers(self) -> dict[str, str]:
         headers = dict(self.headers)
-        if not any(key.lower() == "authorization" for key in headers):
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        lower_keys = {key.lower() for key in headers}
+        token = self.api_key.strip()
+        if not token:
+            return headers
+        if self.protocol == "gemini":
+            if "x-goog-api-key" not in lower_keys and "authorization" not in lower_keys:
+                headers["x-goog-api-key"] = token
+        elif "authorization" not in lower_keys:
+            headers["Authorization"] = f"Bearer {token}"
         return headers
 
 

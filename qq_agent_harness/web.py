@@ -675,6 +675,7 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
         if not config.base_url.strip():
             raise HTTPException(400, "请先保存生图接口地址")
         fingerprint = (
+            config.protocol,
             config.base_url,
             config.api_key,
             tuple(sorted(config.headers.items())),
@@ -683,26 +684,50 @@ def create_app(config_path: Path, *, connect_mcp: bool = True) -> FastAPI:
         cached = model_cache.get("__image__")
         if cached and cached[0] > time.monotonic() and cached[1] == fingerprint and not refresh:
             return {"models": [model for model in cached[2]]}
-        async with httpx.AsyncClient(
-            timeout=config.timeout, proxy=config.proxy, trust_env=False
-        ) as client:
-            response = await client.get(
-                config.endpoint_base() + "/models",
-                headers=config.request_headers(),
+        models_base = config.endpoint_base()
+        if config.protocol == "dashscope":
+            models_base = models_base.removesuffix(
+                "/services/aigc/multimodal-generation/generation"
             )
-            if not response.is_success:
-                raise HTTPException(502, f"模型列表接口返回 HTTP {response.status_code}")
+        try:
+            async with httpx.AsyncClient(
+                timeout=config.timeout, proxy=config.proxy, trust_env=False
+            ) as client:
+                response = await client.get(
+                    models_base + "/models",
+                    headers=config.request_headers(),
+                )
+        except httpx.HTTPError as error:
+            raise HTTPException(502, f"模型列表接口连接失败（{type(error).__name__}）") from None
+        if not response.is_success:
+            raise HTTPException(502, f"模型列表接口返回 HTTP {response.status_code}")
+        try:
             payload = JSON_OBJECT.validate_json(response.content)
-            entries = payload.get("data")
-            ids = (
-                [
-                    str(entry["id"])
-                    for entry in entries
-                    if isinstance(entry, dict) and isinstance(entry.get("id"), str)
-                ]
-                if isinstance(entries, list)
-                else []
-            )
+        except ValueError:
+            raise HTTPException(502, "模型列表接口响应不是有效 JSON 对象") from None
+        ids: list[str] = []
+        if config.protocol == "gemini" and isinstance(raw_models := payload.get("models"), list):
+            for entry in raw_models:
+                if not isinstance(entry, dict):
+                    continue
+                raw_name = entry.get("name")
+                raw_id = entry.get("id")
+                if isinstance(raw_name, str) and raw_name:
+                    ids.append(raw_name.removeprefix("models/"))
+                elif isinstance(raw_id, str) and raw_id:
+                    ids.append(raw_id)
+        elif isinstance(entries := payload.get("data"), list):
+            ids = [
+                str(entry["id"])
+                for entry in entries
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            ]
+        elif isinstance(raw_models := payload.get("models"), list):
+            ids = [
+                str(entry["name"]).removeprefix("models/")
+                for entry in raw_models
+                if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+            ]
         model_cache["__image__"] = (time.monotonic() + 30, fingerprint, ids)
         return {"models": [model for model in ids]}
 

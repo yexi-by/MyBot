@@ -94,8 +94,11 @@ output_limit = 1048576
 transfer_max_bytes = 50000000
 max_pending_operations = 32
 
+# 图像生成：支持多协议生图与改图。
+# protocol 可选：openai_images（默认）/ chat_completions / responses / gemini / xai_images / ark_images / dashscope
 [image]
 enabled = false
+protocol = "openai_images"
 base_url = "https://api.openai.com/v1"
 api_key = ""
 model = ""
