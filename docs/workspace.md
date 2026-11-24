@@ -1,6 +1,6 @@
 # 共享工作区说明
 
-QQ Agent Harness 采用单容器持久化共享工作区（`[workspace]`），为开放了 `workspace` 能力的会话提供文件读写、精确文本编辑、全文搜索及受控本地子进程执行能力，无需部署额外的 Docker-in-Docker Runner 或出口网关容器。
+QQ Agent Harness 采用单容器持久化共享工作区（`[workspace]`），为开放了 `workspace` 能力的会话提供文件读写、精确文本编辑、全文搜索及受控本地子进程执行能力。
 
 ## 目录结构与隔离边界
 

@@ -1,4 +1,4 @@
-# Python 构建与缓存
+# Python 构建与虚拟环境
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,25 +6,18 @@ build/
 dist/
 wheels/
 *.egg-info/
-
-# 本地虚拟环境
 .venv/
-.venv-harness/
-.venv-retired/
 .ruff_cache/
-venv/
-env/
+.pytest_cache/
 
-# Node.js 本地依赖
+# Node.js 与浏览器调试产物
 node_modules/
 *.tsbuildinfo
 .playwright-cli/
 .playwright-mcp/
 
-# 真实配置、密钥与个人隐私
+# 本地规范、真实配置与凭据
 AGENTS.md
-setting.toml
-setting.local.toml
 /config/
 *.secret.toml
 .env
@@ -37,27 +30,18 @@ setting.local.toml
 *.pfx
 secrets/
 
-# 插件真实配置包含群号、提示词和私有开关，禁止提交
-plugins_config/
-
-# 运行产物与调试产物
+# 运行期与临时目录
 /workspace/
+/deploy/indextts/voices/
 logs/
-debug/
 data/
 image/
 images/
-/deploy/indextts/voices/
 tmp/
 *.log
 *.trace
 *.tmp
 *.bak
-test.txt
-
-# 历史归档代码只用于本地临时迁移，禁止重新提交
-archived_plugins/
-archived_plugins_config/
 
 # IDE 与系统文件
 .idea/
@@ -65,6 +49,3 @@ archived_plugins_config/
 .vs/
 .DS_Store
 Thumbs.db
-
-# 保留可提交的示例配置
-!config.example.toml
