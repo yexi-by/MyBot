@@ -1,16 +1,12 @@
 """唯一配置模型；权限不包含任何发起者角色或个人 ACL。"""
 
-import re
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, JsonValue, field_validator, model_validator
+from pydantic import Field, JsonValue, model_validator
 
 from .contracts import ConversationScope, Model
-
-# 这些标识会拼入请求地址或请求体，只接受各自的规范字符集。
-_VOICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 
 
 class ParameterRule(Model):
@@ -218,49 +214,6 @@ class ImageSettings(Model):
         return headers
 
 
-class TTSSettings(Model):
-    """独立于会话服务商的 IndexTTS 2.5 语音合成与音色管理配置。"""
-
-    enabled: bool = False
-    base_url: str = "http://127.0.0.1:7861"
-    api_key: str = ""
-    # 音色由管理员固定，Agent 不能更换。
-    voice: str = ""
-    timeout: float = Field(default=120, gt=0)
-    max_retries: int = Field(default=3, ge=0)
-    proxy: str | None = None
-
-    @field_validator("voice")
-    @classmethod
-    def valid_voice(cls, value: str) -> str:
-        if value and not _VOICE_ID.fullmatch(value):
-            raise ValueError("音色只能包含字母、数字、下划线和连字符")
-        return value
-
-    def endpoint_base(self) -> str:
-        stripped = self.base_url.strip().rstrip("/")
-        if not stripped:
-            return ""
-        parsed = urlsplit(stripped)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            return ""
-        return stripped
-
-    def request_headers(self) -> dict[str, str]:
-        if self.api_key:
-            return {"Authorization": f"Bearer {self.api_key}"}
-        return {}
-
-    def unavailable_reason(self) -> str:
-        if not self.enabled:
-            return "尚未启用语音合成"
-        if not self.endpoint_base():
-            return "语音合成尚未填写服务地址"
-        if not self.voice:
-            return "语音合成尚未选择音色"
-        return ""
-
-
 class ServerSettings(Model):
     host: str = "0.0.0.0"
     port: int = Field(default=6055, ge=1, le=65535)
@@ -277,7 +230,6 @@ class HarnessSettings(Model):
     mcp: dict[str, MCPSettings] = Field(default_factory=dict)
     workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     image: ImageSettings = Field(default_factory=ImageSettings)
-    tts: TTSSettings = Field(default_factory=TTSSettings)
 
     def conversations(self) -> list[tuple[list[str], ConversationSettings]]:
         return [

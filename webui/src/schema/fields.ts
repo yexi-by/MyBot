@@ -656,74 +656,6 @@ export const imageRequestSection: SectionDef = {
   ],
 };
 
-export const ttsVoiceSection: SectionDef = {
-  id: "tts-voice",
-  title: "连接与音色",
-  description:
-    "连接本机部署的 IndexTTS 2.5 服务进行语音合成与音色复刻管理，保存后立即生效。",
-  fields: [
-    {
-      key: "enabled",
-      label: "启用语音合成",
-      type: "toggle",
-      help: "启用、填写本机服务地址并选好音色后，在会话的「能力权限」中开放「语音合成」即可使用。",
-    },
-    {
-      key: "base_url",
-      label: "本机服务地址",
-      type: "text",
-      placeholder: "http://192.168.31.100:7861",
-      help: "本机 IndexTTS 2.5 HTTP 服务的根地址。",
-    },
-    {
-      key: "api_key",
-      label: "连接密钥",
-      type: "secret",
-      generate: true,
-      help: "须与本机 IndexTTS 启动时的 API Key 一致；本机未开启鉴权时可留空。",
-    },
-    {
-      key: "voice",
-      label: "当前音色",
-      type: "select",
-      editable: true,
-      options: [],
-      placeholder: "选择或输入音色 ID",
-      help: "Agent 说话固定使用这个音色，不能自行更换；情绪控制方式（原声/文本描述/8维情感向量/参考音频）由 Agent 按台词自主选择。",
-    },
-  ],
-};
-
-export const ttsRequestSection: SectionDef = {
-  id: "tts-request",
-  title: "请求与重试",
-  fields: [
-    {
-      key: "timeout",
-      label: "请求超时",
-      type: "number",
-      ...seconds,
-      help: "每次合成请求的最长等待时间；超时后按重试次数设置重新请求。",
-    },
-    {
-      key: "max_retries",
-      label: "失败重试次数",
-      type: "number",
-      min: 0,
-      integer: true,
-      help: "首次请求失败后最多重试的次数，默认 3 次；0 表示不重试。",
-    },
-    {
-      key: "proxy",
-      label: "HTTP 代理",
-      type: "text",
-      nullable: true,
-      placeholder: "http://127.0.0.1:7890",
-      help: "连接本机 IndexTTS 服务经过的代理；局域网直连时请留空。",
-    },
-  ],
-};
-
 export const workspaceSection: SectionDef = {
   id: "workspace",
   title: "目录与限制",
@@ -892,8 +824,6 @@ export function fieldInstances(config: ObjectValue): FieldInstance[] {
   add(workspaceSection, ["workspace"], "/workspace/settings");
   add(imageConnectionSection, ["image"], "/tools/image");
   add(imageRequestSection, ["image"], "/tools/image");
-  add(ttsVoiceSection, ["tts"], "/tools/tts");
-  add(ttsRequestSection, ["tts"], "/tools/tts");
   for (const id of Object.keys(object(config.providers))) {
     const route = "/providers/" + enc(id);
     add(providerApiSection, ["providers", id], route);
@@ -928,7 +858,6 @@ export function routeForPath(path: Path): string {
   if (head === "private") return "/conversations/private";
   if (head === "providers" && id !== undefined) return "/providers/" + enc(String(id));
   if (head === "image") return "/tools/image";
-  if (head === "tts") return "/tools/tts";
   if (head === "mcp" && id !== undefined) return "/tools/mcp/" + enc(String(id));
   if (head === "workspace") return "/workspace/settings";
   if (head === "napcat") return "/settings/napcat";
@@ -976,7 +905,6 @@ export function fieldLabel(config: ObjectValue, path: Path): string {
   if (head === "private") return scoped("私聊", path.slice(1), name);
   if (head === "providers") return scoped("服务商 " + id, path.slice(2), name);
   if (head === "image") return scoped("图像生成", path.slice(1), name);
-  if (head === "tts") return name ? "语音合成 · " + name : "语音合成";
   if (head === "workspace") return name ? "工作区 · " + name : "工作区";
   if (head === "mcp") return scoped("MCP " + id, path.slice(2), name);
   if (name) return name;

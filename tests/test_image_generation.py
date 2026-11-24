@@ -2,6 +2,7 @@
 
 import base64
 import json
+from collections import OrderedDict
 from pathlib import Path
 
 import httpx
@@ -9,7 +10,14 @@ import pytest
 from fastapi.testclient import TestClient
 from test_napcat import GROUP, Bot, message
 
-from qq_agent_harness.contracts import ConversationScope, JsonObject, ToolContext
+import qq_agent_harness.contracts as contracts
+from qq_agent_harness.contracts import (
+    ConversationScope,
+    GeneratedMedia,
+    JsonObject,
+    ToolContext,
+    remember_generated,
+)
 from qq_agent_harness.image import CATEGORY_LABELS as IMAGE_CATEGORIES
 from qq_agent_harness.image import build_tools as build_image_tools
 from qq_agent_harness.napcat import MediaReader
@@ -1086,3 +1094,31 @@ model = "gemini-3.1-flash-image"
         app.state.store.settings.image.model = ""
         missing = client.post("/api/image/preview", json={"prompt": "一只橘猫"})
         assert missing.status_code == 400
+
+
+async def test_generated_media_types_and_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry, context, _, bot = setup_image_harness()
+    context.generated_media["gen_image"] = GeneratedMedia("gen_image", PNG, "image/png")
+    context.generated_media["gen_audio"] = GeneratedMedia("gen_audio", b"RIFF", "audio/wav")
+    attempts: list[tuple[str, JsonObject]] = [
+        ("qq__send_message", {"parts": [{"type": "record", "generated_id": "gen_image"}]}),
+        ("qq__send_message", {"parts": [{"type": "image", "generated_id": "gen_audio"}]}),
+        ("qq__set_group_portrait", {"generated_id": "gen_audio"}),
+    ]
+    for name, arguments in attempts:
+        result = await registry.execute(context, name, arguments)
+        assert result.status == "error", (name, arguments)
+    assert not [action for action, _ in bot.calls if action.startswith(("send_", "set_"))]
+
+    store: OrderedDict[str, GeneratedMedia] = OrderedDict()
+    for index in range(contracts.MAX_GENERATED_MEDIA + 1):
+        remember_generated(store, GeneratedMedia(f"m{index}", b"x", "image/png"))
+    assert list(store)[0] == "m1" and len(store) == contracts.MAX_GENERATED_MEDIA
+
+    monkeypatch.setattr(contracts, "MAX_GENERATED_BYTES", 100)
+    store.clear()
+    for name in ("a", "b", "c"):
+        remember_generated(store, GeneratedMedia(name, b"x" * 40, "image/png"))
+    assert list(store) == ["b", "c"]
+    remember_generated(store, GeneratedMedia("big", b"x" * 300, "image/png"))
+    assert list(store) == ["big"]

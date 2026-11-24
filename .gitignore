@@ -32,7 +32,6 @@ secrets/
 
 # 运行期与临时目录
 /workspace/
-/deploy/indextts/voices/
 logs/
 data/
 image/

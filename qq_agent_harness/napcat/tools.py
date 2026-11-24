@@ -401,8 +401,7 @@ ACTION_SPECS = (
     ),
     ActionSpec(
         "get_ai_characters",
-        "查询 QQ 群 AI 语音的角色声线（QQ 自带配音，不是你自己的声音；可用 tts__synthesize 时，"
-        "用自己的声音说话应优先用它）。拿到 character 后可在 send_message 中发 ai_voice",
+        "查询 QQ 群 AI 语音的角色声线 ID，拿到 character 后可在 send_message 中发 ai_voice",
         a.AICharacters,
         "media",
     ),

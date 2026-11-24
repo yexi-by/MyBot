@@ -31,7 +31,6 @@
 | **按需技能**<br>(`skills`) | `skill__load` | 自动注入 `config/skills/` 下的技能摘要索引，按需读取领域作业规范。 |
 | **定时提醒**<br>(`timer`) | `timer__schedule` / `list` / `cancel` | 有界内存定时唤醒任务（重启清空）。 |
 | **图像生成**<br>(`[image]`) | `image__generate` | 支持文生图与结合会话图片/头像/工作区图片的改图；兼容 `openai_images`、`chat_completions`、`responses`、`gemini`、`xai_images`、`ark_images`、`dashscope` 七种协议，WebUI 支持端点预览与在线测试。 |
-| **语音合成**<br>(`[tts]`) | `tts__synthesize` | 对接独立 IndexTTS 2.5 HTTP 服务（见 [IndexTTS 接入说明](deploy/indextts/README.md)），固定主音色，支持 `reference` / `text` / `vector` / `audio` 四种情绪模式；WebUI 支持显存管理、音色上传与在线试听。 |
 | **MCP 扩展**<br>(`[mcp.<id>]`) | `<server>__*` | 支持 `stdio` 与 `streamable_http` 接入外部 MCP 服务，按服务分类、具体工具及参数规则授权。 |
 
 ## 快速开始

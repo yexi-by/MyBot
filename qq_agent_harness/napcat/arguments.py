@@ -393,7 +393,7 @@ class MediaPart(Model):
     generated_id: str | None = Field(
         default=None,
         min_length=1,
-        description="image__generate 生成的图片 ID 或 tts__synthesize 生成的语音 ID",
+        description="image__generate 生成的图片 ID",
     )
     name: str | None = Field(default=None, description="发送普通文件时显示的文件名")
 

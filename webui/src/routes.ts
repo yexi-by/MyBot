@@ -39,7 +39,7 @@ export type Route =
     }
   | { page: "providers"; id: string }
   | { page: "prompts"; path: string }
-  | { page: "tools"; view: "catalog" | "image" | "tts" | "mcp" | "napcat"; id: string; tool: string }
+  | { page: "tools"; view: "catalog" | "image" | "mcp" | "napcat"; id: string; tool: string }
   | { page: "workspace"; view: "overview" | "settings" }
   | { page: "settings"; section: SettingsSection }
   | { page: "missing" };
@@ -79,8 +79,6 @@ export function parseRoute(location: string): Route {
     if (!second) return { page: "tools", view: "catalog", id: "", tool };
     if (second === "image" && parts.length === 2)
       return { page: "tools", view: "image", id: "", tool };
-    if (second === "tts" && parts.length === 2)
-      return { page: "tools", view: "tts", id: "", tool };
     if (second === "mcp" && parts.length <= 3)
       return { page: "tools", view: "mcp", id: decode(third), tool };
     if (second === "napcat" && parts.length === 2)

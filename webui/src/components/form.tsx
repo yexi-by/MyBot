@@ -770,7 +770,7 @@ export function ConfigField({
         <SecretInput id={id} value={value} onChange={update} generate={def.generate} invalid={!!error} label={def.label} />,
       );
     case "select": {
-      // 页面可以追加运行时读取的候选项，例如项目中的自定义音色。
+      // 页面可以追加运行时读取的候选项，例如服务商模型或 MCP 工具列表。
       const options = [...(def.options ?? []), ...(suggestions ?? [])];
       return shell(
         <Combobox

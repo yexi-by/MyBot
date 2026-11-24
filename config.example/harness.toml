@@ -107,12 +107,3 @@ max_retries = 3
 
 [image.headers]
 
-# 语音合成：连接本机部署的 IndexTTS 2.5 服务。voice 是 Agent 固定使用的音色 ID，必须选定，Agent 不能更换；
-# 情绪控制方式（reference/text/vector/audio）由 Agent 按台词自行选择。
-[tts]
-enabled = false
-base_url = "http://127.0.0.1:7861"
-api_key = ""
-voice = ""
-timeout = 120.0
-max_retries = 3
